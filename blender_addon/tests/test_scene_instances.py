@@ -172,6 +172,9 @@ class InstantiateSceneInstanceTests(unittest.TestCase):
             def _apply_instance_metadata(self, objects, record, effective_palette_id):
                 self.metadata = (objects, record, effective_palette_id)
 
+            def _flush_pending_view_layer_update(self):
+                pass
+
         importer = _Importer()
         parent = SimpleNamespace(name="root")
         parent_node = SimpleNamespace(name="hardpoint")

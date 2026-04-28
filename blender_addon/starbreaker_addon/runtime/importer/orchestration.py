@@ -11,6 +11,7 @@ the final :class:`PackageImporter` by combining every themed mixin.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import uuid
@@ -74,6 +75,32 @@ from .utils import (
 )
 
 
+@contextlib.contextmanager
+def _suppress_gltf_selection():
+    """Phase C perf fix: skip Blender's glTF importer ``select_imported_objects``.
+
+    The stock implementation iterates every ``vnode`` and calls
+    ``select_set(True)`` after each glTF import. With hundreds of small
+    template imports and a growing scene, this becomes O(n\u00b2) and dominates
+    ~24s of a 175s Clipper import. The StarBreaker addon never reads the
+    selection state \u2014 it tracks newly imported objects via a
+    pointer-set diff in ``ensure_template`` and unlinks them from the
+    default scene collection regardless. Patching the function to a no-op
+    for the duration of our import is therefore safe.
+    """
+    try:
+        from io_scene_gltf2.blender.imp.scene import BlenderScene
+    except Exception:  # pragma: no cover - fallback if module path moves
+        yield
+        return
+    original = BlenderScene.select_imported_objects
+    BlenderScene.select_imported_objects = staticmethod(lambda gltf: None)
+    try:
+        yield
+    finally:
+        BlenderScene.select_imported_objects = original
+
+
 class OrchestrationMixin:
     def __init__(
         self,
@@ -103,6 +130,18 @@ class OrchestrationMixin:
         self.progress_callback = progress_callback
         self._progress_total_steps = 1
         self._progress_completed_steps = 0
+        # Phase A perf fix: defer view_layer.update() between template clones.
+        # The original per-template update was costing ~67s on a Clipper import
+        # because each interior placement (~600+) triggered a full depsgraph
+        # evaluation. We now batch-flush only when subsequent code is about to
+        # read matrix_world (the start of instantiate_scene_instance) or after
+        # finishing a placement loop. See ``_flush_pending_view_layer_update``.
+        self._pending_view_layer_update = False
+
+    def _flush_pending_view_layer_update(self) -> None:
+        if self._pending_view_layer_update:
+            self.context.view_layer.update()
+            self._pending_view_layer_update = False
 
     def _start_progress(self, total_steps: int, description: str) -> None:
         self._progress_total_steps = max(int(total_steps), 1)
@@ -274,6 +313,8 @@ class OrchestrationMixin:
             self._advance_progress(f"Preparing {interior.name}")
             self.import_interior_container(interior, scene_root_parent)
 
+        # Final flush in case anything else deferred a depsgraph update.
+        self._flush_pending_view_layer_update()
         self._emit_progress(f"Finalizing {self.package.package_name}")
         return package_root
 
@@ -416,6 +457,10 @@ class OrchestrationMixin:
         parent: bpy.types.Object,
         parent_node: bpy.types.Object | None = None,
     ) -> tuple[bpy.types.Object, list[bpy.types.Object]]:
+        # If a previous instantiate_template deferred a view_layer.update(),
+        # flush it now — we may be about to read ``parent_node.matrix_world``.
+        if parent_node is not None:
+            self._flush_pending_view_layer_update()
         effective_palette_id = self._effective_palette_id(self._palette_id_for_instance(record))
         anchor = bpy.data.objects.new(record.entity_name, None)
         anchor.empty_display_type = "PLAIN_AXES"
@@ -543,6 +588,9 @@ class OrchestrationMixin:
         for light in interior.lights:
             self.create_light(light, anchor)
 
+        # Flush any deferred view_layer.update() once at the end of the
+        # placement loop instead of per placement.
+        self._flush_pending_view_layer_update()
         return anchor
 
     def create_light(self, light: Any, parent: bpy.types.Object) -> bpy.types.Object:
@@ -697,7 +745,8 @@ class OrchestrationMixin:
             return cached
 
         before = {obj.as_pointer() for obj in bpy.data.objects}
-        result = bpy.ops.import_scene.gltf(filepath=str(asset_path), import_pack_images=False, merge_vertices=False)
+        with _suppress_gltf_selection():
+            result = bpy.ops.import_scene.gltf(filepath=str(asset_path), import_pack_images=False, merge_vertices=False)
         if "FINISHED" not in result:
             raise RuntimeError(f"Failed to import {asset_path}")
 
@@ -783,7 +832,9 @@ class OrchestrationMixin:
                 needs_view_layer_update = True
             clones.append(clone)
         if needs_view_layer_update:
-            self.context.view_layer.update()
+            # Defer to a batched flush. See ``_flush_pending_view_layer_update``
+            # and the docstring above on ``_pending_view_layer_update``.
+            self._pending_view_layer_update = True
         return list(mapping.values()) or clones
 
     def _duplicate_object_tree(
