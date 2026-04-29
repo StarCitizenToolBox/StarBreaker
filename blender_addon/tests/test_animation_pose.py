@@ -53,6 +53,9 @@ class _StubObject:
         self.location = tuple(float(v) for v in location)
         self.rotation_mode = "QUATERNION"
         self.rotation_quaternion = tuple(float(v) for v in rotation_quaternion)
+        self.type = "MESH"
+        self.parent = None
+        self.children_recursive: list[object] = []
         self._props: dict[str, object] = {}
 
     # dict-like custom-properties access mirroring the bpy API surface
@@ -279,6 +282,44 @@ class AnimationPoseTests(unittest.TestCase):
                 got, want, places=5,
                 msg=f"axis {axis}: override mode must use sample verbatim",
             )
+
+    def test_position_track_matches_bind_detects_incompatible_duplicate(self) -> None:
+        positions = [
+            [0.0, 0.099973, -1.002515],
+            [0.0, 0.099973, 0.530196],
+        ]
+
+        self.assertTrue(
+            self.package_ops._position_track_matches_bind((0.0, 0.1, 0.53), positions),
+            "front swingarm bind should match the shared track",
+        )
+        self.assertFalse(
+            self.package_ops._position_track_matches_bind((0.788171, -0.460876, -0.0005), positions),
+            "rear swingarm bind should be rejected for the shared track",
+        )
+
+    def test_shared_hash_position_policy_suppresses_incompatible_duplicates(self) -> None:
+        channel = {
+            "position": [
+                [0.0, 0.099973, -1.002515],
+                [0.0, 0.099973, 0.530196],
+            ]
+        }
+        front = self._make_object("swingarm_big_anim.001", (0.0, 0.1, 0.53))
+        rear = self._make_object("swingarm_big_anim.003", (0.788171, -0.460876, -0.0005))
+
+        policy = self.package_ops._shared_hash_position_policy(
+            {
+                "0x2522C378": [
+                    (front, self._bind_data((0.0, 0.1, 0.53))),
+                    (rear, self._bind_data((0.788171, -0.460876, -0.0005))),
+                ]
+            },
+            {"0x2522C378": channel},
+        )
+
+        self.assertTrue(policy[id(front)])
+        self.assertFalse(policy[id(rear)])
 
     # ---- Phase 39: layered-Action helpers ---------------------------
 
@@ -637,7 +678,6 @@ class AnimationPoseTests(unittest.TestCase):
         self.assertEqual(obj.location, (0.0, 5.5, 0.0))
         for actual, expected in zip(obj.rotation_quaternion, (0.707, 0.0, 0.707, 0.0)):
             self.assertAlmostEqual(actual, expected, places=5)
-
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

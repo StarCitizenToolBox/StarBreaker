@@ -1364,6 +1364,91 @@ def _normalized_bone_channels(clip: dict[str, Any]) -> dict[str, dict[str, Any]]
     return normalized
 
 
+def _position_track_matches_bind(
+    bind_loc: tuple[float, float, float],
+    positions: list[Any],
+    *,
+    tol: float = 0.15,
+) -> bool:
+    tol_sq = tol * tol
+    for sample in positions:
+        if not isinstance(sample, list) or len(sample) < 3:
+            continue
+        decoded = _decode_animation_position(sample, "identity")
+        dist_sq = (
+            (decoded[0] - bind_loc[0]) ** 2
+            + (decoded[1] - bind_loc[1]) ** 2
+            + (decoded[2] - bind_loc[2]) ** 2
+        )
+        if dist_sq <= tol_sq:
+            return True
+    return False
+
+
+def _shared_hash_position_policy(
+    groups: dict[str, list[tuple[bpy.types.Object, dict[str, Any]]]],
+    bones: dict[str, dict[str, Any]],
+) -> dict[int, bool]:
+    """Return per-object position eligibility for duplicate-hash channels.
+
+    Absolute parent-local position tracks work for a shared hash only when the
+    receiving object's bind pose is compatible with at least one sampled
+    position. If a hash is shared across multiple instances and only a subset of
+    those binds match the track, suppress position on the incompatible objects
+    while still allowing rotation.
+    """
+
+    policy: dict[int, bool] = {}
+    for key, entries in groups.items():
+        if len(entries) <= 1:
+            continue
+        channel = bones.get(key)
+        if not isinstance(channel, dict):
+            continue
+        positions = channel.get("position")
+        if not isinstance(positions, list) or not positions:
+            continue
+
+        matches: list[bool] = []
+        for _obj, bind_data in entries:
+            bind_location = bind_data.get("location")
+            if not isinstance(bind_location, list) or len(bind_location) < 3:
+                matches.append(False)
+                continue
+            bind_loc = (float(bind_location[0]), float(bind_location[1]), float(bind_location[2]))
+            matches.append(_position_track_matches_bind(bind_loc, positions))
+
+        if not any(matches) or all(matches):
+            continue
+
+        for (obj, _bind_data), matched in zip(entries, matches):
+            policy[id(obj)] = matched
+    return policy
+
+
+def _animation_bone_candidates(
+    package_root: bpy.types.Object,
+    bones: dict[str, dict[str, Any]],
+) -> tuple[list[tuple[bpy.types.Object, str, dict[str, Any], dict[str, Any]]], dict[int, bool]]:
+    candidates: list[tuple[bpy.types.Object, str, dict[str, Any], dict[str, Any]]] = []
+    groups: dict[str, list[tuple[bpy.types.Object, dict[str, Any]]]] = {}
+
+    for obj in _iter_candidate_bone_objects(package_root):
+        key = _canonical_bone_hash_key(_object_bone_hash(obj)) or _object_bone_hash(obj)
+        channel = bones.get(key)
+        if not isinstance(channel, dict):
+            continue
+        _store_bind_pose_once(obj)
+        bind_data = _bind_pose_payload(obj)
+        if bind_data is None:
+            continue
+
+        candidates.append((obj, key, bind_data, channel))
+        groups.setdefault(key, []).append((obj, bind_data))
+
+    return candidates, _shared_hash_position_policy(groups, bones)
+
+
 def _iter_candidate_bone_objects(package_root: bpy.types.Object) -> list[bpy.types.Object]:
     return [obj for obj in _iter_package_objects(package_root) if obj.type in {"EMPTY", "MESH"}]
 
@@ -1481,6 +1566,7 @@ def _apply_best_channel_transform(
     endpoint_policy: str,
     target_frame: float | None = None,
     anchor_frame: float | None = None,
+    allow_position: bool = True,
 ) -> None:
     _restore_object_bind_pose(obj, bind_data)
 
@@ -1563,7 +1649,7 @@ def _apply_best_channel_transform(
         # when first_rot.w < 0 (e.g. DRAK Clipper Foot_joint_anim).
         obj.rotation_quaternion = rot_sample_q
 
-    if position_sample is not None and isinstance(positions, list) and positions:
+    if allow_position and position_sample is not None and isinstance(positions, list) and positions:
         sample_decoded = _decode_animation_position(position_sample, "identity")
         blend_mode = str(channel.get("blend_mode") or "").lower()
         if blend_mode == "override":
@@ -1644,16 +1730,10 @@ def _apply_animation_pose(
     bones = _normalized_bone_channels(clip)
     if not bones:
         return 0
+    candidates, position_policy = _animation_bone_candidates(package_root, bones)
     updated = 0
-    for obj in _iter_candidate_bone_objects(package_root):
-        key = _canonical_bone_hash_key(_object_bone_hash(obj)) or _object_bone_hash(obj)
-        channel = bones.get(key)
-        if not isinstance(channel, dict):
-            continue
-        _store_bind_pose_once(obj)
-        bind_data = _bind_pose_payload(obj)
-        if bind_data is None:
-            continue
+    for obj, key, bind_data, channel in candidates:
+        allow_position = position_policy.get(id(obj), True)
 
         _apply_best_channel_transform(
             obj,
@@ -1663,6 +1743,7 @@ def _apply_animation_pose(
             endpoint_policy,
             target_frame,
             anchor_frame,
+            allow_position=allow_position,
         )
         updated += 1
     return updated
@@ -1766,16 +1847,9 @@ def _insert_animation_action(
     # wherever they had stopped).
     frame_offset = 1
 
+    candidates, position_policy = _animation_bone_candidates(package_root, bones)
     updated = 0
-    for obj in _iter_candidate_bone_objects(package_root):
-        key = _canonical_bone_hash_key(_object_bone_hash(obj)) or _object_bone_hash(obj)
-        channel = bones.get(key)
-        if not isinstance(channel, dict):
-            continue
-        _store_bind_pose_once(obj)
-        bind_data = _bind_pose_payload(obj)
-        if bind_data is None:
-            continue
+    for obj, key, bind_data, channel in candidates:
         obj.rotation_mode = "QUATERNION"
         obj.animation_data_create()
 
@@ -1806,12 +1880,13 @@ def _insert_animation_action(
         position_times = _channel_times(channel, "position_time", len(positions))
         channel_times = [*rotation_times, *position_times]
         duration_frame = trim_frame if trim_frame is not None else max(channel_times, default=0.0)
+        allow_position = position_policy.get(id(obj), True)
 
         def _action_frame(sample_time: float) -> float:
             local_time = duration_frame - sample_time if reverse_playback else sample_time
             return frame_offset + local_time
 
-        if positions:
+        if allow_position and positions:
             bind_location = bind_data.get("location", obj.location)
             bind = (float(bind_location[0]), float(bind_location[1]), float(bind_location[2]))
 
@@ -1828,19 +1903,25 @@ def _insert_animation_action(
             if first is not None:
                 anchor = _decode_animation_position(first, "identity")
 
-            if anchor is not None:
-                for index, sample in enumerate(positions):
-                    sample_time = position_times[index] if index < len(position_times) else float(index)
-                    if trim_frame is not None and sample_time > trim_frame:
-                        continue
-                    if isinstance(sample, list) and len(sample) >= 3:
-                        sample_decoded = _decode_animation_position(sample, "identity")
+            for index, sample in enumerate(positions):
+                sample_time = position_times[index] if index < len(position_times) else float(index)
+                if trim_frame is not None and sample_time > trim_frame:
+                    continue
+                if isinstance(sample, list) and len(sample) >= 3:
+                    sample_decoded = _decode_animation_position(sample, "identity")
+                    if trim_frame is not None and anchor is not None:
+                        # Cyclic clip: use bind-delta to anchor the animation
+                        # at the bind pose (e.g. Scorpius landing_gear_deploy).
                         obj.location = (
                             bind[0] + (sample_decoded[0] - anchor[0]),
                             bind[1] + (sample_decoded[1] - anchor[1]),
                             bind[2] + (sample_decoded[2] - anchor[2]),
                         )
-                        obj.keyframe_insert(data_path="location", frame=_action_frame(sample_time))
+                    else:
+                        # Non-cyclic clip: CAF stores absolute parent-local
+                        # positions — apply verbatim.
+                        obj.location = sample_decoded
+                    obj.keyframe_insert(data_path="location", frame=_action_frame(sample_time))
 
         # Phase 47.3: align each rotation sample to the previous *keyed*
         # sample's hemisphere so per-component LINEAR interpolation stays
