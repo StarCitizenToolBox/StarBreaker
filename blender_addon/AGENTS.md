@@ -248,3 +248,48 @@ workspace-root `AGENTS.md` for the path. Each phase has Context /
 Acceptance / Steps sections and is marked `✅` when landed with a
 commit hash. When starting a new phase, re-read the most recent
 completed phase for conventions, then update the todo file as you go.
+
+## Animation Insertion (MCP)
+
+After importing a ship, the runtime is loaded with a root object
+(`"StarBreaker <name>"`) that has a `starbreaker_scene_path` custom
+property pointing to its `scene.json`. Animation data lives in the
+`animations` array of that file. Use `runtime/package_ops.py` to apply
+them — no UI context needed.
+
+### Insert a full animation as Blender Action
+
+```python
+import bpy
+from starbreaker_addon.runtime.package_ops import apply_animation_mode_to_package_root
+
+root_name = "StarBreaker RSI Scorpius_LOD0_TEX0"
+root = bpy.data.objects.get(root_name)
+
+# "action" mode inserts full keyframes as Blender Actions (one per bone)
+apply_animation_mode_to_package_root(bpy.context, root, "fragment:<idx>:<clip_name>", "action")
+```
+
+The `fragment:<idx>:<clip_name>` key comes from `scene.json`:
+```python
+import json
+with open(root.get("starbreaker_scene_path")) as f:
+    scene = json.load(f)
+for i, anim in enumerate(scene["root_entity"]["animations"]):
+    print(f"  {i}: {anim['name']} (fragments: {[f['fragment'] for f in anim.get('fragments', [])]})")
+# Output e.g.: 4: canopy_close (fragments: ['Canopy'])
+#              26: wings_retract (fragments: ['Wings'])
+#              56: landing_gear_extend (fragments: ['Landing_Gear'])
+```
+
+Modes: `snap_first` (first frame pose), `snap_last` (last frame pose),
+`action` (full keyframes), `none` (clear animation).
+
+### MCP helper module
+
+`runtime/animation_tools.py` provides name-resolution helpers:
+- `get_animation_list(context, root_name)` → list of all animations
+- `apply_animation_mode(context, root_name, "Canopy", "snap_first")` → resolves "Canopy" → `fragment:4:canopy_close` internally
+- `clear_animation_mode(context, root_name, "Canopy")` → mode "none"
+
+These work without window-manager context (direct API, not UI operators).
