@@ -1047,6 +1047,36 @@ The animation samples themselves carry through unchanged because the
 glTF representation already contains baked LINEAR keyframes in the
 target DCC's coordinate convention.
 
+### 14.8 Duplicate-hash channel routing contract
+
+Some ship rigs instantiate multiple sub-rigs that reuse identical bone
+names. Because clip channels are keyed by CRC32(name), this creates
+legitimate hash collisions across distinct instance families (for
+example, front and rear landing-gear packages).
+
+To keep routing deterministic, the decomposed sidecar contract uses
+provenance-bearing channel variants:
+
+- `bones[hash]` may be either a single channel object or an array of
+  channel objects when collisions are present.
+- Each channel object carries `source_skeleton_path`.
+- When the hash resolves in the parsed skeleton map, channel objects may
+  also carry `source_node_name`.
+
+Importer routing order should be:
+
+1. Compute receiver hash from source node name as usual.
+2. If `bones[hash]` is a single object, use it.
+3. If `bones[hash]` is an array, score each variant by provenance
+   compatibility with the receiving object (source-node equality,
+   template-path token overlap, directional token agreement such as
+   `front`/`rear`/`left`/`right`).
+4. Pick the highest-scoring variant deterministically, then apply the
+   normal snap/action math.
+
+This keeps animation routing data-driven and removes the need for
+ship-name hardcoding in the importer.
+
 ---
 
 ## 15. Limitations and out-of-scope content
