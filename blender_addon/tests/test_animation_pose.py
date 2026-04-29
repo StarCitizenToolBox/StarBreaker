@@ -200,13 +200,13 @@ class AnimationPoseTests(unittest.TestCase):
             "parent_distance": None,
         }
 
-    def test_constant_position_track_keeps_bone_at_bind(self) -> None:
+    def test_constant_position_track_keeps_bone_at_verbatim_sample(self) -> None:
         """Wing_Rotator_Top_Left has a constant position track in the
-        wings_deploy sidecar. The endpoint must land at bind position
-        in Blender-local frame (delta-from-closed-frame logic). This
-        property is independent of any future parent-frame composition
-        fix; if it ever regresses, the X-shape collapses regardless of
-        what the parent yaw does.
+        wings_deploy sidecar. With verbatim position, the endpoint lands
+        at the sampled position directly (CAF stores absolute parent-local
+        values). The first and last samples are equal so the bone stays at
+        the clip's authored resting position, which happens to be very
+        close to bind for this bone.
         """
         obj = self._make_object("Wing_Rotator_Top_Left", _TOP_LEFT_BIND)
         channel = {
@@ -221,17 +221,17 @@ class AnimationPoseTests(unittest.TestCase):
             endpoint_policy="literal",
         )
 
-        for axis, (got, want) in enumerate(zip(obj.location, _TOP_LEFT_BIND)):
+        for axis, (got, want) in enumerate(zip(obj.location, _TOP_LEFT_POS_LAST)):
             self.assertAlmostEqual(
                 got, want, places=5,
-                msg=f"axis {axis}: constant track must keep bone at bind",
+                msg=f"axis {axis}: constant track must use verbatim sample",
             )
 
-    def test_authored_position_track_lands_at_bind_plus_clip_delta(self) -> None:
-        """Wing_Rotator_Top_Right's clip moves the bone +0.57 along
-        Blender-X and +0.33 along Blender-Z between frame 0 and the
-        last frame (in clip frame). The addon's delta-anchored apply
-        must add that delta on top of the bone's bind position.
+    def test_authored_position_track_lands_at_verbatim_last_sample(self) -> None:
+        """Wing_Rotator_Top_Right's clip moves the bone between frame 0
+        and the last frame. With verbatim position apply, the endpoint
+        lands at the last sample directly (CAF stores absolute parent-local
+        values, not deltas relative to any anchor).
         """
         obj = self._make_object("Wing_Rotator_Top_Right", _TOP_RIGHT_BIND)
         channel = {
@@ -246,15 +246,7 @@ class AnimationPoseTests(unittest.TestCase):
             endpoint_policy="literal",
         )
 
-        clip_dx = _TOP_RIGHT_POS_LAST[0] - _TOP_RIGHT_POS_FIRST[0]
-        clip_dy = _TOP_RIGHT_POS_LAST[1] - _TOP_RIGHT_POS_FIRST[1]
-        clip_dz = _TOP_RIGHT_POS_LAST[2] - _TOP_RIGHT_POS_FIRST[2]
-        expected = (
-            _TOP_RIGHT_BIND[0] + clip_dx,
-            _TOP_RIGHT_BIND[1] + clip_dy,
-            _TOP_RIGHT_BIND[2] + clip_dz,
-        )
-        for axis, (got, want) in enumerate(zip(obj.location, expected)):
+        for axis, (got, want) in enumerate(zip(obj.location, _TOP_RIGHT_POS_LAST)):
             self.assertAlmostEqual(got, want, places=5, msg=f"axis {axis}")
 
     def test_override_blend_mode_uses_sample_verbatim(self) -> None:
@@ -376,10 +368,9 @@ class AnimationPoseTests(unittest.TestCase):
             frame_index=0,
             endpoint_policy="literal",
         )
-        # At frame 0 the literal policy picks pos[0]. With closed_sample
-        # also = pos[0] (or any frame nearest bind), delta is zero, so
-        # location should be at bind.
-        for axis, (got, want) in enumerate(zip(obj.location, _TOP_RIGHT_BIND)):
+        # At frame 0 the literal policy picks pos[0]. With verbatim position,
+        # location = pos[0] directly.
+        for axis, (got, want) in enumerate(zip(obj.location, _TOP_RIGHT_POS_FIRST)):
             self.assertAlmostEqual(got, want, places=5, msg=f"axis {axis}")
         # Rotation at frame 0 is bind-equivalent (~5° tilt).
         self.assertAlmostEqual(obj.rotation_quaternion[0], 0.999, places=3)
@@ -483,6 +474,11 @@ class AnimationPoseTests(unittest.TestCase):
         )
 
     def test_target_frame_snap_opens_from_bind_anchored_start(self) -> None:
+        # snap_last on a cyclic clip whose first sample is
+        # bind-aligned (the bone's resting state in clip-frame) and
+        # whose target frame holds the deployed pose: anchor must be
+        # the bind-nearer endpoint (here the first sample), so
+        # `result = bind + (target - first)` lands at the target.
         obj = self._make_object("Canopy_Front", (0.0, 0.0, 0.0))
         channel = {
             "position": [[0.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.1, 0.0]],
@@ -537,6 +533,110 @@ class AnimationPoseTests(unittest.TestCase):
         )
 
         self.assertEqual(obj.location, (0.0, 2.0, 0.0))
+
+    # ---- Phase 53 hotfix: clip-root-frame DBA fields are research-only --
+
+    def test_clip_start_position_does_not_displace_per_bone_anchor(self) -> None:
+        """Regression: Phase 53 originally consumed DBA `start_position`
+        as a per-bone anchor, which displaced bones whose first
+        authored sample was not at the clip-root origin (Scorpius
+        landing_gear_deploy: bones "completely separated"). The DBA
+        fields are clip-root-frame, not parent-local, so they are
+        plumbed through scene.json but not used per-bone. Anchor
+        selection must remain a bind-distance choice between
+        `first_sample` and the `anchor_frame` sample.
+        """
+        obj = self._make_object("BONE_Back_Piston_Lower", (0.0, 0.0, 0.0))
+        channel = {
+            # First sample is bind-aligned; target deploys the bone.
+            "position": [[0.0, 0.0, 0.0], [0.0, 0.5, 0.0], [0.0, 0.0, 0.0]],
+            "position_time": [0.0, 36.5, 75.0],
+        }
+        self.package_ops._apply_best_channel_transform(
+            obj,
+            self._bind_data((0.0, 0.0, 0.0)),
+            channel,
+            frame_index=-1,
+            endpoint_policy="literal",
+            target_frame=36.5,
+            anchor_frame=36.5,
+        )
+        # bind + (target - first) = (0, 0.5, 0) — not (0, 0, 0)+(0, 0.5, 0)
+        # piled on a non-zero clip-root start.
+        self.assertEqual(obj.location, (0.0, 0.5, 0.0))
+
+    def test_drak_door_cyclic_returns_to_bind_via_first_sample_anchor(self) -> None:
+        """DRAK Clipper shape: cyclic rotation that returns to identity.
+        Without the retired `_channel_other_endpoint` heuristic, the
+        first-sample anchor leaves snap_last at bind even when a
+        mid-clip extreme is present.
+        """
+        obj = self._make_object("door_lower_anim", (0.0, 0.0, 0.0))
+        bind = self._bind_data((0.0, 0.0, 0.0))
+        channel = {
+            "rotation": [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.707, 0.707, 0.0, 0.0],
+                [1.0, 0.0, 0.0, 0.0],
+            ],
+            "rotation_time": [0.0, 36.5, 75.0],
+        }
+        self.package_ops._apply_best_channel_transform(
+            obj,
+            bind,
+            channel,
+            frame_index=-1,
+            endpoint_policy="transition_end",
+        )
+        for actual, expected in zip(obj.rotation_quaternion, (1.0, 0.0, 0.0, 0.0)):
+            self.assertAlmostEqual(actual, expected, places=5)
+
+    def test_literal_snap_last_picks_last_sample_as_anchor_when_last_is_nearer_bind(self) -> None:
+        """Regression guard for DRAK Clipper swingarm pattern.
+        snap_last on a literal clip where `last_pos ≈ bind` and
+        `first_pos` is far away: the bind-distance pick must choose
+        `last` as anchor so the result is bind + (last - last) = bind,
+        not bind + (last - first) = displaced.
+        """
+        obj = self._make_object("swingarm_big_anim", (0.0, 0.1, 0.53))
+        bind = self._bind_data((0.0, 0.1, 0.53))
+        channel = {
+            # first ≈ retracted (far), last ≈ bind (deployed rest pose)
+            "position": [[0.0, 0.1, -1.0], [0.0, 0.1, 0.53]],
+            "position_time": [0.0, 75.0],
+        }
+        self.package_ops._apply_best_channel_transform(
+            obj,
+            bind,
+            channel,
+            frame_index=-1,
+            endpoint_policy="literal",
+        )
+        # verbatim last = (0, 0.1, 0.53) = bind → no displacement
+        for actual, expected in zip(obj.location, (0.0, 0.1, 0.53)):
+            self.assertAlmostEqual(actual, expected, places=4)
+
+    def test_caf_only_clip_uses_first_sample_anchor(self) -> None:
+        """CAF-only clips have no DBA metadata. Positions use verbatim
+        sample (absolute parent-local); rotations use verbatim sample.
+        """
+        obj = self._make_object("wing_pivot", (0.0, 0.0, 0.0))
+        bind = self._bind_data((0.0, 0.0, 0.0))
+        channel = {
+            "rotation": [[1.0, 0.0, 0.0, 0.0], [0.707, 0.0, 0.707, 0.0]],
+            "position": [[0.0, 1.5, 0.0], [0.0, 5.5, 0.0]],
+        }
+        self.package_ops._apply_best_channel_transform(
+            obj,
+            bind,
+            channel,
+            frame_index=-1,
+            endpoint_policy="transition_end",
+        )
+        # verbatim last position = (0, 5.5, 0) regardless of bind or first
+        self.assertEqual(obj.location, (0.0, 5.5, 0.0))
+        for actual, expected in zip(obj.rotation_quaternion, (0.707, 0.0, 0.707, 0.0)):
+            self.assertAlmostEqual(actual, expected, places=5)
 
 
 if __name__ == "__main__":  # pragma: no cover

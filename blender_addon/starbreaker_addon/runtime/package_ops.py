@@ -1244,6 +1244,46 @@ def _series_cyclic_target_time(
     return False, target_time
 
 
+def _clip_start_rotation(clip: dict[str, Any]) -> tuple[float, float, float, float] | None:
+    """Return the clip's DBA-metadata `start_rotation` as a Blender wxyz
+    quaternion tuple, or None when the field is absent (CAF-only clips)
+    or malformed.
+
+    The exporter (`crates/starbreaker-3d/src/animation.rs::clip_to_json`)
+    already converts the on-disk CryEngine xyzw quat into Blender wxyz
+    convention (see `cry_xyzw_to_blender_wxyz`), so consumers here just
+    need to validate the shape and coerce to floats.
+    """
+
+    raw = clip.get("start_rotation")
+    if not isinstance(raw, (list, tuple)) or len(raw) < 4:
+        return None
+    try:
+        return (float(raw[0]), float(raw[1]), float(raw[2]), float(raw[3]))
+    except (TypeError, ValueError):
+        return None
+
+
+def _clip_start_position(clip: dict[str, Any]) -> tuple[float, float, float] | None:
+    """Return the clip's DBA-metadata `start_position` as a Blender Z-up
+    XYZ tuple, or None when the field is absent (CAF-only clips) or
+    malformed.
+
+    The exporter applies the same CryEngine→Blender axis swap used for
+    sample positions (`(cx, cy, cz) → (cx, -cz, cy)`), so the value is
+    already in Blender frame and can be used directly as the anchor in
+    `bind + (sample - anchor)`.
+    """
+
+    raw = clip.get("start_position")
+    if not isinstance(raw, (list, tuple)) or len(raw) < 3:
+        return None
+    try:
+        return (float(raw[0]), float(raw[1]), float(raw[2]))
+    except (TypeError, ValueError):
+        return None
+
+
 def _clip_cyclic_transition_target_frame(clip: dict[str, Any]) -> float | None:
     if not _clip_has_transition_fragment(clip):
         return None
@@ -1458,63 +1498,24 @@ def _apply_best_channel_transform(
         float(bind_quaternion[3]),
     )
 
-    def _rotation_score(sample: list[Any]) -> float:
-        w = float(sample[0])
-        x = float(sample[1])
-        y = float(sample[2])
-        z = float(sample[3])
-        dot = abs(bind_rot[0] * w + bind_rot[1] * x + bind_rot[2] * y + bind_rot[3] * z)
-        dot = max(0.0, min(1.0, dot))
-        return 2.0 * math.acos(dot)
-
-    def _position_score(sample: list[Any]) -> float:
-        decoded = _decode_animation_position(sample, "identity")
-        dx = decoded[0] - bind_loc[0]
-        dy = decoded[1] - bind_loc[1]
-        dz = decoded[2] - bind_loc[2]
-        return (dx * dx + dy * dy + dz * dz) ** 0.5
-
-    def _channel_other_endpoint(
-        valid: list[list[Any]],
-        item_len: int,
-        distance: Callable[[list[Any], list[Any]], float],
-        threshold: float,
-    ) -> list[Any]:
-        """Return the channel's "opposite state" sample.
-
-        For a non-cyclic series the last sample is the opposite of the first.
-        For a cyclic series (first ≈ last) the opposite state lives mid-clip:
-        find the sample most distant from the first/last endpoint.
-        """
-
-        if len(valid) < 2:
-            return valid[-1] if valid else []
-        first = valid[0]
-        last = valid[-1]
-        if distance(first, last) > threshold:
-            return last
-        # Cyclic: pick the sample most distant from the shared endpoint.
-        return max(valid, key=lambda value: distance(first, value))
-
-    def _select_sample(values: list[Any], item_len: int, scorer: Callable[[list[Any]], float]) -> list[Any] | None:
+    def _select_sample(values: list[Any], item_len: int) -> list[Any] | None:
         valid: list[list[Any]] = [v for v in values if isinstance(v, list) and len(v) >= item_len]
         if not valid:
             return None
-        if endpoint_policy == "literal":
-            return valid[0] if frame_index == 0 else valid[-1]
+        # Phase 53: data-backed sample selection. The exporter classifies
+        # each bone as Additive vs Override (see classify_bone_blend_modes
+        # in starbreaker-3d), and the addon composes
+        # `result = bind · (start⁻¹ · sample)` for Additive bones using
+        # the clip's DBA-metadata `start_rotation` / `start_position`
+        # (whitepaper §14.6) as the anchor. The selector here only
+        # decides WHICH sample to read; cyclic-target frames are handled
+        # upstream by `_clip_cyclic_transition_target_frame`.
         if endpoint_policy == "transition_start":
             return valid[0]
         if endpoint_policy == "transition_end":
-            distance = _position_distance if item_len == 3 else _rotation_distance
-            threshold = 0.05 if item_len == 3 else 0.03
-            return _channel_other_endpoint(valid, item_len, distance, threshold)
-        if endpoint_policy == "least_bind_error":
-            endpoint_candidates = [valid[0], valid[-1]] if len(valid) > 1 else valid
-            scored = [(scorer(v), v) for v in endpoint_candidates]
-            return min(scored, key=lambda item: item[0])[1]
-        if endpoint_policy == "most_bind_error":
-            scored = [(scorer(v), v) for v in valid]
-            return max(scored, key=lambda item: item[0])[1]
+            return valid[-1]
+        # Default ("literal" + any unrecognised string): first at
+        # frame_index=0, last otherwise. Matches engine playback.
         return valid[0] if frame_index == 0 else valid[-1]
 
     rotation_sample: list[Any] | None = None
@@ -1524,7 +1525,7 @@ def _apply_best_channel_transform(
                 rotations, _channel_times(channel, "rotation_time", len(rotations)), 4, target_frame
             )
         else:
-            rotation_sample = _select_sample(rotations, 4, _rotation_score)
+            rotation_sample = _select_sample(rotations, 4)
 
     position_sample: list[Any] | None = None
     if isinstance(positions, list) and positions:
@@ -1533,7 +1534,7 @@ def _apply_best_channel_transform(
                 positions, _channel_times(channel, "position_time", len(positions)), 3, target_frame
             )
         else:
-            position_sample = _select_sample(positions, 3, _position_score)
+            position_sample = _select_sample(positions, 3)
 
     if rotation_sample is not None:
         obj.rotation_mode = "QUATERNION"
@@ -1551,28 +1552,15 @@ def _apply_best_channel_transform(
             # pose rather than ride on top of it. Use the sampled rotation
             # verbatim — no anchor-relative composition.
             obj.rotation_quaternion = rot_sample_q
-        elif endpoint_policy in {"transition_start", "transition_end"} and isinstance(rotations, list) and rotations:
-            # Anchor-relative composition (matches the position pathway).
-            # Clip channels are stored in a coordinate frame that has a fixed
-            # offset from the imported rest pose; the offset cancels out by
-            # composing `bind ⋅ (anchor⁻¹ ⋅ sample)`. The clip's two channel
-            # "states" are valid[0] and the per-channel opposite endpoint
-            # (last sample, or rotation-extreme mid-clip sample for cyclic
-            # channels). The state nearer to bind acts as the anchor.
-            valid_rots: list[list[Any]] = [v for v in rotations if isinstance(v, list) and len(v) >= 4]
-            if valid_rots:
-                other_rot = _channel_other_endpoint(valid_rots, 4, _rotation_distance, 0.03)
-                anchor_candidates = [valid_rots[0], other_rot]
-                anchor_rot_list = min(anchor_candidates, key=_rotation_score)
-                anchor_q = (
-                    float(anchor_rot_list[0]),
-                    float(anchor_rot_list[1]),
-                    float(anchor_rot_list[2]),
-                    float(anchor_rot_list[3]),
-                )
-                rot_sample_q = _quat_align(anchor_q, rot_sample_q)
-                delta = _quat_mul(_quat_conj(anchor_q), rot_sample_q)
-                rot_sample_q = _quat_mul(bind_rot, delta)
+        # For transition_start/transition_end: CAF clips store absolute
+        # bone rotations in parent-local space, not deltas. Using verbatim
+        # sample is correct for all current cases (cyclic clips have
+        # first=last=bind so verbatim is trivially bind; non-cyclic clips
+        # author the deployed/stowed state directly as the sample value).
+        # Bind-compose (`bind @ first⁻¹ @ sample`) was incorrect: for
+        # non-cyclic deploy clips where last≈bind it doubles the rotation,
+        # and the hemisphere-alignment step introduces additional sign errors
+        # when first_rot.w < 0 (e.g. DRAK Clipper Foot_joint_anim).
         obj.rotation_quaternion = rot_sample_q
 
     if position_sample is not None and isinstance(positions, list) and positions:
@@ -1585,41 +1573,51 @@ def _apply_best_channel_transform(
             # (canonical example: Scorpius BONE_Front_Landing_Gear_Foot).
             obj.location = sample_decoded
             return
-        # Anchor-relative composition (mirrors rotation pathway). Clip
-        # positions are in a fixed-offset coordinate frame relative to
-        # bind; composing `bind + (sample - anchor)` cancels the offset.
-        # Anchor candidates: valid[0] and the per-channel opposite endpoint
-        # (last sample, or mid-clip extreme for cyclic position channels).
-        # The candidate nearest to bind is the anchor.
+        # Per-bone position anchor. The DBA `start_position` field
+        # is plumbed through scene.json (whitepaper §14.6) but is
+        # *not* used here: it is a clip-root-frame value, not in the
+        # same coordinate space as per-bone parent-local samples.
+        # Anchor selection picks whichever of {first sample,
+        # anchor_frame sample} sits nearer to bind — that is the
+        # endpoint the engine treats as the bone's resting state in
+        # clip-frame, with the other endpoint being the "moved"
+        # pose. The same shape was used pre-Phase-53; only the
+        # rotation pathway needed the heuristic-removal that Phase
+        # 52 / Phase 53 landed.
         valid_positions: list[list[Any]] = [v for v in positions if isinstance(v, list) and len(v) >= 3]
         if valid_positions:
+            first_decoded = _decode_animation_position(valid_positions[0], "identity")
             if anchor_frame is not None:
                 anchor_target = _sample_nearest_time(
                     positions, _channel_times(channel, "position_time", len(positions)), 3, anchor_frame
                 )
-                anchor_samples = [valid_positions[0], anchor_target or position_sample]
-            elif endpoint_policy in {"transition_start", "transition_end"}:
-                other = _channel_other_endpoint(
-                    valid_positions, 3, _position_distance, 0.05
+                if anchor_target is not None:
+                    anchor_target_decoded = _decode_animation_position(anchor_target, "identity")
+                    d_first = (
+                        (first_decoded[0] - bind_loc[0]) ** 2
+                        + (first_decoded[1] - bind_loc[1]) ** 2
+                        + (first_decoded[2] - bind_loc[2]) ** 2
+                    )
+                    d_target = (
+                        (anchor_target_decoded[0] - bind_loc[0]) ** 2
+                        + (anchor_target_decoded[1] - bind_loc[1]) ** 2
+                        + (anchor_target_decoded[2] - bind_loc[2]) ** 2
+                    )
+                    anchor_decoded = first_decoded if d_first <= d_target else anchor_target_decoded
+                else:
+                    anchor_decoded = first_decoded
+                obj.location = (
+                    bind_loc[0] + (sample_decoded[0] - anchor_decoded[0]),
+                    bind_loc[1] + (sample_decoded[1] - anchor_decoded[1]),
+                    bind_loc[2] + (sample_decoded[2] - anchor_decoded[2]),
                 )
-                anchor_samples = [valid_positions[0], other]
             else:
-                anchor_samples = [valid_positions[0], valid_positions[-1]]
-
-            def _dist_sq(sample: list[Any]) -> float:
-                decoded = _decode_animation_position(sample, "identity")
-                return (
-                    (decoded[0] - bind_loc[0]) ** 2
-                    + (decoded[1] - bind_loc[1]) ** 2
-                    + (decoded[2] - bind_loc[2]) ** 2
-                )
-
-            anchor_decoded = _decode_animation_position(min(anchor_samples, key=_dist_sq), "identity")
-            obj.location = (
-                bind_loc[0] + (sample_decoded[0] - anchor_decoded[0]),
-                bind_loc[1] + (sample_decoded[1] - anchor_decoded[1]),
-                bind_loc[2] + (sample_decoded[2] - anchor_decoded[2]),
-            )
+                # Non-cyclic clips (no cyclic-anchor frame) store absolute
+                # parent-local bone positions. Apply verbatim — no bind-compose.
+                # The bind-compose was wrong for bones shared across multiple
+                # instances that have different bind positions (e.g. DRAK Clipper
+                # side swingarms whose bind ≠ channel endpoints).
+                obj.location = sample_decoded
         else:
             obj.location = sample_decoded
 
@@ -1658,7 +1656,13 @@ def _apply_animation_pose(
             continue
 
         _apply_best_channel_transform(
-            obj, bind_data, channel, frame_index, endpoint_policy, target_frame, anchor_frame
+            obj,
+            bind_data,
+            channel,
+            frame_index,
+            endpoint_policy,
+            target_frame,
+            anchor_frame,
         )
         updated += 1
     return updated
@@ -1811,27 +1815,18 @@ def _insert_animation_action(
             bind_location = bind_data.get("location", obj.location)
             bind = (float(bind_location[0]), float(bind_location[1]), float(bind_location[2]))
 
+            # Per-bone first-sample anchor. The DBA `start_position`
+            # field is plumbed through scene.json (whitepaper §14.6)
+            # but is *not* used here: it is a clip-root-frame value,
+            # not directly compatible with per-bone parent-local
+            # samples. The bind-distance first/last heuristic that
+            # lived here previously is retired — it masked the same
+            # cyclic-channel ambiguity the snap-pose path suffered
+            # from (Phase 52 evidence).
             first = positions[0] if isinstance(positions[0], list) and len(positions[0]) >= 3 else None
-            last = (
-                _sample_nearest_time(positions, position_times, 3, trim_frame)
-                if trim_frame is not None
-                else positions[-1] if isinstance(positions[-1], list) and len(positions[-1]) >= 3 else None
-            )
             anchor: tuple[float, float, float] | None = None
-            if first is not None and last is not None:
-                first_decoded = _decode_animation_position(first, "identity")
-                last_decoded = _decode_animation_position(last, "identity")
-                first_dist_sq = (
-                    (first_decoded[0] - bind[0]) ** 2
-                    + (first_decoded[1] - bind[1]) ** 2
-                    + (first_decoded[2] - bind[2]) ** 2
-                )
-                last_dist_sq = (
-                    (last_decoded[0] - bind[0]) ** 2
-                    + (last_decoded[1] - bind[1]) ** 2
-                    + (last_decoded[2] - bind[2]) ** 2
-                )
-                anchor = first_decoded if first_dist_sq <= last_dist_sq else last_decoded
+            if first is not None:
+                anchor = _decode_animation_position(first, "identity")
 
             if anchor is not None:
                 for index, sample in enumerate(positions):
