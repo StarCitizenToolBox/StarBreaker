@@ -331,7 +331,11 @@ const SKIP_ENTITY_CLASSES: &[&str] = &[
     "GreenZone",
     "Hazard",
     "Hint",
-    "Ladder",
+    // NOTE: do NOT skip "Ladder" — in CryEngine the `Ladder` entity is an
+    // interactive ladder with real visible geometry, not a non-visual area
+    // trigger. Skipping it dropped `drak_clipper_lift_access_ladder_01.cgf`,
+    // `drak_clipper_lift_access_ladder_hatch_01.cga`, and
+    // `drak_clipper_cargo_hold_ladder_01.cgf` from the Clipper interior export.
     "LandingArea",
     "LedgeObject",
     "LocationManager",
