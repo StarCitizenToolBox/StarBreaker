@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable
@@ -31,6 +32,7 @@ from .constants import (
     PROP_SCENE_PATH,
     PROP_SOURCE_NODE_NAME,
     PROP_SUBMATERIAL_JSON,
+    PROP_TEMPLATE_PATH,
 )
 from .validators import _purge_orphaned_file_backed_images, _purge_orphaned_runtime_groups
 
@@ -1291,7 +1293,10 @@ def _clip_cyclic_transition_target_frame(clip: dict[str, Any]) -> float | None:
     position_targets: list[float] = []
     rotation_moving = 0
     rotation_targets: list[float] = []
-    for channel in _normalized_bone_channels(clip).values():
+    for channel_variants in _normalized_bone_channels(clip).values():
+        if not channel_variants:
+            continue
+        channel = channel_variants[0]
         positions = channel.get("position")
         if isinstance(positions, list):
             position_times = _channel_times(channel, "position_time", len(positions))
@@ -1349,19 +1354,81 @@ def _canonical_bone_hash_key(value: Any) -> str | None:
     return None
 
 
-def _normalized_bone_channels(clip: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def _normalized_bone_channels(clip: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     bones = clip.get("bones")
     if not isinstance(bones, dict):
         return {}
-    normalized: dict[str, dict[str, Any]] = {}
-    for raw_key, channel in bones.items():
-        if not isinstance(channel, dict):
+    normalized: dict[str, list[dict[str, Any]]] = {}
+    for raw_key, raw_channel in bones.items():
+        channels: list[dict[str, Any]] = []
+        if isinstance(raw_channel, dict):
+            channels.append(raw_channel)
+        elif isinstance(raw_channel, list):
+            channels.extend(c for c in raw_channel if isinstance(c, dict))
+        if not channels:
             continue
         key = _canonical_bone_hash_key(raw_key)
         if key is None:
             continue
-        normalized[key] = channel
+        normalized[key] = channels
     return normalized
+
+
+def _provenance_tokens(value: Any) -> set[str]:
+    if not isinstance(value, str) or not value:
+        return set()
+    text = value.replace("\\", "/").lower()
+    stem = Path(text).stem
+    return {token for token in re.split(r"[^a-z0-9]+", stem) if len(token) > 1}
+
+
+_DIRECTION_TOKENS = {"front", "rear", "left", "right", "upper", "lower", "top", "bottom"}
+
+
+def _channel_variant_score(obj: bpy.types.Object, channel: dict[str, Any]) -> int:
+    obj_source = str(obj.get(PROP_SOURCE_NODE_NAME, "") or "").strip().lower()
+    obj_template = str(obj.get(PROP_TEMPLATE_PATH, "") or "").strip().lower()
+    channel_source = str(channel.get("source_node_name", "") or "").strip().lower()
+    channel_skeleton = str(channel.get("source_skeleton_path", "") or "").strip().lower()
+
+    score = 0
+    if obj_source and channel_source:
+        if obj_source == channel_source:
+            score += 6
+        elif obj_source.endswith(channel_source) or channel_source.endswith(obj_source):
+            score += 4
+
+    if obj_template and channel_skeleton:
+        template_tokens = _provenance_tokens(obj_template)
+        skeleton_tokens = _provenance_tokens(channel_skeleton)
+        overlap = template_tokens.intersection(skeleton_tokens)
+        score += min(len(overlap), 4)
+
+        template_dirs = template_tokens.intersection(_DIRECTION_TOKENS)
+        skeleton_dirs = skeleton_tokens.intersection(_DIRECTION_TOKENS)
+        if template_dirs and skeleton_dirs:
+            direction_overlap = template_dirs.intersection(skeleton_dirs)
+            if direction_overlap:
+                score += 6 + len(direction_overlap)
+            else:
+                score -= 6
+
+    if obj_source and channel_skeleton and obj_source in channel_skeleton:
+        score += 2
+    return score
+
+
+def _select_channel_variant_for_object(
+    obj: bpy.types.Object,
+    channels: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if not channels:
+        return None
+    if len(channels) == 1:
+        return channels[0]
+    scored = [(index, _channel_variant_score(obj, channel)) for index, channel in enumerate(channels)]
+    best_index, _best_score = max(scored, key=lambda item: (item[1], -item[0]))
+    return channels[best_index]
 
 
 def _position_track_matches_bind(
@@ -1386,8 +1453,8 @@ def _position_track_matches_bind(
 
 
 def _shared_hash_position_policy(
-    groups: dict[str, list[tuple[bpy.types.Object, dict[str, Any]]]],
-    bones: dict[str, dict[str, Any]],
+    groups: dict[str, list[tuple[bpy.types.Object, dict[str, Any], dict[str, Any]]]],
+    _legacy_bones: Any | None = None,
 ) -> dict[int, bool]:
     """Return per-object position eligibility for duplicate-hash channels.
 
@@ -1402,15 +1469,26 @@ def _shared_hash_position_policy(
     for key, entries in groups.items():
         if len(entries) <= 1:
             continue
-        channel = bones.get(key)
-        if not isinstance(channel, dict):
-            continue
-        positions = channel.get("position")
-        if not isinstance(positions, list) or not positions:
-            continue
-
         matches: list[bool] = []
-        for _obj, bind_data in entries:
+        for entry in entries:
+            if len(entry) == 3:
+                _obj, bind_data, channel = entry
+            elif len(entry) == 2:
+                _obj, bind_data = entry
+                if isinstance(_legacy_bones, dict):
+                    channel = _legacy_bones.get(key)
+                else:
+                    channel = None
+            else:
+                matches.append(False)
+                continue
+            if not isinstance(channel, dict):
+                matches.append(False)
+                continue
+            positions = channel.get("position")
+            if not isinstance(positions, list) or not positions:
+                matches.append(True)
+                continue
             bind_location = bind_data.get("location")
             if not isinstance(bind_location, list) or len(bind_location) < 3:
                 matches.append(False)
@@ -1421,21 +1499,28 @@ def _shared_hash_position_policy(
         if not any(matches) or all(matches):
             continue
 
-        for (obj, _bind_data), matched in zip(entries, matches):
+        for entry, matched in zip(entries, matches):
+            if len(entry) >= 1:
+                obj = entry[0]
+            else:
+                continue
             policy[id(obj)] = matched
     return policy
 
 
 def _animation_bone_candidates(
     package_root: bpy.types.Object,
-    bones: dict[str, dict[str, Any]],
+    bones: dict[str, list[dict[str, Any]]],
 ) -> tuple[list[tuple[bpy.types.Object, str, dict[str, Any], dict[str, Any]]], dict[int, bool]]:
     candidates: list[tuple[bpy.types.Object, str, dict[str, Any], dict[str, Any]]] = []
-    groups: dict[str, list[tuple[bpy.types.Object, dict[str, Any]]]] = {}
+    groups: dict[str, list[tuple[bpy.types.Object, dict[str, Any], dict[str, Any]]]] = {}
 
     for obj in _iter_candidate_bone_objects(package_root):
         key = _canonical_bone_hash_key(_object_bone_hash(obj)) or _object_bone_hash(obj)
-        channel = bones.get(key)
+        variants = bones.get(key)
+        if not isinstance(variants, list) or not variants:
+            continue
+        channel = _select_channel_variant_for_object(obj, variants)
         if not isinstance(channel, dict):
             continue
         _store_bind_pose_once(obj)
@@ -1444,9 +1529,9 @@ def _animation_bone_candidates(
             continue
 
         candidates.append((obj, key, bind_data, channel))
-        groups.setdefault(key, []).append((obj, bind_data))
+        groups.setdefault(key, []).append((obj, bind_data, channel))
 
-    return candidates, _shared_hash_position_policy(groups, bones)
+    return candidates, _shared_hash_position_policy(groups)
 
 
 def _iter_candidate_bone_objects(package_root: bpy.types.Object) -> list[bpy.types.Object]:

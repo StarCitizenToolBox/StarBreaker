@@ -1298,6 +1298,55 @@ pub fn database_to_animations_json(db: &AnimationDatabase) -> serde_json::Value 
     serde_json::Value::Array(db.clips.iter().map(clip_to_json).collect())
 }
 
+fn parse_bone_hash_key(key: &str) -> Option<u32> {
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(hex) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
+        return u32::from_str_radix(hex, 16).ok();
+    }
+    trimmed.parse::<u32>().ok()
+}
+
+fn annotate_animation_json_source(
+    value: &mut serde_json::Value,
+    source_skeleton_path: &str,
+    source_node_name_by_hash: &HashMap<u32, String>,
+) {
+    let Some(clips) = value.as_array_mut() else {
+        return;
+    };
+    for clip in clips {
+        let Some(clip_obj) = clip.as_object_mut() else {
+            continue;
+        };
+        let Some(bones) = clip_obj.get_mut("bones").and_then(|bones| bones.as_object_mut()) else {
+            continue;
+        };
+        for (bone_key, channel_value) in bones {
+            let Some(channel_obj) = channel_value.as_object_mut() else {
+                continue;
+            };
+            channel_obj.insert(
+                "source_skeleton_path".to_string(),
+                serde_json::Value::String(source_skeleton_path.to_string()),
+            );
+            if let Some(hash) = parse_bone_hash_key(bone_key)
+                && let Some(name) = source_node_name_by_hash.get(&hash)
+            {
+                channel_obj.insert(
+                    "source_node_name".to_string(),
+                    serde_json::Value::String(name.clone()),
+                );
+            }
+        }
+    }
+}
+
 /// Per-bone animation blend mode, derived from the geometric
 /// relationship between the bone's CHR-bind position and the AABB
 /// of all CAF clip samples that touch the bone.
@@ -2480,7 +2529,8 @@ pub fn extract_animations_for_skeleton_json(
         // `annotate_animations_json_with_blend_modes` helper remain as
         // latent infrastructure for a future data-grounded discriminator;
         // the addon's runtime override path consumes the field when set.
-        let value = database_to_animations_json(&AnimationDatabase { clips });
+        let mut value = database_to_animations_json(&AnimationDatabase { clips });
+        annotate_animation_json_source(&mut value, skeleton_path, &skeleton_bone_name_by_hash);
         return Ok(Some(value));
     }
 
@@ -2508,7 +2558,9 @@ pub fn extract_animations_for_skeleton_json(
     if clips.is_empty() {
         return Ok(None);
     }
-    Ok(Some(database_to_animations_json(&AnimationDatabase { clips })))
+    let mut value = database_to_animations_json(&AnimationDatabase { clips });
+    annotate_animation_json_source(&mut value, skeleton_path, &HashMap::new());
+    Ok(Some(value))
 }
 
 /// Helper: swap file extension. E.g., "file.chr" → "file.chrparams"

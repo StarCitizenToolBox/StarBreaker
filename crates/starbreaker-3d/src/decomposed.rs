@@ -1004,7 +1004,17 @@ pub(crate) fn write_decomposed_export(
                                     existing_clip.get_mut("bones")
                                 {
                                     for (k, v) in new_bones {
-                                        existing_bones.entry(k).or_insert(v);
+                                        if let Some(existing_value) = existing_bones.get_mut(&k) {
+                                            let existing_taken = existing_value.take();
+                                            let mut merged_list: Vec<serde_json::Value> = match existing_taken {
+                                                serde_json::Value::Array(items) => items,
+                                                other => vec![other],
+                                            };
+                                            merged_list.push(v);
+                                            *existing_value = serde_json::Value::Array(merged_list);
+                                        } else {
+                                            existing_bones.insert(k, v);
+                                        }
                                     }
                                 }
                             }
