@@ -977,9 +977,21 @@ class MaterialsMixin:
 
 
     def _purge_unused_materials(self, materials: list[bpy.types.Material]) -> None:
+        # Phase B perf fix: defer the actual ``bpy.data.materials.remove``
+        # to a single ``bpy.data.batch_remove`` at the end of the import.
+        # The per-template path used to call ``remove`` once per orphan
+        # which dominated 8s of wall on the Clipper. The orphan set is
+        # re-checked for ``users == 0`` at flush time so any intervening
+        # rebind still keeps the material alive.
+        pending = getattr(self, "_pending_orphan_materials", None)
+        if pending is None:
+            for material in materials:
+                if material is not None and material.users == 0:
+                    bpy.data.materials.remove(material)
+            return
         for material in materials:
-            if material.users == 0:
-                bpy.data.materials.remove(material)
+            if material is not None and material.users == 0:
+                pending.add(material)
 
 
 

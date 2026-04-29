@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import bpy
+import numpy as np
 
 
 @dataclass(frozen=True)
@@ -96,8 +97,12 @@ def _bake_bitangent_sign_attribute(mesh: bpy.types.Mesh) -> bool:
     if existing is not None:
         mesh.attributes.remove(existing)
     attr = mesh.attributes.new(BITANGENT_SIGN_ATTRIBUTE, "FLOAT", "CORNER")
-    for idx, loop in enumerate(mesh.loops):
-        attr.data[idx].value = loop.bitangent_sign
+    # Vectorised path: foreach_get/foreach_set are ~50\u00d7 faster than the
+    # equivalent Python loop over mesh.loops, which dominated the import
+    # profile (629 calls / 11.7s self time on the Clipper).
+    sign = np.empty(len(mesh.loops), dtype=np.float32)
+    mesh.loops.foreach_get("bitangent_sign", sign)
+    attr.data.foreach_set("value", sign)
     try:
         mesh.free_tangents()
     except Exception:

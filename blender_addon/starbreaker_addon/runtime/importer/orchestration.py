@@ -11,7 +11,6 @@ the final :class:`PackageImporter` by combining every themed mixin.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import math
 import uuid
@@ -75,32 +74,6 @@ from .utils import (
 )
 
 
-@contextlib.contextmanager
-def _suppress_gltf_selection():
-    """Phase C perf fix: skip Blender's glTF importer ``select_imported_objects``.
-
-    The stock implementation iterates every ``vnode`` and calls
-    ``select_set(True)`` after each glTF import. With hundreds of small
-    template imports and a growing scene, this becomes O(n\u00b2) and dominates
-    ~24s of a 175s Clipper import. The StarBreaker addon never reads the
-    selection state \u2014 it tracks newly imported objects via a
-    pointer-set diff in ``ensure_template`` and unlinks them from the
-    default scene collection regardless. Patching the function to a no-op
-    for the duration of our import is therefore safe.
-    """
-    try:
-        from io_scene_gltf2.blender.imp.scene import BlenderScene
-    except Exception:  # pragma: no cover - fallback if module path moves
-        yield
-        return
-    original = BlenderScene.select_imported_objects
-    BlenderScene.select_imported_objects = staticmethod(lambda gltf: None)
-    try:
-        yield
-    finally:
-        BlenderScene.select_imported_objects = original
-
-
 class OrchestrationMixin:
     def __init__(
         self,
@@ -137,11 +110,28 @@ class OrchestrationMixin:
         # read matrix_world (the start of instantiate_scene_instance) or after
         # finishing a placement loop. See ``_flush_pending_view_layer_update``.
         self._pending_view_layer_update = False
+        # Phase B perf fix: defer ``bpy.data.materials.remove`` until end of
+        # import. Removing per-template was costing ~8s on a Clipper because
+        # each call triggers internal RNA bookkeeping. ``bpy.data.batch_remove``
+        # is much cheaper for bulk removal at the end. See
+        # ``_flush_pending_orphan_materials``.
+        self._pending_orphan_materials: set[bpy.types.Material] = set()
 
     def _flush_pending_view_layer_update(self) -> None:
         if self._pending_view_layer_update:
             self.context.view_layer.update()
             self._pending_view_layer_update = False
+
+    def _flush_pending_orphan_materials(self) -> None:
+        if not self._pending_orphan_materials:
+            return
+        # Re-check users at flush time; intervening work may have re-bound
+        # materials we previously marked orphan, and the per-template path
+        # also accepts "users == 0" as the contract.
+        orphans = [m for m in self._pending_orphan_materials if m and m.users == 0]
+        self._pending_orphan_materials.clear()
+        if orphans:
+            bpy.data.batch_remove(ids=orphans)
 
     def _start_progress(self, total_steps: int, description: str) -> None:
         self._progress_total_steps = max(int(total_steps), 1)
@@ -315,6 +305,9 @@ class OrchestrationMixin:
 
         # Final flush in case anything else deferred a depsgraph update.
         self._flush_pending_view_layer_update()
+        # Drain the per-template orphan-material queue with a single
+        # ``bpy.data.batch_remove`` instead of N per-template ``remove`` calls.
+        self._flush_pending_orphan_materials()
         self._emit_progress(f"Finalizing {self.package.package_name}")
         return package_root
 
@@ -744,9 +737,20 @@ class OrchestrationMixin:
         if cached is not None:
             return cached
 
+        # Phase R3 perf fix: pass ``import_select_created_objects=False``
+        # to skip the Blender glTF addon's post-import O(n) selection
+        # pass directly via the official op param (replacing the prior
+        # monkey-patch on ``BlenderScene.select_imported_objects``). With
+        # hundreds of small template imports against a growing scene the
+        # selection step was costing ~24s on a Clipper import; the
+        # StarBreaker addon never reads selection state.
         before = {obj.as_pointer() for obj in bpy.data.objects}
-        with _suppress_gltf_selection():
-            result = bpy.ops.import_scene.gltf(filepath=str(asset_path), import_pack_images=False, merge_vertices=False)
+        result = bpy.ops.import_scene.gltf(
+            filepath=str(asset_path),
+            import_pack_images=False,
+            merge_vertices=False,
+            import_select_created_objects=False,
+        )
         if "FINISHED" not in result:
             raise RuntimeError(f"Failed to import {asset_path}")
 
