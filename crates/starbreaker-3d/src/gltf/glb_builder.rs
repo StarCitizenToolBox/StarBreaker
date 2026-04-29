@@ -486,12 +486,31 @@ impl GlbBuilder {
     }
 
     /// Attach skeleton bone nodes to the first scene root, registering them in the name map.
+    ///
+    /// Bones whose names are already registered (e.g. by a previously-emitted NMC
+    /// node) are skipped entirely — emitting a second flat node with the bone's
+    /// world-space matrix would create a duplicate sibling at the scene root,
+    /// shadow-attached to entity wrappers via the name lookup, and cause
+    /// hardpoint child entities to inherit identity rotation instead of the
+    /// NMC's local rotation. NMC nodes always take priority.
     pub fn attach_skeleton_bones(
         &mut self,
         bones: &[crate::skeleton::Bone],
         scene_nodes: &[json::Index<json::Node>],
     ) {
         for bone in bones {
+            if bone.name.is_empty() {
+                continue;
+            }
+            let lower_name = bone.name.to_lowercase();
+            // Skip bones whose names are already registered (e.g. by an NMC
+            // node). Otherwise we would emit a duplicate flat node that
+            // shadows the NMC node when child entities resolve their
+            // ``parent_node_name`` via ``node_name_to_idx``.
+            if self.node_name_to_idx.contains_key(&lower_name) {
+                continue;
+            }
+
             let bone_node_idx = self.nodes_json.len() as u32;
 
             // Convert quaternion [w,x,y,z] + translation to 3x4 matrix.
@@ -520,11 +539,7 @@ impl GlbBuilder {
                 ..Default::default()
             });
 
-            // Add to lookup map (lowercase for case-insensitive matching).
-            // Only insert if not already present — NMC nodes take priority.
-            self.node_name_to_idx
-                .entry(bone.name.to_lowercase())
-                .or_insert(bone_node_idx);
+            self.node_name_to_idx.insert(lower_name, bone_node_idx);
 
             // Attach bone node to the first scene root node
             if let Some(root_node) = scene_nodes.first() {
