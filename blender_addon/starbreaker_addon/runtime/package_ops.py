@@ -1566,6 +1566,7 @@ def _apply_best_channel_transform(
     endpoint_policy: str,
     target_frame: float | None = None,
     anchor_frame: float | None = None,
+    allow_rotation: bool = True,
     allow_position: bool = True,
 ) -> None:
     _restore_object_bind_pose(obj, bind_data)
@@ -1622,7 +1623,7 @@ def _apply_best_channel_transform(
         else:
             position_sample = _select_sample(positions, 3)
 
-    if rotation_sample is not None:
+    if allow_rotation and rotation_sample is not None:
         obj.rotation_mode = "QUATERNION"
         rot_sample_q = (
             float(rotation_sample[0]),
@@ -1733,7 +1734,7 @@ def _apply_animation_pose(
     candidates, position_policy = _animation_bone_candidates(package_root, bones)
     updated = 0
     for obj, key, bind_data, channel in candidates:
-        allow_position = position_policy.get(id(obj), True)
+        allow_channel = position_policy.get(id(obj), True)
 
         _apply_best_channel_transform(
             obj,
@@ -1743,7 +1744,8 @@ def _apply_animation_pose(
             endpoint_policy,
             target_frame,
             anchor_frame,
-            allow_position=allow_position,
+            allow_rotation=allow_channel,
+            allow_position=allow_channel,
         )
         updated += 1
     return updated
@@ -1880,13 +1882,13 @@ def _insert_animation_action(
         position_times = _channel_times(channel, "position_time", len(positions))
         channel_times = [*rotation_times, *position_times]
         duration_frame = trim_frame if trim_frame is not None else max(channel_times, default=0.0)
-        allow_position = position_policy.get(id(obj), True)
+        allow_channel = position_policy.get(id(obj), True)
 
         def _action_frame(sample_time: float) -> float:
             local_time = duration_frame - sample_time if reverse_playback else sample_time
             return frame_offset + local_time
 
-        if allow_position and positions:
+        if allow_channel and positions:
             bind_location = bind_data.get("location", obj.location)
             bind = (float(bind_location[0]), float(bind_location[1]), float(bind_location[2]))
 
@@ -1931,22 +1933,23 @@ def _insert_animation_action(
         # frame between the two keys (observed on Scorpius
         # `landing_gear_extend` BONE_Front_Landing_Gear_Foot frames 37→39).
         prev_keyed_quat: tuple[float, float, float, float] | None = None
-        for index, sample in enumerate(rotations):
-            sample_time = rotation_times[index] if index < len(rotation_times) else float(index)
-            if trim_frame is not None and sample_time > trim_frame:
-                continue
-            if isinstance(sample, list) and len(sample) >= 4:
-                sample_q = (
-                    float(sample[0]),
-                    float(sample[1]),
-                    float(sample[2]),
-                    float(sample[3]),
-                )
-                if prev_keyed_quat is not None:
-                    sample_q = _quat_align(prev_keyed_quat, sample_q)
-                obj.rotation_quaternion = sample_q
-                obj.keyframe_insert(data_path="rotation_quaternion", frame=_action_frame(sample_time))
-                prev_keyed_quat = sample_q
+        if allow_channel:
+            for index, sample in enumerate(rotations):
+                sample_time = rotation_times[index] if index < len(rotation_times) else float(index)
+                if trim_frame is not None and sample_time > trim_frame:
+                    continue
+                if isinstance(sample, list) and len(sample) >= 4:
+                    sample_q = (
+                        float(sample[0]),
+                        float(sample[1]),
+                        float(sample[2]),
+                        float(sample[3]),
+                    )
+                    if prev_keyed_quat is not None:
+                        sample_q = _quat_align(prev_keyed_quat, sample_q)
+                    obj.rotation_quaternion = sample_q
+                    obj.keyframe_insert(data_path="rotation_quaternion", frame=_action_frame(sample_time))
+                    prev_keyed_quat = sample_q
 
         # Phase 24C / Phase 39: assign all fcurves on this action to the
         # bone's group so the Action editor renders a single collapsible

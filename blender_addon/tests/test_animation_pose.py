@@ -321,6 +321,40 @@ class AnimationPoseTests(unittest.TestCase):
         self.assertTrue(policy[id(front)])
         self.assertFalse(policy[id(rear)])
 
+    def test_transform_application_can_skip_full_channel_for_mismatched_duplicate(self) -> None:
+        bind = (2.304258, -0.327204, 0.0)
+        obj = _StubObject(
+            "door_upper_anim.004",
+            location=bind,
+            rotation_quaternion=(0.300706, 0.0, 0.0, -0.953717),
+        )
+        bind_data = {
+            "location": list(bind),
+            "rotation_mode": "QUATERNION",
+            "rotation_quaternion": [0.300706, 0.0, 0.0, -0.953717],
+            "parent_distance": None,
+        }
+        channel = {
+            "rotation": [[1.0, 0.0, 0.0, 0.0], [-0.300719, 0.0, 0.0, 0.953713]],
+            "position": [[0.386403, -0.331004, -0.000001], [1.330354, -0.673419, -0.000001]],
+        }
+
+        self.package_ops._apply_best_channel_transform(
+            obj,
+            bind_data,
+            channel,
+            frame_index=0,
+            endpoint_policy="literal",
+            allow_rotation=False,
+            allow_position=False,
+        )
+
+        for axis, (got, want) in enumerate(zip(obj.location, bind)):
+            self.assertAlmostEqual(got, want, places=5, msg=f"location axis {axis}")
+        expected_rot = (0.300706, 0.0, 0.0, -0.953717)
+        for axis, (got, want) in enumerate(zip(obj.rotation_quaternion, expected_rot)):
+            self.assertAlmostEqual(got, want, places=5, msg=f"rotation axis {axis}")
+
     # ---- Phase 39: layered-Action helpers ---------------------------
 
     def test_action_fcurves_handles_legacy_action(self) -> None:
