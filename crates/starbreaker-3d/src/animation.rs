@@ -44,6 +44,20 @@ pub struct AnimationClip {
     pub fps: f32,
     /// Per-bone animation channels.
     pub channels: Vec<BoneChannel>,
+    /// DBA-metadata `start_rotation` (CryEngine xyzw quaternion) when this
+    /// clip came from a DBA. Documented in §14.6 of the SC animation
+    /// formats whitepaper as the authored clip-origin rotation; the
+    /// addon uses it as the data-backed anchor for the composition
+    /// `result = bind ⋅ (start⁻¹ ⋅ sample)`. `None` for `.caf` files
+    /// (no DBA metadata block) and for clips whose metadata-vs-block
+    /// match-up failed.
+    pub start_rotation: Option<[f32; 4]>,
+    /// DBA-metadata `start_position` (CryEngine XYZ). The on-disk DBA
+    /// entry only stores XY (Z is implicit zero); we expose the full
+    /// 3-component vector here so downstream consumers don't have to
+    /// know the file-format quirk. `None` when no DBA metadata is
+    /// available (`.caf` files, or unmatched DBA entries).
+    pub start_position: Option<[f32; 3]>,
 }
 
 /// DataCore-declared Mannequin animation-controller sources for an entity.
@@ -177,6 +191,8 @@ fn match_dba_metadata_to_blocks(
                 name: format!("anim_{i}"),
                 fps: 30.0,
                 channels,
+                start_rotation: None,
+                start_position: None,
             })
             .collect();
     }
@@ -194,7 +210,7 @@ fn match_dba_metadata_to_blocks(
     // fall back to a positional name so the clip is still exported.
     let mut clips: Vec<AnimationClip> = Vec::with_capacity(blocks.len());
     for (i, channels) in blocks.into_iter().enumerate() {
-        let (name, fps) = match meta_entries.get(i) {
+        let (name, fps, start_rotation, start_position) = match meta_entries.get(i) {
             Some((name, meta)) => {
                 if (meta.num_controllers as usize) != channels.len() {
                     log::warn!(
@@ -210,11 +226,23 @@ fn match_dba_metadata_to_blocks(
                     name.clone()
                 };
                 let fps = if meta.fps == 0 { 30.0 } else { meta.fps as f32 };
-                (clip_name, fps)
+                // DBA only stores XY of the start position (the 48-byte
+                // entry has no room for Z); expose the full XYZ here
+                // with Z = 0.0 so consumers don't have to know the
+                // on-disk quirk. See `DbaMetaEntry::start_position_xy`
+                // and the layout comment in `parse_dba_metadata`.
+                let start_pos = [meta.start_position_xy[0], meta.start_position_xy[1], 0.0_f32];
+                (clip_name, fps, Some(meta.start_rotation), Some(start_pos))
             }
-            None => (format!("anim_{i}"), 30.0),
+            None => (format!("anim_{i}"), 30.0, None, None),
         };
-        clips.push(AnimationClip { name, fps, channels });
+        clips.push(AnimationClip {
+            name,
+            fps,
+            channels,
+            start_rotation,
+            start_position,
+        });
     }
     clips
 }
@@ -251,6 +279,12 @@ pub fn parse_caf(data: &[u8]) -> Result<AnimationDatabase, Error> {
             name: format!("clip_{i}"),
             fps,
             channels,
+            // `.caf` files have no DBA metadata block, so the data-backed
+            // start anchor is unavailable here. The addon falls back to
+            // first-sample anchoring for these clips (see
+            // `_apply_best_channel_transform` in `package_ops.py`).
+            start_rotation: None,
+            start_position: None,
         })
         .collect();
 
@@ -1230,12 +1264,33 @@ pub fn clip_to_json(clip: &AnimationClip) -> serde_json::Value {
         }
     }
 
-    serde_json::json!({
+    let mut value = serde_json::json!({
         "name": clip.name,
         "fps": clip.fps as u32,
         "frame_count": max_frame,
         "bones": bones,
-    })
+    });
+    // Phase 53: emit DBA-metadata `start_rotation` / `start_position` as
+    // top-level clip fields so the addon can use them as the data-backed
+    // anchor for `result = bind ⋅ (start⁻¹ ⋅ sample)` (see SC animation
+    // formats whitepaper §14.6). Both fields are converted into the same
+    // Blender Z-up convention used for sample keyframes:
+    //   - rotation: CryEngine xyzw → Blender wxyz, axis-swapped via
+    //     `cry_xyzw_to_blender_wxyz` (matches per-sample emission above).
+    //   - position: CryEngine (x, y, z) → Blender (x, -z, y) (matches the
+    //     per-sample swap used a few lines up). DBA only stores XY on
+    //     disk; the Z is already filled in as 0.0 by
+    //     `match_dba_metadata_to_blocks`, which is the documented
+    //     empirical default. CAF clips leave both fields `None` and the
+    //     addon falls back to first-sample anchoring.
+    if let Some(start_rot_xyzw) = clip.start_rotation {
+        let q = cry_xyzw_to_blender_wxyz(start_rot_xyzw);
+        value["start_rotation"] = serde_json::json!([q[0], q[1], q[2], q[3]]);
+    }
+    if let Some(p) = clip.start_position {
+        value["start_position"] = serde_json::json!([p[0], -p[2], p[1]]);
+    }
+    value
 }
 
 /// Convert a full database to a JSON array of animations.
@@ -2106,6 +2161,8 @@ fn caf_anchored_remap(
                 name: event_name.clone(),
                 fps: db.clips[idx].fps,
                 channels: db.clips[idx].channels.clone(),
+                start_rotation: db.clips[idx].start_rotation,
+                start_position: db.clips[idx].start_position,
             });
         } else {
             log::debug!(
@@ -2521,6 +2578,8 @@ mod bake_tests {
                 rot_format_flags: 0,
                 pos_format_flags: 0,
             }],
+            start_rotation: None,
+            start_position: None,
         };
 
         let json = clip_to_json(&clip);
@@ -2550,6 +2609,8 @@ mod bake_tests {
                 rot_format_flags: 0,
                 pos_format_flags: 0,
             }],
+            start_rotation: None,
+            start_position: None,
         };
 
         let json = clip_to_json(&clip);
@@ -2557,6 +2618,45 @@ mod bake_tests {
         let entry = bones.values().next().unwrap();
         let rotation_times = entry["rotation_time"].as_array().unwrap();
         assert_eq!(rotation_times[0].as_f64().unwrap(), 12.5);
+    }
+
+    /// Phase 53: clips that originate from DBA metadata expose
+    /// `start_rotation` / `start_position` as top-level JSON fields, in
+    /// the same Blender Z-up convention as the per-sample emission.
+    /// Clips without metadata (e.g. from `parse_caf`) must omit both.
+    #[test]
+    fn clip_to_json_emits_start_metadata_in_blender_convention() {
+        // CryEngine xyzw=(1,2,3,4) → Blender wxyz=(4, 1, -3, 2).
+        // CryEngine XYZ=(7,8,9) → Blender XYZ=(7, -9, 8).
+        let clip_with_meta = AnimationClip {
+            name: "deploy".to_string(),
+            fps: 30.0,
+            channels: vec![],
+            start_rotation: Some([1.0, 2.0, 3.0, 4.0]),
+            start_position: Some([7.0, 8.0, 9.0]),
+        };
+        let json = clip_to_json(&clip_with_meta);
+        let sr = json["start_rotation"].as_array().expect("start_rotation");
+        assert_eq!(sr[0].as_f64().unwrap(), 4.0, "wxyz[0] = cry_w");
+        assert_eq!(sr[1].as_f64().unwrap(), 1.0, "wxyz[1] = cry_x");
+        assert_eq!(sr[2].as_f64().unwrap(), -3.0, "wxyz[2] = -cry_z");
+        assert_eq!(sr[3].as_f64().unwrap(), 2.0, "wxyz[3] = cry_y");
+        let sp = json["start_position"].as_array().expect("start_position");
+        assert_eq!(sp[0].as_f64().unwrap(), 7.0, "blender_x = cry_x");
+        assert_eq!(sp[1].as_f64().unwrap(), -9.0, "blender_y = -cry_z");
+        assert_eq!(sp[2].as_f64().unwrap(), 8.0, "blender_z = cry_y");
+
+        // CAF-style clip omits both fields entirely.
+        let clip_caf = AnimationClip {
+            name: "caf_clip".to_string(),
+            fps: 30.0,
+            channels: vec![],
+            start_rotation: None,
+            start_position: None,
+        };
+        let json_caf = clip_to_json(&clip_caf);
+        assert!(json_caf.get("start_rotation").is_none(), "CAF clips must omit start_rotation");
+        assert!(json_caf.get("start_position").is_none(), "CAF clips must omit start_position");
     }
 
     #[test]
@@ -2598,6 +2698,8 @@ mod bake_tests {
                 rot_format_flags: 0,
                 pos_format_flags: 0,
             }],
+            start_rotation: None,
+            start_position: None,
         };
         let mut full = clip_to_json(&clip);
         // Mimic fragment annotation by adding a fragments key.
@@ -2665,6 +2767,8 @@ mod bake_tests {
                     pos_format_flags: 0,
                 },
             ],
+            start_rotation: None,
+            start_position: None,
         }];
 
         let mut binds = std::collections::HashMap::new();
@@ -2815,6 +2919,8 @@ mod bake_tests {
                     make_ch(other_hash),
                     make_ch(unresolved_hash),
                 ],
+                start_rotation: None,
+                start_position: None,
             }],
         };
         let mut hash_to_name = std::collections::HashMap::new();
