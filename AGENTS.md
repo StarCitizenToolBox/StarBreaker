@@ -159,11 +159,17 @@ data without shelling out to the CLI:
 
 Two source files are currently monolithic and have active plans to be split. Before editing them, read the plan so your change lands in the right future sub-module:
 
-- **`crates/starbreaker-3d/src/pipeline.rs`** (~5970 lines, 125 functions)
-  See **Phase 51** in `docs/StarBreaker/todo.md` for the planned `pipeline/` module layout.
-  File index (updated as sub-modules are extracted):
-  - `pipeline.rs` (→ `pipeline/mod.rs`) — public entry points: `export_entity_payload`, `assemble_glb_with_loadout*`, `resolve_loadout_meshes`, `tint_palette_hash`, `load_raw_dds_file`.
-  - *(sub-modules listed in todo.md Phase 51 file-index block as they are created)*
+- **`crates/starbreaker-3d/src/pipeline/`** (Phase 51 IN PROGRESS) — decomposed `pipeline/` module:
+  - `pipeline/mod.rs` — type defs (MaterialMode, ExportKind, ExportFormat, ExportOptions, DecomposedExport, ExportedFileKind, ExportedFile, ExportResult), `P4kSiblingReader`, `load_raw_dds_file`, `datacore_path_to_p4k`, `dump_nmc_nodes`, `dump_hierarchy`, `socpaks_to_glb` — 923 lines
+  - `pipeline/textures.rs` — texture/PNG helpers (`PngCache`, `load_material_textures`, `cached_load`, `load_diffuse_texture`, `load_normal_texture`, `load_roughness_texture`)
+  - `pipeline/interiors.rs` — interior discovery/loading (`LoadedInteriors`, `InteriorCgfEntry`, `InteriorContainerData`, `load_interiors`, `build_interiors_from_payloads`, `preload_interior_meshes`, `preload_interior_textures`, `expand_loadout_into_placements`)
+  - `pipeline/nmc_bridge.rs` — NMC transform helpers (`bone_world_transform`, `synthesize_nmc_from_bones`, `bake_nmc_into_mesh`, `load_nmc_for_cgf`, `compose_helper_transform`, mat4 helpers)
+  - `pipeline/child_payload.rs` — child payload helpers (`load_child_mesh`, `collect_child_payload_specs`, `load_child_payload_asset`, `load_child_payloads`, `LandingGearAsset`)
+  - `pipeline/loadout.rs` — loadout resolution (`resolve_loadout_meshes`, `resolve_children`, `flatten_resolved_tree`)
+  - `pipeline/entity_export.rs` — entity export helpers + geometry loading (`export_entity_payload`, `export_entity_from_paths`, `export_cgf_from_path`, `skeleton_source_paths`, `load_skeleton`, `GeometryPart`, `ResolvedGeometry`)
+  - `pipeline/palette.rs` — material/paint/tint/palette (`resolve_material`, `resolve_paint_override`, `enumerate_paint_variants_for_entity`, `query_tint_palette`, `try_load_mtl`, `query_animation_controller_source`)
+  - `pipeline/vehicle.rs` — vehicle XML parsing (`query_landing_gear`, `load_invisible_ports`, `VehicleXmlPart`, `load_vehicle_xml_parts`)
+  - `pipeline/glb_assembly.rs` — GLB assembly entry points (`assemble_glb_with_loadout`, `assemble_glb_with_loadout_with_progress`, `path_is_shield_related`)
 
 - **`crates/starbreaker-3d/src/animation.rs`** (~3070 lines, 54 functions)
 - **`crates/starbreaker-3d/src/animation/`** (Phase 59 ✅ commit `039fe46`) — 7 sub-modules
