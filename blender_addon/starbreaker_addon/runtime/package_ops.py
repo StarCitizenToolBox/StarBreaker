@@ -934,7 +934,7 @@ def _apply_animation_mode_for_clip(
         )
         sample_frame_index = (-1 if frame_index == 0 else 0) if reverse_playback and endpoint_policy == "literal" else frame_index
         cyclic_target_frame = _clip_cyclic_transition_target_frame(clip)
-        target_frame = cyclic_target_frame if normalized_mode == "snap_last" and not reverse_playback else None
+        target_frame = cyclic_target_frame if endpoint_policy == "transition_end" else None
         updated = _apply_animation_pose(
             package_root,
             clip,
@@ -949,7 +949,7 @@ def _apply_animation_mode_for_clip(
                 paired_clip, paired_frame_index = paired
                 paired_policy = _snap_endpoint_policy(str(paired_clip.get("name", "")), normalized_mode)
                 paired_cyclic_target_frame = _clip_cyclic_transition_target_frame(paired_clip)
-                paired_target_frame = paired_cyclic_target_frame if normalized_mode == "snap_last" else None
+                paired_target_frame = paired_cyclic_target_frame if paired_policy == "transition_end" else None
                 updated = _apply_animation_pose(
                     package_root,
                     paired_clip,

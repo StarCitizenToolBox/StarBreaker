@@ -548,6 +548,55 @@ class AnimationPoseTests(unittest.TestCase):
             "transition_start",
         )
 
+    def test_reverse_snap_first_uses_cyclic_target_for_transition_end(self) -> None:
+        clip = {
+            "name": "landing_gear_extend",
+            "source_fragment": {
+                "fragment": "Landing_Gear",
+                "frag_tags": ["Retract"],
+                "animations": [{"name": "landing_gear_extend", "speed": -1}],
+            },
+        }
+        capture: dict[str, object] = {}
+        original_apply = self.package_ops._apply_animation_pose
+        original_target = self.package_ops._clip_cyclic_transition_target_frame
+        try:
+            self.package_ops._clip_cyclic_transition_target_frame = lambda _clip: 36.5
+
+            def _fake_apply(
+                package_root,
+                clip_data,
+                frame_index,
+                endpoint_policy,
+                target_frame=None,
+                anchor_frame=None,
+            ):
+                capture["frame_index"] = frame_index
+                capture["endpoint_policy"] = endpoint_policy
+                capture["target_frame"] = target_frame
+                capture["anchor_frame"] = anchor_frame
+                return 1
+
+            self.package_ops._apply_animation_pose = _fake_apply
+            updated = self.package_ops._apply_animation_mode_for_clip(
+                context=None,
+                package_root=object(),
+                package=object(),
+                clip=clip,
+                mode="snap_first",
+                fragment=clip["source_fragment"],
+                reverse_playback=True,
+            )
+        finally:
+            self.package_ops._apply_animation_pose = original_apply
+            self.package_ops._clip_cyclic_transition_target_frame = original_target
+
+        self.assertEqual(updated, 1)
+        self.assertEqual(capture["frame_index"], 0)
+        self.assertEqual(capture["endpoint_policy"], "transition_end")
+        self.assertEqual(capture["target_frame"], 36.5)
+        self.assertEqual(capture["anchor_frame"], 36.5)
+
     def test_target_frame_snap_opens_from_bind_anchored_start(self) -> None:
         # snap_last on a cyclic clip whose first sample is
         # bind-aligned (the bone's resting state in clip-frame) and
