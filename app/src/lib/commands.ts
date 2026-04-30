@@ -189,6 +189,34 @@ export async function browseOutputDir(): Promise<string | null> {
   return result ?? null;
 }
 
+export interface BlenderAddonStatus {
+  state: "install" | "installed" | "upgrade" | "unavailable";
+  current_version: string;
+  installed_version: string | null;
+  addons_path: string | null;
+  blender_version: string | null;
+  blender_running: boolean;
+  message: string | null;
+  /** True when Blender was found but all installs are older than 5.0. */
+  incompatible_blender_found: boolean;
+}
+
+export async function getBlenderAddonStatus(): Promise<BlenderAddonStatus> {
+  return invoke<BlenderAddonStatus>("get_blender_addon_status");
+}
+
+export async function installBlenderAddon(
+  targetPath: string | null = null,
+): Promise<BlenderAddonStatus> {
+  return invoke<BlenderAddonStatus>("install_blender_addon", {
+    target_path: targetPath,
+  });
+}
+
+export async function reloadBlenderAddon(): Promise<string> {
+  return invoke<string>("reload_blender_addon");
+}
+
 // ── DataCore types ──
 
 export interface SearchResultDto {

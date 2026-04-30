@@ -8,6 +8,9 @@ bl_info = {
     "category": "Import-Export",
 }
 
+# Installer-facing semantic version string.
+VERSION = "0.2.2+addon.1"
+
 try:
     from .ui import register, unregister
 except ModuleNotFoundError as exc:
@@ -21,4 +24,4 @@ except ModuleNotFoundError as exc:
         return None
 
 
-__all__ = ["bl_info", "register", "unregister"]
+__all__ = ["bl_info", "VERSION", "register", "unregister"]

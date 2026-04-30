@@ -1,7 +1,12 @@
 use std::collections::HashSet;
+use std::fs;
+use std::io::Write;
+use std::net::TcpStream;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::process::Command;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -13,6 +18,10 @@ use starbreaker_p4k::MappedP4k;
 
 use crate::error::AppError;
 use crate::state::AppState;
+
+/// Minimum Blender version required to install the StarBreaker addon.
+const MIN_BLENDER_MAJOR: u32 = 5;
+const MIN_BLENDER_MINOR: u32 = 0;
 
 /// Discovery result returned to the frontend.
 #[derive(Serialize)]
@@ -208,6 +217,502 @@ pub fn list_dir(state: State<'_, AppState>, path: String) -> Result<Vec<DirEntry
         .collect();
 
     Ok(dtos)
+}
+
+#[derive(Clone, Serialize)]
+pub struct BlenderAddonStatusDto {
+    pub state: String,
+    pub current_version: String,
+    pub installed_version: Option<String>,
+    pub addons_path: Option<String>,
+    pub blender_version: Option<String>,
+    pub blender_running: bool,
+    pub message: Option<String>,
+    /// True when Blender installations were found but all are older than 5.0.
+    pub incompatible_blender_found: bool,
+}
+
+#[derive(Clone)]
+struct BlenderAddonTarget {
+    blender_version: String,
+    addons_path: PathBuf,
+}
+
+/// Result of scanning the system for Blender addon directories.
+struct BlenderDiscovery {
+    /// Targets with Blender ≥ 5.0, sorted by version descending.
+    compatible: Vec<BlenderAddonTarget>,
+    /// True when at least one Blender config directory was found but filtered out as < 5.0.
+    has_incompatible: bool,
+}
+
+fn parse_addon_version_from_init(content: &str) -> Option<String> {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("VERSION") {
+            let mut parts = trimmed.splitn(2, '=');
+            let _ = parts.next();
+            if let Some(raw) = parts.next() {
+                let value = raw.trim().trim_matches('"').trim_matches('\'');
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
+            }
+        }
+
+        if trimmed.contains("\"version\"") && trimmed.contains('(') && trimmed.contains(')') {
+            let open = trimmed.find('(')?;
+            let close = trimmed[open + 1..].find(')')? + open + 1;
+            let tuple = &trimmed[open + 1..close];
+            let parts: Vec<String> = tuple
+                .split(',')
+                .filter_map(|part| {
+                    let digits: String = part.chars().filter(|ch| ch.is_ascii_digit()).collect();
+                    if digits.is_empty() {
+                        None
+                    } else {
+                        Some(digits)
+                    }
+                })
+                .collect();
+            if !parts.is_empty() {
+                return Some(parts.join("."));
+            }
+        }
+    }
+    None
+}
+
+fn version_sort_key(version: &str) -> Vec<u32> {
+    version
+        .split(|ch: char| !ch.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse::<u32>().ok())
+        .collect()
+}
+
+fn version_meets_minimum(version: &str) -> bool {
+    let parts = version_sort_key(version);
+    match (parts.first(), parts.get(1)) {
+        (Some(&major), Some(&minor)) => {
+            major > MIN_BLENDER_MAJOR
+                || (major == MIN_BLENDER_MAJOR && minor >= MIN_BLENDER_MINOR)
+        }
+        (Some(&major), None) => major > MIN_BLENDER_MAJOR,
+        _ => false,
+    }
+}
+
+/// Return candidate Blender executable paths for a given addons directory.
+/// Walks up the tree looking for a binary, then checks common system locations.
+fn find_blender_binary_candidates(addons_path: &Path) -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    // Walk up (up to 6 levels) from addons_path looking for the binary
+    let mut dir = addons_path.to_path_buf();
+    for _ in 0..6 {
+        if !dir.pop() {
+            break;
+        }
+        #[cfg(target_os = "windows")]
+        candidates.push(dir.join("blender.exe"));
+        #[cfg(not(target_os = "windows"))]
+        candidates.push(dir.join("blender"));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        candidates.push(PathBuf::from("/usr/bin/blender"));
+        candidates.push(PathBuf::from("/usr/local/bin/blender"));
+        candidates.push(PathBuf::from("/opt/blender/blender"));
+        if let Ok(out) = Command::new("which").arg("blender").output() {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !s.is_empty() {
+                    candidates.push(PathBuf::from(s));
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        candidates.push(PathBuf::from(
+            "/Applications/Blender.app/Contents/MacOS/Blender",
+        ));
+        candidates.push(PathBuf::from(
+            "/Applications/Blender.app/Contents/MacOS/blender",
+        ));
+        if let Ok(out) = Command::new("which").arg("blender").output() {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !s.is_empty() {
+                    candidates.push(PathBuf::from(s));
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        for root in &[
+            r"C:\Program Files\Blender Foundation",
+            r"C:\Program Files (x86)\Blender Foundation",
+        ] {
+            if let Ok(entries) = fs::read_dir(root) {
+                for entry in entries.flatten() {
+                    candidates.push(entry.path().join("blender.exe"));
+                }
+            }
+        }
+    }
+
+    candidates.into_iter().filter(|p| p.is_file()).collect()
+}
+
+/// Run `blender --version` and parse the version string from stdout.
+/// Blender prints: "Blender 5.1.0 (hash abcdef built 2026-04-01 ...)"
+fn probe_blender_version(binary: &Path) -> Option<String> {
+    let out = Command::new(binary).arg("--version").output().ok()?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.starts_with("Blender ") {
+            if let Some(ver) = line.split_whitespace().nth(1) {
+                if ver.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+                    return Some(ver.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Determine the actual Blender version for a given addons directory.
+/// Uses the parent directory name when it looks like a dotted version (e.g. "5.1"),
+/// otherwise locates the Blender binary and probes it with `--version`.
+fn detect_blender_version(addons_path: &Path, dir_name: &str) -> Option<String> {
+    let is_dotted_version = !dir_name.is_empty()
+        && !dir_name.starts_with('.')
+        && !dir_name.ends_with('.')
+        && dir_name.contains('.')
+        && dir_name
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '.');
+
+    if is_dotted_version {
+        return Some(dir_name.to_string());
+    }
+
+    // Fall back to probing the binary
+    for binary in find_blender_binary_candidates(addons_path) {
+        if let Some(ver) = probe_blender_version(&binary) {
+            return Some(ver);
+        }
+    }
+    None
+}
+
+fn discover_blender_addon_targets() -> BlenderDiscovery {
+    let mut roots: Vec<PathBuf> = Vec::new();
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            roots.push(PathBuf::from(home).join(".config/blender"));
+        }
+        roots.push(PathBuf::from("/usr/share/blender"));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            roots.push(PathBuf::from(home).join("Library/Application Support/Blender"));
+        }
+        roots.push(PathBuf::from("/Applications/Blender.app/Contents/Resources"));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            roots.push(PathBuf::from(appdata).join("Blender Foundation/Blender"));
+        }
+        roots.push(PathBuf::from(r"C:\Program Files\Blender Foundation"));
+    }
+
+    let mut compatible: Vec<BlenderAddonTarget> = Vec::new();
+    let mut has_incompatible = false;
+
+    for root in roots {
+        let entries = match fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let dir_name = entry.file_name().to_string_lossy().to_string();
+            let addons_path = path.join("scripts").join("addons");
+            if !addons_path.exists() {
+                continue;
+            }
+            let blender_version =
+                detect_blender_version(&addons_path, &dir_name).unwrap_or(dir_name);
+            if version_meets_minimum(&blender_version) {
+                compatible.push(BlenderAddonTarget {
+                    blender_version,
+                    addons_path,
+                });
+            } else {
+                has_incompatible = true;
+            }
+        }
+    }
+
+    compatible.sort_by(|a, b| {
+        let ka = version_sort_key(&a.blender_version);
+        let kb = version_sort_key(&b.blender_version);
+        kb.cmp(&ka)
+    });
+    compatible.dedup_by(|a, b| a.addons_path == b.addons_path);
+    BlenderDiscovery {
+        compatible,
+        has_incompatible,
+    }
+}
+
+fn addon_source_dir() -> Option<PathBuf> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let candidates = [
+        manifest_dir.join("../blender_addon/starbreaker_addon"),
+        manifest_dir.join("../../blender_addon/starbreaker_addon"),
+    ];
+    for candidate in candidates {
+        if candidate.join("__init__.py").is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn current_addon_version() -> Result<String, AppError> {
+    let source_dir = addon_source_dir().ok_or_else(|| {
+        AppError::Internal("Unable to locate bundled starbreaker_addon source directory".into())
+    })?;
+    let init_path = source_dir.join("__init__.py");
+    let content = fs::read_to_string(&init_path)?;
+    Ok(parse_addon_version_from_init(&content)
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string()))
+}
+
+fn installed_addon_version(addons_path: &Path) -> Option<String> {
+    let init_path = addons_path.join("starbreaker_addon").join("__init__.py");
+    let content = fs::read_to_string(init_path).ok()?;
+    parse_addon_version_from_init(&content)
+}
+
+fn blender_running() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        return Command::new("pgrep")
+            .args(["-f", "[bB]lender"])
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return Command::new("pgrep")
+            .args(["-f", "[bB]lender"])
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return Command::new("tasklist")
+            .args(["/FI", "IMAGENAME eq blender.exe"])
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).to_ascii_lowercase().contains("blender.exe"))
+            .unwrap_or(false);
+    }
+
+    #[allow(unreachable_code)]
+    false
+}
+
+fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), AppError> {
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let src = entry.path();
+        let dst = destination.join(entry.file_name());
+        if src.is_dir() {
+            copy_dir_recursive(&src, &dst)?;
+        } else {
+            if let Some(parent) = dst.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(&src, &dst)?;
+        }
+    }
+    Ok(())
+}
+
+fn compute_addon_status(
+    target: Option<BlenderAddonTarget>,
+    incompatible_blender_found: bool,
+) -> Result<BlenderAddonStatusDto, AppError> {
+    let current_version = current_addon_version()?;
+    let running = blender_running();
+
+    let Some(target) = target else {
+        let message = if incompatible_blender_found {
+            format!(
+                "Blender was found but requires version {}.{} or newer. \
+                 Please upgrade Blender to use the StarBreaker addon.",
+                MIN_BLENDER_MAJOR, MIN_BLENDER_MINOR
+            )
+        } else {
+            "No Blender installation was detected. Install Blender {}.{}+ or provide a manual target path."
+                .replace("{}.{}", &format!("{}.{}", MIN_BLENDER_MAJOR, MIN_BLENDER_MINOR))
+        };
+        return Ok(BlenderAddonStatusDto {
+            state: "unavailable".to_string(),
+            current_version,
+            installed_version: None,
+            addons_path: None,
+            blender_version: None,
+            blender_running: running,
+            message: Some(message),
+            incompatible_blender_found,
+        });
+    };
+
+    let installed_version = installed_addon_version(&target.addons_path);
+    let state = match installed_version.as_deref() {
+        None => "install",
+        Some(installed) if installed == current_version => "installed",
+        Some(_) => "upgrade",
+    };
+
+    Ok(BlenderAddonStatusDto {
+        state: state.to_string(),
+        current_version,
+        installed_version,
+        addons_path: Some(target.addons_path.to_string_lossy().to_string()),
+        blender_version: Some(target.blender_version),
+        blender_running: running,
+        message: if running {
+            Some(
+                "Blender appears to be running. Restart Blender after install/upgrade to reload the addon."
+                    .to_string(),
+            )
+        } else {
+            None
+        },
+        incompatible_blender_found,
+    })
+}
+
+#[tauri::command]
+pub fn get_blender_addon_status() -> Result<BlenderAddonStatusDto, AppError> {
+    let discovery = discover_blender_addon_targets();
+    let has_incompatible = discovery.has_incompatible;
+    compute_addon_status(discovery.compatible.into_iter().next(), has_incompatible)
+}
+
+#[tauri::command]
+pub fn install_blender_addon(target_path: Option<String>) -> Result<BlenderAddonStatusDto, AppError> {
+    let source_dir = addon_source_dir().ok_or_else(|| {
+        AppError::Internal("Unable to locate bundled starbreaker_addon source directory".into())
+    })?;
+
+    let (target, has_incompatible) = if let Some(path) = target_path {
+        // Manual path: trust the user, version is unknown
+        (
+            BlenderAddonTarget {
+                blender_version: "manual".to_string(),
+                addons_path: PathBuf::from(path),
+            },
+            false,
+        )
+    } else {
+        let discovery = discover_blender_addon_targets();
+        let has_incompatible = discovery.has_incompatible;
+        let target = discovery.compatible.into_iter().next().ok_or_else(|| {
+            if has_incompatible {
+                AppError::Internal(format!(
+                    "Blender found but requires {}.{}+. Please upgrade Blender.",
+                    MIN_BLENDER_MAJOR, MIN_BLENDER_MINOR
+                ))
+            } else {
+                AppError::Internal("No Blender installation found.".into())
+            }
+        })?;
+        (target, has_incompatible)
+    };
+
+    fs::create_dir_all(&target.addons_path)?;
+    let destination = target.addons_path.join("starbreaker_addon");
+    if destination.exists() {
+        let _ = fs::remove_dir_all(destination.join("__pycache__"));
+        fs::remove_dir_all(&destination)?;
+    }
+    copy_dir_recursive(&source_dir, &destination)?;
+
+    let mut status = compute_addon_status(Some(target), has_incompatible)?;
+    if status.blender_running {
+        status.message = Some(
+            "Addon files were installed. Blender is running — restart Blender to load the new version."
+                .to_string(),
+        );
+    }
+    Ok(status)
+}
+
+/// Attempt to reload the StarBreaker addon in the running Blender instance via its
+/// built-in TCP server (port 6264). Falls back gracefully if the server is not running.
+#[tauri::command]
+pub fn reload_blender_addon() -> Result<String, AppError> {
+    if !blender_running() {
+        return Ok(
+            "Blender is not running. The addon will load automatically on next start.".to_string(),
+        );
+    }
+
+    // Blender's built-in Python server listens on 127.0.0.1:6264 when enabled.
+    // The protocol is: send the Python source followed by a newline, then read the response.
+    let snippet = "\
+import importlib, sys, bpy; \
+mod = sys.modules.get('starbreaker_addon'); \
+bpy.ops.preferences.addon_disable(module='starbreaker_addon') if mod else None; \
+[sys.modules.pop(k, None) for k in list(sys.modules) if k.startswith('starbreaker_addon')]; \
+bpy.ops.preferences.addon_enable(module='starbreaker_addon')\
+";
+
+    match TcpStream::connect_timeout(
+        &"127.0.0.1:6264".parse().unwrap(),
+        Duration::from_millis(500),
+    ) {
+        Ok(mut stream) => {
+            let payload = format!("{snippet}\n");
+            match stream.write_all(payload.as_bytes()) {
+                Ok(_) => Ok("Reload command sent to Blender.".to_string()),
+                Err(e) => Ok(format!(
+                    "Connected to Blender but failed to send reload: {e}. Restart Blender manually."
+                )),
+            }
+        }
+        Err(_) => Ok(
+            "Restart Blender to complete the upgrade (Blender's Python server is not enabled)."
+                .to_string(),
+        ),
+    }
 }
 
 // ── DataCore / Export DTOs ──────────────────────────────────────────

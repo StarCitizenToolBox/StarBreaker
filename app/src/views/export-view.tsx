@@ -8,11 +8,18 @@ import {
   onExportProgress,
   onExportDone,
   browseOutputDir,
+  getBlenderAddonStatus,
+  installBlenderAddon,
+  reloadBlenderAddon,
   type ExportRequest,
+  type BlenderAddonStatus,
 } from "../lib/commands";
 
 export function ExportView() {
   const [optionsWidth, setOptionsWidth] = useState(260);
+  const [addonStatus, setAddonStatus] = useState<BlenderAddonStatus | null>(null);
+  const [addonBusy, setAddonBusy] = useState(false);
+  const [addonError, setAddonError] = useState<string | null>(null);
   const categories = useExportStore((s) => s.categories);
   const categoriesLoading = useExportStore((s) => s.categoriesLoading);
   const activeCategory = useExportStore((s) => s.activeCategory);
@@ -80,6 +87,25 @@ export function ExportView() {
         setCategoriesLoading(false);
       });
   }, [setCategoriesLoading, setCategories]);
+
+  useEffect(() => {
+    let mounted = true;
+    getBlenderAddonStatus()
+      .then((status) => {
+        if (mounted) {
+          setAddonStatus(status);
+          setAddonError(null);
+        }
+      })
+      .catch((err) => {
+        if (mounted) {
+          setAddonError(String(err));
+        }
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   // Subscribe to export events on mount
   useEffect(() => {
@@ -183,6 +209,59 @@ export function ExportView() {
       if (dir !== null) setOutputDir(dir);
     });
   };
+
+  const refreshAddonStatus = () => {
+    getBlenderAddonStatus()
+      .then((status) => {
+        setAddonStatus(status);
+        setAddonError(null);
+      })
+      .catch((err) => setAddonError(String(err)));
+  };
+
+  const handleInstallAddon = () => {
+    setAddonBusy(true);
+    setAddonError(null);
+    installBlenderAddon()
+      .then((status) => {
+        setAddonStatus(status);
+      })
+      .catch((err) => {
+        setAddonError(String(err));
+      })
+      .finally(() => {
+        setAddonBusy(false);
+        refreshAddonStatus();
+      });
+  };
+
+  const handleReloadAddon = () => {
+    setAddonBusy(true);
+    setAddonError(null);
+    reloadBlenderAddon()
+      .then((msg) => {
+        setAddonError(null);
+        refreshAddonStatus();
+        // Surface the reload result as a transient message via addonError (it may be informational)
+        if (msg) {
+          setAddonError(msg);
+        }
+      })
+      .catch((err) => {
+        setAddonError(String(err));
+      })
+      .finally(() => {
+        setAddonBusy(false);
+      });
+  };
+
+  const addonActionLabel = addonStatus?.state === "installed"
+    ? "Installed"
+    : addonStatus?.state === "upgrade"
+      ? "Upgrade"
+      : addonStatus?.state === "unavailable"
+        ? "Unavailable"
+        : "Install";
 
   return (
     <div className="flex-1 flex overflow-hidden relative">
@@ -350,6 +429,67 @@ export function ExportView() {
           <h2 className="text-xs font-semibold text-primary uppercase tracking-wider">
             Export Options
           </h2>
+
+          <div className="rounded-md border border-border bg-surface/40 p-3 flex flex-col gap-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs text-text-sub">Blender Addon</span>
+              <div className="flex items-center gap-1.5">
+                {addonStatus?.blender_running && addonStatus.state === "installed" && (
+                  <button
+                    onClick={handleReloadAddon}
+                    disabled={addonBusy}
+                    className="px-2 py-1 rounded-md text-[11px] font-medium bg-surface text-text-sub hover:bg-surface/80 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+                    title="Reload addon in running Blender"
+                  >
+                    Reload
+                  </button>
+                )}
+                <button
+                  onClick={handleInstallAddon}
+                  disabled={addonBusy || addonStatus?.state === "unavailable" || addonStatus?.state === "installed"}
+                  className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors ${
+                    addonBusy || addonStatus?.state === "unavailable" || addonStatus?.state === "installed"
+                      ? "bg-surface text-text-faint cursor-not-allowed"
+                      : addonStatus?.state === "upgrade"
+                        ? "bg-warning/20 text-warning hover:bg-warning/30"
+                        : "bg-accent text-on-accent hover:brightness-110"
+                  }`}
+                >
+                  {addonBusy ? "Working..." : addonActionLabel}
+                </button>
+              </div>
+            </div>
+            {addonStatus && (
+              <>
+                <p className="text-[10px] text-text-faint leading-relaxed">
+                  Current addon: {addonStatus.current_version}
+                  {addonStatus.installed_version
+                    ? ` | Installed: ${addonStatus.installed_version}`
+                    : " | Not installed"}
+                </p>
+                {addonStatus.addons_path && (
+                  <p className="text-[10px] text-text-faint leading-relaxed break-all">
+                    Target: {addonStatus.addons_path}
+                  </p>
+                )}
+                {addonStatus.incompatible_blender_found && addonStatus.state === "unavailable" && (
+                  <p className="text-[10px] text-warning leading-relaxed">
+                    Blender found but requires 5.0 or newer. Please upgrade Blender.
+                  </p>
+                )}
+                {addonStatus.message && (
+                  <p className="text-[10px] text-warning leading-relaxed">
+                    {addonStatus.message}
+                  </p>
+                )}
+              </>
+            )}
+            {addonError && (
+              <p className="text-[10px] text-danger leading-relaxed break-words">
+                {addonError}
+              </p>
+            )}
+          </div>
 
           {/* LOD */}
           <div className="flex flex-col gap-1.5">
