@@ -175,6 +175,7 @@ Two source files are currently monolithic and have active plans to be split. Bef
   - `animation/serialise.rs` — JSON serialisation (`clip_to_json`, `database_to_animations_json`, `dump_database_to_json`, `sanitize_clip_filename`, `split_clip_for_sidecar`, `BoneBlendMode`, `classify_bone_blend_modes`, `annotate_animations_json_with_blend_modes`, `annotate_animation_json_source`)
   - `animation/mannequin.rs` — Mannequin ADB fragment reading (`annotate_animation_fragments_json`, `dump_mannequin_adb_to_json`, all `read_mannequin_*`/`collect_*`/`mannequin_*` helpers)
   - `animation/matching.rs` — matching, scoring, orchestration (`caf_anchored_remap`, `caf_anchored_remap_decisions`, `extract_animations_for_skeleton_json`, `ClipMatchDecision`, `clip_semantic_score`, `clip_motion_score_milli`, `clip_name_lookup_keys`, `split_tag_list`, `parse_f32_attr`, `tokenize_for_match`, `swap_extension`)
+  - `animation/bake_tests.rs` — 15 unit tests for animation pipeline correctness (axis-swap, SNORM decoding, time-format 0x42, bone blend modes, clip serialisation)
 
 When a decomposition phase is completed, update the file-index entry here to list the actual sub-modules created.
 
