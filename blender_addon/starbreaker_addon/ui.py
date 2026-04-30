@@ -659,8 +659,11 @@ class STARBREAKER_OT_import_decomposed_package(Operator, ImportHelper):
             self.cancel(context)
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
-        _auto_apply_landing_gear_snap_last(context, package_root)
-        _finalize_import_view(context, package_root)
+        prefs = _get_prefs()
+        if _should_apply_landing_gear(prefs):
+            _auto_apply_landing_gear_snap_last(context, package_root)
+        if _should_change_viewport(prefs):
+            _finalize_import_view(context, package_root)
         _end_import_progress(context, f"Imported {package_root.get(PROP_PACKAGE_NAME, package_name)}")
         self.cancel(context)
         self.report({"INFO"}, f"Imported {package_root.get(PROP_PACKAGE_NAME, package_name)}")
@@ -713,8 +716,11 @@ class STARBREAKER_OT_import_progress_popup(Operator):
                     self.cancel(context)
                     self.report({"ERROR"}, str(exc))
                     return {"CANCELLED"}
-                _auto_apply_landing_gear_snap_last(context, package_root)
-                _finalize_import_view(context, package_root)
+                prefs = _get_prefs()
+                if _should_apply_landing_gear(prefs):
+                    _auto_apply_landing_gear_snap_last(context, package_root)
+                if _should_change_viewport(prefs):
+                    _finalize_import_view(context, package_root)
                 _end_import_progress(
                     context,
                     f"Imported {package_root.get(PROP_PACKAGE_NAME, self.package_name or Path(self.filepath).parent.name)}",
@@ -1077,7 +1083,62 @@ class STARBREAKER_PT_tools(Panel):
                         op.fps_policy = fps_policy
 
 
+# ── Addon Preferences ────────────────────────────────────────────────────────
+
+class STARBREAKER_AP_preferences(bpy.types.AddonPreferences):
+    """User-configurable post-import behaviour for the StarBreaker addon."""
+
+    bl_idname = "starbreaker_addon"
+
+    viewport_change_after_import: BoolProperty(  # type: ignore[assignment]
+        name="Adjust viewport after import",
+        description=(
+            "Frame the imported package in the 3D viewport and switch to "
+            "perspective view after a successful import."
+        ),
+        default=True,
+    )
+
+    landing_gear_retract_after_import: BoolProperty(  # type: ignore[assignment]
+        name="Retract landing gear after import",
+        description=(
+            "Automatically apply the best landing-gear retracted pose when a "
+            "package is imported, so ships appear ready-for-flight by default."
+        ),
+        default=True,
+    )
+
+    def draw(self, context: bpy.types.Context) -> None:
+        layout = self.layout
+        layout.label(text="Post-import behaviour:")
+        layout.prop(self, "landing_gear_retract_after_import")
+        layout.prop(self, "viewport_change_after_import")
+
+
+def _get_prefs() -> STARBREAKER_AP_preferences | None:
+    """Return the addon preferences object, or None when not available."""
+    addon_entry = bpy.context.preferences.addons.get("starbreaker_addon")
+    if addon_entry is None:
+        return None
+    return getattr(addon_entry, "preferences", None)
+
+
+def _should_apply_landing_gear(prefs: object | None) -> bool:
+    """Pure gate — return True when landing-gear retract should run after import."""
+    if prefs is None:
+        return True
+    return bool(getattr(prefs, "landing_gear_retract_after_import", True))
+
+
+def _should_change_viewport(prefs: object | None) -> bool:
+    """Pure gate — return True when viewport framing should run after import."""
+    if prefs is None:
+        return True
+    return bool(getattr(prefs, "viewport_change_after_import", True))
+
+
 CLASSES = [
+    STARBREAKER_AP_preferences,
     STARBREAKER_OT_import_decomposed_package,
     STARBREAKER_OT_import_progress_popup,
     STARBREAKER_OT_apply_paint,
