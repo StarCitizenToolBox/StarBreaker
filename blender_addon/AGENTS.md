@@ -4,6 +4,14 @@ Project-wide notes live in [../AGENTS.md](../AGENTS.md). This file covers
 the Blender addon specifically: target versions, layout, deploy flow,
 tests, and hard-won lessons about driving Blender from an agent.
 
+## Agent Self-Maintenance Rule
+
+If you hit a problem during a session that cost real time and isn't already
+covered in this file — wrong operator name, confusing CLI output path, a
+Blender API pitfall — **document the fix here before committing**. Keep
+entries short and factual. This file must stay concise to limit token use;
+prefer a one-liner or a compact code block over prose.
+
 ## Target Blender
 
 - **Latest LTS** and **latest release** — currently Blender 5.1.x.
@@ -191,6 +199,28 @@ SC_DATA_P4K="…/Data.p4k" \
 
 Point the Blender import operator at the resulting `scene.json`, not
 the outer folder.
+
+**P4K path auto-detection.** The CLI auto-detects `Data.p4k` from
+standard Star Citizen install paths. You do **not** need `SC_DATA_P4K`
+unless you want a non-default install (e.g. PTU instead of LIVE). Omit
+the env-var for routine work.
+
+**Default test target: LOD 0.** Always use `--lod 0` for import
+testing. The resulting package will be named `<entity>_LOD0_TEX0` or
+`<entity>_LOD0_TEX2` depending on available textures. Either is fine
+for validation.
+testing. **Always use TEX0** — the resulting package will be named
+`<entity>_LOD0_TEX0`. Do not target TEX2 packages for validation;
+TEX0 is the canonical test baseline.
+
+**Fresh import — always reset the scene first.** Before importing any
+ship, call:
+```python
+bpy.ops.wm.read_homefile(app_template="")
+```
+This is the **only** reliable way to get a clean slate. Do not use
+hand-rolled cleanup loops — they miss hidden users and leave residue.
+See "ALWAYS reset the scene this way" above for the full rationale.
 
 ### MCP animation tools
 

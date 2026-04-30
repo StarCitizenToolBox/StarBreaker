@@ -17,8 +17,8 @@ from starbreaker_addon.shader_inventory import ShaderInventory
 
 
 ARGO_SIDECAR_DIR = REPO_ROOT / "ships/Data/Objects/Spaceships/Ships/ARGO/MOLE"
-ARGO_EXTERIOR = ARGO_SIDECAR_DIR / "argo_mole_exterior.materials.json"
-ARGO_INTERIOR = ARGO_SIDECAR_DIR / "argo_mole_interior.materials.json"
+ARGO_EXTERIOR = ARGO_SIDECAR_DIR / "argo_mole_exterior_TEX0.materials.json"
+ARGO_INTERIOR = ARGO_SIDECAR_DIR / "argo_mole_interior_TEX0.materials.json"
 
 
 _requires_argo_sidecars = unittest.skipUnless(

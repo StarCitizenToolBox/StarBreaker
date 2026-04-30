@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 import sys
 import unittest
 
@@ -14,10 +15,42 @@ sys.path.insert(0, str(ADDON_ROOT))
 from starbreaker_addon.manifest import LightRecord, LightState, MaterialSidecar, PackageBundle, SceneInstanceRecord, TextureReference, infer_export_root
 
 
-ARGO_SCENE = REPO_ROOT / "ships/Packages/ARGO MOLE/scene.json"
-VULTURE_SCENE = REPO_ROOT / "ships/Packages/Drake Vulture/scene.json"
-ARGO_INTERIOR = REPO_ROOT / "ships/Data/Objects/Spaceships/Ships/ARGO/MOLE/argo_mole_interior.materials.json"
-COMPONENT_MASTER = REPO_ROOT / "ships/Data/Materials/vehicles/components/component_master_01.materials.json"
+_STARBREAKER_BIN = STARBREAKER_ROOT / "target/debug/starbreaker"
+
+
+def _existing_path(*candidates: str) -> "Path":
+    for c in candidates:
+        p = REPO_ROOT / c
+        if p.is_file():
+            return p
+    return REPO_ROOT / candidates[-1]
+
+
+def _ensure_argo_mole_exported() -> None:
+    key = REPO_ROOT / "ships/Data/Objects/Spaceships/Ships/ARGO/MOLE/argo_mole_interior_TEX0.materials.json"
+    if key.is_file():
+        return
+    if not _STARBREAKER_BIN.is_file():
+        return
+    subprocess.run(
+        [str(_STARBREAKER_BIN), "entity", "export", "ARGO MOLE", str(REPO_ROOT / "ships"), "--kind", "decomposed", "--lod", "0"],
+        check=False,
+        capture_output=True,
+    )
+
+
+_ensure_argo_mole_exported()
+
+ARGO_SCENE = _existing_path(
+    "ships/Packages/ARGO MOLE_LOD0_TEX0/scene.json",
+    "ships/Packages/ARGO MOLE/scene.json",
+)
+VULTURE_SCENE = _existing_path(
+    "ships/Packages/DRAK Vulture_LOD0_TEX0/scene.json",
+    "ships/Packages/Drake Vulture/scene.json",
+)
+ARGO_INTERIOR = REPO_ROOT / "ships/Data/Objects/Spaceships/Ships/ARGO/MOLE/argo_mole_interior_TEX0.materials.json"
+COMPONENT_MASTER = REPO_ROOT / "ships/Data/Materials/vehicles/components/component_master_01_TEX0.materials.json"
 
 
 _requires_argo_fixture = unittest.skipUnless(
@@ -38,7 +71,7 @@ class ManifestTests(unittest.TestCase):
     @_requires_argo_fixture
     def test_package_bundle_loads_real_fixture_manifests(self) -> None:
         package = PackageBundle.load(ARGO_SCENE)
-        self.assertEqual(package.package_name, "ARGO MOLE")
+        self.assertIn("ARGO MOLE", package.package_name)  # folder: ARGO MOLE_LOD0_TEX0
         self.assertEqual(package.scene.root_entity.entity_name, "EntityClassDefinition.ARGO_MOLE")
         self.assertGreater(len(package.scene.children), 10)
         self.assertIn("palette/argo_mole", package.palettes)
@@ -47,12 +80,12 @@ class ManifestTests(unittest.TestCase):
     @_requires_argo_fixture
     def test_package_bundle_resolves_and_caches_material_sidecars(self) -> None:
         package = PackageBundle.load(ARGO_SCENE)
-        sidecar = package.load_material_sidecar("Data/objects/spaceships/ships/argo/mole/argo_mole_interior.materials.json")
+        sidecar = package.load_material_sidecar("Data/Objects/Spaceships/Ships/ARGO/MOLE/argo_mole_interior_TEX0.materials.json")
         self.assertIsNotNone(sidecar)
-        second = package.load_material_sidecar("Data/objects/spaceships/ships/argo/mole/argo_mole_interior.materials.json")
+        second = package.load_material_sidecar("Data/Objects/Spaceships/Ships/ARGO/MOLE/argo_mole_interior_TEX0.materials.json")
         self.assertIs(sidecar, second)
 
-        cargo_pod = package.resolve_path("Data/Objects/Spaceships/Ships/MISC/Prospector/MISC_Prospector_Cargo_Pod_Collapsed.glb")
+        cargo_pod = package.resolve_path("Data/Objects/Spaceships/Ships/misc/Prospector/MISC_Prospector_Cargo_Pod_Collapsed_LOD0.glb")
         self.assertIsNotNone(cargo_pod)
         self.assertTrue(cargo_pod.is_file())
 
@@ -212,7 +245,7 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(smoothness_texture.texture_identity, "ddna_normal")
 
     def test_layer_manifest_preserves_resolved_layer_details(self) -> None:
-        exterior_path = REPO_ROOT / "ships/Data/Objects/Spaceships/Ships/ARGO/MOLE/argo_mole_exterior.materials.json"
+        exterior_path = REPO_ROOT / "ships/Data/Objects/Spaceships/Ships/ARGO/MOLE/argo_mole_exterior_TEX0.materials.json"
         if not exterior_path.is_file():
             self.skipTest(f"ARGO MOLE exterior fixture not present at {exterior_path}")
         exterior = MaterialSidecar.from_file(exterior_path)

@@ -15,9 +15,9 @@ sys.path.insert(0, str(ADDON_ROOT))
 from starbreaker_addon.shader_inventory import ShaderInventory, material_sidecar_paths
 
 
-ARGO_SIDECARE_DIR = REPO_ROOT / "ships/Data/objects/spaceships/ships/argo/mole"
-ARGO_EXTERIOR = ARGO_SIDECARE_DIR / "argo_mole_exterior.materials.json"
-ARGO_INTERIOR = ARGO_SIDECARE_DIR / "argo_mole_interior.materials.json"
+ARGO_SIDECARE_DIR = REPO_ROOT / "ships/Data/Objects/Spaceships/Ships/ARGO/MOLE"
+ARGO_EXTERIOR = ARGO_SIDECARE_DIR / "argo_mole_exterior_TEX0.materials.json"
+ARGO_INTERIOR = ARGO_SIDECARE_DIR / "argo_mole_interior_TEX0.materials.json"
 
 
 _requires_argo_sidecars = unittest.skipUnless(

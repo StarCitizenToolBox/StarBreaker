@@ -134,7 +134,7 @@ class PaletteTests(unittest.TestCase):
 
         self.assertEqual(
             resolved_palette_id(package, "palette/mole_bronze_black_brown"),
-            "palette/argo_mole_july_bronze_black_brown",
+              "palette/mole_bronze_black_brown",
         )
 
     def test_palette_color_returns_named_channels(self) -> None:
@@ -168,7 +168,7 @@ class PaletteTests(unittest.TestCase):
 
     def test_palette_signature_reuses_same_glass_color_across_palettes(self) -> None:
         package = PackageBundle.load(ARGO_SCENE)
-        sidecar = package.load_material_sidecar("Data/objects/spaceships/ships/argo/mole/argo_mole_interior.materials.json")
+        sidecar = package.load_material_sidecar("Data/Objects/Spaceships/Ships/ARGO/MOLE/argo_mole_interior_TEX0.materials.json")
         self.assertIsNotNone(sidecar)
 
         glass = next(submaterial for submaterial in sidecar.submaterials if submaterial.submaterial_name == "glass_interior_canopy")
@@ -182,7 +182,7 @@ class PaletteTests(unittest.TestCase):
 
     def test_palette_signature_keeps_distinct_primary_colors_split(self) -> None:
         package = PackageBundle.load(ARGO_SCENE)
-        sidecar = package.load_material_sidecar("Data/objects/spaceships/ships/argo/mole/argo_mole_exterior.materials.json")
+        sidecar = package.load_material_sidecar("Data/Objects/Spaceships/Ships/ARGO/MOLE/argo_mole_exterior_TEX0.materials.json")
         self.assertIsNotNone(sidecar)
 
         paint = next(
