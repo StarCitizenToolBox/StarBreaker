@@ -444,6 +444,7 @@ struct ExportProgressSlot {
     entity_name: String,
     entity_id: String,
     progress: Arc<Progress>,
+    done: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Copy)]
@@ -478,9 +479,13 @@ fn snapshot_export_progress(slots: &[ExportProgressSlot]) -> ExportProgress {
 
     for slot in slots {
         let (fraction, stage) = slot.progress.get();
-        fraction_sum += fraction;
-        if slot.progress.is_done() || fraction >= 0.9999 {
+        if slot.done.load(Ordering::Relaxed) {
             completed += 1;
+            fraction_sum += 1.0;
+        } else {
+            // Keep running entities slightly below 100% so the aggregate only
+            // reaches 100% after every export slot is marked complete.
+            fraction_sum += fraction.min(0.9999);
         }
 
         let has_activity = fraction > 0.0 || !stage.is_empty();
@@ -650,6 +655,7 @@ pub async fn start_export(
             entity_name: entity_name.clone(),
             entity_id: entity_id.clone(),
             progress: Arc::new(Progress::new()),
+            done: Arc::new(AtomicBool::new(false)),
         })
         .collect();
     let progress_done = Arc::new(AtomicBool::new(false));
@@ -803,11 +809,13 @@ pub async fn start_export(
                         Some(existing_asset_paths.as_ref()),
                     ) {
                         Ok(()) => {
+                            progress_slot.done.store(true, Ordering::Relaxed);
                             success.fetch_add(1, Ordering::Relaxed);
                             succeeded_ids.lock().unwrap().push(id_str.clone());
                         }
                         Err(e) => {
                             progress_slot.progress.report(1.0, "Failed");
+                            progress_slot.done.store(true, Ordering::Relaxed);
                             let mut snapshot = snapshot_export_progress(&progress_slots);
                             snapshot.entity_name = export_name.clone();
                             snapshot.entity_id = id_str.clone();

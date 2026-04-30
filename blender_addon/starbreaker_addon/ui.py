@@ -27,6 +27,7 @@ from .runtime import (
     PROP_SURFACE_SHADER_MODE,
     PROP_TEMPLATE_KEY,
     SCENE_POM_DETAIL_PROP,
+    TEMPLATE_COLLECTION_NAME,
     apply_pom_detail_mode,
     SCENE_WEAR_STRENGTH_PROP,
     apply_animation_mode_to_package_root,
@@ -73,6 +74,83 @@ def _tag_view3d_redraws(context: bpy.types.Context) -> None:
     for area in screen.areas:
         if area.type == "VIEW_3D":
             area.tag_redraw()
+
+
+def _set_active_object(context: bpy.types.Context, obj: bpy.types.Object | None) -> None:
+    view_layer = getattr(context, "view_layer", None)
+    if view_layer is not None and obj is not None:
+        view_layer.objects.active = obj
+
+
+def _collapse_template_cache_outliner(context: bpy.types.Context) -> None:
+    if bpy.data.collections.get(TEMPLATE_COLLECTION_NAME) is None:
+        return
+    window = getattr(context, "window", None)
+    screen = getattr(window, "screen", None)
+    if window is None or screen is None:
+        return
+    for area in screen.areas:
+        if area.type != "OUTLINER":
+            continue
+        region = next((region for region in area.regions if region.type == "WINDOW"), None)
+        if region is None:
+            continue
+        with context.temp_override(window=window, area=area, region=region):
+            for _ in range(8):
+                try:
+                    bpy.ops.outliner.show_one_level(open=False)
+                except RuntimeError:
+                    break
+
+
+def _frame_package_root_three_quarter(
+    context: bpy.types.Context,
+    package_root: bpy.types.Object,
+) -> None:
+    window = getattr(context, "window", None)
+    screen = getattr(window, "screen", None)
+    if window is None or screen is None:
+        return
+
+    focus_objects = [
+        obj
+        for obj in package_root.children_recursive
+        if obj.type not in {"EMPTY", "LIGHT"}
+    ]
+    if not focus_objects:
+        return
+
+    for area in screen.areas:
+        if area.type != "VIEW_3D":
+            continue
+        region = next((region for region in area.regions if region.type == "WINDOW"), None)
+        if region is None:
+            continue
+        with context.temp_override(window=window, area=area, region=region):
+            bpy.ops.object.select_all(action="DESELECT")
+            for obj in focus_objects:
+                obj.select_set(True)
+            _set_active_object(context, focus_objects[0])
+            try:
+                bpy.ops.view3d.view_selected(use_all_regions=False)
+            except TypeError:
+                bpy.ops.view3d.view_selected()
+            except RuntimeError:
+                continue
+            bpy.ops.view3d.view_orbit(type="ORBITRIGHT")
+            bpy.ops.view3d.view_orbit(type="ORBITUP")
+            break
+
+
+def _finalize_import_view(context: bpy.types.Context, package_root: bpy.types.Object) -> None:
+    bpy.ops.object.select_all(action="DESELECT")
+    package_root.select_set(True)
+    _set_active_object(context, package_root)
+    _collapse_template_cache_outliner(context)
+    _frame_package_root_three_quarter(context, package_root)
+    bpy.ops.object.select_all(action="DESELECT")
+    package_root.select_set(True)
+    _set_active_object(context, package_root)
 
 
 def _update_pom_detail(_: bpy.types.ID, context: bpy.types.Context) -> None:
@@ -396,6 +474,7 @@ class STARBREAKER_OT_import_decomposed_package(Operator, ImportHelper):
             self.cancel(context)
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
+        _finalize_import_view(context, package_root)
         _end_import_progress(context, f"Imported {package_root.get(PROP_PACKAGE_NAME, package_name)}")
         self.cancel(context)
         self.report({"INFO"}, f"Imported {package_root.get(PROP_PACKAGE_NAME, package_name)}")
@@ -448,6 +527,7 @@ class STARBREAKER_OT_import_progress_popup(Operator):
                     self.cancel(context)
                     self.report({"ERROR"}, str(exc))
                     return {"CANCELLED"}
+                _finalize_import_view(context, package_root)
                 _end_import_progress(
                     context,
                     f"Imported {package_root.get(PROP_PACKAGE_NAME, self.package_name or Path(self.filepath).parent.name)}",
