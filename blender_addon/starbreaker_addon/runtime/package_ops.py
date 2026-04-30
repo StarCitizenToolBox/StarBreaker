@@ -406,14 +406,13 @@ def _temporary_object_mode(context: bpy.types.Context):
             switched = _mode_set("OBJECT")
         yield
     finally:
-        if not switched or active_object is None or view_layer is None:
-            return
-        try:
-            if view_layer.objects.active is not active_object:
-                view_layer.objects.active = active_object
-            _mode_set(original_mode)
-        except Exception:
-            pass
+        if switched and active_object is not None and view_layer is not None:
+            try:
+                if view_layer.objects.active is not active_object:
+                    view_layer.objects.active = active_object
+                _mode_set(original_mode)
+            except Exception:
+                pass
 
 
 def _load_package_from_root(package_root: bpy.types.Object) -> PackageBundle:
