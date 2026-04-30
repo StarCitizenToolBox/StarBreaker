@@ -1,3 +1,12 @@
+//! NMC (NodeMeshCombo) transform helpers and mesh-bone bridging.
+//!
+//! Computes per-node world transforms from an NMC (`compute_nmc_world_transforms`),
+//! synthesizes an NMC from a skeleton's bones (`synthesize_nmc_from_bones`), bakes
+//! NMC transforms directly into mesh vertex positions (`bake_nmc_into_mesh`), and
+//! loads NMC data paired with an MTL file (`load_nmc_for_cgf`).
+//! Also contains mat4 helpers (`mat4_from_array`, `mat4_to_array`, `mat3x4_from_mat4`),
+//! `bone_world_transform`, and `compose_helper_transform`.
+
 use starbreaker_p4k::MappedP4k;
 
 use super::{datacore_path_to_p4k, P4kSiblingReader};

@@ -1,3 +1,12 @@
+//! Texture loading, PNG encode/decode, and material texture assembly.
+//!
+//! Provides `PngCache` for deduplicated DDS→PNG transcoding, texture-transform
+//! helpers (`apply_transform`, `apply_stencil`, etc.), the layered/fallback
+//! texture-tag builders (`build_fallback_texture_tags`), and the top-level
+//! `load_material_textures` function that drives the full material texture pipeline.
+//! Public exports: `PngCache`, `cached_load`, `load_diffuse_texture`,
+//! `load_normal_texture`, `load_roughness_texture`, `decode_png`.
+
 use starbreaker_dds::DdsFile;
 use starbreaker_p4k::MappedP4k;
 

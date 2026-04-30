@@ -1,3 +1,11 @@
+//! Loadout resolution and attachment-tree flattening.
+//!
+//! `resolve_loadout_meshes` is the public entry point: given a DataCore entity record
+//! and its loadout tree, it resolves all child attachment geometries into a flat
+//! `ResolvedLoadout`. `resolve_children` and `flatten_resolved_tree` walk the
+//! loadout tree recursively. `expand_loadout_into_placements` converts the resolved
+//! tree into interior-style CGF placements for decomposed export.
+
 use std::collections::HashSet;
 
 use starbreaker_datacore::database::Database;

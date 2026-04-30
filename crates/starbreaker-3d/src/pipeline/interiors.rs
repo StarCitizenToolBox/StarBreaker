@@ -1,3 +1,13 @@
+//! Interior mesh discovery, loading, and preloading orchestration.
+//!
+//! Discovers interior CGF geometry from DataCore (`load_interiors`), builds
+//! interior containers from socpak payloads (`build_interiors_from_payloads`),
+//! preloads unique CGF meshes in parallel (`preload_interior_meshes`) and their
+//! associated texture sets (`preload_interior_textures`). Also contains
+//! `tint_palette_hash` (hash for texture cache keys) and
+//! `expand_loadout_into_placements` (loadout→interior placement expansion).
+//! Public types: `LoadedInteriors`, `InteriorCgfEntry`, `InteriorContainerData`.
+
 use starbreaker_datacore::database::Database;
 use starbreaker_datacore::types::Record;
 use starbreaker_p4k::MappedP4k;

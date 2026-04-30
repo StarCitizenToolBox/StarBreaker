@@ -1,3 +1,14 @@
+//! Material, paint, tint palette, and DataCore value helpers.
+//!
+//! `resolve_material` resolves an MTL path from a DataCore entity record.
+//! `query_tint_palette` / `query_related_tint_palettes` extract tint colour data.
+//! `resolve_paint_override` / `enumerate_paint_variants_for_entity` drive the paint
+//! variant system. `try_load_mtl` reads and parses a raw MTL file from the P4k.
+//! `query_animation_controller_source` reads the animation controller path.
+//! `load_localization_map`, `build_paint_display_name_map`, `populate_palette_display_name`
+//! localise paint/palette display names.
+//! Also contains `load_layer_details` / `populate_layer_snapshots` for layer-detail textures.
+
 use std::collections::{HashMap, HashSet};
 
 use starbreaker_datacore::database::Database;

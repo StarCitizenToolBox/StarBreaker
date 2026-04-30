@@ -1,3 +1,11 @@
+//! Public pipeline module: type definitions, utility helpers, and module re-exports.
+//!
+//! Declares sub-modules and re-exports their public surfaces. Defines the primary
+//! export types (`ExportOptions`, `ExportResult`, `ExportKind`, `ExportFormat`,
+//! `MaterialMode`, `DecomposedExport`) and low-level utilities that are called from
+//! many sub-modules: `load_raw_dds_file`, `datacore_path_to_p4k`, `socpaks_to_glb`,
+//! `dump_nmc_nodes`, `dump_hierarchy`.
+
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 

@@ -1,3 +1,12 @@
+//! Child entity payload loading and caching helpers.
+//!
+//! Loads child mesh assets for loadout children and inline entity attachments.
+//! `collect_child_payload_specs` gathers attachment specs from a loadout tree;
+//! `load_child_payload_asset` exports a single child CGF; `load_child_payloads`
+//! drives the full parallel load pipeline.
+//! Also defines `LandingGearAsset` (cached landing gear geometry) and the path
+//! normalisation helpers used for decomposed export deduplication.
+
 use std::collections::HashSet;
 
 use starbreaker_datacore::database::Database;

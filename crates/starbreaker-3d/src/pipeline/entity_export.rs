@@ -1,3 +1,12 @@
+//! Entity export entry points and geometry/skeleton loading helpers.
+//!
+//! `export_entity_payload` and `export_entity_from_paths` are the primary entity
+//! export functions; `export_cgf_from_path` handles individual CGF files.
+//! Geometry loading helpers: `resolve_geometry_files`, `load_geometry_parts`,
+//! `skeleton_source_paths`, `load_skeleton`, `apply_default_animation_pose_for_skel`.
+//! Mesh helpers: `load_nmc_and_material`, `load_single_mesh`, `rebase_mesh_submeshes_to_bone_space`.
+//! Public types: `GeometryPart`, `ResolvedGeometry`.
+
 use starbreaker_datacore::database::Database;
 use starbreaker_datacore::error::QueryError;
 use starbreaker_datacore::types::Record;

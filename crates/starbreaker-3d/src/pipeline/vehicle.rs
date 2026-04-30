@@ -1,3 +1,11 @@
+//! Vehicle XML parsing, landing gear queries, and invisible-port extraction.
+//!
+//! `query_landing_gear` reads landing gear geometry paths and bone names from a
+//! `VehicleLandingGearSystem` DataCore record. `load_invisible_ports` reads the
+//! vehicle XML override to find ports that should be hidden in the scene.
+//! `load_vehicle_xml_parts` parses the vehicle XML into a flat list of `VehicleXmlPart`
+//! structs, each describing a named geometry attachment with transform and flags.
+
 use std::collections::HashSet;
 
 use starbreaker_datacore::database::Database;

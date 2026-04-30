@@ -1,3 +1,11 @@
+//! Top-level GLB assembly: `assemble_glb_with_loadout_with_progress`.
+//!
+//! Orchestrates the full bundled and decomposed export pipeline: resolves the
+//! loadout, exports the root entity and landing gear, flattens child attachments,
+//! discovers interiors, preloads meshes and textures, then calls the GLB writer
+//! (or decomposed writer) with all assembled inputs. Also contains
+//! `assemble_glb_with_loadout` (thin wrapper) and `path_is_shield_related`.
+
 use std::collections::HashMap;
 
 use starbreaker_common::progress::{report as report_progress, Progress};

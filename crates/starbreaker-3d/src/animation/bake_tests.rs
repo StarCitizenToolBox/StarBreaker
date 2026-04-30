@@ -1,3 +1,8 @@
+//! Unit tests for the animation bake pipeline (axis-swap, SNORM decoding, time-format 0x42,
+//! bone blend-mode classification, clip serialisation correctness).
+//!
+//! 15 focused tests covering the most regression-prone parts of the animation codec.
+
     use super::*;
     use super::pose::{quat_mul_wxyz, quat_rotate_vec_wxyz};
     use super::codec::{read_snorm_packed_positions, read_time_keys};
