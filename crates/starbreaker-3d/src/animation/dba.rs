@@ -47,7 +47,11 @@ pub fn parse_dba(data: &[u8]) -> Result<AnimationDatabase, Error> {
     // Use file data from chunk offset (not bounded chunk_data) because DBA
     // controller offsets can reference keyframe data that extends past the
     // IVO chunk boundary.
-    let data_bytes = &ivo.file_data()[db_data_chunk.offset as usize..];
+    let data_offset = db_data_chunk.offset as usize;
+    let data_bytes = ivo
+        .file_data()
+        .get(data_offset..)
+        .ok_or_else(|| Error::Other(format!("DBA data chunk offset out of range: {data_offset}")))?;
     let meta_entries = db_meta_chunk
         .map(|c| parse_dba_metadata(ivo.chunk_data(c)))
         .unwrap_or_default();
@@ -146,7 +150,20 @@ fn parse_dba_metadata(data: &[u8]) -> Vec<(String, DbaMetaEntry)> {
     }
     let count = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
     let entry_size = 48; // 0x30
-    let entries_end = 4 + count * entry_size;
+    let entries_end = match count
+        .checked_mul(entry_size)
+        .and_then(|bytes| bytes.checked_add(4))
+    {
+        Some(end) => end,
+        None => {
+            log::warn!(
+                "DBA metadata entry span overflow: count={} entry_size={}",
+                count,
+                entry_size
+            );
+            return Vec::new();
+        }
+    };
     if entries_end > data.len() {
         log::warn!(
             "DBA metadata: {} entries × {} bytes = {} exceeds chunk size {}",
@@ -227,4 +244,26 @@ fn parse_dba_metadata(data: &[u8]) -> Vec<(String, DbaMetaEntry)> {
     }
 
     names.into_iter().zip(entries).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_dba_metadata;
+
+    #[test]
+    fn parse_dba_metadata_returns_empty_when_entry_span_overflows() {
+        let data = u32::MAX.to_le_bytes().to_vec();
+        let entries = parse_dba_metadata(&data);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn parse_dba_metadata_returns_empty_when_entries_exceed_chunk_size() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.resize(8, 0);
+
+        let entries = parse_dba_metadata(&data);
+        assert!(entries.is_empty());
+    }
 }
