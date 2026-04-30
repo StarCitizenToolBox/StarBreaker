@@ -161,10 +161,15 @@ fn caf_anchored_remap(
     include_unmatched: bool,
     allow_bone_subset_fallback: bool,
 ) -> Vec<AnimationClip> {
-    // Build a name→index map from the DBA metadata names (case-insensitive).
-    let mut name_map: HashMap<String, usize> = HashMap::new();
+    // Build a name→indices map from the DBA metadata names (case-insensitive).
+    // Some DBAs can repeat clip names; keep all candidate indices so path-based
+    // lookup can choose an unmatched slot instead of hard-wiring to the first.
+    let mut name_map: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, clip) in db.clips.iter().enumerate() {
-        name_map.entry(clip.name.to_ascii_lowercase()).or_insert(i);
+        name_map
+            .entry(clip.name.to_ascii_lowercase())
+            .or_default()
+            .push(i);
     }
 
     // When skeleton_bone_hashes is empty we skip validation (skeleton not found).
@@ -194,8 +199,8 @@ fn caf_anchored_remap(
         let mut path_idx_hint: Option<usize> = None;
 
         // Step 1: path-based lookup.
-        if let Some(&path_idx) = name_map.get(&resolved_lower) {
-            if !matched[path_idx] {
+        if let Some(path_indices) = name_map.get(&resolved_lower) {
+            if let Some(path_idx) = path_indices.iter().copied().find(|idx| !matched[*idx]) {
                 let block_valid = !can_validate || db.clips[path_idx]
                     .channels
                     .iter()
@@ -656,7 +661,12 @@ fn swap_extension(path: &str, new_ext: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, HashMap, HashSet};
+
     use super::tokenize_for_match;
+    use super::caf_anchored_remap;
+    use crate::animation::{AnimationClip, AnimationDatabase};
+    use crate::chrparams::ChrParams;
 
     #[test]
     fn tokenize_for_match_keeps_ship_specific_tokens() {
@@ -672,6 +682,51 @@ mod tests {
         assert!(!tokens.iter().any(|token| token == "ships"));
         assert!(!tokens.iter().any(|token| token == "component"));
         assert!(tokens.iter().any(|token| token == "wings"));
+    }
+
+    #[test]
+    fn caf_anchored_remap_uses_unmatched_duplicate_name_slots() {
+        let db = AnimationDatabase {
+            clips: vec![
+                AnimationClip {
+                    name: "animations/shared_clip.caf".into(),
+                    fps: 30.0,
+                    channels: vec![],
+                    start_rotation: None,
+                    start_position: None,
+                },
+                AnimationClip {
+                    name: "animations/shared_clip.caf".into(),
+                    fps: 30.0,
+                    channels: vec![],
+                    start_rotation: None,
+                    start_position: None,
+                },
+            ],
+        };
+
+        let chrparams = ChrParams {
+            animations: BTreeMap::from([
+                ("event_a".to_string(), "animations/shared_clip.caf".to_string()),
+                ("event_b".to_string(), "animations/shared_clip.caf".to_string()),
+            ]),
+            animation_paths: BTreeMap::new(),
+            ..Default::default()
+        };
+
+        let remapped = caf_anchored_remap(
+            &db,
+            &chrparams,
+            &HashSet::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            false,
+            false,
+        );
+
+        assert_eq!(remapped.len(), 2);
+        assert!(remapped.iter().any(|clip| clip.name == "event_a"));
+        assert!(remapped.iter().any(|clip| clip.name == "event_b"));
     }
 }
 
