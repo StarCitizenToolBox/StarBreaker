@@ -7,6 +7,7 @@ import time
 import bpy
 import blf
 import gpu
+import mathutils
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, StringProperty
 from bpy.types import Operator, Panel
 from bpy_extras.io_utils import ImportHelper
@@ -76,6 +77,26 @@ def _tag_view3d_redraws(context: bpy.types.Context) -> None:
             area.tag_redraw()
 
 
+def _force_view3d_perspective(context: bpy.types.Context) -> None:
+    window = getattr(context, "window", None)
+    screen = getattr(window, "screen", None)
+    if window is None or screen is None:
+        return
+    for area in screen.areas:
+        if area.type != "VIEW_3D":
+            continue
+        region = next((region for region in area.regions if region.type == "WINDOW"), None)
+        if region is None:
+            continue
+        space = getattr(area, "spaces", None)
+        active_space = space.active if space is not None else None
+        region_3d = getattr(active_space, "region_3d", None)
+        if region_3d is None:
+            continue
+        with context.temp_override(window=window, area=area, region=region):
+            region_3d.view_perspective = "PERSP"
+
+
 def _set_active_object(context: bpy.types.Context, obj: bpy.types.Object | None) -> None:
     view_layer = getattr(context, "view_layer", None)
     if view_layer is not None and obj is not None:
@@ -112,17 +133,96 @@ def _frame_package_root_three_quarter(
     if window is None or screen is None:
         return
 
-    focus_objects = [
-        obj
-        for obj in package_root.children_recursive
-        if obj.type not in {"EMPTY", "LIGHT"}
-    ]
-    if not focus_objects:
+    mesh_candidates: list[tuple[bpy.types.Object, float]] = []
+    for obj in package_root.children_recursive:
+        if obj.type != "MESH":
+            continue
+        if not bool(getattr(getattr(obj, "data", None), "polygons", ())):
+            continue
+        if bool(getattr(obj, "hide_viewport", False)):
+            continue
+        if not obj.visible_get(view_layer=context.view_layer):
+            continue
+        corners = [obj.matrix_world @ mathutils.Vector(corner) for corner in obj.bound_box]
+        if not corners:
+            continue
+        min_corner = mathutils.Vector(
+            (
+                min(corner.x for corner in corners),
+                min(corner.y for corner in corners),
+                min(corner.z for corner in corners),
+            )
+        )
+        max_corner = mathutils.Vector(
+            (
+                max(corner.x for corner in corners),
+                max(corner.y for corner in corners),
+                max(corner.z for corner in corners),
+            )
+        )
+        diagonal = (max_corner - min_corner).length
+        if diagonal > 0.0:
+            mesh_candidates.append((obj, diagonal))
+
+    if not mesh_candidates:
         return
 
-    for area in screen.areas:
-        if area.type != "VIEW_3D":
+    largest_diagonal = max(diagonal for _, diagonal in mesh_candidates)
+    cutoff = largest_diagonal * 0.08
+    focus_objects = [obj for obj, diagonal in mesh_candidates if diagonal >= cutoff]
+    if not focus_objects:
+        focus_objects = [obj for obj, _ in mesh_candidates]
+
+    world_corners: list[mathutils.Vector] = []
+    for obj in focus_objects:
+        bound_box = getattr(obj, "bound_box", None)
+        if not bound_box:
             continue
+        matrix_world = obj.matrix_world
+        for corner in bound_box:
+            world_corners.append(matrix_world @ mathutils.Vector(corner))
+    if not world_corners:
+        return
+
+    sorted_x = sorted(corner.x for corner in world_corners)
+    sorted_y = sorted(corner.y for corner in world_corners)
+    sorted_z = sorted(corner.z for corner in world_corners)
+    corner_count = len(world_corners)
+    low_index = max(0, int(corner_count * 0.02))
+    high_index = min(corner_count - 1, int(corner_count * 0.98))
+
+    min_corner = mathutils.Vector(
+        (
+            sorted_x[low_index],
+            sorted_y[low_index],
+            sorted_z[low_index],
+        )
+    )
+    max_corner = mathutils.Vector(
+        (
+            sorted_x[high_index],
+            sorted_y[high_index],
+            sorted_z[high_index],
+        )
+    )
+    focus_center = (min_corner + max_corner) * 0.5
+    diagonal = (max_corner - min_corner).length
+    if diagonal <= 1e-6:
+        diagonal = 1.0
+
+    # Baseline direction tuned from an approved manual viewport angle.
+    view_direction = mathutils.Vector((-0.735, -0.487, -0.650)).normalized()
+    target_rotation = view_direction.to_track_quat("-Z", "Y")
+
+    prioritized_areas: list[bpy.types.Area] = []
+    active_area = getattr(context, "area", None)
+    if active_area is not None and active_area.type == "VIEW_3D":
+        prioritized_areas.append(active_area)
+    prioritized_areas.extend(
+        area for area in screen.areas if area.type == "VIEW_3D" and area is not active_area
+    )
+
+    for area in prioritized_areas:
         region = next((region for region in area.regions if region.type == "WINDOW"), None)
         if region is None:
             continue
@@ -131,26 +231,98 @@ def _frame_package_root_three_quarter(
             for obj in focus_objects:
                 obj.select_set(True)
             _set_active_object(context, focus_objects[0])
-            try:
-                bpy.ops.view3d.view_selected(use_all_regions=False)
-            except TypeError:
-                bpy.ops.view3d.view_selected()
-            except RuntimeError:
-                continue
-            bpy.ops.view3d.view_orbit(type="ORBITRIGHT")
-            bpy.ops.view3d.view_orbit(type="ORBITUP")
-            break
+            space = getattr(area, "spaces", None)
+            active_space = space.active if space is not None else None
+            region_3d = getattr(active_space, "region_3d", None)
+            if region_3d is not None:
+                region_3d.view_perspective = "PERSP"
+                for _ in range(3):
+                    if region_3d.view_perspective == "PERSP":
+                        break
+                    try:
+                        bpy.ops.view3d.view_persportho()
+                    except RuntimeError:
+                        break
+                    region_3d.view_perspective = "PERSP"
+                region_3d.view_rotation = target_rotation
+                region_3d.view_location = focus_center
+
+                lens_mm = float(getattr(active_space, "lens", 50.0))
+                lens_scale = max(lens_mm, 1.0) / 50.0
+                # Deterministic fit: scales with lens so 100mm does not over-zoom.
+                region_3d.view_distance = max(diagonal * 0.95 * lens_scale, diagonal * 0.78)
 
 
 def _finalize_import_view(context: bpy.types.Context, package_root: bpy.types.Object) -> None:
-    bpy.ops.object.select_all(action="DESELECT")
-    package_root.select_set(True)
-    _set_active_object(context, package_root)
     _collapse_template_cache_outliner(context)
     _frame_package_root_three_quarter(context, package_root)
+    _force_view3d_perspective(context)
     bpy.ops.object.select_all(action="DESELECT")
     package_root.select_set(True)
     _set_active_object(context, package_root)
+
+
+def _auto_apply_landing_gear_snap_last(
+    context: bpy.types.Context,
+    package_root: bpy.types.Object,
+) -> None:
+    scene_path = package_root.get(PROP_SCENE_PATH)
+    if not isinstance(scene_path, str) or not scene_path:
+        return
+
+    try:
+        package = PackageBundle.load(scene_path)
+    except Exception:
+        return
+
+    try:
+        animation_items = available_package_animation_items(package)
+    except Exception:
+        return
+    if not animation_items:
+        return
+
+    def _animation_score(name: str, display_name: str) -> int:
+        text = f"{name} {display_name}".lower()
+        has_landing_gear = "landing" in text and "gear" in text
+        if not has_landing_gear:
+            return -1
+
+        score = 0
+        if "retract" in text:
+            score += 100
+        if "stow" in text or "stowed" in text:
+            score += 80
+        if "close" in text or "closed" in text:
+            score += 60
+        if "up" in text:
+            score += 40
+
+        if "deploy" in text or "deployed" in text:
+            score -= 60
+        if "extend" in text or "extended" in text:
+            score -= 60
+        if "open" in text or "opened" in text:
+            score -= 40
+        if "down" in text:
+            score -= 20
+        return score
+
+    best_name: str | None = None
+    best_score = -1
+    for animation_name, animation_display_name in animation_items:
+        score = _animation_score(animation_name, animation_display_name)
+        if score > best_score:
+            best_score = score
+            best_name = animation_name
+
+    if best_name is None or best_score < 0:
+        return
+
+    try:
+        apply_animation_mode_to_package_root(context, package_root, best_name, "snap_last")
+    except Exception:
+        return
 
 
 def _update_pom_detail(_: bpy.types.ID, context: bpy.types.Context) -> None:
@@ -474,6 +646,7 @@ class STARBREAKER_OT_import_decomposed_package(Operator, ImportHelper):
             self.cancel(context)
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
+        _auto_apply_landing_gear_snap_last(context, package_root)
         _finalize_import_view(context, package_root)
         _end_import_progress(context, f"Imported {package_root.get(PROP_PACKAGE_NAME, package_name)}")
         self.cancel(context)
@@ -527,6 +700,7 @@ class STARBREAKER_OT_import_progress_popup(Operator):
                     self.cancel(context)
                     self.report({"ERROR"}, str(exc))
                     return {"CANCELLED"}
+                _auto_apply_landing_gear_snap_last(context, package_root)
                 _finalize_import_view(context, package_root)
                 _end_import_progress(
                     context,
@@ -863,14 +1037,7 @@ class STARBREAKER_PT_tools(Panel):
             else:
                 mode_map = package_animation_mode_map(package_root)
                 for animation_name, animation_display_name in animation_items:
-                    name_row = animation_box.row(align=True)
-                    name_row.label(text=animation_display_name)
-                    diag = name_row.operator(
-                        STARBREAKER_OT_dump_animation_diagnostics.bl_idname,
-                        text="Diag",
-                        icon="INFO",
-                    )
-                    diag.animation_name = animation_name
+                    animation_box.label(text=animation_display_name)
                     current_mode = mode_map.get(animation_name, "none")
                     buttons_row = animation_box.row(align=True)
                     for mode_id, mode_label, _ in _ANIMATION_MODE_ITEMS:
