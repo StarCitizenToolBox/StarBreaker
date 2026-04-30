@@ -184,11 +184,11 @@ fn caf_anchored_remap(
         let caf_file = resolved_caf
             .rsplit_once('/')
             .map(|(_, tail)| tail)
-            .unwrap_or(resolved_caf.as_str())
-            .trim_end_matches(".caf");
+            .unwrap_or(resolved_caf.as_str());
+        let caf_stem = caf_file.trim_end_matches(".caf");
 
         let mut event_tokens = tokenize_for_match(event_name);
-        event_tokens.extend(tokenize_for_match(caf_file));
+        event_tokens.extend(tokenize_for_match(caf_stem));
         if let Some(targets) = animevents_targets_by_caf.get(&resolved_lower) {
             for target in targets {
                 event_tokens.extend(tokenize_for_match(target));
@@ -199,21 +199,30 @@ fn caf_anchored_remap(
         let mut path_idx_hint: Option<usize> = None;
 
         // Step 1: path-based lookup.
-        if let Some(path_indices) = name_map.get(&resolved_lower) {
-            if let Some(path_idx) = path_indices.iter().copied().find(|idx| !matched[*idx]) {
-                let block_valid = !can_validate || db.clips[path_idx]
-                    .channels
-                    .iter()
-                    .all(|ch| skeleton_bone_hashes.contains(&ch.bone_hash));
-                if block_valid {
-                    // Keep as a hint; we may override it if semantic scoring finds
-                    // a better candidate among similarly-valid blocks.
-                    path_idx_hint = Some(path_idx);
-                    chosen_idx = Some(path_idx);
-                } else {
-                    log::debug!(
-                        "[anim] path-matched block {path_idx} for '{event_name}' has bones outside skeleton — using semantic/bone-subset fallback"
-                    );
+        let mut lookup_keys = vec![resolved_lower.clone()];
+        let caf_file_lower = caf_file.to_ascii_lowercase();
+        if caf_file_lower != resolved_lower {
+            lookup_keys.push(caf_file_lower);
+        }
+
+        for key in lookup_keys {
+            if let Some(path_indices) = name_map.get(&key) {
+                if let Some(path_idx) = path_indices.iter().copied().find(|idx| !matched[*idx]) {
+                    let block_valid = !can_validate || db.clips[path_idx]
+                        .channels
+                        .iter()
+                        .all(|ch| skeleton_bone_hashes.contains(&ch.bone_hash));
+                    if block_valid {
+                        // Keep as a hint; we may override it if semantic scoring finds
+                        // a better candidate among similarly-valid blocks.
+                        path_idx_hint = Some(path_idx);
+                        chosen_idx = Some(path_idx);
+                        break;
+                    } else {
+                        log::debug!(
+                            "[anim] path-matched block {path_idx} for '{event_name}' has bones outside skeleton — using semantic/bone-subset fallback"
+                        );
+                    }
                 }
             }
         }
@@ -727,6 +736,41 @@ mod tests {
         assert_eq!(remapped.len(), 2);
         assert!(remapped.iter().any(|clip| clip.name == "event_a"));
         assert!(remapped.iter().any(|clip| clip.name == "event_b"));
+    }
+
+    #[test]
+    fn caf_anchored_remap_matches_filename_when_metadata_omits_prefix() {
+        let db = AnimationDatabase {
+            clips: vec![AnimationClip {
+                name: "shared_clip.caf".into(),
+                fps: 30.0,
+                channels: vec![],
+                start_rotation: None,
+                start_position: None,
+            }],
+        };
+
+        let chrparams = ChrParams {
+            animations: BTreeMap::from([(
+                "event_prefixed".to_string(),
+                "Animations/shared_clip.caf".to_string(),
+            )]),
+            animation_paths: BTreeMap::new(),
+            ..Default::default()
+        };
+
+        let remapped = caf_anchored_remap(
+            &db,
+            &chrparams,
+            &HashSet::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            false,
+            false,
+        );
+
+        assert_eq!(remapped.len(), 1);
+        assert_eq!(remapped[0].name, "event_prefixed");
     }
 }
 
