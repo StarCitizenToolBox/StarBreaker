@@ -1031,13 +1031,13 @@ pub(crate) fn write_decomposed_export(
                                 {
                                     for (k, v) in new_bones {
                                         if let Some(existing_value) = existing_bones.get_mut(&k) {
-                                            let existing_taken = existing_value.take();
-                                            let mut merged_list: Vec<serde_json::Value> = match existing_taken {
-                                                serde_json::Value::Array(items) => items,
-                                                other => vec![other],
-                                            };
-                                            merged_list.push(v);
-                                            *existing_value = serde_json::Value::Array(merged_list);
+                                            if *existing_value != v {
+                                                log::debug!(
+                                                    "[anim] duplicate channel '{}' for clip '{}' while merging skeleton outputs; keeping first value",
+                                                    k,
+                                                    name
+                                                );
+                                            }
                                         } else {
                                             existing_bones.insert(k, v);
                                         }
