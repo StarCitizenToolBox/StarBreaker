@@ -3,12 +3,10 @@
 use std::collections::{HashMap, HashSet};
 
 use super::dba::parse_dba;
-use super::mannequin::annotate_animation_fragments_json;
 use super::serialise::{
-    annotate_animation_json_source, annotate_animations_json_with_blend_modes,
-    classify_bone_blend_modes, database_to_animations_json,
+    annotate_animation_json_source, database_to_animations_json,
 };
-use super::{AnimationClip, AnimationControllerSource, AnimationDatabase};
+use super::{AnimationClip, AnimationDatabase};
 use crate::error::Error;
 use super::caf::parse_caf;
 use super::pose::bone_name_hash;

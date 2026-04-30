@@ -21,12 +21,6 @@
 //! decoder follows the Ghidra-confirmed bit layout (sign-bit borrow across
 //! u16 boundaries).
 
-use std::collections::{HashMap, HashSet};
-
-use starbreaker_chunks::ChunkFile;
-
-use crate::error::Error;
-
 mod codec;
 pub mod pose;
 pub mod caf;

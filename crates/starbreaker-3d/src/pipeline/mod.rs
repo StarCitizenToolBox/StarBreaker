@@ -6,13 +6,10 @@
 //! many sub-modules: `load_raw_dds_file`, `datacore_path_to_p4k`, `socpaks_to_glb`,
 //! `dump_nmc_nodes`, `dump_hierarchy`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::str::FromStr;
 
-use starbreaker_common::progress::{report as report_progress, Progress};
 use starbreaker_datacore::database::Database;
-use starbreaker_datacore::error::QueryError;
-use starbreaker_datacore::query::value::Value;
 use starbreaker_datacore::types::Record;
 use starbreaker_dds::{DdsFile, ReadSibling};
 use starbreaker_p4k::MappedP4k;
@@ -20,10 +17,10 @@ use starbreaker_p4k::MappedP4k;
 use crate::error::Error;
 use crate::mtl;
 use crate::nmc;
-use crate::types::{MaterialTextures, TextureTransformInfo};
+use crate::types::MaterialTextures;
 
 mod textures;
-pub(crate) use self::textures::{cached_load, load_diffuse_texture, load_normal_texture, load_roughness_texture, PngCache};
+pub(crate) use self::textures::{cached_load, load_diffuse_texture, load_normal_texture, PngCache};
 use self::textures::*;
 mod interiors;
 pub(crate) use self::interiors::*;

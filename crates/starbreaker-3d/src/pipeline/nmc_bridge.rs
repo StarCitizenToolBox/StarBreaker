@@ -9,7 +9,7 @@
 
 use starbreaker_p4k::MappedP4k;
 
-use super::{datacore_path_to_p4k, P4kSiblingReader};
+use super::datacore_path_to_p4k;
 
 
 /// Compute world-space transforms for each NMC node by walking the parent chain.

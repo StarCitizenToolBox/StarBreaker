@@ -16,10 +16,9 @@ use starbreaker_datacore::query::value::Value;
 use starbreaker_datacore::types::Record;
 use starbreaker_p4k::MappedP4k;
 
-use crate::error::Error;
 use crate::mtl;
 
-use super::{datacore_path_to_p4k, decode_png, load_diffuse_texture, ExportOptions};
+use super::{datacore_path_to_p4k, decode_png, load_diffuse_texture};
 
 pub(crate) fn resolve_mtl_p4k_path(mtl_name: &str, p4k_geom_path: &str) -> String {
     if mtl_name.contains('/') || mtl_name.contains('\\') {

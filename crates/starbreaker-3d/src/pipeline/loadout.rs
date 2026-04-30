@@ -13,7 +13,6 @@ use starbreaker_datacore::types::Record;
 use starbreaker_p4k::MappedP4k;
 
 use crate::error::Error;
-use crate::mtl;
 
 use super::*;
 

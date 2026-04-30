@@ -6,10 +6,7 @@
 //! `load_vehicle_xml_parts` parses the vehicle XML into a flat list of `VehicleXmlPart`
 //! structs, each describing a named geometry attachment with transform and flags.
 
-use std::collections::HashSet;
-
 use starbreaker_datacore::database::Database;
-use starbreaker_datacore::query::value::Value as _Value;
 use starbreaker_datacore::types::Record;
 use starbreaker_p4k::MappedP4k;
 
