@@ -2123,6 +2123,14 @@ def _insert_animation_action(
             if track is None:
                 track = anim.nla_tracks.new()
                 track.name = name
+            else:
+                # Re-inserting the same clip should replace prior strips on
+                # this per-clip track, not append stale duplicates.
+                for existing_strip in list(track.strips):
+                    try:
+                        track.strips.remove(existing_strip)
+                    except Exception:
+                        continue
             try:
                 strip_start = int(action.frame_range[0])
             except Exception:
