@@ -56,6 +56,19 @@ _ANIMATION_MODE_ITEMS: tuple[tuple[str, str, str], ...] = (
     ("snap_last", "Last", "Apply last keyframe pose"),
     ("action", "Insert", "Insert full keyframes as Blender Action"),
 )
+_ANIMATION_FPS_POLICY_ITEMS: tuple[tuple[str, str, str], ...] = (
+    (
+        "adapt_scene",
+        "Adapt To Scene FPS",
+        "Keep scene FPS; scale keyframe times by scene_fps/clip_fps",
+    ),
+    (
+        "match_scene_to_clip",
+        "Match Scene To Clip FPS",
+        "Set scene FPS to clip FPS before inserting keys",
+    ),
+)
+_SCENE_ANIMATION_FPS_POLICY_PROP = "starbreaker_animation_fps_policy"
 _IMPORT_PROGRESS_ACTIVE_PROP = "starbreaker_import_progress_active"
 _IMPORT_PROGRESS_VALUE_PROP = "starbreaker_import_progress_value"
 _IMPORT_PROGRESS_DESCRIPTION_PROP = "starbreaker_import_progress_description"
@@ -884,6 +897,11 @@ class STARBREAKER_OT_apply_animation_mode(Operator):
 
     animation_name: StringProperty(name="Animation")  # type: ignore[assignment]
     mode: EnumProperty(name="Mode", items=_ANIMATION_MODE_ITEMS)  # type: ignore[assignment]
+    fps_policy: EnumProperty(  # type: ignore[assignment]
+        name="FPS Policy",
+        items=_ANIMATION_FPS_POLICY_ITEMS,
+        default="adapt_scene",
+    )
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
@@ -899,7 +917,13 @@ class STARBREAKER_OT_apply_animation_mode(Operator):
             self.report({"ERROR"}, "No animation selected")
             return {"CANCELLED"}
         try:
-            updated = apply_animation_mode_to_package_root(context, package_root, name, self.mode)
+            updated = apply_animation_mode_to_package_root(
+                context,
+                package_root,
+                name,
+                self.mode,
+                fps_policy=self.fps_policy,
+            )
         except Exception as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
@@ -1035,7 +1059,9 @@ class STARBREAKER_PT_tools(Panel):
             if not animation_items:
                 animation_box.label(text="No animations exported in this scene.json")
             else:
+                animation_box.prop(context.scene, _SCENE_ANIMATION_FPS_POLICY_PROP, text="FPS")
                 mode_map = package_animation_mode_map(package_root)
+                fps_policy = getattr(context.scene, _SCENE_ANIMATION_FPS_POLICY_PROP, "adapt_scene")
                 for animation_name, animation_display_name in animation_items:
                     animation_box.label(text=animation_display_name)
                     current_mode = mode_map.get(animation_name, "none")
@@ -1048,6 +1074,7 @@ class STARBREAKER_PT_tools(Panel):
                         )
                         op.animation_name = animation_name
                         op.mode = mode_id
+                        op.fps_policy = fps_policy
 
 
 CLASSES = [
@@ -1111,6 +1138,19 @@ def register() -> None:
             soft_max=2.0,
         ),
     )
+    setattr(
+        bpy.types.Scene,
+        _SCENE_ANIMATION_FPS_POLICY_PROP,
+        EnumProperty(
+            name="Animation FPS",
+            description=(
+                "How to reconcile clip FPS with scene FPS when inserting animation actions. "
+                "Snap modes are unaffected."
+            ),
+            items=_ANIMATION_FPS_POLICY_ITEMS,
+            default="adapt_scene",
+        ),
+    )
     for cls in CLASSES:
         bpy.utils.register_class(cls)
 
@@ -1133,3 +1173,5 @@ def unregister() -> None:
         delattr(bpy.types.Scene, SCENE_POM_DETAIL_PROP)
     if hasattr(bpy.types.Scene, SCENE_WEAR_STRENGTH_PROP):
         delattr(bpy.types.Scene, SCENE_WEAR_STRENGTH_PROP)
+    if hasattr(bpy.types.Scene, _SCENE_ANIMATION_FPS_POLICY_PROP):
+        delattr(bpy.types.Scene, _SCENE_ANIMATION_FPS_POLICY_PROP)

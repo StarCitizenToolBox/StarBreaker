@@ -34,6 +34,11 @@ from .constants import (
     PROP_SUBMATERIAL_JSON,
     PROP_TEMPLATE_PATH,
 )
+from .animation_fps import (
+    FPS_POLICY_ADAPT_SCENE,
+    describe_reconciliation,
+    reconcile_animation_fps,
+)
 from .validators import _purge_orphaned_file_backed_images, _purge_orphaned_runtime_groups
 
 
@@ -838,6 +843,7 @@ def apply_animation_mode_to_package_root(
     package_root: bpy.types.Object,
     animation_name: str,
     mode: str,
+    fps_policy: str = FPS_POLICY_ADAPT_SCENE,
 ) -> int:
     """Apply one animation in one of: none, snap_first, snap_last, action."""
     package = _load_package_from_root(package_root)
@@ -890,6 +896,7 @@ def apply_animation_mode_to_package_root(
                     other_mode,
                     fragment=other_fragment,
                     reverse_playback=_fragment_reverse_playback(other_fragment),
+                    fps_policy=fps_policy,
                 )
 
     updated = _apply_animation_mode_for_clip(
@@ -900,6 +907,7 @@ def apply_animation_mode_to_package_root(
         normalized_mode,
         fragment=fragment,
         reverse_playback=reverse_playback,
+        fps_policy=fps_policy,
     )
 
     mode_map[animation_name] = normalized_mode
@@ -915,6 +923,7 @@ def _apply_animation_mode_for_clip(
     mode: str,
     fragment: dict[str, Any] | None = None,
     reverse_playback: bool = False,
+    fps_policy: str = FPS_POLICY_ADAPT_SCENE,
 ) -> int:
     normalized_mode = mode.strip().lower()
     if normalized_mode == "none":
@@ -952,7 +961,13 @@ def _apply_animation_mode_for_clip(
                 )
         return updated
     if normalized_mode == "action":
-        return _insert_animation_action(context, package_root, clip, reverse_playback=reverse_playback)
+        return _insert_animation_action(
+            context,
+            package_root,
+            clip,
+            reverse_playback=reverse_playback,
+            fps_policy=fps_policy,
+        )
     raise RuntimeError(f"Unsupported animation mode: {mode}")
 
 
@@ -1917,12 +1932,16 @@ def _insert_animation_action(
     package_root: bpy.types.Object,
     clip: dict[str, Any],
     reverse_playback: bool = False,
+    fps_policy: str = FPS_POLICY_ADAPT_SCENE,
 ) -> int:
     bones = _normalized_bone_channels(clip)
     if not bones:
         return 0
     name = str(clip.get("name", "animation")) or "animation"
     trim_frame = _clip_cyclic_transition_target_frame(clip)
+    fps_reconciliation = reconcile_animation_fps(context.scene, clip.get("fps"), fps_policy)
+    if fps_reconciliation.mismatch:
+        print(describe_reconciliation(name, fps_reconciliation))
 
     # Phase 46.2: anchor inserted keyframes at frame 1 by default. Earlier
     # versions used the current scene playhead so multiple action-mode
@@ -1971,7 +1990,7 @@ def _insert_animation_action(
 
         def _action_frame(sample_time: float) -> float:
             local_time = duration_frame - sample_time if reverse_playback else sample_time
-            return frame_offset + local_time
+            return frame_offset + (local_time * fps_reconciliation.frame_scale)
 
         if allow_channel and positions:
             bind_location = bind_data.get("location", obj.location)
