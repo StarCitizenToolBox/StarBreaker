@@ -155,6 +155,24 @@ data without shelling out to the CLI:
   `entity_loadout` tool returns StarBreaker's processed/resolved tree
   instead.
 
+## Large Source Files — Decomposition Plans
+
+Two source files are currently monolithic and have active plans to be split. Before editing them, read the plan so your change lands in the right future sub-module:
+
+- **`crates/starbreaker-3d/src/pipeline.rs`** (~5970 lines, 125 functions)
+  See **Phase 51** in `docs/StarBreaker/todo.md` for the planned `pipeline/` module layout.
+  File index (updated as sub-modules are extracted):
+  - `pipeline.rs` (→ `pipeline/mod.rs`) — public entry points: `export_entity_payload`, `assemble_glb_with_loadout*`, `resolve_loadout_meshes`, `tint_palette_hash`, `load_raw_dds_file`.
+  - *(sub-modules listed in todo.md Phase 51 file-index block as they are created)*
+
+- **`crates/starbreaker-3d/src/animation.rs`** (~3070 lines, 54 functions)
+  See **Phase 59** in `docs/StarBreaker/todo.md` for the planned `animation/` module layout.
+  File index (updated as sub-modules are extracted):
+  - `animation/mod.rs` — public re-exports + `extract_animations_for_skeleton_json`, `bone_name_hash`.
+  - *(sub-modules listed in todo.md Phase 59 file-index block as they are created)*
+
+When a decomposition phase is completed, update the file-index entry here to list the actual sub-modules created.
+
 ## Reference Docs
 
 - `docs/decomposed-export-contract.md` — scene.json / palettes.json /
