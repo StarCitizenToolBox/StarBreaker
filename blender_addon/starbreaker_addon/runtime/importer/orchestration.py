@@ -99,6 +99,7 @@ class OrchestrationMixin:
         self.material_identity_index_ready = False
         self.sidecar_submaterials_by_index: dict[str, dict[int, SubmaterialRecord]] = {}
         self.sidecar_submaterials_by_name: dict[str, dict[str, SubmaterialRecord]] = {}
+        self.sidecar_submaterials_by_name_all: dict[str, dict[str, list[SubmaterialRecord]]] = {}
         self.slot_mapping_cache: dict[int, list[int | None] | None] = {}
         self.progress_callback = progress_callback
         self._progress_total_steps = 1
@@ -182,22 +183,40 @@ class OrchestrationMixin:
         self.material_identity_index_ready = True
 
     def _submaterials_by_index(self, sidecar_path: str, sidecar: MaterialSidecar) -> dict[int, SubmaterialRecord]:
-        canonical_path = _canonical_material_sidecar_path(sidecar_path, sidecar)
-        cached = self.sidecar_submaterials_by_index.get(canonical_path)
+        cache_key = sidecar_path or _canonical_material_sidecar_path(sidecar_path, sidecar)
+        cached = self.sidecar_submaterials_by_index.get(cache_key)
         if cached is not None:
             return cached
         indexed = {submaterial.index: submaterial for submaterial in sidecar.submaterials}
-        self.sidecar_submaterials_by_index[canonical_path] = indexed
+        self.sidecar_submaterials_by_index[cache_key] = indexed
         return indexed
 
     def _submaterials_by_unique_name(self, sidecar_path: str, sidecar: MaterialSidecar) -> dict[str, SubmaterialRecord]:
-        canonical_path = _canonical_material_sidecar_path(sidecar_path, sidecar)
-        cached = self.sidecar_submaterials_by_name.get(canonical_path)
+        cache_key = sidecar_path or _canonical_material_sidecar_path(sidecar_path, sidecar)
+        cached = self.sidecar_submaterials_by_name.get(cache_key)
         if cached is not None:
             return cached
         indexed = _unique_submaterials_by_name(sidecar)
-        self.sidecar_submaterials_by_name[canonical_path] = indexed
+        self.sidecar_submaterials_by_name[cache_key] = indexed
         return indexed
+
+    def _submaterials_by_name_all(
+        self,
+        sidecar_path: str,
+        sidecar: MaterialSidecar,
+    ) -> dict[str, list[SubmaterialRecord]]:
+        cache_key = sidecar_path or _canonical_material_sidecar_path(sidecar_path, sidecar)
+        cached = self.sidecar_submaterials_by_name_all.get(cache_key)
+        if cached is not None:
+            return cached
+        grouped: dict[str, list[SubmaterialRecord]] = {}
+        for submaterial in sidecar.submaterials:
+            submaterial_name = submaterial.submaterial_name.strip()
+            if not submaterial_name:
+                continue
+            grouped.setdefault(submaterial_name, []).append(submaterial)
+        self.sidecar_submaterials_by_name_all[cache_key] = grouped
+        return grouped
 
     def _effective_palette_id(self, palette_id: str | None) -> str | None:
         inherited_palette_id = None
@@ -342,6 +361,27 @@ class OrchestrationMixin:
         if data_pointer not in self.slot_mapping_cache:
             slot_mapping = _slot_mapping_for_object(obj)
             self.slot_mapping_cache[data_pointer] = slot_mapping
+        target_submaterials_by_name = self._submaterials_by_unique_name(sidecar_path, sidecar)
+        if slot_mapping is None:
+            inferred_slot_mapping: list[int | None] = []
+            inferred_matches = 0
+            for slot in obj.material_slots:
+                slot_material = slot.material
+                if slot_material is None:
+                    inferred_slot_mapping.append(None)
+                    continue
+                canonical_slot_name = _canonical_source_name(slot_material.name)
+                if canonical_slot_name is None:
+                    inferred_slot_mapping.append(None)
+                    continue
+                matched_submaterial = target_submaterials_by_name.get(canonical_slot_name)
+                if matched_submaterial is None:
+                    inferred_slot_mapping.append(None)
+                    continue
+                inferred_slot_mapping.append(matched_submaterial.index)
+                inferred_matches += 1
+            if inferred_matches > 0:
+                slot_mapping = inferred_slot_mapping
         if slot_mapping is not None:
             if mesh_materials is not None:
                 while len(mesh_materials) < len(slot_mapping):
@@ -352,7 +392,7 @@ class OrchestrationMixin:
                 source_sidecar = sidecar
             source_submaterials_by_index = self._submaterials_by_index(source_sidecar_path, source_sidecar)
             target_submaterials_by_index = self._submaterials_by_index(sidecar_path, sidecar)
-            target_submaterials_by_name = self._submaterials_by_unique_name(sidecar_path, sidecar)
+            target_submaterials_by_name_all = self._submaterials_by_name_all(sidecar_path, sidecar)
             for slot_index, mapped_index in enumerate(slot_mapping):
                 fallback_index = mapped_index if mapped_index is not None else slot_index
                 source_submaterial = source_submaterials_by_index.get(fallback_index)
@@ -361,7 +401,14 @@ class OrchestrationMixin:
                     fallback_index,
                     target_submaterials_by_index,
                     target_submaterials_by_name,
+                    target_submaterials_by_name_all,
                 )
+                if submaterial is None and slot_index < len(obj.material_slots):
+                    slot_material = obj.material_slots[slot_index].material
+                    if slot_material is not None:
+                        canonical_slot_name = _canonical_source_name(slot_material.name)
+                        if canonical_slot_name is not None:
+                            submaterial = target_submaterials_by_name.get(canonical_slot_name)
                 if submaterial is None:
                     print(
                         f"StarBreaker: missing sidecar submaterial index {mapped_index} for {obj.name}"

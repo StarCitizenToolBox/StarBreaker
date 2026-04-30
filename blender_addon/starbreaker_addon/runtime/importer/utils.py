@@ -400,11 +400,22 @@ def _unique_submaterials_by_name(sidecar: MaterialSidecar) -> dict[str, Submater
     }
 
 
+def _submaterials_by_name(sidecar: MaterialSidecar) -> dict[str, list[SubmaterialRecord]]:
+    grouped: dict[str, list[SubmaterialRecord]] = {}
+    for submaterial in sidecar.submaterials:
+        name = submaterial.submaterial_name.strip()
+        if not name:
+            continue
+        grouped.setdefault(name, []).append(submaterial)
+    return grouped
+
+
 def _remapped_submaterial_for_slot(
     source_submaterial: SubmaterialRecord | None,
     fallback_index: int,
     target_submaterials_by_index: dict[int, SubmaterialRecord],
     target_submaterials_by_name: dict[str, SubmaterialRecord],
+    target_submaterials_by_name_all: dict[str, list[SubmaterialRecord]] | None = None,
 ) -> SubmaterialRecord | None:
     if source_submaterial is not None:
         source_name = source_submaterial.submaterial_name.strip()
@@ -412,6 +423,10 @@ def _remapped_submaterial_for_slot(
             remapped = target_submaterials_by_name.get(source_name)
             if remapped is not None:
                 return remapped
+            if target_submaterials_by_name_all is not None:
+                candidates = target_submaterials_by_name_all.get(source_name)
+                if candidates:
+                    return min(candidates, key=lambda item: abs(item.index - fallback_index))
     return target_submaterials_by_index.get(fallback_index)
 
 

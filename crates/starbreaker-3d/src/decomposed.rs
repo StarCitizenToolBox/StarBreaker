@@ -405,6 +405,39 @@ fn build_decomposed_material_view(
         })
         .collect();
 
+    // Keep sidecar + GLB material indices aligned with the surviving primitive
+    // set by removing materials no remaining submesh references.
+    let used_material_ids: BTreeSet<u32> = filtered_mesh
+        .submeshes
+        .iter()
+        .map(|submesh| submesh.material_id)
+        .collect();
+    if used_material_ids.len() < filtered_materials.len() {
+        let mut compacted = Vec::with_capacity(used_material_ids.len());
+        let mut remap: Vec<Option<u32>> = vec![None; filtered_materials.len()];
+        for (old_index, material) in filtered_materials.iter().enumerate() {
+            if used_material_ids.contains(&(old_index as u32)) {
+                let new_index = compacted.len() as u32;
+                remap[old_index] = Some(new_index);
+                compacted.push(material.clone());
+            }
+        }
+
+        filtered_mesh.submeshes.retain_mut(|submesh| {
+            let Some(Some(new_material_id)) = remap.get(submesh.material_id as usize) else {
+                dropped_out_of_range = true;
+                return false;
+            };
+            submesh.material_id = *new_material_id;
+            if let Some(material) = compacted.get(*new_material_id as usize) {
+                submesh.material_name = Some(material.name.clone());
+            }
+            true
+        });
+
+        filtered_materials = compacted;
+    }
+
     if dropped_out_of_range {
         log::warn!(
             "decomposed mesh references out-of-range material ids; dropping invalid submeshes for {}",
@@ -826,13 +859,6 @@ pub(crate) fn write_decomposed_export(
                     material_sidecar_relative_path(&source_material_path, &entry.name, opts.texture_mip)
                 });
                 let material_sidecar = interior_material_view.sidecar_materials.as_ref().map(|materials| {
-                    if let Some(requested_path) = requested_material_sidecar.as_ref() {
-                        if files.contains_key(requested_path)
-                            || existing_asset_paths.is_some_and(|paths| paths.contains(&requested_path.to_ascii_lowercase()))
-                        {
-                            return requested_path.clone();
-                        }
-                    }
                     write_material_sidecar(
                         &mut files,
                         p4k,
@@ -3072,6 +3098,79 @@ mod tests {
                 .map(|submesh| submesh.material_id)
                 .collect::<Vec<_>>(),
             vec![1, 0]
+        );
+    }
+
+    #[test]
+    fn decomposed_material_view_drops_unused_proxy_after_helper_filter() {
+        let mut proxy = sample_submaterial();
+        proxy.name = "proxy".into();
+        proxy.shader = "Illum".into();
+        proxy.is_nodraw = false;
+
+        let mut hull = sample_submaterial();
+        hull.name = "hull".into();
+
+        let mut decal = sample_submaterial();
+        decal.name = "decal".into();
+
+        let materials = MtlFile {
+            materials: vec![proxy, hull, decal],
+            source_path: Some("Data/Objects/Ships/Test/hull.mtl".into()),
+            paint_override: None,
+            material_set: Default::default(),
+        };
+        let mesh = sample_mesh(vec![
+            crate::types::SubMesh {
+                material_name: Some("proxy".into()),
+                material_id: 0,
+                first_index: 0,
+                num_indices: 3,
+                first_vertex: 0,
+                num_vertices: 3,
+                node_parent_index: 1,
+            },
+            crate::types::SubMesh {
+                material_name: Some("hull".into()),
+                material_id: 1,
+                first_index: 3,
+                num_indices: 3,
+                first_vertex: 0,
+                num_vertices: 3,
+                node_parent_index: 0,
+            },
+            crate::types::SubMesh {
+                material_name: Some("decal".into()),
+                material_id: 2,
+                first_index: 6,
+                num_indices: 3,
+                first_vertex: 0,
+                num_vertices: 3,
+                node_parent_index: 0,
+            },
+        ]);
+        let nmc = sample_nmc(&["body", "proxy_mount"]);
+
+        let view = build_decomposed_material_view(&mesh, Some(&materials), Some(&nmc), false, true);
+        let filtered_materials = view.sidecar_materials.expect("filtered sidecar materials");
+
+        assert_eq!(filtered_materials.materials.len(), 2);
+        assert_eq!(
+            filtered_materials
+                .materials
+                .iter()
+                .map(|material| material.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["hull", "decal"]
+        );
+        assert_eq!(view.mesh.submeshes.len(), 2);
+        assert_eq!(
+            view.mesh
+                .submeshes
+                .iter()
+                .map(|submesh| submesh.material_id)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
         );
     }
 
