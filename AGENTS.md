@@ -63,6 +63,15 @@ Shared across every language in the repo:
 - **Tests track behaviour, not lines.** Add or update tests when a
   behaviour changes; don't add tests just to bump coverage on
   trivial getters.
+- **Every new Rust source file needs a `//!` module-doc header.** The
+  first lines of every `.rs` file must be a `//!` block (one or more
+  lines) describing the file's responsibility, key functions, and
+  public types. This allows agents and developers to understand a
+  file's purpose from its first line without reading it in full.
+  When you significantly change a file's responsibility — adding a
+  new group of functions, moving functions out, or changing the
+  primary type it owns — update the `//!` header to reflect the
+  current state. Stale headers mislead future readers.
 
 ## Python
 
@@ -157,33 +166,14 @@ data without shelling out to the CLI:
 
 ## Large Source Files — Decomposition Plans
 
-Two source files are currently monolithic and have active plans to be split. Before editing them, read the plan so your change lands in the right future sub-module:
+The two previously-monolithic source files have been fully decomposed:
 
-- **`crates/starbreaker-3d/src/pipeline/`** (Phase 51 IN PROGRESS) — decomposed `pipeline/` module:
-  - `pipeline/mod.rs` — type defs (MaterialMode, ExportKind, ExportFormat, ExportOptions, DecomposedExport, ExportedFileKind, ExportedFile, ExportResult), `P4kSiblingReader`, `load_raw_dds_file`, `datacore_path_to_p4k`, `dump_nmc_nodes`, `dump_hierarchy`, `socpaks_to_glb` — 923 lines
-  - `pipeline/textures.rs` — texture/PNG helpers (`PngCache`, `load_material_textures`, `cached_load`, `load_diffuse_texture`, `load_normal_texture`, `load_roughness_texture`)
-  - `pipeline/interiors.rs` — interior discovery/loading (`LoadedInteriors`, `InteriorCgfEntry`, `InteriorContainerData`, `load_interiors`, `build_interiors_from_payloads`, `preload_interior_meshes`, `preload_interior_textures`, `expand_loadout_into_placements`)
-  - `pipeline/nmc_bridge.rs` — NMC transform helpers (`bone_world_transform`, `synthesize_nmc_from_bones`, `bake_nmc_into_mesh`, `load_nmc_for_cgf`, `compose_helper_transform`, mat4 helpers)
-  - `pipeline/child_payload.rs` — child payload helpers (`load_child_mesh`, `collect_child_payload_specs`, `load_child_payload_asset`, `load_child_payloads`, `LandingGearAsset`)
-  - `pipeline/loadout.rs` — loadout resolution (`resolve_loadout_meshes`, `resolve_children`, `flatten_resolved_tree`)
-  - `pipeline/entity_export.rs` — entity export helpers + geometry loading (`export_entity_payload`, `export_entity_from_paths`, `export_cgf_from_path`, `skeleton_source_paths`, `load_skeleton`, `GeometryPart`, `ResolvedGeometry`)
-  - `pipeline/palette.rs` — material/paint/tint/palette (`resolve_material`, `resolve_paint_override`, `enumerate_paint_variants_for_entity`, `query_tint_palette`, `try_load_mtl`, `query_animation_controller_source`)
-  - `pipeline/vehicle.rs` — vehicle XML parsing (`query_landing_gear`, `load_invisible_ports`, `VehicleXmlPart`, `load_vehicle_xml_parts`)
-  - `pipeline/glb_assembly.rs` — GLB assembly entry points (`assemble_glb_with_loadout`, `assemble_glb_with_loadout_with_progress`, `path_is_shield_related`)
+- **`crates/starbreaker-3d/src/pipeline/`** (Phase 51 ✅ commit `389880a`) — 10 sub-modules
+- **`crates/starbreaker-3d/src/animation/`** (Phase 59 ✅ commit `efcca33`) — 9 sub-modules
 
-- **`crates/starbreaker-3d/src/animation.rs`** (~3070 lines, 54 functions)
-- **`crates/starbreaker-3d/src/animation/`** (Phase 59 ✅ commit `039fe46`) — 7 sub-modules
-  - `animation/mod.rs` — public re-exports, struct defs (`AnimationDatabase`, `AnimationClip`, `AnimationControllerSource`, `BoneChannel`, `Keyframe<T>`), `#[cfg(test)]` block; 135 non-test lines
-  - `animation/codec.rs` — low-level keyframe codec helpers (`read_time_keys`, `read_rotation_keys`, `read_uncompressed_quats`, `read_small_tree_48bit_quats`, `decode_small_tree_quat_48`, `read_position_keys`, `read_snorm_full_positions`, `read_snorm_packed_positions`, `read_vec3`)
-  - `animation/pose.rs` — bone-pose utilities (`BonePose`, `BoneTransforms`, `cry_xyzw_to_blender_wxyz`, `read_dba_final_pose`, `clip_final_pose`, `find_block_for_skeleton`, `apply_pose_to_skeleton`, `quat_mul_wxyz`, `quat_rotate_vec_wxyz`, `bone_name_hash`, `clip_arc_score`)
-  - `animation/caf.rs` — CAF parser + shared block parsing (`parse_caf`, `parse_animation_blocks`, `parse_single_block`, `ControllerEntry`, `AnimInfo`, `parse_anim_info`)
-  - `animation/dba.rs` — DBA parser (`parse_dba`, `match_dba_metadata_to_blocks`, `parse_dba_metadata`, `DbaMetaEntry`)
-  - `animation/serialise.rs` — JSON serialisation (`clip_to_json`, `database_to_animations_json`, `dump_database_to_json`, `sanitize_clip_filename`, `split_clip_for_sidecar`, `BoneBlendMode`, `classify_bone_blend_modes`, `annotate_animations_json_with_blend_modes`, `annotate_animation_json_source`)
-  - `animation/mannequin.rs` — Mannequin ADB fragment reading (`annotate_animation_fragments_json`, `dump_mannequin_adb_to_json`, all `read_mannequin_*`/`collect_*`/`mannequin_*` helpers)
-  - `animation/matching.rs` — matching, scoring, orchestration (`caf_anchored_remap`, `caf_anchored_remap_decisions`, `extract_animations_for_skeleton_json`, `ClipMatchDecision`, `clip_semantic_score`, `clip_motion_score_milli`, `clip_name_lookup_keys`, `split_tag_list`, `parse_f32_attr`, `tokenize_for_match`, `swap_extension`)
-  - `animation/bake_tests.rs` — 15 unit tests for animation pipeline correctness (axis-swap, SNORM decoding, time-format 0x42, bone blend modes, clip serialisation)
-
-When a decomposition phase is completed, update the file-index entry here to list the actual sub-modules created.
+Every sub-module has a `//!` header. To find where a function lives, use
+`grep_search` for the function name, or `file_search` + `read_file` on
+the `//!` first line of each file in the module directory.
 
 ## Reference Docs
 
