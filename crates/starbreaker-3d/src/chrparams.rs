@@ -39,6 +39,12 @@ pub struct ChrParams {
     pub filepath_prefix: Option<String>,
     /// Animation event name → `.caf` filename (or full path if absolute).
     pub animations: BTreeMap<String, String>,
+    /// Animation event name → all declared `.caf` paths in declaration order.
+    ///
+    /// Some chrparams files may define the same event name multiple times for
+    /// variant clips or fallback entries. `animations` preserves the first
+    /// declaration for backwards compatibility; this map keeps the full list.
+    pub animation_paths: BTreeMap<String, Vec<String>>,
 }
 
 impl ChrParams {
@@ -69,15 +75,23 @@ impl ChrParams {
                     "#filepath" => out.filepath_prefix = Some(path.to_string()),
                     "$TracksDatabase" => out.tracks_database = Some(path.to_string()),
                     "$AnimEventDatabase" => out.anim_event_database = Some(path.to_string()),
-                    _ => {
-                        out.animations.insert(name.to_string(), path.to_string());
-                    }
+                    _ => out.record_animation_path(name, path),
                 }
             }
         }
         for child in xml.node_children(node) {
             Self::walk(xml, child, out);
         }
+    }
+
+    fn record_animation_path(&mut self, name: &str, path: &str) {
+        let key = name.to_string();
+        let value = path.to_string();
+        self.animation_paths
+            .entry(key.clone())
+            .or_default()
+            .push(value.clone());
+        self.animations.entry(key).or_insert(value);
     }
 
     /// Resolve a relative `.caf` path against the `#filepath` prefix.
@@ -179,4 +193,17 @@ mod tests {
         let resolved = cp.resolved_caf_path(cp.animations.get("landing_gear_extend").unwrap());
         assert!(resolved.ends_with("rsi_Scorpius_lg_deploy_r.caf"));
     }
+
+        #[test]
+        fn preserves_duplicate_animation_event_paths() {
+                let mut parsed = ChrParams::default();
+                parsed.record_animation_path("door_open", "door_open_a.caf");
+                parsed.record_animation_path("door_open", "door_open_b.caf");
+
+                assert_eq!(parsed.animations.get("door_open"), Some(&"door_open_a.caf".to_string()));
+                assert_eq!(
+                        parsed.animation_paths.get("door_open"),
+                        Some(&vec!["door_open_a.caf".to_string(), "door_open_b.caf".to_string()])
+                );
+        }
 }
