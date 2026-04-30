@@ -166,10 +166,15 @@ Two source files are currently monolithic and have active plans to be split. Bef
   - *(sub-modules listed in todo.md Phase 51 file-index block as they are created)*
 
 - **`crates/starbreaker-3d/src/animation.rs`** (~3070 lines, 54 functions)
-  See **Phase 59** in `docs/StarBreaker/todo.md` for the planned `animation/` module layout.
-  File index (updated as sub-modules are extracted):
-  - `animation/mod.rs` — public re-exports + `extract_animations_for_skeleton_json`, `bone_name_hash`.
-  - *(sub-modules listed in todo.md Phase 59 file-index block as they are created)*
+- **`crates/starbreaker-3d/src/animation/`** (Phase 59 ✅ commit `039fe46`) — 7 sub-modules
+  - `animation/mod.rs` — public re-exports, struct defs (`AnimationDatabase`, `AnimationClip`, `AnimationControllerSource`, `BoneChannel`, `Keyframe<T>`), `#[cfg(test)]` block; 135 non-test lines
+  - `animation/codec.rs` — low-level keyframe codec helpers (`read_time_keys`, `read_rotation_keys`, `read_uncompressed_quats`, `read_small_tree_48bit_quats`, `decode_small_tree_quat_48`, `read_position_keys`, `read_snorm_full_positions`, `read_snorm_packed_positions`, `read_vec3`)
+  - `animation/pose.rs` — bone-pose utilities (`BonePose`, `BoneTransforms`, `cry_xyzw_to_blender_wxyz`, `read_dba_final_pose`, `clip_final_pose`, `find_block_for_skeleton`, `apply_pose_to_skeleton`, `quat_mul_wxyz`, `quat_rotate_vec_wxyz`, `bone_name_hash`, `clip_arc_score`)
+  - `animation/caf.rs` — CAF parser + shared block parsing (`parse_caf`, `parse_animation_blocks`, `parse_single_block`, `ControllerEntry`, `AnimInfo`, `parse_anim_info`)
+  - `animation/dba.rs` — DBA parser (`parse_dba`, `match_dba_metadata_to_blocks`, `parse_dba_metadata`, `DbaMetaEntry`)
+  - `animation/serialise.rs` — JSON serialisation (`clip_to_json`, `database_to_animations_json`, `dump_database_to_json`, `sanitize_clip_filename`, `split_clip_for_sidecar`, `BoneBlendMode`, `classify_bone_blend_modes`, `annotate_animations_json_with_blend_modes`, `annotate_animation_json_source`)
+  - `animation/mannequin.rs` — Mannequin ADB fragment reading (`annotate_animation_fragments_json`, `dump_mannequin_adb_to_json`, all `read_mannequin_*`/`collect_*`/`mannequin_*` helpers)
+  - `animation/matching.rs` — matching, scoring, orchestration (`caf_anchored_remap`, `caf_anchored_remap_decisions`, `extract_animations_for_skeleton_json`, `ClipMatchDecision`, `clip_semantic_score`, `clip_motion_score_milli`, `clip_name_lookup_keys`, `split_tag_list`, `parse_f32_attr`, `tokenize_for_match`, `swap_extension`)
 
 When a decomposition phase is completed, update the file-index entry here to list the actual sub-modules created.
 
