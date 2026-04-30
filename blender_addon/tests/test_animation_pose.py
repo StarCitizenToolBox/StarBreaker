@@ -597,6 +597,71 @@ class AnimationPoseTests(unittest.TestCase):
         self.assertEqual(capture["target_frame"], 36.5)
         self.assertEqual(capture["anchor_frame"], 36.5)
 
+    def test_paired_clip_fallback_uses_fragment_transition_policy(self) -> None:
+        primary_clip = {"name": "landing_gear_retract.caf", "bones": {}}
+        paired_fragment = {
+            "frag_tags": ["Retract"],
+            "animations": [{"name": "landing_gear_deploy", "speed": -1}],
+        }
+        paired_clip = {
+            "name": "landing_gear_deploy.caf",
+            "bones": {"001": {"rotation": [[1, 0, 0, 0]]}},
+            "source_fragment": paired_fragment,
+        }
+
+        calls: list[dict[str, object]] = []
+        original_apply = self.package_ops._apply_animation_pose
+        original_pair = self.package_ops._paired_clip_for_snap
+        original_target = self.package_ops._clip_cyclic_transition_target_frame
+        try:
+            self.package_ops._paired_clip_for_snap = lambda package, clip, frame: (paired_clip, -1)
+            self.package_ops._clip_cyclic_transition_target_frame = (
+                lambda clip_data: 24.0 if clip_data is paired_clip else None
+            )
+
+            def _fake_apply(
+                package_root,
+                clip_data,
+                frame_index,
+                endpoint_policy,
+                target_frame=None,
+                anchor_frame=None,
+            ):
+                calls.append(
+                    {
+                        "clip": clip_data,
+                        "frame_index": frame_index,
+                        "endpoint_policy": endpoint_policy,
+                        "target_frame": target_frame,
+                        "anchor_frame": anchor_frame,
+                    }
+                )
+                return 0 if len(calls) == 1 else 1
+
+            self.package_ops._apply_animation_pose = _fake_apply
+            updated = self.package_ops._apply_animation_mode_for_clip(
+                context=None,
+                package_root=object(),
+                package=object(),
+                clip=primary_clip,
+                mode="snap_first",
+                fragment=paired_fragment,
+                reverse_playback=True,
+            )
+        finally:
+            self.package_ops._apply_animation_pose = original_apply
+            self.package_ops._paired_clip_for_snap = original_pair
+            self.package_ops._clip_cyclic_transition_target_frame = original_target
+
+        self.assertEqual(updated, 1)
+        self.assertEqual(len(calls), 2)
+        fallback = calls[1]
+        self.assertIs(fallback["clip"], paired_clip)
+        self.assertEqual(fallback["endpoint_policy"], "transition_end")
+        self.assertEqual(fallback["frame_index"], -1)
+        self.assertEqual(fallback["target_frame"], 24.0)
+        self.assertEqual(fallback["anchor_frame"], 24.0)
+
     def test_target_frame_snap_opens_from_bind_anchored_start(self) -> None:
         # snap_last on a cyclic clip whose first sample is
         # bind-aligned (the bone's resting state in clip-frame) and

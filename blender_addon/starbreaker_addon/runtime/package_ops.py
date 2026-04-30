@@ -582,7 +582,6 @@ _ANIMATION_MODES_PROP = "starbreaker_animation_modes"
 _ANIMATION_BIND_TRS_PROP = "starbreaker_animation_bind_trs"
 _FRAGMENT_ANIMATION_PREFIX = "fragment:"
 
-
 def available_package_animation_names(package: PackageBundle) -> list[str]:
     """Return animation names exported on the package root entity."""
     return [name for name, _ in available_package_animation_items(package)]
@@ -947,13 +946,26 @@ def _apply_animation_mode_for_clip(
             paired = _paired_clip_for_snap(package, clip, frame_index)
             if paired is not None:
                 paired_clip, paired_frame_index = paired
-                paired_policy = _snap_endpoint_policy(str(paired_clip.get("name", "")), normalized_mode)
+                paired_fragment = paired_clip.get("source_fragment") if isinstance(paired_clip, dict) else None
+                if not isinstance(paired_fragment, dict):
+                    paired_fragment = None
+                paired_policy = _fragment_endpoint_policy(paired_fragment, normalized_mode) or _snap_endpoint_policy(
+                    str(paired_clip.get("name", "")), normalized_mode
+                )
+                paired_reverse = _fragment_reverse_playback(paired_fragment)
+                paired_sample_frame_index = (
+                    (-1 if paired_frame_index == 0 else 0)
+                    if paired_reverse and paired_policy == "literal"
+                    else paired_frame_index
+                )
                 paired_cyclic_target_frame = _clip_cyclic_transition_target_frame(paired_clip)
-                paired_target_frame = paired_cyclic_target_frame if paired_policy == "transition_end" else None
+                paired_target_frame = (
+                    paired_cyclic_target_frame if paired_policy == "transition_end" else None
+                )
                 updated = _apply_animation_pose(
                     package_root,
                     paired_clip,
-                    paired_frame_index,
+                    paired_sample_frame_index,
                     paired_policy,
                     target_frame=paired_target_frame,
                     anchor_frame=paired_cyclic_target_frame,
