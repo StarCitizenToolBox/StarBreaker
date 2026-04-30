@@ -300,8 +300,8 @@ def _light_energy_to_blender(
     W/m^2 (irradiance). SC intensities are treated as KHR_lights_punctual-style
     candela values: luminous flux = ``intensity * 4π``, radiant flux =
     flux / 683 lm/W. An empirical ``LIGHT_VISUAL_GAIN`` multiplier compensates
-    for the engine's much brighter in-game response so Aurora interiors
-    actually illuminate. Sun retains the legacy lux→W/m^2 ratio.
+    for the engine's much brighter in-game response so dim interior fixtures
+    still illuminate correctly. Sun retains the legacy lux→W/m^2 ratio.
 
     See ``docs/StarBreaker/lights-research.md``.
     """

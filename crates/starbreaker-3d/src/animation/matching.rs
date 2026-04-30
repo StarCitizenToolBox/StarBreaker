@@ -45,8 +45,6 @@ fn tokenize_for_match(input: &str) -> Vec<String> {
         "ships",
         "objects",
         "object",
-        "rsi",
-        "scorpius",
         "play",
         "ssmp",
         "component",
@@ -653,6 +651,27 @@ fn swap_extension(path: &str, new_ext: &str) -> Option<String> {
         Some(format!("{}{}", base, new_ext))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tokenize_for_match;
+
+    #[test]
+    fn tokenize_for_match_keeps_ship_specific_tokens() {
+        let tokens = tokenize_for_match("RSI Scorpius wings deploy");
+        assert!(tokens.iter().any(|token| token == "rsi"));
+        assert!(tokens.iter().any(|token| token == "scorpius"));
+    }
+
+    #[test]
+    fn tokenize_for_match_still_removes_generic_stopwords() {
+        let tokens = tokenize_for_match("Animations ships component wings");
+        assert!(!tokens.iter().any(|token| token == "animations"));
+        assert!(!tokens.iter().any(|token| token == "ships"));
+        assert!(!tokens.iter().any(|token| token == "component"));
+        assert!(tokens.iter().any(|token| token == "wings"));
     }
 }
 

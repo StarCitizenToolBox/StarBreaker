@@ -705,10 +705,10 @@ def _fragment_endpoint_policy(fragment: dict[str, Any] | None, mode: str) -> str
     another ("end"). We resolve start/end purely in clip-time:
 
     * ``start`` = first clip sample (clip-time = 0).
-    * ``end`` = the per-channel "other endpoint": the last sample for
-      non-cyclic channels, or the mid-clip extreme for cyclic channels
-      (those whose first and last samples coincide, e.g. Scorpius front
-      landing-gear which is bound in the stowed pose and arcs back to it).
+        * ``end`` = the per-channel "other endpoint": the last sample for
+            non-cyclic channels, or the mid-clip extreme for cyclic channels
+            (those whose first and last samples coincide, e.g. a front
+            landing-gear channel bound in the stowed pose that arcs back to it).
 
     For a forward fragment, ``snap_first`` -> ``start`` and ``snap_last`` ->
     ``end``. For a reverse-playback fragment (``speed = -1``), playback
