@@ -9,7 +9,7 @@ bl_info = {
 }
 
 # Installer-facing semantic version string.
-VERSION = "0.2.2+addon.1"
+VERSION = "0.2.2+addon.2"
 
 try:
     from .ui import register, unregister

@@ -247,19 +247,25 @@ struct BlenderDiscovery {
 }
 
 fn parse_addon_version_from_init(content: &str) -> Option<String> {
+    // Prefer installer-facing VERSION first (e.g. VERSION = "0.2.2+addon.2").
     for line in content.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("VERSION") {
-            let mut parts = trimmed.splitn(2, '=');
-            let _ = parts.next();
-            if let Some(raw) = parts.next() {
-                let value = raw.trim().trim_matches('"').trim_matches('\'');
-                if !value.is_empty() {
-                    return Some(value.to_string());
-                }
+        if !trimmed.starts_with("VERSION") {
+            continue;
+        }
+        let mut parts = trimmed.splitn(2, '=');
+        let _ = parts.next();
+        if let Some(raw) = parts.next() {
+            let value = raw.trim().trim_matches('"').trim_matches('\'');
+            if !value.is_empty() {
+                return Some(value.to_string());
             }
         }
+    }
 
+    // Fallback for legacy addon bundles that only expose bl_info["version"].
+    for line in content.lines() {
+        let trimmed = line.trim();
         if trimmed.contains("\"version\"") && trimmed.contains('(') && trimmed.contains(')') {
             let open = trimmed.find('(')?;
             let close = trimmed[open + 1..].find(')')? + open + 1;
