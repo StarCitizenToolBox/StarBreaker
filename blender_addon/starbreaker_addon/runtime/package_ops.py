@@ -2412,6 +2412,18 @@ def _insert_animation_action(
 
     candidates, position_policy = _animation_bone_candidates(package_root, bones)
     updated = 0
+    # Multi-clip mode: when prior instances exist, clear live action from all
+    # objects so NLA is the sole driver.  This covers the case where the first
+    # insert left anim.action set (single-clip Dopesheet mode) and a second
+    # insert is now being added.
+    if existing_instances:
+        for obj in _iter_package_objects(package_root):
+            animation_data = getattr(obj, "animation_data", None)
+            if animation_data is not None and getattr(animation_data, "action", None) is not None:
+                try:
+                    animation_data.action = None
+                except Exception:
+                    pass
     for obj, key, bind_data, channel in candidates:
         obj.rotation_mode = "QUATERNION"
         obj.animation_data_create()
@@ -2610,12 +2622,10 @@ def _insert_animation_action(
             # scheduled frame ranges.  When multiple clips are inserted on
             # separate non-overlapping tracks, the NLA plays each clip at
             # the right time without blending artifacts.
-            # Clear the live action after inserting so the NLA (not a stale
-            # live action) is the sole driver.  This avoids both double-
-            # evaluation and the "prior insert freezes at its last keyframe"
-            # problem that occurred when anim.action held a different clip's
-            # action pointer.
-            if anim is not None:
+            # For single-clip mode (no prior instances), keep anim.action set
+            # so keyframes are visible in the Action Editor / Dopesheet.
+            # For multi-clip mode, clear anim.action so NLA drives playback.
+            if anim is not None and existing_instances:
                 anim.action = None
 
         updated += 1
