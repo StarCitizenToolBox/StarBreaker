@@ -106,14 +106,15 @@ When a bug is found or something behaves unexpectedly:
   Discover the structural property (shader family, blend mode flag,
   alpha channel usage, chrparams event type, …) and fix the rule for
   the whole category.
-- **Ask: how does the game engine handle this?** Star Citizen uses
-  CryEngine. When the fix is ambiguous — a channel remapping, a
-  coordinate space, a material slot ordering, a light unit — look at
-  how CryEngine / Lumberyard would process the same data. The
-  canonical source is the `.chrparams`, `.dba`, `.mtl`, and shader
-  definitions extracted from `Data.p4k`. Mirroring the engine's own
-  logic is almost always more correct and more robust than a
-  derived heuristic.
+- **Ask: how does the game engine handle this?** Star Citizen runs on
+  Star Engine, Cloud Imperium's fork of CryEngine / Lumberyard. It
+  shares most CryEngine conventions but diverges in places. When the
+  fix is ambiguous — a channel remapping, a coordinate space, a
+  material slot ordering, a light unit — look at how Star Engine
+  would process the same data. The canonical source is the
+  `.chrparams`, `.dba`, `.mtl`, and shader definitions extracted from
+  `Data.p4k`. Mirroring the engine's own logic is almost always more
+  correct and more robust than a derived heuristic.
 
 ## Python
 
