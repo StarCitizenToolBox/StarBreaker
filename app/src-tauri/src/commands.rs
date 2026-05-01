@@ -475,7 +475,7 @@ fn discover_blender_addon_targets() -> BlenderDiscovery {
                 continue;
             }
             let dir_name = entry.file_name().to_string_lossy().to_string();
-            let addons_path = path.join("scripts").join("addons");
+            let initial_addons_path = path.join("scripts").join("addons");
             // Detect the version before checking whether the addons directory
             // exists.  On a fresh Blender install the user data directory
             // (e.g. %APPDATA%\Blender Foundation\Blender\5.1\scripts\addons)
@@ -488,7 +488,12 @@ fn discover_blender_addon_targets() -> BlenderDiscovery {
             // compatible, skip silently (no has_incompatible flag — we don't
             // want non-Blender directories to pollute the error state).
             let blender_version =
-                detect_blender_version(&addons_path, &dir_name).unwrap_or_else(|| dir_name.clone());
+                detect_blender_version(&initial_addons_path, &dir_name).unwrap_or_else(|| dir_name.clone());
+            #[cfg(target_os = "windows")]
+            let profile_dir = blender_profile_version_dir(&blender_version);
+            #[cfg(not(target_os = "windows"))]
+            let profile_dir = dir_name.clone();
+            let addons_path = root.join(&profile_dir).join("scripts").join("addons");
             let is_compatible = version_meets_minimum(&blender_version);
             if !addons_path.exists() {
                 // Include the target only if we are confident the version
