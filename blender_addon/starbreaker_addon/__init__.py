@@ -1,7 +1,7 @@
 bl_info = {
     "name": "StarBreaker Decomposed Import",
     "author": "GitHub Copilot",
-    "version": (0, 1, 0),
+    "version": (0, 2, 2),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > StarBreaker",
     "description": "Import StarBreaker decomposed export packages and rebuild template-driven materials",
