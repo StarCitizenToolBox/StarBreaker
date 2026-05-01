@@ -1151,6 +1151,7 @@ class STARBREAKER_PT_tools(Panel):
             animation_items = available_package_animation_items(package)
             animation_box = layout.box()
             animation_box.label(text="Animations")
+            animation_box.label(text=f"{len(animation_items)} clip(s)")
             if not animation_items:
                 animation_box.label(text="No animations exported in this scene.json")
             else:
