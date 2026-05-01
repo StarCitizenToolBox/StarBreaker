@@ -489,6 +489,46 @@ def _end_import_progress(context: bpy.types.Context, description: str) -> None:
         pass
 
 
+def _init_instance_start_props(
+    context: bpy.types.Context,
+    package_root: bpy.types.Object,  # noqa: ARG001 — kept for future use
+    instances: list[dict],
+) -> None:
+    """Initialise inline-frame scene props for all tracked animation instances.
+
+    Must be called from an operator execute context, never from a draw callback.
+    """
+    for instance in instances:
+        instance_id = str(instance.get("id", ""))
+        if not instance_id:
+            continue
+        start = int(round(float(instance.get("start_frame", 1.0))))
+        key = f"starbreaker_anim_start_{instance_id}"
+        if context.scene.get(key) is None:
+            context.scene[key] = start
+
+
+def _schedule_init_scene_prop(key: str, value: int) -> None:
+    """Defer a scene custom-property write to outside the draw callback.
+
+    Writing to ID classes during a draw call raises a Blender context error.
+    Using a zero-interval timer pushes the write to the next event loop tick.
+    """
+    def _init() -> None:
+        try:
+            scene = bpy.context.scene
+            if key not in scene:
+                scene[key] = value
+        except Exception:
+            pass
+        return None
+
+    try:
+        bpy.app.timers.register(_init, first_interval=0.0, persistent=False)
+    except Exception:
+        pass
+
+
 def _package_root_from_context(context: bpy.types.Context) -> bpy.types.Object | None:
     package_root = find_package_root(context.active_object)
     if package_root is not None:
@@ -959,6 +999,18 @@ class STARBREAKER_OT_apply_animation_mode(Operator):
             if len(warnings) > 2:
                 head = f"{head}; +{len(warnings) - 2} more overlap(s)"
             self.report({"WARNING"}, head)
+        # After inserting, make sure the inline-frame scene props are
+        # pre-initialised so that the panel draw never needs to mutate
+        # ID data (which Blender forbids during draw callbacks).
+        if self.mode == "action" and package is not None:
+            try:
+                _init_instance_start_props(
+                    context,
+                    package_root,
+                    package_animation_instances(package_root, package),
+                )
+            except Exception:
+                pass
         self.report({"INFO"}, f"{name}: {self.mode} ({updated} object(s) updated)")
         return {"FINISHED"}
 
@@ -1282,10 +1334,14 @@ class STARBREAKER_PT_tools(Panel):
 
                                 # Inline frame number control (replaces old dialog workflow).
                                 scene_prop_key = f"starbreaker_anim_start_{instance_id}"
-                                scene_value = context.scene.get(scene_prop_key)
-                                if scene_value is None:
-                                    context.scene[scene_prop_key] = int(start)
-                                row.prop(context.scene, f'["{scene_prop_key}"]', text="@")
+                                if context.scene.get(scene_prop_key) is None:
+                                    # Writing to ID classes is forbidden during draw.
+                                    # Defer the initialisation to a timer and show a
+                                    # read-only label for this one redraw cycle.
+                                    _schedule_init_scene_prop(scene_prop_key, int(start))
+                                    row.label(text=f"@{start}")
+                                else:
+                                    row.prop(context.scene, f'["{scene_prop_key}"]', text="@")
 
                                 apply_op = row.operator(
                                     STARBREAKER_OT_edit_animation_instance.bl_idname,
