@@ -9,7 +9,7 @@ use super::pose::cry_xyzw_to_blender_wxyz;
 use super::{AnimationClip, AnimationDatabase};
 
 pub fn clip_to_json(clip: &AnimationClip) -> serde_json::Value {
-    let mut bones = serde_json::json!({});
+    let mut bones: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
 
     for channel in &clip.channels {
         let has_rotation = !channel.rotations.is_empty();
@@ -41,7 +41,7 @@ pub fn clip_to_json(clip: &AnimationClip) -> serde_json::Value {
         }
 
         let bone_key = format!("0x{:X}", channel.bone_hash);
-        bones[bone_key] = serde_json::json!({
+        let channel_value = serde_json::json!({
             "has_rotation": has_rotation,
             "has_position": has_position,
             "rotation": rotation_array,
@@ -49,6 +49,20 @@ pub fn clip_to_json(clip: &AnimationClip) -> serde_json::Value {
             "position": position_array,
             "position_time": position_time_array,
         });
+
+        match bones.get_mut(&bone_key) {
+            None => {
+                bones.insert(bone_key, channel_value);
+            }
+            Some(existing) => {
+                if let Some(array) = existing.as_array_mut() {
+                    array.push(channel_value);
+                } else {
+                    let previous = existing.take();
+                    *existing = serde_json::Value::Array(vec![previous, channel_value]);
+                }
+            }
+        }
     }
 
     // Calculate frame count from both rotation and position keyframes
@@ -66,7 +80,7 @@ pub fn clip_to_json(clip: &AnimationClip) -> serde_json::Value {
         "name": clip.name,
         "fps": clip.fps as u32,
         "frame_count": max_frame,
-        "bones": bones,
+        "bones": serde_json::Value::Object(bones),
     });
     // Phase 53: emit DBA-metadata `start_rotation` / `start_position` as
     // top-level clip fields so the addon can use them as the data-backed
@@ -126,20 +140,31 @@ pub(super) fn annotate_animation_json_source(
             continue;
         };
         for (bone_key, channel_value) in bones {
-            let Some(channel_obj) = channel_value.as_object_mut() else {
-                continue;
-            };
-            channel_obj.insert(
-                "source_skeleton_path".to_string(),
-                serde_json::Value::String(source_skeleton_path.to_string()),
-            );
-            if let Some(hash) = parse_bone_hash_key(bone_key)
-                && let Some(name) = source_node_name_by_hash.get(&hash)
-            {
+            let annotate_channel = |channel_obj: &mut serde_json::Map<String, serde_json::Value>| {
                 channel_obj.insert(
-                    "source_node_name".to_string(),
-                    serde_json::Value::String(name.clone()),
+                    "source_skeleton_path".to_string(),
+                    serde_json::Value::String(source_skeleton_path.to_string()),
                 );
+                if let Some(hash) = parse_bone_hash_key(bone_key)
+                    && let Some(name) = source_node_name_by_hash.get(&hash)
+                {
+                    channel_obj.insert(
+                        "source_node_name".to_string(),
+                        serde_json::Value::String(name.clone()),
+                    );
+                }
+            };
+
+            if let Some(channel_obj) = channel_value.as_object_mut() {
+                annotate_channel(channel_obj);
+                continue;
+            }
+            if let Some(channel_array) = channel_value.as_array_mut() {
+                for variant in channel_array {
+                    if let Some(channel_obj) = variant.as_object_mut() {
+                        annotate_channel(channel_obj);
+                    }
+                }
             }
         }
     }
@@ -248,11 +273,17 @@ pub fn annotate_animations_json_with_blend_modes(
             let Some(stripped) = key.strip_prefix("0x").or(Some(key)) else { continue };
             let Ok(hash) = u32::from_str_radix(stripped, 16) else { continue };
             let Some(mode) = modes.get(&hash) else { continue };
+            let blend_value = serde_json::Value::String(mode.as_str().to_string());
             if let Some(obj) = value.as_object_mut() {
-                obj.insert(
-                    "blend_mode".to_string(),
-                    serde_json::Value::String(mode.as_str().to_string()),
-                );
+                obj.insert("blend_mode".to_string(), blend_value.clone());
+                continue;
+            }
+            if let Some(arr) = value.as_array_mut() {
+                for variant in arr {
+                    if let Some(obj) = variant.as_object_mut() {
+                        obj.insert("blend_mode".to_string(), blend_value.clone());
+                    }
+                }
             }
         }
     }

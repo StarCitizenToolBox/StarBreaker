@@ -2428,7 +2428,17 @@ def _apply_animation_pose(
     candidates, position_policy = _animation_bone_candidates(package_root, bones)
     updated = 0
     for obj, key, bind_data, channel in candidates:
-        allow_channel = position_policy.get(id(obj), True)
+        allow_position = position_policy.get(id(obj), True)
+        local_anchor_frame = anchor_frame
+        if not allow_position:
+            positions = channel.get("position")
+            # Duplicate-hash fallback: when absolute position routing is
+            # ambiguous, keep rotation and use bind-relative position deltas
+            # (anchored to frame 0) so these channels still animate.
+            if isinstance(positions, list) and positions:
+                allow_position = True
+                if local_anchor_frame is None:
+                    local_anchor_frame = 0.0
 
         _apply_best_channel_transform(
             obj,
@@ -2437,9 +2447,11 @@ def _apply_animation_pose(
             frame_index,
             endpoint_policy,
             target_frame,
-            anchor_frame,
-            allow_rotation=allow_channel,
-            allow_position=allow_channel,
+            local_anchor_frame,
+            # Duplicate-hash disambiguation only suppresses incompatible
+            # position tracks; rotation remains valid and must still apply.
+            allow_rotation=True,
+            allow_position=allow_position,
         )
         updated += 1
     return updated
@@ -2609,13 +2621,14 @@ def _insert_animation_action(
         position_times = _channel_times(channel, "position_time", len(positions))
         channel_times = [*rotation_times, *position_times]
         duration_frame = trim_frame if trim_frame is not None else max(channel_times, default=0.0)
-        allow_channel = position_policy.get(id(obj), True)
+        allow_position = position_policy.get(id(obj), True)
+        use_relative_position_fallback = (not allow_position) and bool(positions)
 
         def _action_frame(sample_time: float) -> float:
             local_time = duration_frame - sample_time if reverse_playback else sample_time
             return frame_offset + (local_time * fps_reconciliation.frame_scale)
 
-        if allow_channel and positions:
+        if (allow_position or use_relative_position_fallback) and positions:
             bind_location = bind_data.get("location", obj.location)
             bind = (float(bind_location[0]), float(bind_location[1]), float(bind_location[2]))
 
@@ -2638,7 +2651,7 @@ def _insert_animation_action(
                     continue
                 if isinstance(sample, list) and len(sample) >= 3:
                     sample_decoded = _decode_animation_position(sample, "identity")
-                    if trim_frame is not None and anchor is not None:
+                    if (use_relative_position_fallback or trim_frame is not None) and anchor is not None:
                         # Cyclic clip: use bind-delta to anchor the animation
                         # at the bind pose (e.g. Scorpius landing_gear_deploy).
                         obj.location = (
@@ -2660,7 +2673,7 @@ def _insert_animation_action(
         # frame between the two keys (observed on Scorpius
         # `landing_gear_extend` BONE_Front_Landing_Gear_Foot frames 37→39).
         prev_keyed_quat: tuple[float, float, float, float] | None = None
-        if allow_channel:
+        if rotations:
             for index, sample in enumerate(rotations):
                 sample_time = rotation_times[index] if index < len(rotation_times) else float(index)
                 if trim_frame is not None and sample_time > trim_frame:

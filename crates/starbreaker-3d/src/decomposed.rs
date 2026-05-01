@@ -1068,13 +1068,7 @@ pub(crate) fn write_decomposed_export(
                                 {
                                     for (k, v) in new_bones {
                                         if let Some(existing_value) = existing_bones.get_mut(&k) {
-                                            if *existing_value != v {
-                                                log::debug!(
-                                                    "[anim] duplicate channel '{}' for clip '{}' while merging skeleton outputs; keeping first value",
-                                                    k,
-                                                    name
-                                                );
-                                            }
+                                            merge_animation_channel_values(existing_value, v, &name, &k);
                                         } else {
                                             existing_bones.insert(k, v);
                                         }
@@ -2440,6 +2434,37 @@ fn string_value_to_json(value: &str) -> serde_json::Value {
     serde_json::json!(value)
 }
 
+fn merge_animation_channel_values(
+    existing_value: &mut serde_json::Value,
+    incoming_value: serde_json::Value,
+    clip_name: &str,
+    channel_key: &str,
+) {
+    if *existing_value == incoming_value {
+        return;
+    }
+
+    if let Some(existing_variants) = existing_value.as_array_mut() {
+        if !existing_variants.iter().any(|variant| *variant == incoming_value) {
+            existing_variants.push(incoming_value);
+        }
+        return;
+    }
+
+    let previous_value = existing_value.take();
+    if previous_value == incoming_value {
+        *existing_value = previous_value;
+        return;
+    }
+
+    log::debug!(
+        "[anim] duplicate channel '{}' for clip '{}' while merging skeleton outputs; preserving both variants",
+        channel_key,
+        clip_name
+    );
+    *existing_value = serde_json::Value::Array(vec![previous_value, incoming_value]);
+}
+
 fn hash_vec3(hasher: &mut std::collections::hash_map::DefaultHasher, values: &[f32; 3]) {
     values[0].to_bits().hash(hasher);
     values[1].to_bits().hash(hasher);
@@ -2464,6 +2489,33 @@ fn hash_finish_entry(
 mod tests {
     use super::*;
     use crate::mtl;
+
+    #[test]
+    fn merge_animation_channel_values_promotes_duplicates_to_variant_array() {
+        let mut existing = serde_json::json!({"position": [[1.0, 2.0, 3.0]]});
+        let incoming = serde_json::json!({"position": [[4.0, 5.0, 6.0]]});
+
+        merge_animation_channel_values(&mut existing, incoming.clone(), "landing_gear_retract", "0x2522C378");
+
+        let arr = existing.as_array().expect("channel entry should become a variant array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0], serde_json::json!({"position": [[1.0, 2.0, 3.0]]}));
+        assert_eq!(arr[1], incoming);
+    }
+
+    #[test]
+    fn merge_animation_channel_values_deduplicates_existing_variant_array() {
+        let mut existing = serde_json::json!([
+            {"position": [[1.0, 2.0, 3.0]]},
+            {"position": [[4.0, 5.0, 6.0]]}
+        ]);
+        let incoming = serde_json::json!({"position": [[4.0, 5.0, 6.0]]});
+
+        merge_animation_channel_values(&mut existing, incoming, "landing_gear_retract", "0x2522C378");
+
+        let arr = existing.as_array().expect("channel entry should remain an array");
+        assert_eq!(arr.len(), 2);
+    }
 
     fn sample_submaterial() -> SubMaterial {
         SubMaterial {

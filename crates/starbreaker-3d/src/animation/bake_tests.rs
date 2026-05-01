@@ -100,6 +100,55 @@
         assert_eq!(rotation_times[0].as_f64().unwrap(), 12.5);
     }
 
+    #[test]
+    fn clip_to_json_preserves_duplicate_hash_channels_as_variants() {
+        let hash = 0xDEADBEEF_u32;
+        let clip = AnimationClip {
+            name: "duplicate_hash_clip".to_string(),
+            fps: 30.0,
+            channels: vec![
+                BoneChannel {
+                    bone_hash: hash,
+                    rotations: vec![],
+                    positions: vec![Keyframe {
+                        time: 0.0,
+                        value: [1.0, 2.0, 3.0],
+                    }],
+                    rot_format_flags: 0,
+                    pos_format_flags: 0,
+                },
+                BoneChannel {
+                    bone_hash: hash,
+                    rotations: vec![],
+                    positions: vec![Keyframe {
+                        time: 0.0,
+                        value: [4.0, 5.0, 6.0],
+                    }],
+                    rot_format_flags: 0,
+                    pos_format_flags: 0,
+                },
+            ],
+            start_rotation: None,
+            start_position: None,
+        };
+
+        let json = clip_to_json(&clip);
+        let key = format!("0x{:X}", hash);
+        let entry = &json["bones"][key];
+        let variants = entry.as_array().expect("duplicate hash entry must be a variant array");
+        assert_eq!(variants.len(), 2, "both channels must be preserved under one hash key");
+
+        let first = variants[0]["position"][0].as_array().expect("first variant position sample");
+        let second = variants[1]["position"][0].as_array().expect("second variant position sample");
+        // Axis swap check for both samples: (x,y,z) -> (x,-z,y)
+        assert_eq!(first[0].as_f64().unwrap(), 1.0);
+        assert_eq!(first[1].as_f64().unwrap(), -3.0);
+        assert_eq!(first[2].as_f64().unwrap(), 2.0);
+        assert_eq!(second[0].as_f64().unwrap(), 4.0);
+        assert_eq!(second[1].as_f64().unwrap(), -6.0);
+        assert_eq!(second[2].as_f64().unwrap(), 5.0);
+    }
+
     /// Phase 53: clips that originate from DBA metadata expose
     /// `start_rotation` / `start_position` as top-level JSON fields, in
     /// the same Blender Z-up convention as the per-sample emission.
