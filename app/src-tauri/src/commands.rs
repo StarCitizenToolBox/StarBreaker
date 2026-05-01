@@ -573,13 +573,10 @@ fn addon_source_dir() -> Option<PathBuf> {
 }
 
 fn current_addon_version() -> Result<String, AppError> {
-    let source_dir = addon_source_dir().ok_or_else(|| {
-        AppError::Internal("Unable to locate bundled starbreaker_addon source directory".into())
-    })?;
-    let init_path = source_dir.join("__init__.py");
-    let content = fs::read_to_string(&init_path)?;
-    Ok(parse_addon_version_from_init(&content)
-        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string()))
+    // Use the build-time version string (derived from git commit count) so
+    // that every new build automatically shows "Update available" to users
+    // who have an older installed copy.  No manual VERSION bump required.
+    Ok(env!("ADDON_BUILD_VERSION").to_string())
 }
 
 fn installed_addon_version(addons_path: &Path) -> Option<String> {
@@ -739,6 +736,33 @@ pub fn install_blender_addon(target_path: Option<String>) -> Result<BlenderAddon
         fs::remove_dir_all(&destination)?;
     }
     copy_dir_recursive(&source_dir, &destination)?;
+
+    // Stamp the installed __init__.py with the build-time version so that
+    // compute_addon_status correctly reports "up to date" after a fresh install
+    // rather than always showing "update available".
+    let init_path = destination.join("__init__.py");
+    if let Ok(content) = fs::read_to_string(&init_path) {
+        let build_version = env!("ADDON_BUILD_VERSION");
+        let patched = content
+            .lines()
+            .map(|line| {
+                let trimmed = line.trim();
+                if trimmed.starts_with("VERSION") && trimmed.contains('=') {
+                    format!("VERSION = \"{}\"", build_version)
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Preserve a trailing newline if the original had one.
+        let patched = if content.ends_with('\n') {
+            patched + "\n"
+        } else {
+            patched
+        };
+        let _ = fs::write(&init_path, patched);
+    }
 
     let mut status = compute_addon_status(Some(target), has_incompatible)?;
     if status.blender_running {
