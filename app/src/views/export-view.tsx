@@ -161,7 +161,14 @@ export function ExportView() {
 
   const canExport = totalSelected > 0 && outputDir !== null && !exporting;
 
-  const progressPercent = Math.round(progressFraction * 100);
+  const allDone = progressTotal > 0 && progress >= progressTotal;
+  // Never display 100% until all export slots are marked complete, to avoid the
+  // aggregate fraction rounding up prematurely when most (but not all) entities
+  // are done and the last one is near the end (e.g. 2/3 done + 0.99 → 0.9966 rounds to 100).
+  const progressPercent = allDone
+    ? 100
+    : Math.min(Math.round(progressFraction * 100), 99);
+  const progressBarFraction = allDone ? progressFraction : Math.min(progressFraction, 0.99);
 
   const handleExport = () => {
     const allEntities = categories.flatMap((c) => c.entities);
@@ -277,7 +284,7 @@ export function ExportView() {
               <div className="w-full bg-surface rounded-full h-2 overflow-hidden">
                 <div
                   className="bg-accent h-full rounded-full transition-all duration-300"
-                  style={{ width: `${progressFraction * 100}%` }}
+                  style={{ width: `${progressBarFraction * 100}%` }}
                 />
               </div>
               <div className="flex items-start justify-between gap-3">
