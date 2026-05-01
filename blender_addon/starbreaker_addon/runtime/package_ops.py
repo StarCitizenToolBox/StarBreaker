@@ -684,15 +684,18 @@ def _clip_duration_frames(clip: dict[str, Any], frame_scale: float) -> float:
     trim_frame = _clip_cyclic_transition_target_frame(clip)
     bones = _normalized_bone_channels(clip)
     channel_times: list[float] = []
-    for channel in bones.values():
-        rotations = channel.get("rotation") if isinstance(channel.get("rotation"), list) else []
-        positions = channel.get("position") if isinstance(channel.get("position"), list) else []
-        rotation_times = _channel_times(channel, "rotation_time", len(rotations))
-        position_times = _channel_times(channel, "position_time", len(positions))
-        for sample_time in [*rotation_times, *position_times]:
-            if trim_frame is not None and sample_time > trim_frame:
+    for channel_variants in bones.values():
+        for channel in channel_variants:
+            if not isinstance(channel, dict):
                 continue
-            channel_times.append(float(sample_time))
+            rotations = channel.get("rotation") if isinstance(channel.get("rotation"), list) else []
+            positions = channel.get("position") if isinstance(channel.get("position"), list) else []
+            rotation_times = _channel_times(channel, "rotation_time", len(rotations))
+            position_times = _channel_times(channel, "position_time", len(positions))
+            for sample_time in [*rotation_times, *position_times]:
+                if trim_frame is not None and sample_time > trim_frame:
+                    continue
+                channel_times.append(float(sample_time))
     if not channel_times:
         return 0.0
     return max(channel_times) * frame_scale
