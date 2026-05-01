@@ -1022,6 +1022,24 @@ def _resync_animation_instances_from_scene(
                     entry["duration_frames"] = max(float(entry.get("duration_frames", 0.0)), strip_duration)
 
     resynced = [instance for instance_id, instance in by_id.items() if instance_id in seen_ids]
+
+    # When NLA-driven playback is active (anim.action == None) and NlaStrip
+    # IDProperties are not supported, seen_ids may be empty even though valid
+    # instances exist.  In that case, scan bpy.data.actions for actions tagged
+    # with instance IDs that belong to this package root, so the stored
+    # instances are confirmed to still have live data in the scene.
+    if not seen_ids:
+        pkg_prefix = f"SB_{package_root.name}_"
+        for action in bpy.data.actions:
+            if not action.name.startswith(pkg_prefix):
+                continue
+            try:
+                instance_id = action.get(_ANIMATION_INSTANCE_ID_PROP)
+            except Exception:
+                continue
+            if isinstance(instance_id, str) and instance_id and instance_id in by_id:
+                seen_ids.add(instance_id)
+        resynced = [instance for instance_id, instance in by_id.items() if instance_id in seen_ids]
     resynced.sort(key=lambda item: (str(item.get("animation_name", "")), float(item.get("start_frame", 1.0))))
     if persist:
         _store_animation_instances(package_root, resynced)
