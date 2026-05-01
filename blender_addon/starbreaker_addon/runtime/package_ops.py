@@ -785,6 +785,22 @@ def _fragment_animation_variants(clip: dict[str, Any]) -> list[tuple[str, str, i
     return variants
 
 
+def _animation_insert_label(animation_name: str | None, clip: dict[str, Any]) -> str:
+    """Return the visible label used for inserted Action/NLA strip names.
+
+    Keeps internal IDs canonical (raw clip/fragment key) but surfaces the
+    same human-readable fragment labels shown in the animation UI.
+    """
+
+    key = (animation_name or "").strip()
+    if key:
+        for variant_key, display_name, _, _ in _fragment_animation_variants(clip):
+            if variant_key == key and display_name:
+                return display_name
+        return key
+    return str(clip.get("name", "animation")).strip() or "animation"
+
+
 def _fragment_tags(fragment: dict[str, Any], key: str) -> list[str]:
     value = fragment.get(key)
     if isinstance(value, list):
@@ -2651,6 +2667,7 @@ def _insert_animation_action(
     if not bones:
         return 0
     name = animation_name or str(clip.get("name", "animation")) or "animation"
+    visible_name = _animation_insert_label(animation_name, clip)
     trim_frame = _clip_cyclic_transition_target_frame(clip)
     fps_reconciliation = reconcile_animation_fps(context.scene, clip.get("fps"), fps_policy)
     if fps_reconciliation.mismatch:
@@ -2700,7 +2717,7 @@ def _insert_animation_action(
         # Dope Sheet Action editor shows clean per-bone groups. The Action
         # is pushed onto a per-clip NLA track so multiple clips coexist on
         # the timeline without overwriting each other.
-        action_name = f"SB_{package_root.name}_{name}_{instance_id}_{obj.name}"
+        action_name = f"SB_{package_root.name}_{visible_name}_{instance_id}_{obj.name}"
         action = bpy.data.actions.new(name=action_name)
         try:
             action[_ANIMATION_INSTANCE_ID_PROP] = instance_id
@@ -2872,8 +2889,8 @@ def _insert_animation_action(
                 strip_start = int(round(float(frame_offset)))
             strip = None
             try:
-                strip = track.strips.new(name=name, start=strip_start, action=action)
-                strip.name = name
+                strip = track.strips.new(name=visible_name, start=strip_start, action=action)
+                strip.name = visible_name
                 strip.extrapolation = 'HOLD_FORWARD'
                 try:
                     strip[_ANIMATION_INSTANCE_ID_PROP] = instance_id

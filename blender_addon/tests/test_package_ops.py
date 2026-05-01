@@ -383,6 +383,30 @@ class AnimationDisplayNameTests(unittest.TestCase):
         self.assertEqual(item_map.get("fragment:0:test_ship_wings_deploy"), "Wings Retract")
         self.assertEqual(item_map.get("fragment:0:test_ship_wings_retract"), "Wings Deploy")
 
+    def test_animation_insert_label_uses_fragment_display_name(self) -> None:
+        clip = {
+            "name": "test_ship_wings_retract",
+            "fragments": [
+                {
+                    "fragment": "Wings",
+                    "frag_tags": ["Deploy"],
+                    "tags": [],
+                    "scopes": [],
+                    "animations": [],
+                }
+            ],
+        }
+        label = self.package_ops._animation_insert_label(
+            "fragment:0:test_ship_wings_retract",
+            clip,
+        )
+        self.assertEqual(label, "Wings Deploy")
+
+    def test_animation_insert_label_falls_back_to_animation_key(self) -> None:
+        clip = {"name": "test_ship_vtol_deploy", "fragments": []}
+        label = self.package_ops._animation_insert_label("test_ship_vtol_deploy", clip)
+        self.assertEqual(label, "test_ship_vtol_deploy")
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
