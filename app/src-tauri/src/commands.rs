@@ -461,12 +461,34 @@ fn discover_blender_addon_targets() -> BlenderDiscovery {
             }
             let dir_name = entry.file_name().to_string_lossy().to_string();
             let addons_path = path.join("scripts").join("addons");
+            // Detect the version before checking whether the addons directory
+            // exists.  On a fresh Blender install the user data directory
+            // (e.g. %APPDATA%\Blender Foundation\Blender\5.1\scripts\addons)
+            // may not exist yet — Blender creates it lazily on first launch.
+            // We still want to offer it as an install target so that the
+            // installer can create the directory rather than refusing with
+            // "requires 5.0+ / upgrade Blender" when a compatible version is
+            // installed but the profile directory hasn't been initialised yet.
+            // If the addons directory does not exist *and* the version is not
+            // compatible, skip silently (no has_incompatible flag — we don't
+            // want non-Blender directories to pollute the error state).
+            let blender_version =
+                detect_blender_version(&addons_path, &dir_name).unwrap_or_else(|| dir_name.clone());
+            let is_compatible = version_meets_minimum(&blender_version);
             if !addons_path.exists() {
+                // Include the target only if we are confident the version
+                // is compatible.  Skip entries we cannot confirm at all.
+                if is_compatible {
+                    compatible.push(BlenderAddonTarget {
+                        blender_version,
+                        addons_path,
+                    });
+                }
+                // Do NOT set has_incompatible for missing-directory entries;
+                // that would trigger the misleading "upgrade Blender" error.
                 continue;
             }
-            let blender_version =
-                detect_blender_version(&addons_path, &dir_name).unwrap_or(dir_name);
-            if version_meets_minimum(&blender_version) {
+            if is_compatible {
                 compatible.push(BlenderAddonTarget {
                     blender_version,
                     addons_path,
