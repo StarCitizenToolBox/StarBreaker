@@ -815,6 +815,77 @@ def _fragment_reverse_playback(fragment: dict[str, Any] | None) -> bool:
     return saw_animation
 
 
+def _fragment_semantic_reverse_playback(fragment: dict[str, Any] | None) -> bool:
+    """Infer reverse playback from fragment-tag/clip-name semantic mismatch.
+
+    Some Mannequin fragments encode transition intent via tags (Deploy,
+    Retract, Open, Close, etc.) but omit an explicit ``speed`` key. When the
+    referenced animation name carries the opposite semantic token (for example
+    ``frag_tags=["Deploy"]`` with ``..._retract``), engine-authored content
+    expects reverse playback even though speed metadata is absent.
+
+    This fallback is metadata-driven and only applies when no explicit speed is
+    authored on fragment animations.
+    """
+
+    if not isinstance(fragment, dict):
+        return False
+
+    animations = fragment.get("animations")
+    if not isinstance(animations, list) or not animations:
+        return False
+
+    # Explicit speed metadata is authoritative.
+    for animation in animations:
+        if isinstance(animation, dict) and "speed" in animation:
+            return False
+
+    tags = {tag.lower() for key in ("frag_tags", "tags") for tag in _fragment_tags(fragment, key)}
+    if not tags:
+        return False
+
+    semantic_pairs = (
+        ("deploy", "retract"),
+        ("open", "close"),
+        ("extend", "retract"),
+        ("unstow", "stow"),
+    )
+
+    forward_signal = False
+    reverse_signal = False
+    for animation in animations:
+        if not isinstance(animation, dict):
+            continue
+        raw_name = str(animation.get("name", "")).strip().lower()
+        if not raw_name:
+            continue
+        name = raw_name.rsplit("/", 1)[-1]
+        if "." in name:
+            name = name.split(".", 1)[0]
+        tokens = {token for token in re.split(r"[^a-z0-9]+", name) if token}
+        if not tokens:
+            continue
+
+        for positive, negative in semantic_pairs:
+            if positive in tags:
+                if positive in tokens:
+                    forward_signal = True
+                if negative in tokens:
+                    reverse_signal = True
+            if negative in tags:
+                if negative in tokens:
+                    forward_signal = True
+                if positive in tokens:
+                    reverse_signal = True
+
+    # Only flip when all semantic evidence points to an inverse pairing.
+    return reverse_signal and not forward_signal
+
+
+def _effective_fragment_reverse_playback(fragment: dict[str, Any] | None) -> bool:
+    return _fragment_reverse_playback(fragment) or _fragment_semantic_reverse_playback(fragment)
+
+
 def _fragment_endpoint_policy(fragment: dict[str, Any] | None, mode: str) -> str | None:
     """Map a Mannequin fragment + snap mode to a transition state policy.
 
@@ -854,7 +925,7 @@ def _fragment_endpoint_policy(fragment: dict[str, Any] | None, mode: str) -> str
     if not (tags & transition_tags):
         return None
 
-    reverse = not _positive_speed_fragment(fragment)
+    reverse = _effective_fragment_reverse_playback(fragment)
     if normalized_mode == "snap_first":
         return "transition_end" if reverse else "transition_start"
     return "transition_start" if reverse else "transition_end"
@@ -1405,7 +1476,7 @@ def apply_animation_mode_to_package_root(
     if selection is None:
         raise RuntimeError(f"Animation '{animation_name}' not found in package sidecar")
     clip, fragment = selection
-    reverse_playback = _fragment_reverse_playback(fragment)
+    reverse_playback = _effective_fragment_reverse_playback(fragment)
 
     normalized_mode = mode.strip().lower()
     if normalized_mode not in {"none", "snap_first", "snap_last", "action"}:
@@ -1450,7 +1521,7 @@ def apply_animation_mode_to_package_root(
                     other_mode,
                     animation_name=other_name,
                     fragment=other_fragment,
-                    reverse_playback=_fragment_reverse_playback(other_fragment),
+                    reverse_playback=_effective_fragment_reverse_playback(other_fragment),
                     fps_policy=fps_policy,
                 )
 
@@ -1537,7 +1608,7 @@ def _apply_animation_mode_for_clip(
                 paired_policy = _fragment_endpoint_policy(paired_fragment, normalized_mode) or _snap_endpoint_policy(
                     str(paired_clip.get("name", "")), normalized_mode
                 )
-                paired_reverse = _fragment_reverse_playback(paired_fragment)
+                paired_reverse = _effective_fragment_reverse_playback(paired_fragment)
                 paired_sample_frame_index = (
                     (-1 if paired_frame_index == 0 else 0)
                     if paired_reverse and paired_policy == "literal"

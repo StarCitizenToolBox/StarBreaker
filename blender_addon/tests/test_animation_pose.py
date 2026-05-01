@@ -617,6 +617,107 @@ class AnimationPoseTests(unittest.TestCase):
             "transition_start",
         )
 
+    def test_fragment_endpoint_policy_uses_semantic_reverse_when_speed_missing(self) -> None:
+        deploy_with_swapped_clip = {
+            "fragment": "Wings",
+            "frag_tags": ["Deploy"],
+            "animations": [{"name": "drak_corsair_wings_retract"}],
+        }
+        retract_with_swapped_clip = {
+            "fragment": "Wings",
+            "frag_tags": ["Retract"],
+            "animations": [{"name": "drak_corsair_wings_deploy"}],
+        }
+
+        # Missing speed metadata, but semantic mismatch indicates reverse.
+        self.assertEqual(
+            self.package_ops._fragment_endpoint_policy(deploy_with_swapped_clip, "snap_first"),
+            "transition_end",
+        )
+        self.assertEqual(
+            self.package_ops._fragment_endpoint_policy(deploy_with_swapped_clip, "snap_last"),
+            "transition_start",
+        )
+        self.assertEqual(
+            self.package_ops._fragment_endpoint_policy(retract_with_swapped_clip, "snap_first"),
+            "transition_end",
+        )
+        self.assertEqual(
+            self.package_ops._fragment_endpoint_policy(retract_with_swapped_clip, "snap_last"),
+            "transition_start",
+        )
+
+    def test_fragment_endpoint_policy_prefers_explicit_speed_over_semantics(self) -> None:
+        deploy_with_explicit_forward_speed = {
+            "fragment": "Wings",
+            "frag_tags": ["Deploy"],
+            "animations": [{"name": "drak_corsair_wings_retract", "speed": 1.0}],
+        }
+
+        # Explicit speed metadata is authoritative and keeps forward mapping.
+        self.assertEqual(
+            self.package_ops._fragment_endpoint_policy(deploy_with_explicit_forward_speed, "snap_first"),
+            "transition_start",
+        )
+        self.assertEqual(
+            self.package_ops._fragment_endpoint_policy(deploy_with_explicit_forward_speed, "snap_last"),
+            "transition_end",
+        )
+
+    def test_action_mode_uses_semantic_reverse_playback_fallback(self) -> None:
+        clip = {"name": "drak_corsair_wings_retract", "bones": {}}
+        fragment = {
+            "fragment": "Wings",
+            "frag_tags": ["Deploy"],
+            "animations": [{"name": "drak_corsair_wings_retract"}],
+        }
+        package_root = _StubObject("package-root")
+        package = object()
+
+        captured: dict[str, object] = {}
+        original_load = self.package_ops._load_package_from_root
+        original_find = self.package_ops._find_animation_selection
+        original_apply = self.package_ops._apply_animation_mode_for_clip
+        original_mode_map = self.package_ops.package_animation_mode_map
+        try:
+            self.package_ops._load_package_from_root = lambda _root: package
+            self.package_ops._find_animation_selection = lambda _package, _name: (clip, fragment)
+            self.package_ops.package_animation_mode_map = lambda _root: {}
+
+            def _fake_apply(
+                context,
+                root,
+                package_bundle,
+                clip_data,
+                mode,
+                animation_name=None,
+                fragment=None,
+                reverse_playback=False,
+                fps_policy="adapt_scene",
+            ):
+                captured["reverse_playback"] = reverse_playback
+                captured["mode"] = mode
+                captured["animation_name"] = animation_name
+                return 1
+
+            self.package_ops._apply_animation_mode_for_clip = _fake_apply
+            updated = self.package_ops.apply_animation_mode_to_package_root(
+                context=types.SimpleNamespace(scene=types.SimpleNamespace(frame_set=lambda *_a, **_kw: None)),
+                package_root=package_root,
+                animation_name="fragment:0:drak_corsair_wings_retract",
+                mode="action",
+            )
+        finally:
+            self.package_ops._load_package_from_root = original_load
+            self.package_ops._find_animation_selection = original_find
+            self.package_ops._apply_animation_mode_for_clip = original_apply
+            self.package_ops.package_animation_mode_map = original_mode_map
+
+        self.assertEqual(updated, 1)
+        self.assertEqual(captured.get("mode"), "action")
+        self.assertEqual(captured.get("animation_name"), "fragment:0:drak_corsair_wings_retract")
+        self.assertTrue(captured.get("reverse_playback"))
+
     def test_reverse_snap_first_uses_cyclic_target_for_transition_end(self) -> None:
         clip = {
             "name": "landing_gear_extend",
