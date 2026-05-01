@@ -190,6 +190,75 @@ class AnimationPoseTests(unittest.TestCase):
         decoded = self.package_ops._decode_animation_position([1.0, 2.0, 3.0], "legacy")
         self.assertEqual(decoded, (1.0, -3.0, 2.0))
 
+    def test_animation_overlap_warnings_detects_shared_channel_time_overlap(self) -> None:
+        warnings = self.package_ops._animation_overlap_warnings(
+            "landing_gear_extend",
+            10.0,
+            20.0,
+            {"hash_a", "hash_b"},
+            [
+                {
+                    "id": "existing-1",
+                    "animation_name": "landing_gear_retract",
+                    "start_frame": 20.0,
+                    "duration_frames": 15.0,
+                    "driven_hashes": ["hash_b", "hash_c"],
+                }
+            ],
+        )
+
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("landing_gear_retract", warnings[0])
+        self.assertIn("shared channels", warnings[0])
+
+    def test_animation_overlap_warnings_skips_non_overlapping_or_disjoint_channels(self) -> None:
+        warnings = self.package_ops._animation_overlap_warnings(
+            "wings_deploy",
+            1.0,
+            10.0,
+            {"hash_a"},
+            [
+                {
+                    "id": "existing-1",
+                    "animation_name": "other",
+                    "start_frame": 20.0,
+                    "duration_frames": 10.0,
+                    "driven_hashes": ["hash_a"],
+                },
+                {
+                    "id": "existing-2",
+                    "animation_name": "other2",
+                    "start_frame": 4.0,
+                    "duration_frames": 10.0,
+                    "driven_hashes": ["hash_z"],
+                },
+            ],
+        )
+
+        self.assertEqual(warnings, [])
+
+    def test_animation_instance_from_value_parses_and_normalizes_payload(self) -> None:
+        parsed = self.package_ops._animation_instance_from_value(
+            {
+                "id": "abc123",
+                "animation_name": "landing_gear_extend",
+                "start_frame": "12",
+                "duration_frames": 30,
+                "driven_hashes": ["h2", "h1", "h1"],
+            }
+        )
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["id"], "abc123")
+        self.assertEqual(parsed["animation_name"], "landing_gear_extend")
+        self.assertEqual(parsed["start_frame"], 12.0)
+        self.assertEqual(parsed["duration_frames"], 30.0)
+        self.assertEqual(parsed["driven_hashes"], ["h1", "h2"])
+
+    def test_animation_instance_from_value_rejects_missing_required_fields(self) -> None:
+        self.assertIsNone(self.package_ops._animation_instance_from_value({"id": "only-id"}))
+        self.assertIsNone(self.package_ops._animation_instance_from_value({"animation_name": "clip"}))
+
     # ---- _apply_best_channel_transform endpoint policy ---------------
 
     def _make_object(self, name: str, bind_loc: tuple[float, float, float]) -> _StubObject:

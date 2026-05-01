@@ -52,6 +52,7 @@ from .constants import (
 from .importer import PackageImporter
 from .importer.groups import apply_pom_detail_mode
 from .package_ops import (
+    animation_overlap_warnings,
     apply_animation_mode_to_package_root,
     apply_light_state,
     apply_livery_to_package_root,
@@ -64,10 +65,13 @@ from .package_ops import (
     available_package_animation_items,
     available_package_animation_names,
     available_light_state_names,
+    delete_animation_instance,
     dump_selected_metadata,
     exterior_palette_ids,
     find_package_root,
     import_package,
+    package_animation_instances,
     package_animation_mode_map,
+    update_animation_instance_start_frame,
 )
 

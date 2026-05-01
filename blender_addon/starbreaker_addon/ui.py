@@ -31,6 +31,7 @@ from .runtime import (
     TEMPLATE_COLLECTION_NAME,
     apply_pom_detail_mode,
     SCENE_WEAR_STRENGTH_PROP,
+    animation_overlap_warnings,
     apply_animation_mode_to_package_root,
     apply_light_state,
     apply_livery_to_selected_package,
@@ -43,7 +44,10 @@ from .runtime import (
     exterior_palette_ids,
     find_package_root,
     import_package,
+    delete_animation_instance,
+    package_animation_instances,
     package_animation_mode_map,
+    update_animation_instance_start_frame,
 )
 
 
@@ -54,7 +58,11 @@ _ANIMATION_MODE_ITEMS: tuple[tuple[str, str, str], ...] = (
     ("none", "None", "Leave current transforms (restore bind pose if available)"),
     ("snap_first", "First", "Apply first keyframe pose"),
     ("snap_last", "Last", "Apply last keyframe pose"),
-    ("action", "Insert", "Insert full keyframes as Blender Action"),
+    (
+        "action",
+        "Insert",
+        "Insert full keyframes as Blender Action, anchored at the current timeline frame",
+    ),
 )
 _ANIMATION_FPS_POLICY_ITEMS: tuple[tuple[str, str, str], ...] = (
     (
@@ -922,6 +930,17 @@ class STARBREAKER_OT_apply_animation_mode(Operator):
         if not name:
             self.report({"ERROR"}, "No animation selected")
             return {"CANCELLED"}
+        package = _selected_package(context)
+        warnings: list[str] = []
+        if package is not None and self.mode == "action":
+            warnings = animation_overlap_warnings(
+                package_root,
+                name,
+                float(getattr(context.scene, "frame_current", 1.0)),
+                context_scene=context.scene,
+                fps_policy=self.fps_policy,
+                package=package,
+            )
         try:
             updated = apply_animation_mode_to_package_root(
                 context,
@@ -933,7 +952,77 @@ class STARBREAKER_OT_apply_animation_mode(Operator):
         except Exception as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
+        if warnings:
+            head = "; ".join(warnings[:2])
+            if len(warnings) > 2:
+                head = f"{head}; +{len(warnings) - 2} more overlap(s)"
+            self.report({"WARNING"}, head)
         self.report({"INFO"}, f"{name}: {self.mode} ({updated} object(s) updated)")
+        return {"FINISHED"}
+
+
+class STARBREAKER_OT_edit_animation_instance(Operator):
+    bl_idname = "starbreaker.edit_animation_instance"
+    bl_label = "Edit Animation Instance"
+    bl_options = {"REGISTER", "UNDO"}
+
+    animation_name: StringProperty(name="Animation")  # type: ignore[assignment]
+    instance_id: StringProperty(name="Instance Id")  # type: ignore[assignment]
+    start_frame: FloatProperty(name="Start Frame", default=1.0)  # type: ignore[assignment]
+    delete_instance: BoolProperty(name="Delete this instance", default=False)  # type: ignore[assignment]
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return find_package_root(context.active_object) is not None
+
+    def invoke(self, context: bpy.types.Context, event: bpy.types.Event) -> set[str]:
+        del event
+        package_root = _package_root_from_context(context)
+        package = _selected_package(context)
+        if package_root is None or package is None:
+            self.report({"ERROR"}, "Select an imported StarBreaker object first")
+            return {"CANCELLED"}
+        instances = package_animation_instances(package_root, package)
+        entry = next((item for item in instances if item.get("id") == self.instance_id), None)
+        if entry is None:
+            self.report({"ERROR"}, "Animation instance no longer exists")
+            return {"CANCELLED"}
+        self.start_frame = float(entry.get("start_frame", 1.0))
+        self.delete_instance = False
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context: bpy.types.Context) -> None:
+        del context
+        layout = self.layout
+        layout.label(text=self.animation_name or "Animation")
+        layout.prop(self, "start_frame")
+        layout.prop(self, "delete_instance")
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        package_root = _package_root_from_context(context)
+        package = _selected_package(context)
+        if package_root is None or package is None:
+            self.report({"ERROR"}, "Select an imported StarBreaker object first")
+            return {"CANCELLED"}
+
+        if self.delete_instance:
+            deleted = delete_animation_instance(package_root, self.instance_id, package=package)
+            if not deleted:
+                self.report({"ERROR"}, "Animation instance not found")
+                return {"CANCELLED"}
+            self.report({"INFO"}, "Deleted animation instance")
+            return {"FINISHED"}
+
+        updated = update_animation_instance_start_frame(
+            package_root,
+            self.instance_id,
+            float(self.start_frame),
+            package=package,
+        )
+        if not updated:
+            self.report({"ERROR"}, "Animation instance not found")
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"Moved to frame {int(round(self.start_frame))}")
         return {"FINISHED"}
 
 
@@ -1067,6 +1156,15 @@ class STARBREAKER_PT_tools(Panel):
             else:
                 animation_box.prop(context.scene, _SCENE_ANIMATION_FPS_POLICY_PROP, text="FPS")
                 mode_map = package_animation_mode_map(package_root)
+                instances = package_animation_instances(package_root, package)
+                instances_by_animation: dict[str, list[dict[str, object]]] = {}
+                for instance in instances:
+                    key = str(instance.get("animation_name", ""))
+                    if not key:
+                        continue
+                    instances_by_animation.setdefault(key, []).append(instance)
+                for values in instances_by_animation.values():
+                    values.sort(key=lambda item: float(item.get("start_frame", 1.0)))
                 fps_policy = getattr(context.scene, _SCENE_ANIMATION_FPS_POLICY_PROP, "adapt_scene")
                 for animation_name, animation_display_name in animation_items:
                     animation_box.label(text=animation_display_name)
@@ -1081,6 +1179,19 @@ class STARBREAKER_PT_tools(Panel):
                         op.animation_name = animation_name
                         op.mode = mode_id
                         op.fps_policy = fps_policy
+
+                    instance_entries = instances_by_animation.get(animation_name, [])
+                    if instance_entries:
+                        instances_row = animation_box.row(align=True)
+                        instances_row.label(text="Instances")
+                        for instance in instance_entries:
+                            start = int(round(float(instance.get("start_frame", 1.0))))
+                            op = instances_row.operator(
+                                STARBREAKER_OT_edit_animation_instance.bl_idname,
+                                text=f"@{start}",
+                            )
+                            op.animation_name = animation_display_name
+                            op.instance_id = str(instance.get("id", ""))
 
 
 # ── Addon Preferences ────────────────────────────────────────────────────────
@@ -1147,6 +1258,7 @@ CLASSES = [
     STARBREAKER_OT_switch_light_state,
     STARBREAKER_OT_dump_metadata,
     STARBREAKER_OT_apply_animation_mode,
+    STARBREAKER_OT_edit_animation_instance,
     STARBREAKER_OT_dump_animation_diagnostics,
     STARBREAKER_PT_tools,
 ]

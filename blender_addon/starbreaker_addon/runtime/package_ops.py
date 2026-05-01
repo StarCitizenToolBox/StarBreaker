@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable
@@ -580,7 +581,121 @@ def apply_light_state(state_name: str) -> int:
 
 _ANIMATION_MODES_PROP = "starbreaker_animation_modes"
 _ANIMATION_BIND_TRS_PROP = "starbreaker_animation_bind_trs"
+_ANIMATION_INSTANCES_PROP = "starbreaker_animation_instances_v1"
+_ANIMATION_INSTANCE_ID_PROP = "starbreaker_animation_instance_id"
+_ANIMATION_INSTANCE_NAME_PROP = "starbreaker_animation_name"
 _FRAGMENT_ANIMATION_PREFIX = "fragment:"
+
+
+def _ensure_str_list(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    return [str(value) for value in values if isinstance(value, str)]
+
+
+def _animation_instance_from_value(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    instance_id = value.get("id")
+    animation_name = value.get("animation_name")
+    if not isinstance(instance_id, str) or not instance_id:
+        return None
+    if not isinstance(animation_name, str) or not animation_name:
+        return None
+    try:
+        start_frame = float(value.get("start_frame", 1.0))
+    except (TypeError, ValueError):
+        start_frame = 1.0
+    try:
+        duration_frames = max(0.0, float(value.get("duration_frames", 0.0)))
+    except (TypeError, ValueError):
+        duration_frames = 0.0
+    driven_hashes = sorted(set(_ensure_str_list(value.get("driven_hashes"))))
+    return {
+        "id": instance_id,
+        "animation_name": animation_name,
+        "start_frame": start_frame,
+        "duration_frames": duration_frames,
+        "driven_hashes": driven_hashes,
+    }
+
+
+def _load_animation_instances(package_root: bpy.types.Object) -> list[dict[str, Any]]:
+    payload = package_root.get(_ANIMATION_INSTANCES_PROP)
+    if not isinstance(payload, str) or not payload:
+        return []
+    try:
+        loaded = json.loads(payload)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(loaded, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for value in loaded:
+        parsed = _animation_instance_from_value(value)
+        if parsed is not None:
+            result.append(parsed)
+    return result
+
+
+def _store_animation_instances(package_root: bpy.types.Object, instances: list[dict[str, Any]]) -> None:
+    package_root[_ANIMATION_INSTANCES_PROP] = json.dumps(instances, separators=(",", ":"), sort_keys=True)
+
+
+def _instance_end_frame(instance: dict[str, Any]) -> float:
+    return float(instance.get("start_frame", 1.0)) + float(instance.get("duration_frames", 0.0))
+
+
+def _intervals_overlap(start_a: float, end_a: float, start_b: float, end_b: float) -> bool:
+    return max(start_a, start_b) < min(end_a, end_b)
+
+
+def _animation_overlap_warnings(
+    animation_name: str,
+    start_frame: float,
+    duration_frames: float,
+    driven_hashes: set[str],
+    existing_instances: list[dict[str, Any]],
+) -> list[str]:
+    end_frame = start_frame + duration_frames
+    warnings: list[str] = []
+    if duration_frames <= 0.0 or not driven_hashes:
+        return warnings
+    for existing in existing_instances:
+        existing_name = str(existing.get("animation_name", ""))
+        existing_hashes = set(_ensure_str_list(existing.get("driven_hashes")))
+        if not (driven_hashes & existing_hashes):
+            continue
+        existing_start = float(existing.get("start_frame", 1.0))
+        existing_end = _instance_end_frame(existing)
+        if not _intervals_overlap(start_frame, end_frame, existing_start, existing_end):
+            continue
+        warnings.append(
+            (
+                f"{animation_name} overlaps {existing_name} "
+                f"({int(round(existing_start))}-{int(round(existing_end))}) "
+                f"on {len(driven_hashes & existing_hashes)} shared channels"
+            )
+        )
+    return warnings
+
+
+def _clip_duration_frames(clip: dict[str, Any], frame_scale: float) -> float:
+    trim_frame = _clip_cyclic_transition_target_frame(clip)
+    bones = _normalized_bone_channels(clip)
+    channel_times: list[float] = []
+    for channel in bones.values():
+        rotations = channel.get("rotation") if isinstance(channel.get("rotation"), list) else []
+        positions = channel.get("position") if isinstance(channel.get("position"), list) else []
+        rotation_times = _channel_times(channel, "rotation_time", len(rotations))
+        position_times = _channel_times(channel, "position_time", len(positions))
+        for sample_time in [*rotation_times, *position_times]:
+            if trim_frame is not None and sample_time > trim_frame:
+                continue
+            channel_times.append(float(sample_time))
+    if not channel_times:
+        return 0.0
+    return max(channel_times) * frame_scale
 
 def available_package_animation_names(package: PackageBundle) -> list[str]:
     """Return animation names exported on the package root entity."""
@@ -767,6 +882,271 @@ def package_animation_mode_map(package_root: bpy.types.Object) -> dict[str, str]
     return result
 
 
+def _iter_instance_actions(package_root: bpy.types.Object, instance_id: str) -> list[Any]:
+    actions: list[Any] = []
+    for obj in _iter_package_objects(package_root):
+        animation_data = getattr(obj, "animation_data", None)
+        action = getattr(animation_data, "action", None) if animation_data is not None else None
+        if action is None:
+            continue
+        try:
+            action_instance_id = action.get(_ANIMATION_INSTANCE_ID_PROP)
+        except Exception:
+            action_instance_id = None
+        if action_instance_id == instance_id:
+            actions.append(action)
+    return actions
+
+
+def _iter_instance_strips(package_root: bpy.types.Object, instance_id: str) -> list[Any]:
+    strips: list[Any] = []
+    for obj in _iter_package_objects(package_root):
+        animation_data = getattr(obj, "animation_data", None)
+        tracks = getattr(animation_data, "nla_tracks", None) if animation_data is not None else None
+        if tracks is None:
+            continue
+        for track in tracks:
+            for strip in track.strips:
+                try:
+                    strip_instance_id = strip.get(_ANIMATION_INSTANCE_ID_PROP)
+                except Exception:
+                    strip_instance_id = None
+                if strip_instance_id == instance_id:
+                    strips.append(strip)
+    return strips
+
+
+def _shift_action_frames(action: Any, delta: float) -> None:
+    if abs(delta) < 1e-9:
+        return
+    for fcurve in _action_fcurves(action):
+        keyframe_points = getattr(fcurve, "keyframe_points", None)
+        if keyframe_points is None:
+            continue
+        for keyframe in keyframe_points:
+            try:
+                keyframe.co.x = float(keyframe.co.x) + delta
+                keyframe.handle_left.x = float(keyframe.handle_left.x) + delta
+                keyframe.handle_right.x = float(keyframe.handle_right.x) + delta
+            except Exception:
+                continue
+        try:
+            fcurve.update()
+        except Exception:
+            continue
+
+
+def _resync_animation_instances_from_scene(
+    package_root: bpy.types.Object,
+    package: PackageBundle,
+) -> list[dict[str, Any]]:
+    instances = _load_animation_instances(package_root)
+    by_id: dict[str, dict[str, Any]] = {
+        instance["id"]: dict(instance)
+        for instance in instances
+        if isinstance(instance.get("id"), str)
+    }
+    seen_ids: set[str] = set()
+
+    for obj in _iter_package_objects(package_root):
+        animation_data = getattr(obj, "animation_data", None)
+        if animation_data is None:
+            continue
+
+        action = getattr(animation_data, "action", None)
+        if action is not None:
+            try:
+                instance_id = action.get(_ANIMATION_INSTANCE_ID_PROP)
+                animation_name = action.get(_ANIMATION_INSTANCE_NAME_PROP)
+            except Exception:
+                instance_id, animation_name = None, None
+            if isinstance(instance_id, str) and instance_id and isinstance(animation_name, str) and animation_name:
+                seen_ids.add(instance_id)
+                clip = _find_animation_clip(package, animation_name)
+                if clip is None:
+                    continue
+                entry = by_id.get(instance_id)
+                if entry is None:
+                    entry = {
+                        "id": instance_id,
+                        "animation_name": animation_name,
+                        "start_frame": 1.0,
+                        "duration_frames": 0.0,
+                        "driven_hashes": sorted(_clip_bone_hashes(clip)),
+                    }
+                    by_id[instance_id] = entry
+                try:
+                    frame_low, frame_high = action.frame_range
+                    entry["start_frame"] = float(frame_low)
+                    entry["duration_frames"] = max(0.0, float(frame_high) - float(frame_low))
+                except Exception:
+                    pass
+
+        tracks = getattr(animation_data, "nla_tracks", None)
+        if tracks is None:
+            continue
+        for track in tracks:
+            for strip in track.strips:
+                try:
+                    instance_id = strip.get(_ANIMATION_INSTANCE_ID_PROP)
+                    animation_name = strip.get(_ANIMATION_INSTANCE_NAME_PROP)
+                except Exception:
+                    instance_id, animation_name = None, None
+                if not (isinstance(instance_id, str) and instance_id and isinstance(animation_name, str) and animation_name):
+                    continue
+                seen_ids.add(instance_id)
+                clip = _find_animation_clip(package, animation_name)
+                if clip is None:
+                    continue
+                entry = by_id.get(instance_id)
+                if entry is None:
+                    entry = {
+                        "id": instance_id,
+                        "animation_name": animation_name,
+                        "start_frame": float(getattr(strip, "frame_start", 1.0)),
+                        "duration_frames": max(0.0, float(getattr(strip, "frame_end", 1.0)) - float(getattr(strip, "frame_start", 1.0))),
+                        "driven_hashes": sorted(_clip_bone_hashes(clip)),
+                    }
+                    by_id[instance_id] = entry
+                else:
+                    strip_start = float(getattr(strip, "frame_start", entry.get("start_frame", 1.0)))
+                    entry["start_frame"] = min(float(entry.get("start_frame", strip_start)), strip_start)
+                    strip_duration = max(
+                        0.0,
+                        float(getattr(strip, "frame_end", strip_start)) - strip_start,
+                    )
+                    entry["duration_frames"] = max(float(entry.get("duration_frames", 0.0)), strip_duration)
+
+    resynced = [instance for instance_id, instance in by_id.items() if instance_id in seen_ids]
+    resynced.sort(key=lambda item: (str(item.get("animation_name", "")), float(item.get("start_frame", 1.0))))
+    _store_animation_instances(package_root, resynced)
+    return resynced
+
+
+def package_animation_instances(
+    package_root: bpy.types.Object,
+    package: PackageBundle | None = None,
+) -> list[dict[str, Any]]:
+    if package is None:
+        package = _load_package_from_root(package_root)
+    return _resync_animation_instances_from_scene(package_root, package)
+
+
+def animation_overlap_warnings(
+    package_root: bpy.types.Object,
+    animation_name: str,
+    start_frame: float,
+    context_scene: Any | None = None,
+    fps_policy: str = FPS_POLICY_ADAPT_SCENE,
+    package: PackageBundle | None = None,
+) -> list[str]:
+    if package is None:
+        package = _load_package_from_root(package_root)
+    clip = _find_animation_clip(package, animation_name)
+    if clip is None:
+        return []
+    scene = context_scene if context_scene is not None else getattr(bpy.context, "scene", None)
+    if scene is None:
+        frame_scale = 1.0
+    else:
+        frame_scale = reconcile_animation_fps(scene, clip.get("fps"), fps_policy).frame_scale
+    duration_frames = _clip_duration_frames(clip, frame_scale)
+    instances = package_animation_instances(package_root, package)
+    return _animation_overlap_warnings(
+        animation_name,
+        float(start_frame),
+        duration_frames,
+        _clip_bone_hashes(clip),
+        instances,
+    )
+
+
+def update_animation_instance_start_frame(
+    package_root: bpy.types.Object,
+    instance_id: str,
+    start_frame: float,
+    package: PackageBundle | None = None,
+) -> bool:
+    if package is None:
+        package = _load_package_from_root(package_root)
+    instances = package_animation_instances(package_root, package)
+    target = next((instance for instance in instances if instance.get("id") == instance_id), None)
+    if target is None:
+        return False
+    old_start = float(target.get("start_frame", 1.0))
+    new_start = float(start_frame)
+    delta = new_start - old_start
+    if abs(delta) < 1e-9:
+        return True
+    for action in _iter_instance_actions(package_root, instance_id):
+        _shift_action_frames(action, delta)
+    for strip in _iter_instance_strips(package_root, instance_id):
+        try:
+            strip.frame_start = float(strip.frame_start) + delta
+            strip.frame_end = float(strip.frame_end) + delta
+        except Exception:
+            continue
+    for instance in instances:
+        if instance.get("id") == instance_id:
+            instance["start_frame"] = new_start
+            break
+    _store_animation_instances(package_root, instances)
+    return True
+
+
+def delete_animation_instance(
+    package_root: bpy.types.Object,
+    instance_id: str,
+    package: PackageBundle | None = None,
+) -> bool:
+    if package is None:
+        package = _load_package_from_root(package_root)
+    instances = package_animation_instances(package_root, package)
+    before = len(instances)
+    instances = [instance for instance in instances if instance.get("id") != instance_id]
+    if len(instances) == before:
+        return False
+
+    for action in _iter_instance_actions(package_root, instance_id):
+        for obj in _iter_package_objects(package_root):
+            animation_data = getattr(obj, "animation_data", None)
+            if animation_data is not None and getattr(animation_data, "action", None) is action:
+                try:
+                    animation_data.action = None
+                except Exception:
+                    pass
+        try:
+            bpy.data.actions.remove(action, do_unlink=True)
+        except Exception:
+            pass
+
+    for obj in _iter_package_objects(package_root):
+        animation_data = getattr(obj, "animation_data", None)
+        tracks = getattr(animation_data, "nla_tracks", None) if animation_data is not None else None
+        if tracks is None:
+            continue
+        for track in list(tracks):
+            for strip in list(track.strips):
+                try:
+                    strip_instance_id = strip.get(_ANIMATION_INSTANCE_ID_PROP)
+                except Exception:
+                    strip_instance_id = None
+                if strip_instance_id != instance_id:
+                    continue
+                try:
+                    track.strips.remove(strip)
+                except Exception:
+                    continue
+            try:
+                if not track.strips:
+                    tracks.remove(track)
+            except Exception:
+                continue
+
+    _store_animation_instances(package_root, instances)
+    return True
+
+
 def package_animation_diagnostics(
     package: PackageBundle,
     package_root: bpy.types.Object,
@@ -892,6 +1272,7 @@ def apply_animation_mode_to_package_root(
                     package,
                     other_clip,
                     other_mode,
+                    animation_name=other_name,
                     fragment=other_fragment,
                     reverse_playback=_fragment_reverse_playback(other_fragment),
                     fps_policy=fps_policy,
@@ -903,6 +1284,7 @@ def apply_animation_mode_to_package_root(
         package,
         clip,
         normalized_mode,
+        animation_name=animation_name,
         fragment=fragment,
         reverse_playback=reverse_playback,
         fps_policy=fps_policy,
@@ -919,6 +1301,7 @@ def _apply_animation_mode_for_clip(
     package: PackageBundle,
     clip: dict[str, Any],
     mode: str,
+    animation_name: str | None = None,
     fragment: dict[str, Any] | None = None,
     reverse_playback: bool = False,
     fps_policy: str = FPS_POLICY_ADAPT_SCENE,
@@ -976,6 +1359,7 @@ def _apply_animation_mode_for_clip(
             context,
             package_root,
             clip,
+            animation_name=animation_name,
             reverse_playback=reverse_playback,
             fps_policy=fps_policy,
         )
@@ -1942,27 +2326,39 @@ def _insert_animation_action(
     context: bpy.types.Context,
     package_root: bpy.types.Object,
     clip: dict[str, Any],
+    animation_name: str | None = None,
     reverse_playback: bool = False,
     fps_policy: str = FPS_POLICY_ADAPT_SCENE,
 ) -> int:
     bones = _normalized_bone_channels(clip)
     if not bones:
         return 0
-    name = str(clip.get("name", "animation")) or "animation"
+    name = animation_name or str(clip.get("name", "animation")) or "animation"
     trim_frame = _clip_cyclic_transition_target_frame(clip)
     fps_reconciliation = reconcile_animation_fps(context.scene, clip.get("fps"), fps_policy)
     if fps_reconciliation.mismatch:
         print(describe_reconciliation(name, fps_reconciliation))
 
-    # Phase 46.2: anchor inserted keyframes at frame 1 by default. Earlier
-    # versions used the current scene playhead so multiple action-mode
-    # clips could chain naturally on the timeline, but in practice the
-    # per-clip NLA strip (added in Phase 46) is the proper UI gesture for
-    # time-shifting blocks: the user grabs the strip and drags it. Using
-    # the playhead as an implicit anchor surprised users who scrubbed the
-    # timeline and then re-applied a clip and saw it land at frame 76 (or
-    # wherever they had stopped).
-    frame_offset = 1
+    frame_offset = float(getattr(context.scene, "frame_current", 1.0))
+    duration_frames = _clip_duration_frames(clip, fps_reconciliation.frame_scale)
+    existing_instances = _load_animation_instances(package_root)
+    overlap_warnings = _animation_overlap_warnings(
+        name,
+        frame_offset,
+        duration_frames,
+        _clip_bone_hashes(clip),
+        existing_instances,
+    )
+    for warning in overlap_warnings:
+        print(f"[StarBreaker] WARNING: {warning}")
+    instance_id = uuid.uuid4().hex
+    instance = {
+        "id": instance_id,
+        "animation_name": name,
+        "start_frame": frame_offset,
+        "duration_frames": duration_frames,
+        "driven_hashes": sorted(_clip_bone_hashes(clip)),
+    }
 
     candidates, position_policy = _animation_bone_candidates(package_root, bones)
     updated = 0
@@ -1975,11 +2371,13 @@ def _insert_animation_action(
         # Dope Sheet Action editor shows clean per-bone groups. The Action
         # is pushed onto a per-clip NLA track so multiple clips coexist on
         # the timeline without overwriting each other.
-        action_name = f"SB_{package_root.name}_{name}_{obj.name}"
-        existing = bpy.data.actions.get(action_name)
-        if existing is not None:
-            bpy.data.actions.remove(existing, do_unlink=True)
+        action_name = f"SB_{package_root.name}_{name}_{instance_id}_{obj.name}"
         action = bpy.data.actions.new(name=action_name)
+        try:
+            action[_ANIMATION_INSTANCE_ID_PROP] = instance_id
+            action[_ANIMATION_INSTANCE_NAME_PROP] = name
+        except Exception:
+            pass
         obj.animation_data.action = action
         group_name = obj.name
         # Phase 39: defer group creation until after keyframes are
@@ -2130,26 +2528,24 @@ def _insert_animation_action(
         except Exception:
             has_range = False
         if anim is not None and has_range:
-            track = anim.nla_tracks.get(name)
+            track_name = f"{name}@{int(round(frame_offset))}"
+            track = anim.nla_tracks.get(track_name)
             if track is None:
                 track = anim.nla_tracks.new()
-                track.name = name
-            else:
-                # Re-inserting the same clip should replace prior strips on
-                # this per-clip track, not append stale duplicates.
-                for existing_strip in list(track.strips):
-                    try:
-                        track.strips.remove(existing_strip)
-                    except Exception:
-                        continue
+                track.name = track_name
             try:
-                strip_start = int(action.frame_range[0])
+                strip_start = float(action.frame_range[0])
             except Exception:
-                strip_start = int(frame_offset)
+                strip_start = float(frame_offset)
             strip = None
             try:
                 strip = track.strips.new(name=name, start=strip_start, action=action)
                 strip.name = name
+                try:
+                    strip[_ANIMATION_INSTANCE_ID_PROP] = instance_id
+                    strip[_ANIMATION_INSTANCE_NAME_PROP] = name
+                except Exception:
+                    pass
             except Exception:
                 # Strip may already exist at that frame; reuse the
                 # most-recently-added strip on this track.
@@ -2172,6 +2568,10 @@ def _insert_animation_action(
             anim.action = action
 
         updated += 1
+
+    if updated > 0:
+        existing_instances.append(instance)
+        _store_animation_instances(package_root, existing_instances)
 
     return updated
 
