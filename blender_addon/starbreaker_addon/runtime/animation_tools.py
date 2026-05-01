@@ -29,6 +29,11 @@ from starbreaker_addon.runtime.package_ops import (
     _ANIMATION_MODES_PROP,
     _parse_fragment_animation_key,
     _FRAGMENT_ANIMATION_PREFIX,
+    package_animation_instances,
+    update_animation_instance_start_frame,
+    delete_animation_instance,
+    set_animation_instance_muted,
+    solo_animation_instance,
 )
 
 if TYPE_CHECKING:
@@ -231,6 +236,125 @@ def clear_animation_mode(
     return apply_animation_mode(
         context, package_root_name, animation_name, "none",
     )
+
+
+def list_animation_instances(
+    context: bpy.types.Context,
+    package_root_name: str,
+) -> list[dict[str, Any]]:
+    """Return tracked animation instances for the package root.
+
+    This is MCP-friendly and does not require active selection.
+    """
+    del context
+    obj = bpy.data.objects.get(package_root_name)
+    if obj is None:
+        return []
+    try:
+        scene_path = _string_prop(obj, "starbreaker_scene_path")
+        if scene_path is None:
+            return []
+        bundle = PackageBundle.load(scene_path)
+        return package_animation_instances(obj, bundle)
+    except Exception:
+        return []
+
+
+def set_instance_start_frame(
+    context: bpy.types.Context,
+    package_root_name: str,
+    instance_id: str,
+    start_frame: float,
+) -> dict[str, Any]:
+    """Set one animation instance start frame by id."""
+    del context
+    obj = bpy.data.objects.get(package_root_name)
+    if obj is None:
+        return {"status": "error", "message": f"Object '{package_root_name}' not found"}
+    try:
+        scene_path = _string_prop(obj, "starbreaker_scene_path")
+        if scene_path is None:
+            return {"status": "error", "message": "Missing starbreaker_scene_path"}
+        bundle = PackageBundle.load(scene_path)
+        ok = update_animation_instance_start_frame(obj, instance_id, float(start_frame), package=bundle)
+        if not ok:
+            return {"status": "error", "message": "Animation instance not found"}
+        return {"status": "ok", "message": f"Moved to frame {int(round(float(start_frame)))}"}
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
+
+
+def delete_instance(
+    context: bpy.types.Context,
+    package_root_name: str,
+    instance_id: str,
+) -> dict[str, Any]:
+    """Delete one animation instance by id."""
+    del context
+    obj = bpy.data.objects.get(package_root_name)
+    if obj is None:
+        return {"status": "error", "message": f"Object '{package_root_name}' not found"}
+    try:
+        scene_path = _string_prop(obj, "starbreaker_scene_path")
+        if scene_path is None:
+            return {"status": "error", "message": "Missing starbreaker_scene_path"}
+        bundle = PackageBundle.load(scene_path)
+        ok = delete_animation_instance(obj, instance_id, package=bundle)
+        if not ok:
+            return {"status": "error", "message": "Animation instance not found"}
+        return {"status": "ok", "message": "Deleted animation instance"}
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
+
+
+def toggle_instance_mute(
+    context: bpy.types.Context,
+    package_root_name: str,
+    instance_id: str,
+) -> dict[str, Any]:
+    """Toggle mute on one animation instance by id."""
+    del context
+    obj = bpy.data.objects.get(package_root_name)
+    if obj is None:
+        return {"status": "error", "message": f"Object '{package_root_name}' not found"}
+    try:
+        scene_path = _string_prop(obj, "starbreaker_scene_path")
+        if scene_path is None:
+            return {"status": "error", "message": "Missing starbreaker_scene_path"}
+        bundle = PackageBundle.load(scene_path)
+        muted = set_animation_instance_muted(obj, instance_id, None, package=bundle)
+        if muted is None:
+            return {"status": "error", "message": "Animation instance not found"}
+        return {
+            "status": "ok",
+            "message": "Muted animation instance" if muted else "Unmuted animation instance",
+            "muted": bool(muted),
+        }
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
+
+
+def solo_instance(
+    context: bpy.types.Context,
+    package_root_name: str,
+    instance_id: str,
+) -> dict[str, Any]:
+    """Solo one animation instance by muting all other tracked instances."""
+    del context
+    obj = bpy.data.objects.get(package_root_name)
+    if obj is None:
+        return {"status": "error", "message": f"Object '{package_root_name}' not found"}
+    try:
+        scene_path = _string_prop(obj, "starbreaker_scene_path")
+        if scene_path is None:
+            return {"status": "error", "message": "Missing starbreaker_scene_path"}
+        bundle = PackageBundle.load(scene_path)
+        ok = solo_animation_instance(obj, instance_id, package=bundle)
+        if not ok:
+            return {"status": "error", "message": "Animation instance not found"}
+        return {"status": "ok", "message": "Soloed animation instance"}
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
 
 
 # ------------------------------------------------------------------

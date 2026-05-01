@@ -8,7 +8,7 @@ import bpy
 import blf
 import gpu
 import mathutils
-from bpy.props import BoolProperty, EnumProperty, FloatProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 from bpy.types import Operator, Panel
 from bpy_extras.io_utils import ImportHelper
 from gpu_extras.batch import batch_for_shader
@@ -45,6 +45,8 @@ from .runtime import (
     find_package_root,
     import_package,
     delete_animation_instance,
+    set_animation_instance_muted,
+    solo_animation_instance,
     package_animation_instances,
     package_animation_mode_map,
     update_animation_instance_start_frame,
@@ -962,41 +964,17 @@ class STARBREAKER_OT_apply_animation_mode(Operator):
 
 
 class STARBREAKER_OT_edit_animation_instance(Operator):
-    bl_idname = "starbreaker.edit_animation_instance"
-    bl_label = "Edit Animation Instance"
+    bl_idname = "starbreaker.apply_animation_instance_start_frame"
+    bl_label = "Apply Animation Instance Start Frame"
     bl_options = {"REGISTER", "UNDO"}
+    bl_description = "Apply the inline start-frame value for this animation instance"
 
-    animation_name: StringProperty(name="Animation")  # type: ignore[assignment]
     instance_id: StringProperty(name="Instance Id")  # type: ignore[assignment]
-    start_frame: FloatProperty(name="Start Frame", default=1.0)  # type: ignore[assignment]
-    delete_instance: BoolProperty(name="Delete this instance", default=False)  # type: ignore[assignment]
+    scene_prop_key: StringProperty(name="Scene Prop Key")  # type: ignore[assignment]
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
         return find_package_root(context.active_object) is not None
-
-    def invoke(self, context: bpy.types.Context, event: bpy.types.Event) -> set[str]:
-        del event
-        package_root = _package_root_from_context(context)
-        package = _selected_package(context)
-        if package_root is None or package is None:
-            self.report({"ERROR"}, "Select an imported StarBreaker object first")
-            return {"CANCELLED"}
-        instances = package_animation_instances(package_root, package)
-        entry = next((item for item in instances if item.get("id") == self.instance_id), None)
-        if entry is None:
-            self.report({"ERROR"}, "Animation instance no longer exists")
-            return {"CANCELLED"}
-        self.start_frame = float(entry.get("start_frame", 1.0))
-        self.delete_instance = False
-        return context.window_manager.invoke_props_dialog(self)
-
-    def draw(self, context: bpy.types.Context) -> None:
-        del context
-        layout = self.layout
-        layout.label(text=self.animation_name or "Animation")
-        layout.prop(self, "start_frame")
-        layout.prop(self, "delete_instance")
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         package_root = _package_root_from_context(context)
@@ -1005,24 +983,26 @@ class STARBREAKER_OT_edit_animation_instance(Operator):
             self.report({"ERROR"}, "Select an imported StarBreaker object first")
             return {"CANCELLED"}
 
-        if self.delete_instance:
-            deleted = delete_animation_instance(package_root, self.instance_id, package=package)
-            if not deleted:
-                self.report({"ERROR"}, "Animation instance not found")
-                return {"CANCELLED"}
-            self.report({"INFO"}, "Deleted animation instance")
-            return {"FINISHED"}
+        raw_value = context.scene.get(self.scene_prop_key, None)
+        if raw_value is None:
+            self.report({"ERROR"}, "Missing inline frame value")
+            return {"CANCELLED"}
+        try:
+            start_frame = float(raw_value)
+        except Exception:
+            self.report({"ERROR"}, "Inline frame value must be numeric")
+            return {"CANCELLED"}
 
         updated = update_animation_instance_start_frame(
             package_root,
             self.instance_id,
-            float(self.start_frame),
+            start_frame,
             package=package,
         )
         if not updated:
             self.report({"ERROR"}, "Animation instance not found")
             return {"CANCELLED"}
-        self.report({"INFO"}, f"Moved to frame {int(round(self.start_frame))}")
+        self.report({"INFO"}, f"Moved to frame {int(round(start_frame))}")
         return {"FINISHED"}
 
 
@@ -1085,9 +1065,7 @@ class STARBREAKER_OT_mute_animation_instance(Operator):
     bl_options = {"REGISTER", "UNDO"}
     bl_description = "Mute or unmute this animation instance's NLA strips"
 
-    animation_name: StringProperty(name="Animation Name")  # type: ignore[assignment]
     instance_id: StringProperty(name="Instance Id")  # type: ignore[assignment]
-    start_frame: IntProperty(name="Start Frame", default=1)  # type: ignore[assignment]
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
@@ -1095,14 +1073,18 @@ class STARBREAKER_OT_mute_animation_instance(Operator):
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         package_root = _package_root_from_context(context)
+        package = _selected_package(context)
         if package_root is None:
             self.report({"ERROR"}, "Select an imported StarBreaker object first")
             return {"CANCELLED"}
-        track_name = f"{self.animation_name}@{self.start_frame}"
-        current_mute = _nla_track_mute_state(package_root, track_name)
-        _set_nla_track_mute(package_root, track_name, not current_mute)
-        state = "muted" if not current_mute else "unmuted"
-        self.report({"INFO"}, f"{track_name} {state}")
+        if package is None:
+            self.report({"ERROR"}, "No package selected")
+            return {"CANCELLED"}
+        muted = set_animation_instance_muted(package_root, self.instance_id, None, package=package)
+        if muted is None:
+            self.report({"ERROR"}, "Animation instance not found")
+            return {"CANCELLED"}
+        self.report({"INFO"}, "Muted animation instance" if muted else "Unmuted animation instance")
         return {"FINISHED"}
 
 
@@ -1114,9 +1096,7 @@ class STARBREAKER_OT_solo_animation_instance(Operator):
     bl_options = {"REGISTER", "UNDO"}
     bl_description = "Unmute this instance and mute all other animation instances"
 
-    animation_name: StringProperty(name="Animation Name")  # type: ignore[assignment]
     instance_id: StringProperty(name="Instance Id")  # type: ignore[assignment]
-    start_frame: IntProperty(name="Start Frame", default=1)  # type: ignore[assignment]
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
@@ -1124,17 +1104,17 @@ class STARBREAKER_OT_solo_animation_instance(Operator):
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         package_root = _package_root_from_context(context)
+        package = _selected_package(context)
         if package_root is None:
             self.report({"ERROR"}, "Select an imported StarBreaker object first")
             return {"CANCELLED"}
-        target_track = f"{self.animation_name}@{self.start_frame}"
-        # Mute all NLA tracks on all objects in the package, then unmute target.
-        for obj in [package_root, *package_root.children_recursive]:
-            if not obj.animation_data:
-                continue
-            for track in obj.animation_data.nla_tracks:
-                track.mute = (track.name != target_track)
-        self.report({"INFO"}, f"Soloed {target_track}")
+        if package is None:
+            self.report({"ERROR"}, "No package selected")
+            return {"CANCELLED"}
+        if not solo_animation_instance(package_root, self.instance_id, package=package):
+            self.report({"ERROR"}, "Animation instance not found")
+            return {"CANCELLED"}
+        self.report({"INFO"}, "Soloed animation instance")
         return {"FINISHED"}
 
 
@@ -1298,40 +1278,45 @@ class STARBREAKER_PT_tools(Panel):
                                 is_muted = _nla_track_mute_state(package_root, track_name)
 
                                 row = animation_box.row(align=True)
-                                # Frame button: click to edit start frame
-                                op = row.operator(
+                                row.label(text=animation_display_name)
+
+                                # Inline frame number control (replaces old dialog workflow).
+                                scene_prop_key = f"starbreaker_anim_start_{instance_id}"
+                                scene_value = context.scene.get(scene_prop_key)
+                                if scene_value is None:
+                                    context.scene[scene_prop_key] = int(start)
+                                row.prop(context.scene, f'["{scene_prop_key}"]', text="@")
+
+                                apply_op = row.operator(
                                     STARBREAKER_OT_edit_animation_instance.bl_idname,
-                                    text=f"@{start}",
+                                    text="",
+                                    icon="CHECKMARK",
                                 )
-                                op.animation_name = animation_display_name
-                                op.instance_id = instance_id
+                                apply_op.instance_id = instance_id
+                                apply_op.scene_prop_key = scene_prop_key
 
                                 # Mute toggle
                                 mute_op = row.operator(
                                     STARBREAKER_OT_mute_animation_instance.bl_idname,
                                     text="",
-                                    icon="MUTE_IPO_ON" if is_muted else "MUTE_IPO_OFF",
+                                    icon="HIDE_ON" if is_muted else "HIDE_OFF",
                                     depress=is_muted,
                                 )
-                                mute_op.animation_name = animation_name
                                 mute_op.instance_id = instance_id
-                                mute_op.start_frame = start
 
                                 # Solo
                                 solo_op = row.operator(
                                     STARBREAKER_OT_solo_animation_instance.bl_idname,
                                     text="",
-                                    icon="SOLO_ON",
+                                    icon="EVENT_S",
                                 )
-                                solo_op.animation_name = animation_name
                                 solo_op.instance_id = instance_id
-                                solo_op.start_frame = start
 
                                 # Delete
                                 del_op = row.operator(
                                     STARBREAKER_OT_delete_animation_instance.bl_idname,
                                     text="",
-                                    icon="X",
+                                    icon="TRASH",
                                 )
                                 del_op.instance_id = instance_id
                 except Exception as exc:

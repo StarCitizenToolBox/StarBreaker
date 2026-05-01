@@ -73,6 +73,8 @@ from .package_ops import (
     insert_animation_clip_at_frame,
     package_animation_instances,
     package_animation_mode_map,
+    set_animation_instance_muted,
+    solo_animation_instance,
     update_animation_instance_start_frame,
 )
 

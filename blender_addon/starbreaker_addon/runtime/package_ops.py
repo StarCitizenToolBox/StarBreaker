@@ -1236,6 +1236,90 @@ def delete_animation_instance(
     return True
 
 
+def set_animation_instance_muted(
+    package_root: bpy.types.Object,
+    instance_id: str,
+    muted: bool | None = None,
+    package: PackageBundle | None = None,
+) -> bool | None:
+    """Mute/unmute one animation instance by id.
+
+    Returns:
+      - ``True`` when the instance is muted after the call
+      - ``False`` when the instance is unmuted after the call
+      - ``None`` when the instance could not be resolved
+    """
+    if package is None:
+        package = _load_package_from_root(package_root)
+    instances = package_animation_instances(package_root, package)
+    target = next((instance for instance in instances if instance.get("id") == instance_id), None)
+    if target is None:
+        return None
+
+    track_name = f"{target.get('animation_name', '')}@{int(round(float(target.get('start_frame', 1.0))))}"
+    current_state: bool | None = None
+    tracks: list[Any] = []
+    for obj in _iter_package_objects(package_root):
+        animation_data = getattr(obj, "animation_data", None)
+        nla_tracks = getattr(animation_data, "nla_tracks", None) if animation_data is not None else None
+        if nla_tracks is None:
+            continue
+        for track in nla_tracks:
+            if track.name == track_name:
+                tracks.append(track)
+                if current_state is None:
+                    current_state = bool(track.mute)
+
+    if not tracks:
+        return None
+
+    next_state = (not bool(current_state)) if muted is None else bool(muted)
+    for track in tracks:
+        try:
+            track.mute = next_state
+        except Exception:
+            continue
+    return next_state
+
+
+def solo_animation_instance(
+    package_root: bpy.types.Object,
+    instance_id: str,
+    package: PackageBundle | None = None,
+) -> bool:
+    """Solo one animation instance by muting all other tracked instance tracks."""
+    if package is None:
+        package = _load_package_from_root(package_root)
+    instances = package_animation_instances(package_root, package)
+    target = next((instance for instance in instances if instance.get("id") == instance_id), None)
+    if target is None:
+        return False
+
+    track_names = {
+        f"{instance.get('animation_name', '')}@{int(round(float(instance.get('start_frame', 1.0))))}"
+        for instance in instances
+    }
+    target_track_name = f"{target.get('animation_name', '')}@{int(round(float(target.get('start_frame', 1.0))))}"
+
+    target_seen = False
+    for obj in _iter_package_objects(package_root):
+        animation_data = getattr(obj, "animation_data", None)
+        nla_tracks = getattr(animation_data, "nla_tracks", None) if animation_data is not None else None
+        if nla_tracks is None:
+            continue
+        for track in nla_tracks:
+            if track.name not in track_names:
+                continue
+            should_mute = track.name != target_track_name
+            if track.name == target_track_name:
+                target_seen = True
+            try:
+                track.mute = should_mute
+            except Exception:
+                continue
+    return target_seen
+
+
 def package_animation_diagnostics(
     package: PackageBundle,
     package_root: bpy.types.Object,
