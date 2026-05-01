@@ -270,5 +270,119 @@ class PackageOpsTests(unittest.TestCase):
         self.assertEqual(rebuild_calls, [("livery_decal_body", "base.materials.json", "palette/rsi_scorpius")])
 
 
+class AnimationDisplayNameTests(unittest.TestCase):
+    """Tests for _animation_display_name and _entity_name_prefix."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.package_ops, _ = _load_package_ops()
+
+    def _clip(self, name: str, **extra) -> dict:
+        return {"name": name, **extra}
+
+    def test_localized_name_takes_priority_over_raw_clip_name(self) -> None:
+        clip = self._clip("test_ship_vtol_deploy", localized_name="VTOL Deploy")
+        result = self.package_ops._animation_display_name(clip, entity_prefix="test_ship")
+        self.assertEqual(result, "VTOL Deploy")
+
+    def test_entity_prefix_stripped_and_humanized(self) -> None:
+        clip = self._clip("test_ship_vtol_deploy")
+        result = self.package_ops._animation_display_name(clip, entity_prefix="test_ship")
+        self.assertEqual(result, "Vtol Deploy")
+
+    def test_entity_prefix_stripped_retract_variant(self) -> None:
+        clip = self._clip("test_ship_vtol_retract")
+        result = self.package_ops._animation_display_name(clip, entity_prefix="test_ship")
+        self.assertEqual(result, "Vtol Retract")
+
+    def test_no_entity_prefix_returns_raw_name(self) -> None:
+        clip = self._clip("test_ship_vtol_deploy")
+        result = self.package_ops._animation_display_name(clip)
+        self.assertEqual(result, "test_ship_vtol_deploy")
+
+    def test_prefix_mismatch_still_humanizes(self) -> None:
+        # Prefix does not match clip name — entire name is humanized.
+        clip = self._clip("other_ship_action")
+        result = self.package_ops._animation_display_name(clip, entity_prefix="test_ship")
+        self.assertEqual(result, "Other Ship Action")
+
+    def test_entity_name_prefix_strips_class_namespace(self) -> None:
+        package = types.SimpleNamespace(
+            scene=types.SimpleNamespace(
+                root_entity=types.SimpleNamespace(entity_name="EntityClassDefinition.Test_Ship")
+            )
+        )
+        result = self.package_ops._entity_name_prefix(package)
+        self.assertEqual(result, "test_ship")
+
+    def test_entity_name_prefix_no_namespace(self) -> None:
+        package = types.SimpleNamespace(
+            scene=types.SimpleNamespace(
+                root_entity=types.SimpleNamespace(entity_name="Other_Ship")
+            )
+        )
+        result = self.package_ops._entity_name_prefix(package)
+        self.assertEqual(result, "other_ship")
+
+    def test_entity_name_prefix_missing_attribute_returns_empty(self) -> None:
+        package = types.SimpleNamespace()
+        result = self.package_ops._entity_name_prefix(package)
+        self.assertEqual(result, "")
+
+    def test_available_package_animation_items_strips_entity_prefix(self) -> None:
+        """Non-fragment clips get entity prefix stripped and humanized."""
+        clips = [
+            {"name": "test_ship_vtol_deploy", "fps": 30, "frame_count": 60,
+             "fragments": [], "sidecar": None, "start_position": None, "start_rotation": None},
+            {"name": "test_ship_vtol_retract", "fps": 30, "frame_count": 60,
+             "fragments": [], "sidecar": None, "start_position": None, "start_rotation": None},
+        ]
+        package = types.SimpleNamespace(
+            scene=types.SimpleNamespace(
+                root_entity=types.SimpleNamespace(
+                    entity_name="EntityClassDefinition.Test_Ship",
+                    raw={"animations": clips},
+                )
+            )
+        )
+        items = self.package_ops.available_package_animation_items(package)
+        item_map = dict(items)
+        self.assertEqual(item_map.get("test_ship_vtol_deploy"), "Vtol Deploy")
+        self.assertEqual(item_map.get("test_ship_vtol_retract"), "Vtol Retract")
+
+    def test_available_package_animation_items_frag_tags_override_clip_name(self) -> None:
+        """Fragment clips with frag_tags use frag_tags-derived names regardless of prefix."""
+        clips = [
+            {
+                "name": "test_ship_wings_deploy",
+                "fps": 30, "frame_count": 120,
+                "sidecar": None, "start_position": None, "start_rotation": None,
+                "fragments": [{"fragment": "Wings", "frag_tags": ["Retract"],
+                               "tags": [], "scopes": [], "animations": [],
+                               "guid": "a", "option_weight": 1.0, "blend_out_duration": 0.2}],
+            },
+            {
+                "name": "test_ship_wings_retract",
+                "fps": 30, "frame_count": 120,
+                "sidecar": None, "start_position": None, "start_rotation": None,
+                "fragments": [{"fragment": "Wings", "frag_tags": ["Deploy"],
+                               "tags": [], "scopes": [], "animations": [],
+                               "guid": "b", "option_weight": 1.0, "blend_out_duration": 0.2}],
+            },
+        ]
+        package = types.SimpleNamespace(
+            scene=types.SimpleNamespace(
+                root_entity=types.SimpleNamespace(
+                    entity_name="EntityClassDefinition.Test_Ship",
+                    raw={"animations": clips},
+                )
+            )
+        )
+        items = self.package_ops.available_package_animation_items(package)
+        item_map = dict(items)
+        self.assertEqual(item_map.get("fragment:0:test_ship_wings_deploy"), "Wings Retract")
+        self.assertEqual(item_map.get("fragment:0:test_ship_wings_retract"), "Wings Deploy")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

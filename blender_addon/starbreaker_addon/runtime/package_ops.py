@@ -709,7 +709,9 @@ def available_package_animation_items(package: PackageBundle) -> list[tuple[str,
     """Return ``(clip_name, display_name)`` pairs for exported animations.
 
     ``clip_name`` is the canonical sidecar key used for lookups. ``display_name``
-    prefers localized metadata when present, then falls back to a shortened path.
+    prefers localized metadata when present, then falls back to the clip name
+    with the entity prefix stripped and humanized (e.g. ``ship_vtol_deploy``
+    → ``"Vtol Deploy"``).
     """
     clips = _animation_clips(package)
     preferred_exact_names = {
@@ -717,6 +719,7 @@ def available_package_animation_items(package: PackageBundle) -> list[tuple[str,
         for clip in clips
         if _is_preferred_package_animation_name(str(clip.get("name", "")).strip())
     }
+    entity_prefix = _entity_name_prefix(package)
 
     fragment_items: dict[tuple[str, str], tuple[int, str, str]] = {}
     items: list[tuple[str, str]] = []
@@ -733,7 +736,7 @@ def available_package_animation_items(package: PackageBundle) -> list[tuple[str,
             continue
         if preferred_exact_names and clip_name not in preferred_exact_names:
             continue
-        items.append((clip_name, _animation_display_name(clip)))
+        items.append((clip_name, _animation_display_name(clip, entity_prefix=entity_prefix)))
     items.extend((key, display_name) for _, key, display_name in fragment_items.values())
     return items
 
@@ -1591,7 +1594,33 @@ def _strip_animation_prefix(name: str) -> str:
     return normalized
 
 
-def _animation_display_name(clip: dict[str, Any]) -> str:
+def _entity_name_prefix(package: PackageBundle) -> str:
+    """Derive a lowercase entity name prefix for stripping from clip names.
+
+    Returns e.g. ``"my_ship"`` from
+    ``entity_name="EntityClassDefinition.My_Ship"``.
+    """
+    try:
+        entity_name = package.scene.root_entity.entity_name
+    except AttributeError:
+        return ""
+    if not entity_name:
+        return ""
+    if "." in entity_name:
+        entity_name = entity_name.rsplit(".", 1)[-1]
+    return entity_name.lower()
+
+
+def _animation_display_name(
+    clip: dict[str, Any], entity_prefix: str | None = None
+) -> str:
+    """Return a human-readable display name for an animation clip.
+
+    Checks localization keys first.  When the fallback raw clip name is used
+    and *entity_prefix* is provided, the prefix (e.g. ``"my_ship_"``) is
+    stripped and the remainder is title-cased (e.g. ``"my_ship_vtol_deploy"``
+    → ``"Vtol Deploy"``).
+    """
     for key in ("localized_name", "display_name", "label", "title", "ui_name"):
         value = clip.get(key)
         if isinstance(value, str):
@@ -1611,7 +1640,13 @@ def _animation_display_name(clip: dict[str, Any]) -> str:
     raw_name = str(clip.get("name", "")).strip()
     shortened = _strip_animation_prefix(raw_name)
     filename = Path(shortened).name if shortened else ""
-    return filename or shortened or raw_name
+    base = filename or shortened or raw_name
+    if entity_prefix:
+        prefix_with_sep = entity_prefix.rstrip("_") + "_"
+        if base.lower().startswith(prefix_with_sep):
+            base = base[len(prefix_with_sep):]
+        return _humanize_fragment_part(base)
+    return base
 
 
 def _hydrate_animation_clip(package: PackageBundle, clip: dict[str, Any]) -> dict[str, Any]:
