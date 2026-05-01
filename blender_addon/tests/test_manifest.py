@@ -50,11 +50,12 @@ VULTURE_SCENE = _existing_path(
     "ships/Packages/Drake Vulture/scene.json",
 )
 ARGO_INTERIOR = REPO_ROOT / "ships/Data/Objects/Spaceships/Ships/ARGO/MOLE/argo_mole_interior_TEX0.materials.json"
+ARGO_CORAMOR = REPO_ROOT / "ships/Data/Objects/Spaceships/Ships/ARGO/MOLE/argo_mole_coramor_TEX0.materials.json"
 COMPONENT_MASTER = REPO_ROOT / "ships/Data/Materials/vehicles/components/component_master_01_TEX0.materials.json"
 
 
 _requires_argo_fixture = unittest.skipUnless(
-    ARGO_SCENE.is_file() and ARGO_INTERIOR.is_file() and COMPONENT_MASTER.is_file(),
+    ARGO_SCENE.is_file() and ARGO_CORAMOR.is_file() and COMPONENT_MASTER.is_file(),
     "ARGO MOLE fixtures not present; skipping manifest test",
 )
 
@@ -91,11 +92,11 @@ class ManifestTests(unittest.TestCase):
 
     @_requires_argo_fixture
     def test_material_sidecar_preserves_layer_and_virtual_input_contract(self) -> None:
-        interior = MaterialSidecar.from_file(ARGO_INTERIOR)
+        interior = MaterialSidecar.from_file(ARGO_CORAMOR)
         self.assertIsNotNone(interior.source_material_path)
         self.assertTrue(interior.submaterials)
         ui_plane = next(submaterial for submaterial in interior.submaterials if submaterial.shader_family == "UIPlane")
-        self.assertEqual(ui_plane.submaterial_name, "rtt_hud")
+        self.assertEqual(ui_plane.submaterial_name, "int_rtt_hud")
         self.assertIn("$RenderToTexture", ui_plane.virtual_inputs)
 
         component = MaterialSidecar.from_file(COMPONENT_MASTER)

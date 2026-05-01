@@ -168,10 +168,10 @@ class PaletteTests(unittest.TestCase):
 
     def test_palette_signature_reuses_same_glass_color_across_palettes(self) -> None:
         package = PackageBundle.load(ARGO_SCENE)
-        sidecar = package.load_material_sidecar("Data/Objects/Spaceships/Ships/ARGO/MOLE/argo_mole_interior_TEX0.materials.json")
+        sidecar = package.load_material_sidecar("Data/Objects/Spaceships/Ships/ARGO/MOLE/argo_mole_coramor_TEX0.materials.json")
         self.assertIsNotNone(sidecar)
 
-        glass = next(submaterial for submaterial in sidecar.submaterials if submaterial.submaterial_name == "glass_interior_canopy")
+        glass = next(submaterial for submaterial in sidecar.submaterials if submaterial.submaterial_name == "int_glass_cockpit")
         default_palette = palette_for_id(package, "palette/default")
         argo_palette = palette_for_id(package, "palette/argo_mole")
 
