@@ -22,6 +22,7 @@ use crate::state::AppState;
 /// Minimum Blender version required to install the StarBreaker addon.
 const MIN_BLENDER_MAJOR: u32 = 5;
 const MIN_BLENDER_MINOR: u32 = 0;
+const EXPORT_FINAL_WRITE_START: f32 = 0.80;
 
 /// Discovery result returned to the frontend.
 #[derive(Serialize)]
@@ -309,6 +310,18 @@ fn version_meets_minimum(version: &str) -> bool {
     }
 }
 
+/// Blender user profile folders use major.minor (e.g. 5.1), even when
+/// `blender --version` reports a patch component like 5.1.1.
+#[cfg(target_os = "windows")]
+fn blender_profile_version_dir(version: &str) -> String {
+    let parts = version_sort_key(version);
+    match (parts.first(), parts.get(1)) {
+        (Some(major), Some(minor)) => format!("{major}.{minor}"),
+        (Some(major), None) => format!("{major}.0"),
+        _ => version.trim().to_string(),
+    }
+}
+
 /// Return candidate Blender executable paths for a given addons directory.
 /// Walks up the tree looking for a binary, then checks common system locations.
 fn find_blender_binary_candidates(addons_path: &Path) -> Vec<PathBuf> {
@@ -534,7 +547,11 @@ fn discover_blender_addon_targets() -> BlenderDiscovery {
                         has_incompatible = true;
                         continue;
                     }
-                    let addons_path = appdata_root.join(&ver).join("scripts").join("addons");
+                    let profile_dir = blender_profile_version_dir(&ver);
+                    let addons_path = appdata_root
+                        .join(profile_dir)
+                        .join("scripts")
+                        .join("addons");
                     if !compatible.iter().any(|t| t.addons_path == addons_path) {
                         compatible.push(BlenderAddonTarget {
                             blender_version: ver,
@@ -1491,7 +1508,7 @@ fn export_single(
                 ))
             })?;
             if let Some(progress) = progress {
-                progress.report(0.95, "Writing bundled file");
+                progress.report(EXPORT_FINAL_WRITE_START, "Writing bundled file");
             }
             std::fs::write(output_path, bundled_bytes)?;
             if let Some(progress) = progress {
@@ -1517,7 +1534,10 @@ fn export_single(
                         DecomposedWriteOutcome::Written => "Writing package files",
                         DecomposedWriteOutcome::SkippedExisting => "Skipping existing assets",
                     };
-                    progress.report(0.90 + 0.10 * fraction, stage);
+                    progress.report(
+                        EXPORT_FINAL_WRITE_START + (1.0 - EXPORT_FINAL_WRITE_START) * fraction,
+                        stage,
+                    );
                 }
             }
             if let Some(progress) = progress {

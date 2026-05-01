@@ -38,6 +38,9 @@ pub fn assemble_glb_with_loadout_with_progress(
     progress: Option<&Progress>,
     existing_asset_paths: Option<&HashSet<String>>,
 ) -> Result<ExportResult, Error> {
+    const ASSEMBLY_STAGE_START: f32 = 0.60;
+    const ASSEMBLY_STAGE_END: f32 = 0.80;
+
     ensure_supported_export_options(opts)?;
 
     use crate::types::EntityPayload;
@@ -257,7 +260,7 @@ pub fn assemble_glb_with_loadout_with_progress(
             preloaded_interior_textures.len()
         );
     }
-    report_progress(progress, 0.60, if opts.kind == ExportKind::Decomposed {
+    report_progress(progress, ASSEMBLY_STAGE_START, if opts.kind == ExportKind::Decomposed {
         "Building structured package"
     } else {
         "Packing GLB"
@@ -333,7 +336,7 @@ pub fn assemble_glb_with_loadout_with_progress(
             populate_palette_display_name(palette, &paint_display_names);
         }
         let paint_variants = enumerate_paint_variants_for_entity(db, p4k, record, &paint_display_names);
-        let decomposed_progress = progress.map(|progress| progress.sub(0.60, 0.90));
+        let decomposed_progress = progress.map(|progress| progress.sub(ASSEMBLY_STAGE_START, ASSEMBLY_STAGE_END));
         let decomposed = crate::decomposed::write_decomposed_export(
             p4k,
             crate::decomposed::DecomposedInput {
@@ -358,7 +361,7 @@ pub fn assemble_glb_with_loadout_with_progress(
             &mut interior_mesh_loader,
         )?;
 
-        report_progress(progress, 0.90, "Writing structured package");
+        report_progress(progress, ASSEMBLY_STAGE_END, "Writing structured package");
 
         return Ok(ExportResult {
             kind: opts.kind,
@@ -370,7 +373,7 @@ pub fn assemble_glb_with_loadout_with_progress(
         });
     }
 
-    let glb_progress = progress.map(|progress| progress.sub(0.60, 0.90));
+    let glb_progress = progress.map(|progress| progress.sub(ASSEMBLY_STAGE_START, ASSEMBLY_STAGE_END));
     let glb = crate::gltf::write_glb_with_progress(
         crate::gltf::GlbInput {
             root_mesh: Some(root_mesh),
@@ -408,7 +411,7 @@ pub fn assemble_glb_with_loadout_with_progress(
         glb_progress.as_ref(),
     )?;
 
-    report_progress(progress, 0.90, "Writing bundled file");
+    report_progress(progress, ASSEMBLY_STAGE_END, "Writing bundled file");
 
     Ok(ExportResult {
         kind: opts.kind,
