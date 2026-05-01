@@ -913,7 +913,23 @@ def _iter_instance_actions(package_root: bpy.types.Object, instance_id: str) -> 
     return actions
 
 
-def _iter_instance_strips(package_root: bpy.types.Object, instance_id: str) -> list[Any]:
+def _iter_instance_strips(
+    package_root: bpy.types.Object,
+    instance_id: str,
+    instances: list[dict[str, Any]] | None = None,
+    fallback_track_name: str | None = None,
+) -> list[Any]:
+    # Build fallback track name and animation name prefix for matching
+    fallback_anim_prefix: str | None = None
+    if instances is not None or fallback_track_name is not None:
+        if fallback_track_name is None and instances is not None:
+            inst_meta = next((i for i in instances if i.get("id") == instance_id), None)
+            if inst_meta is not None:
+                anim_name = inst_meta.get("animation_name", "")
+                start = int(round(float(inst_meta.get("start_frame", 0))))
+                fallback_track_name = f"{anim_name}@{start}"
+        if fallback_track_name is not None:
+            fallback_anim_prefix = fallback_track_name.rsplit("@", 1)[0] + "@"
     strips: list[Any] = []
     for obj in _iter_package_objects(package_root):
         animation_data = getattr(obj, "animation_data", None)
@@ -922,11 +938,19 @@ def _iter_instance_strips(package_root: bpy.types.Object, instance_id: str) -> l
             continue
         for track in tracks:
             for strip in track.strips:
+                matched = False
                 try:
                     strip_instance_id = strip.get(_ANIMATION_INSTANCE_ID_PROP)
+                    if strip_instance_id == instance_id:
+                        matched = True
                 except Exception:
-                    strip_instance_id = None
-                if strip_instance_id == instance_id:
+                    pass
+                if not matched and fallback_track_name is not None and track.name == fallback_track_name:
+                    matched = True
+                # Last resort: match by animation name prefix (handles stale @N in track name)
+                if not matched and fallback_anim_prefix is not None and track.name.startswith(fallback_anim_prefix):
+                    matched = True
+                if matched:
                     strips.append(strip)
     return strips
 
@@ -1114,14 +1138,29 @@ def update_animation_instance_start_frame(
     delta = new_start - old_start
     if abs(delta) < 1e-9:
         return True
+    anim_name = target.get("animation_name", "")
+    old_track_name = f"{anim_name}@{int(round(old_start))}"
+    new_track_name = f"{anim_name}@{int(round(new_start))}"
     for action in _iter_instance_actions(package_root, instance_id):
         _shift_action_frames(action, delta)
-    for strip in _iter_instance_strips(package_root, instance_id):
+    for strip in _iter_instance_strips(package_root, instance_id, fallback_track_name=old_track_name):
         try:
             strip.frame_start = float(strip.frame_start) + delta
             strip.frame_end = float(strip.frame_end) + delta
         except Exception:
             continue
+    # Rename NLA tracks so future lookups find them under the new start frame
+    for obj in _iter_package_objects(package_root):
+        animation_data = getattr(obj, "animation_data", None)
+        tracks = getattr(animation_data, "nla_tracks", None) if animation_data is not None else None
+        if tracks is None:
+            continue
+        for track in tracks:
+            if track.name == old_track_name:
+                try:
+                    track.name = new_track_name
+                except Exception:
+                    pass
     for instance in instances:
         if instance.get("id") == instance_id:
             instance["start_frame"] = new_start
