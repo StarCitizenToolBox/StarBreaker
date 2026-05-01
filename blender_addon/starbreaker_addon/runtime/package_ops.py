@@ -2384,18 +2384,9 @@ def _insert_animation_action(
             action[_ANIMATION_INSTANCE_NAME_PROP] = name
         except Exception:
             pass
-        # Phase 62: stash the current live action so we can restore it
-        # after keyframe insertion if the object already belongs to a
-        # different instance.  keyframe_insert() writes into whatever
-        # animation_data.action is currently set, so we must temporarily
-        # point it at the new action while inserting, then decide whether
-        # to leave it there or put the old action back.
-        _prior_action = obj.animation_data.action  # may be None
-        _prior_owner = (
-            _prior_action.get(_ANIMATION_INSTANCE_ID_PROP)
-            if _prior_action is not None
-            else None
-        )
+        # Temporarily set anim.action to the new action so keyframe_insert()
+        # writes into the correct target.  After all keyframes are done the
+        # live action pointer is cleared (NLA strips drive playback).
         obj.animation_data.action = action
         group_name = obj.name
         # Phase 39: defer group creation until after keyframes are
@@ -2569,30 +2560,18 @@ def _insert_animation_action(
                 # most-recently-added strip on this track.
                 if track.strips:
                     strip = track.strips[-1]
-            # Phase 46: mute the NLA strip so the live action drives
-            # playback (no double-evaluation). Apply mute regardless of
-            # whether the strip was freshly created or pre-existing from
-            # a prior import — Phase 46's first-pass version only set
-            # mute on freshly-created strips and left re-imports playing
-            # the strip at full strength alongside the live action.
-            if strip is not None:
-                try:
-                    strip.mute = True
-                except Exception:
-                    pass
-            # Phase 46: keep anim.action set so the keyframes are visible
-            # in the Dope Sheet / Action Editor for the selected object.
-            # The NLA strip above is muted, so there's no double-eval.
-            # Phase 62: restore the prior action if it belonged to a
-            # different instance.  keyframe_insert() needed anim.action to
-            # point at the new action while inserting (above), but leaving
-            # it there would evict the prior instance from the Dope Sheet.
-            # If the object had no previous action, or its previous action
-            # was from this same instance (re-insert), keep the new action.
-            if _prior_owner is not None and _prior_owner != instance_id:
-                anim.action = _prior_action
-            # else: no prior owner (first insert on this object) or same
-            # instance — new action stays as the live action.
+            # Phase 62: NLA strips drive playback for multi-insert scenarios.
+            # Leave strips unmuted so Blender's NLA evaluates them at their
+            # scheduled frame ranges.  When multiple clips are inserted on
+            # separate non-overlapping tracks, the NLA plays each clip at
+            # the right time without blending artifacts.
+            # Clear the live action after inserting so the NLA (not a stale
+            # live action) is the sole driver.  This avoids both double-
+            # evaluation and the "prior insert freezes at its last keyframe"
+            # problem that occurred when anim.action held a different clip's
+            # action pointer.
+            if anim is not None:
+                anim.action = None
 
         updated += 1
 
