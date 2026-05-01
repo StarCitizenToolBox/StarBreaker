@@ -440,10 +440,12 @@ fn discover_blender_addon_targets() -> BlenderDiscovery {
 
     #[cfg(target_os = "windows")]
     {
+        // Addon user data always lives under APPDATA, never Program Files.
+        // Writing to Program Files requires UAC elevation; Blender itself
+        // never installs user addons there.
         if let Ok(appdata) = std::env::var("APPDATA") {
             roots.push(PathBuf::from(appdata).join("Blender Foundation/Blender"));
         }
-        roots.push(PathBuf::from(r"C:\Program Files\Blender Foundation"));
     }
 
     let mut compatible: Vec<BlenderAddonTarget> = Vec::new();
@@ -495,6 +497,51 @@ fn discover_blender_addon_targets() -> BlenderDiscovery {
                 });
             } else {
                 has_incompatible = true;
+            }
+        }
+    }
+
+    // Windows: also probe Program Files to discover Blender installations whose
+    // APPDATA profile directory hasn't been created yet (i.e. Blender was installed
+    // but never launched).  We read the version from the binary, then construct the
+    // correct APPDATA-based addon path — we never write to Program Files.
+    #[cfg(target_os = "windows")]
+    {
+        let appdata_blender = std::env::var("APPDATA")
+            .ok()
+            .map(|a| PathBuf::from(a).join("Blender Foundation/Blender"));
+        if let Some(appdata_root) = appdata_blender {
+            for pf_root in &[
+                r"C:\Program Files\Blender Foundation",
+                r"C:\Program Files (x86)\Blender Foundation",
+            ] {
+                let Ok(entries) = fs::read_dir(pf_root) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let pf_path = entry.path();
+                    if !pf_path.is_dir() {
+                        continue;
+                    }
+                    let binary = pf_path.join("blender.exe");
+                    if !binary.is_file() {
+                        continue;
+                    }
+                    let Some(ver) = probe_blender_version(&binary) else {
+                        continue;
+                    };
+                    if !version_meets_minimum(&ver) {
+                        has_incompatible = true;
+                        continue;
+                    }
+                    let addons_path = appdata_root.join(&ver).join("scripts").join("addons");
+                    if !compatible.iter().any(|t| t.addons_path == addons_path) {
+                        compatible.push(BlenderAddonTarget {
+                            blender_version: ver,
+                            addons_path,
+                        });
+                    }
+                }
             }
         }
     }
