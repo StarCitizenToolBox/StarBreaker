@@ -2568,6 +2568,7 @@ def _insert_animation_action(
             try:
                 strip = track.strips.new(name=name, start=strip_start, action=action)
                 strip.name = name
+                strip.extrapolation = 'NOTHING'
                 try:
                     strip[_ANIMATION_INSTANCE_ID_PROP] = instance_id
                     strip[_ANIMATION_INSTANCE_NAME_PROP] = name
