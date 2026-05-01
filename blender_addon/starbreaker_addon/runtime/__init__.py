@@ -70,6 +70,7 @@ from .package_ops import (
     exterior_palette_ids,
     find_package_root,
     import_package,
+    insert_animation_clip_at_frame,
     package_animation_instances,
     package_animation_mode_map,
     update_animation_instance_start_frame,

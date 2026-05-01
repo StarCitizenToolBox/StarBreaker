@@ -1384,6 +1384,32 @@ def apply_animation_mode_to_package_root(
     return updated
 
 
+def insert_animation_clip_at_frame(
+    context: bpy.types.Context,
+    package_root: bpy.types.Object,
+    animation_name: str,
+    frame: float | None = None,
+    fps_policy: str = FPS_POLICY_ADAPT_SCENE,
+) -> int:
+    """Insert *animation_name* onto the NLA timeline at *frame*.
+
+    If *frame* is ``None`` the current scene frame is used (identical to the
+    UI "Insert" button behaviour).  Returns the number of objects updated.
+    Uses the same internal path as ``apply_animation_mode_to_package_root``
+    with ``mode='action'`` so all instance tracking, NLA strip creation, and
+    multi-clip switching logic applies.
+    """
+    if frame is not None:
+        context.scene.frame_set(int(round(float(frame))))
+    return apply_animation_mode_to_package_root(
+        context,
+        package_root,
+        animation_name,
+        "action",
+        fps_policy=fps_policy,
+    )
+
+
 def _apply_animation_mode_for_clip(
     context: bpy.types.Context,
     package_root: bpy.types.Object,
