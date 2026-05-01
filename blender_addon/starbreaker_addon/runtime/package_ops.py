@@ -2384,6 +2384,18 @@ def _insert_animation_action(
             action[_ANIMATION_INSTANCE_NAME_PROP] = name
         except Exception:
             pass
+        # Phase 62: stash the current live action so we can restore it
+        # after keyframe insertion if the object already belongs to a
+        # different instance.  keyframe_insert() writes into whatever
+        # animation_data.action is currently set, so we must temporarily
+        # point it at the new action while inserting, then decide whether
+        # to leave it there or put the old action back.
+        _prior_action = obj.animation_data.action  # may be None
+        _prior_owner = (
+            _prior_action.get(_ANIMATION_INSTANCE_ID_PROP)
+            if _prior_action is not None
+            else None
+        )
         obj.animation_data.action = action
         group_name = obj.name
         # Phase 39: defer group creation until after keyframes are
@@ -2571,22 +2583,16 @@ def _insert_animation_action(
             # Phase 46: keep anim.action set so the keyframes are visible
             # in the Dope Sheet / Action Editor for the selected object.
             # The NLA strip above is muted, so there's no double-eval.
-            # Phase 62: only set the live action if the object does not
-            # already have an action from a different instance. Setting
-            # anim.action unconditionally would overwrite the previously-
-            # inserted clip's live action pointer, making the prior
-            # instance's keyframes invisible in the Dope Sheet even though
-            # its Action and NLA strip still exist. If another instance
-            # already owns anim.action, leave it alone — the new clip is
-            # fully accessible via its NLA strip and its Action datablock.
-            existing_action = anim.action if anim is not None else None
-            existing_owner = (
-                existing_action.get(_ANIMATION_INSTANCE_ID_PROP)
-                if existing_action is not None
-                else None
-            )
-            if existing_owner is None or existing_owner == instance_id:
-                anim.action = action
+            # Phase 62: restore the prior action if it belonged to a
+            # different instance.  keyframe_insert() needed anim.action to
+            # point at the new action while inserting (above), but leaving
+            # it there would evict the prior instance from the Dope Sheet.
+            # If the object had no previous action, or its previous action
+            # was from this same instance (re-insert), keep the new action.
+            if _prior_owner is not None and _prior_owner != instance_id:
+                anim.action = _prior_action
+            # else: no prior owner (first insert on this object) or same
+            # instance — new action stays as the live action.
 
         updated += 1
 
