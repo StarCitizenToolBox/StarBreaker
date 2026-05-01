@@ -887,6 +887,7 @@ def package_animation_mode_map(package_root: bpy.types.Object) -> dict[str, str]
 
 def _iter_instance_actions(package_root: bpy.types.Object, instance_id: str) -> list[Any]:
     actions: list[Any] = []
+    # Check live action references on each object
     for obj in _iter_package_objects(package_root):
         animation_data = getattr(obj, "animation_data", None)
         action = getattr(animation_data, "action", None) if animation_data is not None else None
@@ -897,6 +898,17 @@ def _iter_instance_actions(package_root: bpy.types.Object, instance_id: str) -> 
         except Exception:
             action_instance_id = None
         if action_instance_id == instance_id:
+            actions.append(action)
+    # Also scan bpy.data.actions (live action is cleared to None for NLA-driven playback)
+    pkg_prefix = f"SB_{package_root.name}_"
+    for action in bpy.data.actions:
+        if not action.name.startswith(pkg_prefix):
+            continue
+        try:
+            action_instance_id = action.get(_ANIMATION_INSTANCE_ID_PROP)
+        except Exception:
+            action_instance_id = None
+        if action_instance_id == instance_id and action not in actions:
             actions.append(action)
     return actions
 
@@ -1127,6 +1139,7 @@ def delete_animation_instance(
         package = _load_package_from_root(package_root)
     instances = package_animation_instances(package_root, package)
     before = len(instances)
+    instances_before = list(instances)
     instances = [instance for instance in instances if instance.get("id") != instance_id]
     if len(instances) == before:
         return False
@@ -1150,22 +1163,35 @@ def delete_animation_instance(
         if tracks is None:
             continue
         for track in list(tracks):
+            # Match by IDProperty (may fail on NlaStrip) or by track name pattern
+            track_matches = False
             for strip in list(track.strips):
                 try:
                     strip_instance_id = strip.get(_ANIMATION_INSTANCE_ID_PROP)
                 except Exception:
                     strip_instance_id = None
-                if strip_instance_id != instance_id:
-                    continue
+                if strip_instance_id == instance_id:
+                    track_matches = True
+                    break
+            # Fallback: match track by name "animation_name@start_frame"
+            if not track_matches:
+                track_name = track.name
+                track_matches = any(
+                    track_name == f"{inst.get('animation_name')}@{int(round(inst.get('start_frame', 0)))}"
+                    for inst in [next((i for i in instances_before if i.get('id') == instance_id), None)]
+                    if inst is not None
+                )
+            if not track_matches:
+                continue
+            for strip in list(track.strips):
                 try:
                     track.strips.remove(strip)
                 except Exception:
-                    continue
+                    pass
             try:
-                if not track.strips:
-                    tracks.remove(track)
+                tracks.remove(track)
             except Exception:
-                continue
+                pass
 
     _store_animation_instances(package_root, instances)
     return True
@@ -2568,7 +2594,7 @@ def _insert_animation_action(
             try:
                 strip = track.strips.new(name=name, start=strip_start, action=action)
                 strip.name = name
-                strip.extrapolation = 'NOTHING'
+                strip.extrapolation = 'HOLD_FORWARD'
                 try:
                     strip[_ANIMATION_INSTANCE_ID_PROP] = instance_id
                     strip[_ANIMATION_INSTANCE_NAME_PROP] = name
