@@ -1114,11 +1114,6 @@ class STARBREAKER_PT_tools(Panel):
         tuning.label(text="Layered Wear")
         tuning.prop(context.scene, SCENE_WEAR_STRENGTH_PROP, slider=True)
 
-        if package is not None:
-            available = layout.box()
-            available.label(text=f"Palettes: {', '.join(sorted(package.palettes.keys()))}")
-            available.label(text=f"Liveries: {', '.join(sorted(package.liveries.keys()))}")
-
         if obj is not None and obj.active_material is not None:
             material = obj.active_material
             material_box = layout.box()
