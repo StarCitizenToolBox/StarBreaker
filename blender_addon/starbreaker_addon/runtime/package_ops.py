@@ -2552,9 +2552,9 @@ def _insert_animation_action(
                 track = anim.nla_tracks.new()
                 track.name = track_name
             try:
-                strip_start = float(action.frame_range[0])
+                strip_start = int(round(float(action.frame_range[0])))
             except Exception:
-                strip_start = float(frame_offset)
+                strip_start = int(round(float(frame_offset)))
             strip = None
             try:
                 strip = track.strips.new(name=name, start=strip_start, action=action)
