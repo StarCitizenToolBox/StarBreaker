@@ -1156,43 +1156,46 @@ class STARBREAKER_PT_tools(Panel):
                 animation_box.label(text="No animations exported in this scene.json")
             else:
                 animation_box.prop(context.scene, _SCENE_ANIMATION_FPS_POLICY_PROP, text="FPS")
-                mode_map = package_animation_mode_map(package_root)
-                instances = package_animation_instances(package_root, package)
-                instances_by_animation: dict[str, list[dict[str, object]]] = {}
-                for instance in instances:
-                    key = str(instance.get("animation_name", ""))
-                    if not key:
-                        continue
-                    instances_by_animation.setdefault(key, []).append(instance)
-                for values in instances_by_animation.values():
-                    values.sort(key=lambda item: float(item.get("start_frame", 1.0)))
-                fps_policy = getattr(context.scene, _SCENE_ANIMATION_FPS_POLICY_PROP, "adapt_scene")
-                for animation_name, animation_display_name in animation_items:
-                    animation_box.label(text=animation_display_name)
-                    current_mode = mode_map.get(animation_name, "none")
-                    buttons_row = animation_box.row(align=True)
-                    for mode_id, mode_label, _ in _ANIMATION_MODE_ITEMS:
-                        op = buttons_row.operator(
-                            STARBREAKER_OT_apply_animation_mode.bl_idname,
-                            text=mode_label,
-                            depress=(current_mode == mode_id),
-                        )
-                        op.animation_name = animation_name
-                        op.mode = mode_id
-                        op.fps_policy = fps_policy
-
-                    instance_entries = instances_by_animation.get(animation_name, [])
-                    if instance_entries:
-                        instances_row = animation_box.row(align=True)
-                        instances_row.label(text="Instances")
-                        for instance in instance_entries:
-                            start = int(round(float(instance.get("start_frame", 1.0))))
-                            op = instances_row.operator(
-                                STARBREAKER_OT_edit_animation_instance.bl_idname,
-                                text=f"@{start}",
+                try:
+                    mode_map = package_animation_mode_map(package_root)
+                    instances = package_animation_instances(package_root, package, persist=False)
+                    instances_by_animation: dict[str, list[dict[str, object]]] = {}
+                    for instance in instances:
+                        key = str(instance.get("animation_name", ""))
+                        if not key:
+                            continue
+                        instances_by_animation.setdefault(key, []).append(instance)
+                    for values in instances_by_animation.values():
+                        values.sort(key=lambda item: float(item.get("start_frame", 1.0)))
+                    fps_policy = getattr(context.scene, _SCENE_ANIMATION_FPS_POLICY_PROP, "adapt_scene")
+                    for animation_name, animation_display_name in animation_items:
+                        animation_box.label(text=animation_display_name)
+                        current_mode = mode_map.get(animation_name, "none")
+                        buttons_row = animation_box.row(align=True)
+                        for mode_id, mode_label, _ in _ANIMATION_MODE_ITEMS:
+                            op = buttons_row.operator(
+                                STARBREAKER_OT_apply_animation_mode.bl_idname,
+                                text=mode_label,
+                                depress=(current_mode == mode_id),
                             )
-                            op.animation_name = animation_display_name
-                            op.instance_id = str(instance.get("id", ""))
+                            op.animation_name = animation_name
+                            op.mode = mode_id
+                            op.fps_policy = fps_policy
+
+                        instance_entries = instances_by_animation.get(animation_name, [])
+                        if instance_entries:
+                            instances_row = animation_box.row(align=True)
+                            instances_row.label(text="Instances")
+                            for instance in instance_entries:
+                                start = int(round(float(instance.get("start_frame", 1.0))))
+                                op = instances_row.operator(
+                                    STARBREAKER_OT_edit_animation_instance.bl_idname,
+                                    text=f"@{start}",
+                                )
+                                op.animation_name = animation_display_name
+                                op.instance_id = str(instance.get("id", ""))
+                except Exception as exc:
+                    animation_box.label(text=f"Animation UI error: {exc}")
 
 
 # ── Addon Preferences ────────────────────────────────────────────────────────

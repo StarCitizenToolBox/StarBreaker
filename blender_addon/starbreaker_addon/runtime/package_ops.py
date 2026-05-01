@@ -939,6 +939,7 @@ def _shift_action_frames(action: Any, delta: float) -> None:
 def _resync_animation_instances_from_scene(
     package_root: bpy.types.Object,
     package: PackageBundle,
+    persist: bool = True,
 ) -> list[dict[str, Any]]:
     instances = _load_animation_instances(package_root)
     by_id: dict[str, dict[str, Any]] = {
@@ -1019,17 +1020,19 @@ def _resync_animation_instances_from_scene(
 
     resynced = [instance for instance_id, instance in by_id.items() if instance_id in seen_ids]
     resynced.sort(key=lambda item: (str(item.get("animation_name", "")), float(item.get("start_frame", 1.0))))
-    _store_animation_instances(package_root, resynced)
+    if persist:
+        _store_animation_instances(package_root, resynced)
     return resynced
 
 
 def package_animation_instances(
     package_root: bpy.types.Object,
     package: PackageBundle | None = None,
+    persist: bool = True,
 ) -> list[dict[str, Any]]:
     if package is None:
         package = _load_package_from_root(package_root)
-    return _resync_animation_instances_from_scene(package_root, package)
+    return _resync_animation_instances_from_scene(package_root, package, persist=persist)
 
 
 def animation_overlap_warnings(
