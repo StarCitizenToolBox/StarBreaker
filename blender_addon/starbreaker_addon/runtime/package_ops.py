@@ -2571,7 +2571,22 @@ def _insert_animation_action(
             # Phase 46: keep anim.action set so the keyframes are visible
             # in the Dope Sheet / Action Editor for the selected object.
             # The NLA strip above is muted, so there's no double-eval.
-            anim.action = action
+            # Phase 62: only set the live action if the object does not
+            # already have an action from a different instance. Setting
+            # anim.action unconditionally would overwrite the previously-
+            # inserted clip's live action pointer, making the prior
+            # instance's keyframes invisible in the Dope Sheet even though
+            # its Action and NLA strip still exist. If another instance
+            # already owns anim.action, leave it alone — the new clip is
+            # fully accessible via its NLA strip and its Action datablock.
+            existing_action = anim.action if anim is not None else None
+            existing_owner = (
+                existing_action.get(_ANIMATION_INSTANCE_ID_PROP)
+                if existing_action is not None
+                else None
+            )
+            if existing_owner is None or existing_owner == instance_id:
+                anim.action = action
 
         updated += 1
 
