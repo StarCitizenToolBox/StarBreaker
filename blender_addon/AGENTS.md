@@ -120,6 +120,14 @@ Verify the test passes. Pure-Python tests (no `bpy` calls) live in
 are decorated with `@unittest.skipUnless(HAVE_BPY, "requires bpy")`.
 Do not mark a test as skip-unless-bpy if it can be tested with stubs.
 
+**Troubleshooting mindset:** Fix the root cause, not the symptom.
+No hard-coding around specific asset names, material paths, or magic
+numbers. When the correct behaviour is ambiguous (channel ordering,
+material slot mapping, UV transform), ask: *how does the Star Citizen
+game engine handle this?* The answer is usually derivable from the
+`.mtl`, `.chrparams`, or shader data in `Data.p4k` — match that
+logic rather than inventing a heuristic.
+
 ## Driving Blender from an Agent (MCP)
 
 The `mcp_blendermcp_execute_blender_code` tool runs Python inside a

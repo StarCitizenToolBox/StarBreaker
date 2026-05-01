@@ -93,6 +93,28 @@ cargo test -p starbreaker-3d --lib
 cd blender_addon && python3 -m unittest discover -s tests -q
 ```
 
+## Troubleshooting
+
+When a bug is found or something behaves unexpectedly:
+
+- **Find the root cause, fix that.** Do not paper over symptoms with
+  clamp floors, fallback defaults, `.unwrap_or(0)` silencers, or
+  try/except-pass. If the data is wrong, trace back to where it is
+  written or parsed and fix it there.
+- **No hard-coding, no heuristics.** Do not gate logic on a
+  specific asset name, ship name, material path, or magic number.
+  Discover the structural property (shader family, blend mode flag,
+  alpha channel usage, chrparams event type, …) and fix the rule for
+  the whole category.
+- **Ask: how does the game engine handle this?** Star Citizen uses
+  CryEngine. When the fix is ambiguous — a channel remapping, a
+  coordinate space, a material slot ordering, a light unit — look at
+  how CryEngine / Lumberyard would process the same data. The
+  canonical source is the `.chrparams`, `.dba`, `.mtl`, and shader
+  definitions extracted from `Data.p4k`. Mirroring the engine's own
+  logic is almost always more correct and more robust than a
+  derived heuristic.
+
 ## Python
 
 Always use `uv run python` instead of `python`, `python3`, or `py`
