@@ -73,6 +73,26 @@ Shared across every language in the repo:
   primary type it owns — update the `//!` header to reflect the
   current state. Stale headers mislead future readers.
 
+## Testing
+
+**TDD rule:** When a bug is found, write a failing test that reproduces it
+*before* changing any code. Verify the test fails. Then fix the code.
+Verify the test passes. This ensures tests are genuine regressions, not
+written to match an already-known fix.
+
+How to run tests:
+
+```bash
+# Rust — all workspace tests
+cargo test --workspace
+
+# Rust — targeted (faster during iteration)
+cargo test -p starbreaker-3d --lib
+
+# Blender addon (stubs bpy — runs on system Python)
+cd blender_addon && python3 -m unittest discover -s tests -q
+```
+
 ## Python
 
 Always use `uv run python` instead of `python`, `python3`, or `py`

@@ -3792,4 +3792,30 @@ mod tests {
         );
         assert_eq!(view_a.sidecar_original_indices, vec![0u32, 1u32]);
     }
+
+    /// Phase 58 invariant: the sidecar path is derived from the *source .mtl*
+    /// file, not from the per-CGF geometry path.  This ensures that two
+    /// different CGF meshes sharing the same `.mtl` file always produce the
+    /// same sidecar path (before dedup via `insert_json_file`), so identical
+    /// content can never accumulate hash-variant files.
+    #[test]
+    fn material_sidecar_relative_path_uses_source_mtl_not_geometry_path() {
+        // Both paths reference the same logical .mtl; the sidecar must resolve
+        // to the same output path regardless of the geometry file that triggers it.
+        let path_a = material_sidecar_relative_path("Data/Objects/Ships/Drak/Clipper/hull.mtl", "fallback", 0);
+        let path_b = material_sidecar_relative_path("Data/Objects/Ships/Drak/Clipper/hull.mtl", "other_fallback", 0);
+
+        assert_eq!(path_a, path_b, "same source .mtl must produce the same sidecar path");
+        assert_eq!(path_a, "Data/Objects/Ships/Drak/Clipper/hull_TEX0.materials.json");
+    }
+
+    #[test]
+    fn material_sidecar_relative_path_encodes_mip_level() {
+        let path0 = material_sidecar_relative_path("Data/Objects/Ships/Test/hull.mtl", "f", 0);
+        let path2 = material_sidecar_relative_path("Data/Objects/Ships/Test/hull.mtl", "f", 2);
+
+        assert_eq!(path0, "Data/Objects/Ships/Test/hull_TEX0.materials.json");
+        assert_eq!(path2, "Data/Objects/Ships/Test/hull_TEX2.materials.json");
+        assert_ne!(path0, path2);
+    }
 }

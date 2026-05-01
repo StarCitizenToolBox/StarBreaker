@@ -109,9 +109,16 @@ cd StarBreaker/blender_addon
 python3 -m unittest discover -s tests -q
 ```
 
-Baseline: **54 tests ran, 0 failures, 0 errors, 20 skipped**. Keep
+Baseline: **165 tests, 0 failures, 2 skipped** (bpy-dependent). Keep
 this green after every change. Skipped tests require a real `bpy` and
 only run under Blender — do not try to make them pass headless.
+
+**TDD rule:** When a bug is found, write a failing test that reproduces
+it *before* changing any code. Verify the test fails. Then fix the code.
+Verify the test passes. Pure-Python tests (no `bpy` calls) live in
+`tests/` and run immediately. Tests that require a live Blender session
+are decorated with `@unittest.skipUnless(HAVE_BPY, "requires bpy")`.
+Do not mark a test as skip-unless-bpy if it can be tested with stubs.
 
 ## Driving Blender from an Agent (MCP)
 

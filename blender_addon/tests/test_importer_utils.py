@@ -62,6 +62,7 @@ for _pkg in ("starbreaker_addon", "starbreaker_addon.runtime", "starbreaker_addo
 
 from starbreaker_addon.manifest import MaterialSidecar, SubmaterialRecord
 from starbreaker_addon.runtime.importer.utils import (
+    _material_identity,
     _remapped_submaterial_for_slot,
     _submaterials_by_name,
     _unique_submaterials_by_name,
@@ -222,6 +223,86 @@ class TestRemappedSubmaterialForSlot(unittest.TestCase):
         source = _make_submaterial(0, "ghost")
         result = self._slot(source, 99, {}, {})
         self.assertIsNone(result)
+
+
+# ---------------------------------------------------------------------------
+# Tests for _material_identity  (Phase 57 cache-key dedup)
+# ---------------------------------------------------------------------------
+
+class TestMaterialIdentityCacheKey(unittest.TestCase):
+    """Verify that _material_identity uses the canonical sidecar path, not the
+    raw sidecar_path argument, so two callers with different path strings but
+    the same underlying sidecar produce the same cache key (Phase 57 fix)."""
+
+    def _make_minimal_sidecar(self, normalized_path: str | None) -> MaterialSidecar:
+        return MaterialSidecar(
+            geometry_path=None,
+            normalized_export_relative_path=normalized_path,
+            source_material_path="Data/hull.mtl",
+            palette_contract={},
+            submaterials=[],
+            raw={},
+        )
+
+    def _make_submaterial_record(self) -> SubmaterialRecord:
+        return SubmaterialRecord.from_value({
+            "index": 0,
+            "submaterial_name": "hull_panel",
+        })
+
+    def test_different_sidecar_paths_with_same_normalized_path_produce_same_key(self) -> None:
+        """Two different sidecar_path values (e.g. hash-variant vs canonical)
+        with the same normalized_export_relative_path must produce the same
+        identity hash — the Phase 57 dedup fix."""
+        sidecar = self._make_minimal_sidecar("Data/Objects/Ships/hull_TEX0.materials.json")
+        submaterial = self._make_submaterial_record()
+        key_a = _material_identity(
+            "Data/Objects/Ships/hull_TEX0.materials.json",
+            sidecar,
+            submaterial,
+            None,
+            "none",
+        )
+        key_b = _material_identity(
+            "Data/Objects/Ships/hull-7735c1b7.materials.json",  # hash-variant path
+            sidecar,
+            submaterial,
+            None,
+            "none",
+        )
+        self.assertEqual(key_a, key_b, "different sidecar_path strings must produce the same key when normalized_export_relative_path is set")
+
+    def test_same_path_produces_same_key_deterministically(self) -> None:
+        sidecar = self._make_minimal_sidecar("Data/Objects/Ships/hull_TEX0.materials.json")
+        submaterial = self._make_submaterial_record()
+        key1 = _material_identity("Data/Objects/Ships/hull_TEX0.materials.json", sidecar, submaterial, None, "none")
+        key2 = _material_identity("Data/Objects/Ships/hull_TEX0.materials.json", sidecar, submaterial, None, "none")
+        self.assertEqual(key1, key2)
+
+    def test_different_submaterials_produce_different_keys(self) -> None:
+        sidecar = self._make_minimal_sidecar("Data/Objects/Ships/hull_TEX0.materials.json")
+        sub_a = SubmaterialRecord.from_value({"index": 0, "submaterial_name": "hull_panel"})
+        sub_b = SubmaterialRecord.from_value({"index": 1, "submaterial_name": "glass_pane"})
+        key_a = _material_identity("Data/hull.materials.json", sidecar, sub_a, None, "none")
+        key_b = _material_identity("Data/hull.materials.json", sidecar, sub_b, None, "none")
+        self.assertNotEqual(key_a, key_b)
+
+    def test_different_palette_scopes_produce_different_keys(self) -> None:
+        sidecar = self._make_minimal_sidecar("Data/Objects/Ships/hull_TEX0.materials.json")
+        submaterial = self._make_submaterial_record()
+        key_none = _material_identity("Data/hull.materials.json", sidecar, submaterial, None, "none")
+        key_primary = _material_identity("Data/hull.materials.json", sidecar, submaterial, None, "primary")
+        self.assertNotEqual(key_none, key_primary)
+
+    def test_fallback_to_sidecar_path_when_no_normalized_path(self) -> None:
+        """When normalized_export_relative_path is None, sidecar_path itself
+        is used as the canonical key, so identical sidecar_path values still
+        deduplicate correctly."""
+        sidecar = self._make_minimal_sidecar(None)
+        submaterial = self._make_submaterial_record()
+        key1 = _material_identity("Data/hull.materials.json", sidecar, submaterial, None, "none")
+        key2 = _material_identity("Data/hull.materials.json", sidecar, submaterial, None, "none")
+        self.assertEqual(key1, key2)
 
 
 if __name__ == "__main__":
