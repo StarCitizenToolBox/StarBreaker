@@ -25,6 +25,7 @@ pub struct Mesh {
 pub struct SubMesh {
     pub material_name: Option<String>,
     pub material_id: u32,
+    pub source_material_id: Option<u32>,
     pub first_index: u32,
     pub num_indices: u32,
     pub first_vertex: u32,
@@ -290,6 +291,7 @@ pub fn build_mesh_with_bbox(skin: &SkinMesh, materials: &[MaterialName], use_mod
         .map(|s| SubMesh {
             material_name: materials.get(s.mat_id as usize).map(|m| m.name.clone()),
             material_id: s.mat_id as u32,
+            source_material_id: None,
             first_index: s.first_index,
             num_indices: s.num_indices,
             first_vertex: s.first_vertex,

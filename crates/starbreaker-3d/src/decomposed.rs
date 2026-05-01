@@ -74,6 +74,10 @@ struct ExtractedMaterialEntry {
 struct DecomposedMaterialView {
     mesh: Mesh,
     sidecar_materials: Option<MtlFile>,
+    /// Original (pre-filter) index in the source `.mtl` for each entry in `sidecar_materials`.
+    /// Empty when `sidecar_materials` is `None`; identity mapping (0, 1, 2, …) when no
+    /// materials were hidden.
+    sidecar_original_indices: Vec<u32>,
     glb_materials: Option<MtlFile>,
     glb_nmc: Option<NodeMeshCombo>,
 }
@@ -351,6 +355,7 @@ fn build_decomposed_material_view(
         return DecomposedMaterialView {
             mesh: filtered_mesh,
             sidecar_materials: None,
+            sidecar_original_indices: Vec::new(),
             glb_materials: None,
             glb_nmc: filtered_nmc,
         };
@@ -359,9 +364,11 @@ fn build_decomposed_material_view(
     if include_nodraw {
         let filtered_mesh = filter_mesh_geometry(mesh, Some(materials), nmc, include_nodraw, include_shields);
         let (filtered_mesh, filtered_nmc) = filter_nmc_hierarchy(filtered_mesh, nmc, include_nodraw, include_shields);
+        let identity_indices = (0..materials.materials.len() as u32).collect();
         return DecomposedMaterialView {
             mesh: filtered_mesh,
             sidecar_materials: Some(materials.clone()),
+            sidecar_original_indices: identity_indices,
             glb_materials: None,
             glb_nmc: filtered_nmc,
         };
@@ -377,6 +384,25 @@ fn build_decomposed_material_view(
             filtered_materials.push(material.clone());
         }
     }
+
+    // Compute which original indices survived the hide-filter.  These become the
+    // sidecar indices so that every CGF sharing the same source `.mtl` writes
+    // identical sidecar content regardless of which submaterials it actually uses.
+    let sidecar_original_indices: Vec<u32> = material_id_map
+        .iter()
+        .enumerate()
+        .filter_map(|(orig_idx, mapped)| if mapped.is_some() { Some(orig_idx as u32) } else { None })
+        .collect();
+
+    // Save the non-hidden (post-hide-filter, pre-used-compaction) material list.
+    // This is used as sidecar_materials so the sidecar content is stable across
+    // all meshes that share the same source .mtl.
+    let non_hidden_materials = MtlFile {
+        materials: filtered_materials.clone(),
+        source_path: materials.source_path.clone(),
+        paint_override: materials.paint_override.clone(),
+        material_set: materials.material_set.clone(),
+    };
 
     let mut dropped_out_of_range = false;
     let mut filtered_mesh = mesh.clone();
@@ -397,6 +423,9 @@ fn build_decomposed_material_view(
             };
 
             let mut filtered = submesh.clone();
+            // Preserve the original source material index before any remapping so the
+            // GLB extras `submaterial_index` stays aligned with the sidecar index.
+            filtered.source_material_id = Some(submesh.material_id);
             filtered.material_id = new_material_id;
             if let Some(material) = filtered_materials.get(new_material_id as usize) {
                 filtered.material_name = Some(material.name.clone());
@@ -452,16 +481,18 @@ fn build_decomposed_material_view(
         && filtered_mesh.submeshes.len() == mesh.submeshes.len()
         && !dropped_out_of_range
     {
+        let identity_indices = (0..materials.materials.len() as u32).collect();
         let (filtered_mesh, filtered_nmc) = filter_nmc_hierarchy(filtered_mesh, nmc, include_nodraw, include_shields);
         return DecomposedMaterialView {
             mesh: filtered_mesh,
             sidecar_materials: Some(materials.clone()),
+            sidecar_original_indices: identity_indices,
             glb_materials: None,
             glb_nmc: filtered_nmc,
         };
     }
 
-    let filtered_materials = MtlFile {
+    let glb_materials = MtlFile {
         materials: filtered_materials,
         source_path: materials.source_path.clone(),
         paint_override: materials.paint_override.clone(),
@@ -472,8 +503,9 @@ fn build_decomposed_material_view(
 
     DecomposedMaterialView {
         mesh: filtered_mesh,
-        sidecar_materials: Some(filtered_materials.clone()),
-        glb_materials: Some(filtered_materials),
+        sidecar_materials: Some(non_hidden_materials),
+        sidecar_original_indices,
+        glb_materials: Some(glb_materials),
         glb_nmc: filtered_nmc,
     }
 }
@@ -665,6 +697,7 @@ pub(crate) fn write_decomposed_export(
             &input.geometry_path,
             &input.material_path,
             materials,
+            &root_material_view.sidecar_original_indices,
             opts.texture_mip,
             existing_asset_paths,
         )
@@ -691,6 +724,7 @@ pub(crate) fn write_decomposed_export(
                 .material_path
                 .as_deref()
                 .unwrap_or(&input.material_path);
+            let identity: Vec<u32> = (0..materials.materials.len() as u32).collect();
             write_material_sidecar(
                 &mut files,
                 p4k,
@@ -701,6 +735,7 @@ pub(crate) fn write_decomposed_export(
                 &input.geometry_path,
                 variant_material_path,
                 materials,
+                &identity,
                 opts.texture_mip,
                 existing_asset_paths,
             )
@@ -760,6 +795,7 @@ pub(crate) fn write_decomposed_export(
                 &child.geometry_path,
                 &child.material_path,
                 materials,
+                &child_material_view.sidecar_original_indices,
                 opts.texture_mip,
                 existing_asset_paths,
             )
@@ -869,6 +905,7 @@ pub(crate) fn write_decomposed_export(
                         &entry.cgf_path,
                         entry.material_path.as_deref().unwrap_or(""),
                         materials,
+                        &interior_material_view.sidecar_original_indices,
                         opts.texture_mip,
                         existing_asset_paths,
                     )
@@ -1455,12 +1492,19 @@ fn write_material_sidecar(
     geometry_path: &str,
     material_path: &str,
     materials: &MtlFile,
+    original_indices: &[u32],
     texture_mip: u32,
     existing_asset_paths: Option<&HashSet<String>>,
 ) -> String {
     let source_material_path = material_source_path(p4k, materials, material_path, geometry_path);
+    let (sidecar_materials, sidecar_original_indices) = canonical_sidecar_materials_from_source(
+        p4k,
+        &source_material_path,
+        materials,
+        original_indices,
+    );
     let relative_path = material_sidecar_relative_path(&source_material_path, fallback_name, texture_mip);
-    let extracted = materials
+    let extracted = sidecar_materials
         .materials
         .iter()
         .map(|material| {
@@ -1476,13 +1520,49 @@ fn write_material_sidecar(
         })
         .collect::<Vec<_>>();
     let value = build_material_sidecar_value(
-        materials,
+        &sidecar_materials,
         &source_material_path,
         &relative_path,
         palettes_manifest_path,
         &extracted,
+        &sidecar_original_indices,
     );
     insert_json_file(files, relative_path, value)
+}
+
+fn canonical_sidecar_materials_from_source(
+    p4k: &MappedP4k,
+    source_material_path: &str,
+    fallback_materials: &MtlFile,
+    fallback_indices: &[u32],
+) -> (MtlFile, Vec<u32>) {
+    let p4k_path = source_material_path.replace('/', "\\");
+    if let Some(entry) = p4k.entry_case_insensitive(&p4k_path) {
+        if let Ok(data) = p4k.read(entry) {
+            if let Ok(mut parsed) = crate::mtl::parse_mtl(&data) {
+                parsed.source_path = Some(p4k_path);
+                let mut original_indices = Vec::new();
+                let mut non_hidden = Vec::new();
+                for (idx, material) in parsed.materials.into_iter().enumerate() {
+                    if material.should_hide() {
+                        continue;
+                    }
+                    original_indices.push(idx as u32);
+                    non_hidden.push(material);
+                }
+                let canonical = MtlFile {
+                    materials: non_hidden,
+                    source_path: parsed.source_path,
+                    paint_override: parsed.paint_override,
+                    material_set: parsed.material_set,
+                };
+                return (canonical, original_indices);
+            }
+        }
+    }
+
+    // Fallback path: preserve previous behaviour when we can't reload the source file.
+    (fallback_materials.clone(), fallback_indices.to_vec())
 }
 
 fn extract_material_entry(
@@ -1640,6 +1720,7 @@ fn build_material_sidecar_value(
     relative_path: &str,
     palettes_manifest_path: &str,
     extracted: &[ExtractedMaterialEntry],
+    original_indices: &[u32],
 ) -> serde_json::Value {
     let source_stem = source_material_path
         .rsplit('/')
@@ -1663,14 +1744,15 @@ fn build_material_sidecar_value(
             "scene_instance_field": "palette_id",
         },
         "paint_override": materials.paint_override.as_ref().map(paint_override_json),
-        "submaterials": materials.materials.iter().enumerate().map(|(index, material)| {
+        "submaterials": materials.materials.iter().enumerate().map(|(i, material)| {
+            let source_index = original_indices.get(i).copied().unwrap_or(i as u32);
             build_submaterial_json(
                 material,
                 source_material_path,
                 source_stem,
-                &blender_material_names[index],
-                index,
-                &extracted[index],
+                &blender_material_names[i],
+                source_index as usize,
+                &extracted[i],
             )
         }).collect::<Vec<_>>(),
     })
@@ -2731,6 +2813,7 @@ mod tests {
             "Data/Objects/Ships/Test/hull.materials.json",
             "Packages/ARGO MOLE/palettes.json",
             &extracted,
+            &[0],
         );
 
         assert_eq!(value["source_material_path"], serde_json::json!("Data/Objects/Ships/Test/hull.mtl"));
@@ -2814,6 +2897,7 @@ mod tests {
             "Data/Objects/Ships/Test/hull.materials.json",
             "Packages/ARGO MOLE/palettes.json",
             &extracted,
+            &[0],
         );
 
         assert_eq!(value["submaterials"][0]["decoded_feature_flags"]["has_iridescence"], serde_json::json!(true));
@@ -2875,6 +2959,7 @@ mod tests {
             "Data/Objects/Ships/Test/hull.materials.json",
             "Packages/ARGO MOLE/palettes.json",
             &extracted,
+            &[0, 1],
         );
 
         assert_eq!(value["submaterials"][0]["blender_material_name"], serde_json::json!("hull:hull_panel_0"));
@@ -3050,6 +3135,7 @@ mod tests {
             crate::types::SubMesh {
                 material_name: Some("proxy".into()),
                 material_id: 0,
+                source_material_id: None,
                 first_index: 0,
                 num_indices: 3,
                 first_vertex: 0,
@@ -3059,6 +3145,7 @@ mod tests {
             crate::types::SubMesh {
                 material_name: Some("glass".into()),
                 material_id: 2,
+                source_material_id: None,
                 first_index: 3,
                 num_indices: 3,
                 first_vertex: 0,
@@ -3068,6 +3155,7 @@ mod tests {
             crate::types::SubMesh {
                 material_name: Some("hull".into()),
                 material_id: 1,
+                source_material_id: None,
                 first_index: 6,
                 num_indices: 3,
                 first_vertex: 0,
@@ -3124,6 +3212,7 @@ mod tests {
             crate::types::SubMesh {
                 material_name: Some("proxy".into()),
                 material_id: 0,
+                source_material_id: None,
                 first_index: 0,
                 num_indices: 3,
                 first_vertex: 0,
@@ -3133,6 +3222,7 @@ mod tests {
             crate::types::SubMesh {
                 material_name: Some("hull".into()),
                 material_id: 1,
+                source_material_id: None,
                 first_index: 3,
                 num_indices: 3,
                 first_vertex: 0,
@@ -3142,6 +3232,7 @@ mod tests {
             crate::types::SubMesh {
                 material_name: Some("decal".into()),
                 material_id: 2,
+                source_material_id: None,
                 first_index: 6,
                 num_indices: 3,
                 first_vertex: 0,
@@ -3152,14 +3243,29 @@ mod tests {
         let nmc = sample_nmc(&["body", "proxy_mount"]);
 
         let view = build_decomposed_material_view(&mesh, Some(&materials), Some(&nmc), false, true);
-        let filtered_materials = view.sidecar_materials.expect("filtered sidecar materials");
+        let sidecar = view.sidecar_materials.expect("sidecar materials");
+        let glb_materials = view.glb_materials.expect("glb materials (used-only)");
 
-        assert_eq!(filtered_materials.materials.len(), 2);
+        // Phase 58: sidecar holds the FULL non-hidden set (all 3 — none are hidden/NoDraw).
+        assert_eq!(sidecar.materials.len(), 3);
         assert_eq!(
-            filtered_materials
+            sidecar
                 .materials
                 .iter()
                 .map(|material| material.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["proxy", "hull", "decal"]
+        );
+        // Original indices are identity (no hidden materials).
+        assert_eq!(view.sidecar_original_indices, vec![0u32, 1u32, 2u32]);
+
+        // GLB receives only the used-material compacted set (proxy is excluded by NMC).
+        assert_eq!(glb_materials.materials.len(), 2);
+        assert_eq!(
+            glb_materials
+                .materials
+                .iter()
+                .map(|m| m.name.as_str())
                 .collect::<Vec<_>>(),
             vec!["hull", "decal"]
         );
@@ -3194,6 +3300,7 @@ mod tests {
             crate::types::SubMesh {
                 material_name: Some("proxy_shield".into()),
                 material_id: 0,
+                source_material_id: None,
                 first_index: 0,
                 num_indices: 3,
                 first_vertex: 0,
@@ -3203,6 +3310,7 @@ mod tests {
             crate::types::SubMesh {
                 material_name: Some("broken".into()),
                 material_id: 9,
+                source_material_id: None,
                 first_index: 3,
                 num_indices: 3,
                 first_vertex: 0,
@@ -3212,6 +3320,7 @@ mod tests {
             crate::types::SubMesh {
                 material_name: Some("hull".into()),
                 material_id: 1,
+                source_material_id: None,
                 first_index: 6,
                 num_indices: 3,
                 first_vertex: 0,
@@ -3247,6 +3356,7 @@ mod tests {
             crate::types::SubMesh {
                 material_name: Some("hull".into()),
                 material_id: 0,
+                source_material_id: None,
                 first_index: 0,
                 num_indices: 3,
                 first_vertex: 0,
@@ -3256,6 +3366,7 @@ mod tests {
             crate::types::SubMesh {
                 material_name: Some("hull".into()),
                 material_id: 0,
+                source_material_id: None,
                 first_index: 3,
                 num_indices: 3,
                 first_vertex: 0,
@@ -3285,6 +3396,7 @@ mod tests {
             crate::types::SubMesh {
                 material_name: Some("hull".into()),
                 material_id: 0,
+                source_material_id: None,
                 first_index: 0,
                 num_indices: 3,
                 first_vertex: 0,
@@ -3294,6 +3406,7 @@ mod tests {
             crate::types::SubMesh {
                 material_name: Some("hull".into()),
                 material_id: 0,
+                source_material_id: None,
                 first_index: 3,
                 num_indices: 3,
                 first_vertex: 0,
@@ -3322,6 +3435,7 @@ mod tests {
         let mesh = sample_mesh(vec![crate::types::SubMesh {
             material_name: Some("hull".into()),
             material_id: 0,
+            source_material_id: None,
             first_index: 0,
             num_indices: 3,
             first_vertex: 0,
@@ -3462,5 +3576,168 @@ mod tests {
             full_path.to_string_lossy().replace('\\', "/"),
             "/tmp/export-root/Data/Objects/Ships/Test/hull_diff.png"
         );
+    }
+
+    // --- Phase 58 tests -------------------------------------------------------
+
+    #[test]
+    fn source_material_id_is_set_to_original_index_after_hide_filter() {
+        // Material 0 is hidden (NoDraw); material 1 and 2 are visible.
+        // After filtering, the submesh that referenced material 2 should have:
+        //   material_id        = 1  (compacted post-hide index)
+        //   source_material_id = Some(2)  (original source index)
+        let mut hidden = sample_submaterial();
+        hidden.name = "proxy".into();
+        hidden.shader = "NoDraw".into();
+        hidden.is_nodraw = true;
+
+        let mut hull = sample_submaterial();
+        hull.name = "hull".into();
+
+        let mut decal = sample_submaterial();
+        decal.name = "decal".into();
+
+        let materials = MtlFile {
+            materials: vec![hidden.clone(), hull.clone(), decal.clone()],
+            source_path: Some("Data/Objects/Ships/Test/hull.mtl".into()),
+            paint_override: None,
+            material_set: Default::default(),
+        };
+
+        let mesh = sample_mesh(vec![
+            crate::types::SubMesh {
+                material_name: Some("hull".into()),
+                material_id: 1,
+                source_material_id: None,
+                first_index: 0,
+                num_indices: 3,
+                first_vertex: 0,
+                num_vertices: 3,
+                node_parent_index: 0,
+            },
+            crate::types::SubMesh {
+                material_name: Some("decal".into()),
+                material_id: 2,
+                source_material_id: None,
+                first_index: 3,
+                num_indices: 3,
+                first_vertex: 0,
+                num_vertices: 3,
+                node_parent_index: 0,
+            },
+        ]);
+
+        let view = build_decomposed_material_view(&mesh, Some(&materials), None, false, false);
+
+        // GLB submesh 0 → hull (original index 1)
+        assert_eq!(view.mesh.submeshes[0].material_id, 0, "compacted material_id for hull");
+        assert_eq!(view.mesh.submeshes[0].source_material_id, Some(1), "source index for hull");
+
+        // GLB submesh 1 → decal (original index 2)
+        assert_eq!(view.mesh.submeshes[1].material_id, 1, "compacted material_id for decal");
+        assert_eq!(view.mesh.submeshes[1].source_material_id, Some(2), "source index for decal");
+    }
+
+    #[test]
+    fn sidecar_original_indices_reflect_source_mtl_positions() {
+        // hidden material at index 1; visible at 0 and 2.
+        let mut hull = sample_submaterial();
+        hull.name = "hull".into();
+
+        let mut hidden = sample_submaterial();
+        hidden.name = "proxy".into();
+        hidden.shader = "NoDraw".into();
+        hidden.is_nodraw = true;
+
+        let mut decal = sample_submaterial();
+        decal.name = "decal".into();
+
+        let materials = MtlFile {
+            materials: vec![hull.clone(), hidden.clone(), decal.clone()],
+            source_path: Some("Data/Objects/Ships/Test/hull.mtl".into()),
+            paint_override: None,
+            material_set: Default::default(),
+        };
+
+        // Only hull (0) is referenced by the mesh.
+        let mesh = sample_mesh(vec![crate::types::SubMesh {
+            material_name: Some("hull".into()),
+            material_id: 0,
+            source_material_id: None,
+            first_index: 0,
+            num_indices: 3,
+            first_vertex: 0,
+            num_vertices: 3,
+            node_parent_index: 0,
+        }]);
+
+        let view = build_decomposed_material_view(&mesh, Some(&materials), None, false, false);
+
+        // sidecar should contain the non-hidden set: hull (orig 0) + decal (orig 2)
+        let sidecar = view.sidecar_materials.as_ref().expect("sidecar materials");
+        assert_eq!(sidecar.materials.len(), 2, "non-hidden material count");
+        assert_eq!(sidecar.materials[0].name, "hull");
+        assert_eq!(sidecar.materials[1].name, "decal");
+
+        // original indices: hull→0, decal→2
+        assert_eq!(view.sidecar_original_indices, vec![0u32, 2u32]);
+    }
+
+    #[test]
+    fn two_meshes_sharing_same_mtl_produce_identical_sidecar_content() {
+        // Mesh A uses only material 0; Mesh B uses only material 1.
+        // Both share the same MtlFile.  After Phase 58 the sidecar for both
+        // must be identical (the full non-hidden set with stable original indices).
+        let mut mat0 = sample_submaterial();
+        mat0.name = "exterior".into();
+
+        let mut mat1 = sample_submaterial();
+        mat1.name = "interior".into();
+
+        let materials = MtlFile {
+            materials: vec![mat0.clone(), mat1.clone()],
+            source_path: Some("Data/Objects/Ships/Test/hull.mtl".into()),
+            paint_override: None,
+            material_set: Default::default(),
+        };
+
+        let mesh_a = sample_mesh(vec![crate::types::SubMesh {
+            material_name: Some("exterior".into()),
+            material_id: 0,
+            source_material_id: None,
+            first_index: 0,
+            num_indices: 3,
+            first_vertex: 0,
+            num_vertices: 3,
+            node_parent_index: 0,
+        }]);
+        let mesh_b = sample_mesh(vec![crate::types::SubMesh {
+            material_name: Some("interior".into()),
+            material_id: 1,
+            source_material_id: None,
+            first_index: 0,
+            num_indices: 3,
+            first_vertex: 0,
+            num_vertices: 3,
+            node_parent_index: 0,
+        }]);
+
+        let view_a = build_decomposed_material_view(&mesh_a, Some(&materials), None, false, false);
+        let view_b = build_decomposed_material_view(&mesh_b, Some(&materials), None, false, false);
+
+        // Both sidecars must contain the same non-hidden set and same original indices.
+        let sidecar_a = view_a.sidecar_materials.as_ref().expect("sidecar A");
+        let sidecar_b = view_b.sidecar_materials.as_ref().expect("sidecar B");
+        assert_eq!(
+            sidecar_a.materials.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            sidecar_b.materials.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            "sidecar material lists should be identical"
+        );
+        assert_eq!(
+            view_a.sidecar_original_indices,
+            view_b.sidecar_original_indices,
+            "sidecar original indices should be identical"
+        );
+        assert_eq!(view_a.sidecar_original_indices, vec![0u32, 1u32]);
     }
 }

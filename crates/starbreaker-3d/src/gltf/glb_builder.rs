@@ -2644,7 +2644,7 @@ fn build_material(
                     );
                 }
             }
-            material_set_identity.insert("submaterial_index".into(), serde_json::json!(sub.material_id));
+            material_set_identity.insert("submaterial_index".into(), serde_json::json!(sub.source_material_id.unwrap_or(sub.material_id)));
             if !m.name.is_empty() {
                 material_set_identity.insert("submaterial_name".into(), serde_json::json!(m.name));
             }

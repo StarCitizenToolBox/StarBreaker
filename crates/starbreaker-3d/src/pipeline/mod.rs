@@ -645,6 +645,7 @@ mod tests {
             .map(|(index, node_parent_index)| crate::types::SubMesh {
                 material_name: None,
                 material_id: index as u32,
+                source_material_id: None,
                 first_index: (index as u32) * 3,
                 num_indices: 3,
                 first_vertex: (index as u32) * 3,
@@ -735,6 +736,7 @@ mod tests {
                 crate::types::SubMesh {
                     material_name: None,
                     material_id: 0,
+                    source_material_id: None,
                     first_index: 0,
                     num_indices: 3,
                     first_vertex: 0,
@@ -744,6 +746,7 @@ mod tests {
                 crate::types::SubMesh {
                     material_name: None,
                     material_id: 1,
+                    source_material_id: None,
                     first_index: 3,
                     num_indices: 3,
                     first_vertex: 3,

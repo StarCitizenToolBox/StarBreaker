@@ -314,6 +314,7 @@ mod tests {
             submeshes: vec![SubMesh {
                 material_name: Some("test".into()),
                 material_id: 0,
+                source_material_id: None,
                 first_index: 0,
                 num_indices: 3,
                 first_vertex: 0,
@@ -2090,6 +2091,7 @@ mod tests {
                 SubMesh {
                     material_name: Some("mat_a".into()),
                     material_id: 0,
+                    source_material_id: None,
                     first_index: 0,
                     num_indices: 3,
                     first_vertex: 0,
@@ -2099,6 +2101,7 @@ mod tests {
                 SubMesh {
                     material_name: Some("mat_b".into()),
                     material_id: 0,
+                    source_material_id: None,
                     first_index: 3,
                     num_indices: 3,
                     first_vertex: 3,
@@ -2215,6 +2218,7 @@ mod tests {
             submeshes: vec![SubMesh {
                 material_name: None,
                 material_id: 0,
+                source_material_id: None,
                 first_index: 0,
                 num_indices: 3,
                 first_vertex: 0,
