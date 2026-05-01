@@ -1026,6 +1026,118 @@ class STARBREAKER_OT_edit_animation_instance(Operator):
         return {"FINISHED"}
 
 
+class STARBREAKER_OT_delete_animation_instance(Operator):
+    """Delete this animation instance without confirmation"""
+
+    bl_idname = "starbreaker.delete_animation_instance"
+    bl_label = "Delete Instance"
+    bl_options = {"REGISTER", "UNDO"}
+    bl_description = "Remove this animation instance and its NLA strips"
+
+    instance_id: StringProperty(name="Instance Id")  # type: ignore[assignment]
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return find_package_root(context.active_object) is not None
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        package_root = _package_root_from_context(context)
+        package = _selected_package(context)
+        if package_root is None or package is None:
+            self.report({"ERROR"}, "Select an imported StarBreaker object first")
+            return {"CANCELLED"}
+        deleted = delete_animation_instance(package_root, self.instance_id, package=package)
+        if not deleted:
+            self.report({"ERROR"}, "Animation instance not found")
+            return {"CANCELLED"}
+        self.report({"INFO"}, "Deleted animation instance")
+        return {"FINISHED"}
+
+
+def _nla_track_mute_state(package_root: bpy.types.Object, track_name: str) -> bool:
+    """Return True when the named NLA track is muted on any object in the package."""
+    for obj in [package_root, *package_root.children_recursive]:
+        if not obj.animation_data:
+            continue
+        for track in obj.animation_data.nla_tracks:
+            if track.name == track_name:
+                return track.mute
+    return False
+
+
+def _set_nla_track_mute(
+    package_root: bpy.types.Object, track_name: str, mute: bool
+) -> None:
+    """Set .mute on every NLA track named *track_name* across the package."""
+    for obj in [package_root, *package_root.children_recursive]:
+        if not obj.animation_data:
+            continue
+        for track in obj.animation_data.nla_tracks:
+            if track.name == track_name:
+                track.mute = mute
+
+
+class STARBREAKER_OT_mute_animation_instance(Operator):
+    """Toggle mute on the NLA strips for this animation instance"""
+
+    bl_idname = "starbreaker.mute_animation_instance"
+    bl_label = "Toggle Mute"
+    bl_options = {"REGISTER", "UNDO"}
+    bl_description = "Mute or unmute this animation instance's NLA strips"
+
+    animation_name: StringProperty(name="Animation Name")  # type: ignore[assignment]
+    instance_id: StringProperty(name="Instance Id")  # type: ignore[assignment]
+    start_frame: IntProperty(name="Start Frame", default=1)  # type: ignore[assignment]
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return find_package_root(context.active_object) is not None
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        package_root = _package_root_from_context(context)
+        if package_root is None:
+            self.report({"ERROR"}, "Select an imported StarBreaker object first")
+            return {"CANCELLED"}
+        track_name = f"{self.animation_name}@{self.start_frame}"
+        current_mute = _nla_track_mute_state(package_root, track_name)
+        _set_nla_track_mute(package_root, track_name, not current_mute)
+        state = "muted" if not current_mute else "unmuted"
+        self.report({"INFO"}, f"{track_name} {state}")
+        return {"FINISHED"}
+
+
+class STARBREAKER_OT_solo_animation_instance(Operator):
+    """Solo this animation instance — mute all others"""
+
+    bl_idname = "starbreaker.solo_animation_instance"
+    bl_label = "Solo Instance"
+    bl_options = {"REGISTER", "UNDO"}
+    bl_description = "Unmute this instance and mute all other animation instances"
+
+    animation_name: StringProperty(name="Animation Name")  # type: ignore[assignment]
+    instance_id: StringProperty(name="Instance Id")  # type: ignore[assignment]
+    start_frame: IntProperty(name="Start Frame", default=1)  # type: ignore[assignment]
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return find_package_root(context.active_object) is not None
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        package_root = _package_root_from_context(context)
+        if package_root is None:
+            self.report({"ERROR"}, "Select an imported StarBreaker object first")
+            return {"CANCELLED"}
+        target_track = f"{self.animation_name}@{self.start_frame}"
+        # Mute all NLA tracks on all objects in the package, then unmute target.
+        for obj in [package_root, *package_root.children_recursive]:
+            if not obj.animation_data:
+                continue
+            for track in obj.animation_data.nla_tracks:
+                track.mute = (track.name != target_track)
+        self.report({"INFO"}, f"Soloed {target_track}")
+        return {"FINISHED"}
+
+
 class STARBREAKER_OT_dump_animation_diagnostics(Operator):
     bl_idname = "starbreaker.dump_animation_diagnostics"
     bl_label = "Animation Diagnostics"
@@ -1179,16 +1291,49 @@ class STARBREAKER_PT_tools(Panel):
 
                         instance_entries = instances_by_animation.get(animation_name, [])
                         if instance_entries:
-                            instances_row = animation_box.row(align=True)
-                            instances_row.label(text="Instances")
                             for instance in instance_entries:
                                 start = int(round(float(instance.get("start_frame", 1.0))))
-                                op = instances_row.operator(
+                                instance_id = str(instance.get("id", ""))
+                                track_name = f"{animation_name}@{start}"
+                                is_muted = _nla_track_mute_state(package_root, track_name)
+
+                                row = animation_box.row(align=True)
+                                # Frame button: click to edit start frame
+                                op = row.operator(
                                     STARBREAKER_OT_edit_animation_instance.bl_idname,
                                     text=f"@{start}",
                                 )
                                 op.animation_name = animation_display_name
-                                op.instance_id = str(instance.get("id", ""))
+                                op.instance_id = instance_id
+
+                                # Mute toggle
+                                mute_op = row.operator(
+                                    STARBREAKER_OT_mute_animation_instance.bl_idname,
+                                    text="",
+                                    icon="MUTE_IPO_ON" if is_muted else "MUTE_IPO_OFF",
+                                    depress=is_muted,
+                                )
+                                mute_op.animation_name = animation_name
+                                mute_op.instance_id = instance_id
+                                mute_op.start_frame = start
+
+                                # Solo
+                                solo_op = row.operator(
+                                    STARBREAKER_OT_solo_animation_instance.bl_idname,
+                                    text="",
+                                    icon="SOLO_ON",
+                                )
+                                solo_op.animation_name = animation_name
+                                solo_op.instance_id = instance_id
+                                solo_op.start_frame = start
+
+                                # Delete
+                                del_op = row.operator(
+                                    STARBREAKER_OT_delete_animation_instance.bl_idname,
+                                    text="",
+                                    icon="X",
+                                )
+                                del_op.instance_id = instance_id
                 except Exception as exc:
                     animation_box.label(text=f"Animation UI error: {exc}")
 
@@ -1258,6 +1403,9 @@ CLASSES = [
     STARBREAKER_OT_dump_metadata,
     STARBREAKER_OT_apply_animation_mode,
     STARBREAKER_OT_edit_animation_instance,
+    STARBREAKER_OT_delete_animation_instance,
+    STARBREAKER_OT_mute_animation_instance,
+    STARBREAKER_OT_solo_animation_instance,
     STARBREAKER_OT_dump_animation_diagnostics,
     STARBREAKER_PT_tools,
 ]
