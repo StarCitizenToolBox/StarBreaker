@@ -5412,6 +5412,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "starbreaker-blend"
+version = "0.2.2"
+
+[[package]]
 name = "starbreaker-chf"
 version = "0.2.2"
 dependencies = [
