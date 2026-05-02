@@ -508,6 +508,7 @@ fn assemble_master_blend_from_scene_json(
 ) -> Result<()> {
     const SCRIPT: &str = r#"
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -845,11 +846,57 @@ def instantiate_record(record, export_root, collection, parent_default, parent_n
     return anchor, nodes
 
 
+def sc_pos_to_blender(pos):
+    """Convert a CryEngine world-space position vector to Blender space."""
+    x, y, z = pos
+    return mathutils.Vector((x, -z, y))
+
+
+BLENDER_LIGHT_TYPE = {
+    "point": "POINT",
+    "spot": "SPOT",
+    "sun": "SUN",
+    "area": "AREA",
+}
+
+
+def add_interior_lights(interior, interior_anchor, package_collection):
+    for light_data in interior.get("lights", []):
+        name = light_data.get("name", "light")
+        semantic_kind = (light_data.get("semantic_light_kind") or "point").lower()
+        blender_type = BLENDER_LIGHT_TYPE.get(semantic_kind, "POINT")
+        color = light_data.get("color") or [1.0, 1.0, 1.0]
+        intensity = float(light_data.get("intensity") or 1.0)
+        radius_m = float(light_data.get("radius_m") or 1.0)
+        position = light_data.get("position") or [0.0, 0.0, 0.0]
+        outer_angle = light_data.get("outer_angle")
+        inner_angle = light_data.get("inner_angle")
+
+        light = bpy.data.lights.new(name=name, type=blender_type)
+        light.color = color[:3]
+        light.energy = intensity
+        if blender_type == "POINT":
+            light.shadow_soft_size = radius_m
+        elif blender_type == "SPOT":
+            if outer_angle is not None:
+                light.spot_size = math.radians(float(outer_angle))
+            if inner_angle is not None and outer_angle and outer_angle > 0:
+                light.spot_blend = 1.0 - (float(inner_angle) / float(outer_angle))
+
+        obj = bpy.data.objects.new(name, light)
+        package_collection.objects.link(obj)
+        # Position lights in world space (SC positions are absolute, not relative to container).
+        # Leave unparented so the -90 X correction on package_root does not double-rotate them.
+        obj.location = sc_pos_to_blender(position)
+
+
 def assemble_scene(scene, export_root, output_blend, package_name):
     clear_scene()
     package_collection = ensure_collection(f"StarBreaker {package_name}")
     package_root = bpy.data.objects.new(f"StarBreaker {package_name}", None)
     package_collection.objects.link(package_root)
+    # CryEngine is Z-up; correct to Blender Y-up by rotating the root empty -90° on X.
+    package_root.rotation_euler = (math.radians(-90), 0.0, 0.0)
 
     index_by_entity = {}
     global ASSET_CACHE, LINKED_MESH_CACHE
@@ -885,6 +932,7 @@ def assemble_scene(scene, export_root, output_blend, package_name):
         interior_anchor = bpy.data.objects.new("InteriorContainer", None)
         package_collection.objects.link(interior_anchor)
         apply_local_transform(interior_anchor, root_anchor, interior.get("container_transform"))
+        add_interior_lights(interior, interior_anchor, package_collection)
         for placement in interior.get("placements", []):
             mesh_asset = placement.get("mesh_asset")
             instance_name = Path(mesh_asset).stem if mesh_asset else "InteriorInstance"
