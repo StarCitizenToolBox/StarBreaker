@@ -54,6 +54,8 @@ pub const IDPROPERTY_SIZE: usize = 144;
 
 // ── Attribute enums ───────────────────────────────────────────────────────────
 pub const ATTR_DOMAIN_POINT: u8 = 0;
+pub const ATTR_DOMAIN_EDGE: u8 = 1;
+pub const ATTR_DOMAIN_FACE: u8 = 2;
 pub const ATTR_DOMAIN_CORNER: u8 = 3;
 pub const ATTR_TYPE_INT16_2D: i16 = 2;
 pub const ATTR_TYPE_INT: i16 = 3;

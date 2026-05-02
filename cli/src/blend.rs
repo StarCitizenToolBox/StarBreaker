@@ -6,11 +6,13 @@
 
 use starbreaker_3d::Mesh;
 use starbreaker_blend::{
-    bytes4_data, build_attribute, build_attribute_array, build_file_global, build_mat_ptr_array,
-    build_matbits, build_mesh, build_object, floats2_data, floats3_data, ints_data, write_block,
-    write_block_header, PtrAlloc, ATTR_DOMAIN_CORNER, ATTR_DOMAIN_POINT, ATTR_TYPE_BYTE_COLOR,
+    bytes4_data, build_attribute, build_attribute_array, build_collection, build_file_global,
+    build_mat_ptr_array, build_matbits, build_mesh, build_object, build_scene, build_view_layer,
+    floats2_data, floats3_data, ints_data, write_block, write_block_header, PtrAlloc,
+    ATTR_DOMAIN_CORNER, ATTR_DOMAIN_FACE, ATTR_DOMAIN_POINT, ATTR_TYPE_BYTE_COLOR,
     ATTR_TYPE_FLOAT2, ATTR_TYPE_FLOAT3, ATTR_TYPE_INT, BLEND_MAGIC, DNA1_BYTES,
-    SDNA_IDX_ATTRIBUTE, SDNA_IDX_DNA1, SDNA_IDX_FILE_GLOBAL, SDNA_IDX_MESH, SDNA_IDX_OBJECT,
+    SDNA_IDX_ATTRIBUTE, SDNA_IDX_COLLECTION, SDNA_IDX_DNA1, SDNA_IDX_FILE_GLOBAL, SDNA_IDX_MESH,
+    SDNA_IDX_OBJECT, SDNA_IDX_SCENE, SDNA_IDX_VIEW_LAYER,
 };
 
 /// Convert a `starbreaker_3d::Mesh` into `.blend` file bytes for Blender 5.1.x.
@@ -23,9 +25,11 @@ use starbreaker_blend::{
 /// - `.corner_vert` (CORNER / INT)   — always
 /// - `UVMap`        (CORNER / FLOAT2) — when `mesh.uvs` is `Some`
 /// - `Color`        (CORNER / BYTE_COLOR) — when `mesh.colors` is `Some`
+/// - `material_index` (FACE / INT)   — always (per-polygon material slot index from submeshes)
 ///
 /// Per-vertex UVs and colors are expanded to per-loop (corner) data.
-/// Custom normals and per-face material assignment are deferred to Phase 68.
+/// Per-face material indices are filled from `mesh.submeshes` ranges.
+/// Custom normals are deferred to Phase 68.
 pub(crate) fn mesh_to_blend(name: &str, mesh: &Mesh) -> Vec<u8> {
     let totvert = mesh.positions.len();
     let totloop = mesh.indices.len();
@@ -49,6 +53,11 @@ pub(crate) fn mesh_to_blend(name: &str, mesh: &Mesh) -> Vec<u8> {
     let array_cv_ptr  = ptrs.alloc();
     let raw_pos_ptr   = ptrs.alloc();
     let raw_cv_ptr    = ptrs.alloc();
+
+    // material_index (FACE domain)
+    let name_matidx_ptr = ptrs.alloc();
+    let array_matidx_ptr = ptrs.alloc();
+    let raw_matidx_ptr = ptrs.alloc();
 
     // Optional: UV map
     let (name_uv_ptr, array_uv_ptr, raw_uv_ptr) = if mesh.uvs.is_some() {
@@ -76,6 +85,19 @@ pub(crate) fn mesh_to_blend(name: &str, mesh: &Mesh) -> Vec<u8> {
     let raw_position   = floats3_data(&mesh.positions);
     let raw_corner_vert = ints_data(&corner_verts);
 
+    // Per-polygon material index: fill from submesh ranges
+    let mut material_indices: Vec<i32> = vec![0; totpoly];
+    for (mat_idx, submesh) in mesh.submeshes.iter().enumerate() {
+        let start_face = submesh.first_index / 3;
+        let num_faces = submesh.num_indices / 3;
+        for i in 0..num_faces {
+            if (start_face + i) < totpoly as u32 {
+                material_indices[(start_face + i) as usize] = mat_idx as i32;
+            }
+        }
+    }
+    let raw_material_index = ints_data(&material_indices);
+
     // Expand per-vertex UV → per-loop (CORNER domain requires one entry per loop corner)
     let raw_uv: Option<Vec<u8>> = mesh.uvs.as_ref().map(|uvs| {
         let expanded: Vec<[f32; 2]> = mesh.indices.iter().map(|&i| uvs[i as usize]).collect();
@@ -91,13 +113,16 @@ pub(crate) fn mesh_to_blend(name: &str, mesh: &Mesh) -> Vec<u8> {
     // ── Attribute descriptor blob ─────────────────────────────────────────────
 
     let mut attr_blob: Vec<u8> = Vec::new();
-    let mut num_attrs: u32 = 2; // position + corner_vert always present
+    let mut num_attrs: u32 = 3; // position + corner_vert + material_index always present
 
     attr_blob.extend_from_slice(&build_attribute(
         name_pos_ptr, ATTR_TYPE_FLOAT3, ATTR_DOMAIN_POINT, array_pos_ptr,
     ));
     attr_blob.extend_from_slice(&build_attribute(
         name_cv_ptr, ATTR_TYPE_INT, ATTR_DOMAIN_CORNER, array_cv_ptr,
+    ));
+    attr_blob.extend_from_slice(&build_attribute(
+        name_matidx_ptr, ATTR_TYPE_INT, ATTR_DOMAIN_FACE, array_matidx_ptr,
     ));
     if mesh.uvs.is_some() {
         attr_blob.extend_from_slice(&build_attribute(
@@ -154,12 +179,16 @@ pub(crate) fn mesh_to_blend(name: &str, mesh: &Mesh) -> Vec<u8> {
     // Attribute name strings
     write_block(&mut out, b"DATA", 0, name_pos_ptr, 1, b"position\0");
     write_block(&mut out, b"DATA", 0, name_cv_ptr,  1, b".corner_vert\0");
+    write_block(&mut out, b"DATA", 0, name_matidx_ptr, 1, b"material_index\0");
 
-    // Attribute array descriptors + raw data (position, corner_vert)
+    // Attribute array descriptors + raw data (position, corner_vert, material_index)
     write_block(&mut out, b"DATA", 73, array_pos_ptr, 1, &arr_pos);
     write_block(&mut out, b"DATA", 73, array_cv_ptr,  1, &arr_cv);
+    let arr_matidx = build_attribute_array(raw_matidx_ptr, totpoly as i64);
+    write_block(&mut out, b"DATA", 73, array_matidx_ptr, 1, &arr_matidx);
     write_block(&mut out, b"DATA", 0, raw_pos_ptr, 1, &raw_position);
     write_block(&mut out, b"DATA", 0, raw_cv_ptr,  1, &raw_corner_vert);
+    write_block(&mut out, b"DATA", 0, raw_matidx_ptr, 1, &raw_material_index);
 
     // Optional: UV map
     if let Some(ref uv_data) = raw_uv {
@@ -179,6 +208,47 @@ pub(crate) fn mesh_to_blend(name: &str, mesh: &Mesh) -> Vec<u8> {
 
     // Polygon offset array
     write_block(&mut out, b"DATA", 0, poly_offs_ptr, 1, &raw_poly_offsets);
+
+    write_block(&mut out, b"DNA1", SDNA_IDX_DNA1, 0x01, 1, DNA1_BYTES);
+    write_block_header(&mut out, b"ENDB", 0, 0, 0, 0);
+
+    out
+}
+
+/// Build a master assembly `.blend` with scene + collection setup.
+///
+/// This creates a library-mode `.blend` file with:
+/// - A Scene block with a master Collection
+/// - A ViewLayer linked to the scene
+/// - Empty geometry (no objects) — ready for addon to link individual mesh .blend files
+///
+/// Used in Phase 68 for decomposed export: individual mesh .blend files are linked
+/// via `bpy.data.libraries.load(link=True)`, and instances are placed by the addon.
+pub(crate) fn create_master_blend(entity_name: &str) -> Vec<u8> {
+    let mut ptrs = PtrAlloc::new(0x1000);
+
+    let scene_ptr = ptrs.alloc();
+    let view_layer_ptr = ptrs.alloc();
+    let view_layer_base_ptr = ptrs.alloc();
+    let collection_ptr = ptrs.alloc();
+
+    // ── Build datablocks ─────────────────────────────────────────────────────
+
+    let file_global = build_file_global(scene_ptr, view_layer_ptr);
+    let scene = build_scene(entity_name, view_layer_ptr, collection_ptr);
+    let view_layer = build_view_layer(entity_name, view_layer_base_ptr, collection_ptr);
+    let collection = build_collection(entity_name, scene_ptr, collection_ptr);
+
+    // ── Assemble file ─────────────────────────────────────────────────────────
+
+    let mut out: Vec<u8> = Vec::with_capacity(128 * 1024);
+    out.extend_from_slice(BLEND_MAGIC);
+
+    // Write blocks in order: GLOB, Scene, ViewLayer, Collection
+    write_block(&mut out, b"GLOB", SDNA_IDX_FILE_GLOBAL, 0x10, 1, &file_global);
+    write_block(&mut out, b"SCE\0", SDNA_IDX_SCENE, scene_ptr, 1, &scene);
+    write_block(&mut out, b"SR\0\0", SDNA_IDX_VIEW_LAYER, view_layer_ptr, 1, &view_layer);
+    write_block(&mut out, b"GRP\0", SDNA_IDX_COLLECTION, collection_ptr, 1, &collection);
 
     write_block(&mut out, b"DNA1", SDNA_IDX_DNA1, 0x01, 1, DNA1_BYTES);
     write_block_header(&mut out, b"ENDB", 0, 0, 0, 0);
