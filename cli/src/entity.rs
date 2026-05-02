@@ -417,12 +417,41 @@ fn export_blend(
         mesh.colors.is_some(),
     );
 
-    let blend_bytes = crate::blend::mesh_to_blend(&export_name, &mesh);
+    let is_decomposed = opts.kind.to_lowercase() == "decomposed";
+    
+    if is_decomposed {
+        // Phase 68C: Decomposed export
+        let output_dir = output.unwrap_or_else(|| PathBuf::from(&export_name));
+        std::fs::create_dir_all(&output_dir)
+            .map_err(|e| CliError::IoPath { source: e, path: output_dir.display().to_string() })?;
+        
+        let meshes_dir = output_dir.join("meshes");
+        std::fs::create_dir_all(&meshes_dir)
+            .map_err(|e| CliError::IoPath { source: e, path: meshes_dir.display().to_string() })?;
+        
+        // Export root mesh to meshes/{export_name}.blend
+        let mesh_blend_bytes = crate::blend::mesh_to_blend(&export_name, &mesh);
+        let mesh_path = meshes_dir.join(format!("{export_name}.blend"));
+        std::fs::write(&mesh_path, &mesh_blend_bytes)
+            .map_err(|e| CliError::IoPath { source: e, path: mesh_path.display().to_string() })?;
+        eprintln!("Written {} bytes to {}", mesh_blend_bytes.len(), mesh_path.display());
+        
+        // Create master .blend
+        let master_blend_bytes = crate::blend::create_master_blend(&export_name);
+        let master_path = output_dir.join(format!("{export_name}.blend"));
+        std::fs::write(&master_path, &master_blend_bytes)
+            .map_err(|e| CliError::IoPath { source: e, path: master_path.display().to_string() })?;
+        eprintln!("Written {} bytes to {} (master assembly)", master_blend_bytes.len(), master_path.display());
+        eprintln!("Decomposed .blend export ready. Addon can link meshes from: {}", meshes_dir.display());
+    } else {
+        // Phase 67J: Bundled export (single monolithic mesh)
+        let blend_bytes = crate::blend::mesh_to_blend(&export_name, &mesh);
 
-    let output = output.unwrap_or_else(|| PathBuf::from(format!("{export_name}.blend")));
-    std::fs::write(&output, &blend_bytes)
-        .map_err(|e| CliError::IoPath { source: e, path: output.display().to_string() })?;
-    eprintln!("Written {} bytes to {}", blend_bytes.len(), output.display());
+        let output = output.unwrap_or_else(|| PathBuf::from(format!("{export_name}.blend")));
+        std::fs::write(&output, &blend_bytes)
+            .map_err(|e| CliError::IoPath { source: e, path: output.display().to_string() })?;
+        eprintln!("Written {} bytes to {}", blend_bytes.len(), output.display());
+    }
     Ok(())
 }
 
