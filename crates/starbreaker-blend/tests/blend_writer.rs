@@ -64,7 +64,7 @@ fn object_size_is_1288() {
 
 #[test]
 fn mesh_size_is_1960() {
-    let me = build_mesh("TestMesh", 4, 1, 4, 0, 0, 0, 0, 0, 0, 0, 0);
+    let me = build_mesh("TestMesh", 4, 1, 4, 0, 0, 0, 0, 0, 0, 0, 0, 5);
     assert_eq!(me.len(), MESH_SIZE);
     assert_eq!(MESH_SIZE, 1960);
 }
@@ -152,13 +152,13 @@ fn lamp_object_type_at_416() {
 
 #[test]
 fn mesh_totvert_at_432() {
-    let me = build_mesh("M", 7, 2, 8, 0, 0, 0, 0, 0, 0, 0, 0);
+    let me = build_mesh("M", 7, 2, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     assert_eq!(u32::from_le_bytes(me[432..436].try_into().unwrap()), 7);
 }
 
 #[test]
 fn mesh_attributes_ptr_at_456() {
-    let me = build_mesh("M", 4, 1, 4, 0, 0xcccc_u64, 0, 0, 0, 0, 0, 0);
+    let me = build_mesh("M", 4, 1, 4, 0, 0xcccc_u64, 0, 0, 0, 0, 0, 0, 2);
     assert_eq!(u64::from_le_bytes(me[456..464].try_into().unwrap()), 0xcccc_u64);
 }
 

@@ -398,6 +398,7 @@ pub fn build_mesh(
     vgroup_last_ptr: u64,
     vgroup_count: u64,
     cdl_ptr: u64,
+    num_attributes: u32,
 ) -> Vec<u8> {
     let mut data = vec![0u8; MESH_SIZE];
     write_id_name(&mut data, "ME", mesh_name);
@@ -408,7 +409,7 @@ pub fn build_mesh(
     write_ptr(&mut data, 448, poly_offset_indices_ptr);
     // AttributeStorage (inline): dna_attributes*, dna_attributes_num, pad, runtime*
     write_ptr(&mut data, 456, attributes_ptr);
-    write_i32(&mut data, 464, 5);
+    write_i32(&mut data, 464, num_attributes as i32);
     write_i16(&mut data, 1618, material_slots);
     write_ptr(&mut data, 1472, vgroup_first_ptr);
     write_ptr(&mut data, 1480, vgroup_last_ptr);

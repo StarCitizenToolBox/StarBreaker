@@ -217,6 +217,11 @@ fn export(
     dump_hierarchy: bool,
     opts: ExportOpts,
 ) -> Result<()> {
+    // Route blend format to a dedicated code path
+    if opts.format.to_lowercase() == "blend" {
+        return export_blend(name, output, p4k_path, opts);
+    }
+
     crate::log_mem_stats("start");
     let (p4k, dcb_bytes) = load_dcb_bytes(p4k_path.as_deref(), None)?;
     crate::log_mem_stats("after p4k+dcb load");
@@ -323,6 +328,101 @@ fn export(
     }
     crate::log_mem_stats("after write");
     eprintln!("Written to {}", output.display());
+    Ok(())
+}
+
+/// Export the root geometry of an entity directly to `.blend` format.
+///
+/// Resolves the entity's geometry path from DataCore, loads the `.skinm` from
+/// the P4K, parses it via `starbreaker_3d::parse_skin`, and writes the result
+/// as a Blender 5.x `.blend` library file containing a single OB_MESH object.
+///
+/// Phase 68 will extend this to handle the full node hierarchy (children,
+/// lights, empties) and per-face material assignments.
+fn export_blend(
+    name: String,
+    output: Option<PathBuf>,
+    p4k_path: Option<PathBuf>,
+    opts: ExportOpts,
+) -> Result<()> {
+    let (p4k, dcb_bytes) = load_dcb_bytes(p4k_path.as_deref(), None)?;
+    let p4k = p4k.ok_or_else(|| CliError::MissingRequirement("P4k required for entity blend export".into()))?;
+    let db = Database::from_bytes(&dcb_bytes)?;
+
+    let candidates = find_candidates(&db, &name)?;
+    if candidates.is_empty() {
+        return Err(CliError::NotFound(format!("no EntityClassDefinition records matching '{name}'")));
+    }
+    let record = candidates[0];
+    let rname = db.resolve_string2(record.name_offset);
+    let export_name = sanitize_export_name(&export_entity_name(rname));
+    if candidates.len() > 1 {
+        eprintln!("Found {} candidates, using shortest match: {rname}", candidates.len());
+    }
+
+    // Resolve geometry path from DataCore
+    let geom_compiled = db
+        .compile_path::<String>(
+            record.struct_id(),
+            "Components[SGeometryResourceParams].Geometry.Geometry.Geometry.path",
+        )
+        .map_err(|_| CliError::NotFound(format!("entity '{name}' has no geometry component")))?;
+    let geometry_path = db
+        .query_single::<String>(&geom_compiled, record)
+        .map_err(|e| CliError::InvalidInput(format!("DataCore query failed: {e}")))?
+        .ok_or_else(|| CliError::NotFound(format!("entity '{name}' has no geometry path")))?;
+
+    // Derive the P4K path for the mesh data file (.skinm / .cgfm)
+    // DataCore paths look like "objects/ships/aegs/gladius.skin"; strip Data/ prefix
+    // and convert slashes, then append 'm' for the mashed geometry streams file.
+    let clean_path = geometry_path
+        .strip_prefix("Data/").or_else(|| geometry_path.strip_prefix("Data\\"))
+        .or_else(|| geometry_path.strip_prefix("data/")).or_else(|| geometry_path.strip_prefix("data\\"))
+        .unwrap_or(&geometry_path);
+    let p4k_base = format!("Data\\{}", clean_path.replace('/', "\\"));
+    let lod = opts.lod;
+    let companion_path = if lod > 0 {
+        let lod_path = if let Some(dot) = p4k_base.rfind('.') {
+            format!("{}_lod{}{}", &p4k_base[..dot], lod, &p4k_base[dot..])
+        } else {
+            format!("{}_lod{}", p4k_base, lod)
+        };
+        let lod_companion = format!("{lod_path}m");
+        if p4k.entry_case_insensitive(&lod_companion).is_some() {
+            lod_companion
+        } else {
+            format!("{p4k_base}m")
+        }
+    } else {
+        format!("{p4k_base}m")
+    };
+
+    let entry = p4k
+        .entry_case_insensitive(&companion_path)
+        .ok_or_else(|| CliError::NotFound(format!("mesh data not found in P4K: {companion_path}")))?;
+
+    eprintln!("Loading mesh from: {}", entry.name);
+    let mesh_bytes = p4k.read(entry)
+        .map_err(|e| CliError::InvalidInput(format!("Failed to read mesh data: {e}")))?;
+
+    let mesh = starbreaker_3d::parse_skin(&mesh_bytes)
+        .map_err(|e| CliError::InvalidInput(format!("Failed to parse mesh: {e}")))?;
+
+    eprintln!(
+        "Mesh: {} verts, {} triangles, {} submeshes, uvs={}, colors={}",
+        mesh.positions.len(),
+        mesh.indices.len() / 3,
+        mesh.submeshes.len(),
+        mesh.uvs.is_some(),
+        mesh.colors.is_some(),
+    );
+
+    let blend_bytes = crate::blend::mesh_to_blend(&export_name, &mesh);
+
+    let output = output.unwrap_or_else(|| PathBuf::from(format!("{export_name}.blend")));
+    std::fs::write(&output, &blend_bytes)
+        .map_err(|e| CliError::IoPath { source: e, path: output.display().to_string() })?;
+    eprintln!("Written {} bytes to {}", blend_bytes.len(), output.display());
     Ok(())
 }
 

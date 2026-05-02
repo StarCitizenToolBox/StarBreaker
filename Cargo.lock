@@ -5344,6 +5344,7 @@ dependencies = [
  "regex",
  "serde_json",
  "starbreaker-3d",
+ "starbreaker-blend",
  "starbreaker-chf",
  "starbreaker-chunks",
  "starbreaker-common",
