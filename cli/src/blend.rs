@@ -4,14 +4,17 @@
 //! OB_MESH object.  Material slots are allocated (null pointers) to match the
 //! submesh count; per-face material assignment is deferred to Phase 68.
 
+use starbreaker_3d::types::SubMesh;
 use starbreaker_3d::Mesh;
 use starbreaker_blend::{
-    bytes4_data, build_attribute, build_attribute_array, build_collection, build_file_global,
-    build_mat_ptr_array, build_matbits, build_mesh, build_object, build_scene, build_view_layer,
+    bytes4_data, build_attribute, build_attribute_array, build_base, build_collection,
+    build_collection_object, build_file_global, build_layer_collection, build_mat_ptr_array,
+    build_matbits, build_mesh, build_object, build_scene, build_view_layer, compress_blend_bytes,
     floats2_data, floats3_data, ints_data, write_block, write_block_header, PtrAlloc,
     ATTR_DOMAIN_CORNER, ATTR_DOMAIN_FACE, ATTR_DOMAIN_POINT, ATTR_TYPE_BYTE_COLOR,
     ATTR_TYPE_FLOAT2, ATTR_TYPE_FLOAT3, ATTR_TYPE_INT, BLEND_MAGIC, DNA1_BYTES,
-    SDNA_IDX_ATTRIBUTE, SDNA_IDX_COLLECTION, SDNA_IDX_DNA1, SDNA_IDX_FILE_GLOBAL, SDNA_IDX_MESH,
+    SDNA_IDX_ATTRIBUTE, SDNA_IDX_BASE, SDNA_IDX_COLLECTION, SDNA_IDX_COLLECTION_OBJECT,
+    SDNA_IDX_DNA1, SDNA_IDX_FILE_GLOBAL, SDNA_IDX_LAYER_COLLECTION, SDNA_IDX_MESH,
     SDNA_IDX_OBJECT, SDNA_IDX_SCENE, SDNA_IDX_VIEW_LAYER,
 };
 
@@ -43,6 +46,12 @@ pub(crate) fn mesh_to_blend(name: &str, mesh: &Mesh) -> Vec<u8> {
     let mesh_mat_ptr   = ptrs.alloc();
     let obj_mat_ptr    = ptrs.alloc();
     let obj_matbits_ptr = ptrs.alloc();
+    let scene_ptr      = ptrs.alloc();
+    let view_layer_ptr = ptrs.alloc();
+    let base_ptr       = ptrs.alloc();
+    let collection_ptr = ptrs.alloc();
+    let collection_object_ptr = ptrs.alloc();
+    let layer_collection_ptr = ptrs.alloc();
     let poly_offs_ptr  = ptrs.alloc();
     let attrs_ptr      = ptrs.alloc();
 
@@ -142,6 +151,12 @@ pub(crate) fn mesh_to_blend(name: &str, mesh: &Mesh) -> Vec<u8> {
     let object_data = build_object(
         name, mesh_ptr, obj_mat_ptr, obj_matbits_ptr, mat_slots as i32, 0,
     );
+    let scene_data = build_scene(name, view_layer_ptr, collection_ptr);
+    let view_layer_data = build_view_layer(name, base_ptr, layer_collection_ptr);
+    let base_data = build_base(object_ptr);
+    let collection_data = build_collection(name, scene_ptr, collection_object_ptr);
+    let collection_object_data = build_collection_object(object_ptr);
+    let layer_collection_data = build_layer_collection(collection_ptr);
     let mesh_data = build_mesh(
         name, totvert, totpoly, totloop,
         poly_offs_ptr, attrs_ptr,
@@ -161,8 +176,30 @@ pub(crate) fn mesh_to_blend(name: &str, mesh: &Mesh) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::with_capacity(512 * 1024);
     out.extend_from_slice(BLEND_MAGIC);
 
-    let file_global = build_file_global(0, 0);
+    let file_global = build_file_global(scene_ptr, view_layer_ptr);
     write_block(&mut out, b"GLOB", SDNA_IDX_FILE_GLOBAL, 0x10, 1, &file_global);
+
+    // Minimal scene graph so Blender opens this as a normal scene, not library-only data.
+    write_block(&mut out, b"SCE\0", SDNA_IDX_SCENE, scene_ptr, 1, &scene_data);
+    write_block(&mut out, b"SR\0\0", SDNA_IDX_VIEW_LAYER, view_layer_ptr, 1, &view_layer_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_BASE, base_ptr, 1, &base_data);
+    write_block(&mut out, b"GRP\0", SDNA_IDX_COLLECTION, collection_ptr, 1, &collection_data);
+    write_block(
+        &mut out,
+        b"DATA",
+        SDNA_IDX_COLLECTION_OBJECT,
+        collection_object_ptr,
+        1,
+        &collection_object_data,
+    );
+    write_block(
+        &mut out,
+        b"DATA",
+        SDNA_IDX_LAYER_COLLECTION,
+        layer_collection_ptr,
+        1,
+        &layer_collection_data,
+    );
 
     // OB block + DATA blocks (gap=1 rule: mat** and matbits must immediately follow OB)
     write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, object_ptr, 1, &object_data);
@@ -212,48 +249,41 @@ pub(crate) fn mesh_to_blend(name: &str, mesh: &Mesh) -> Vec<u8> {
     write_block(&mut out, b"DNA1", SDNA_IDX_DNA1, 0x01, 1, DNA1_BYTES);
     write_block_header(&mut out, b"ENDB", 0, 0, 0, 0);
 
-    out
+    compress_blend_bytes(&out)
 }
 
-/// Build a master assembly `.blend` with scene + collection setup.
+/// Build a master assembly `.blend` that opens as a normal Blender scene.
 ///
-/// This creates a library-mode `.blend` file with:
-/// - A Scene block with a master Collection
-/// - A ViewLayer linked to the scene
-/// - Empty geometry (no objects) — ready for addon to link individual mesh .blend files
-///
-/// Used in Phase 68 for decomposed export: individual mesh .blend files are linked
-/// via `bpy.data.libraries.load(link=True)`, and instances are placed by the addon.
+/// A scene-only file can be interpreted by Blender as a library payload and
+/// trigger "Library file, loading empty scene". To avoid that, we emit a tiny
+/// placeholder mesh/object scene. The addon can replace/remove this placeholder
+/// once it links real component assets.
 pub(crate) fn create_master_blend(entity_name: &str) -> Vec<u8> {
-    let mut ptrs = PtrAlloc::new(0x1000);
+    let placeholder = Mesh {
+        positions: vec![[0.0, 0.0, 0.0], [0.001, 0.0, 0.0], [0.0, 0.001, 0.0]],
+        indices: vec![0, 1, 2],
+        uvs: None,
+        secondary_uvs: None,
+        normals: None,
+        tangents: None,
+        colors: None,
+        submeshes: vec![SubMesh {
+            material_name: None,
+            material_id: 0,
+            source_material_id: None,
+            first_index: 0,
+            num_indices: 3,
+            first_vertex: 0,
+            num_vertices: 3,
+            node_parent_index: 0,
+        }],
+        model_min: [0.0, 0.0, 0.0],
+        model_max: [0.001, 0.001, 0.0],
+        scaling_min: [0.0, 0.0, 0.0],
+        scaling_max: [0.001, 0.001, 0.0],
+    };
 
-    let scene_ptr = ptrs.alloc();
-    let view_layer_ptr = ptrs.alloc();
-    let view_layer_base_ptr = ptrs.alloc();
-    let collection_ptr = ptrs.alloc();
-
-    // ── Build datablocks ─────────────────────────────────────────────────────
-
-    let file_global = build_file_global(scene_ptr, view_layer_ptr);
-    let scene = build_scene(entity_name, view_layer_ptr, collection_ptr);
-    let view_layer = build_view_layer(entity_name, view_layer_base_ptr, collection_ptr);
-    let collection = build_collection(entity_name, scene_ptr, collection_ptr);
-
-    // ── Assemble file ─────────────────────────────────────────────────────────
-
-    let mut out: Vec<u8> = Vec::with_capacity(128 * 1024);
-    out.extend_from_slice(BLEND_MAGIC);
-
-    // Write blocks in order: GLOB, Scene, ViewLayer, Collection
-    write_block(&mut out, b"GLOB", SDNA_IDX_FILE_GLOBAL, 0x10, 1, &file_global);
-    write_block(&mut out, b"SCE\0", SDNA_IDX_SCENE, scene_ptr, 1, &scene);
-    write_block(&mut out, b"SR\0\0", SDNA_IDX_VIEW_LAYER, view_layer_ptr, 1, &view_layer);
-    write_block(&mut out, b"GRP\0", SDNA_IDX_COLLECTION, collection_ptr, 1, &collection);
-
-    write_block(&mut out, b"DNA1", SDNA_IDX_DNA1, 0x01, 1, DNA1_BYTES);
-    write_block_header(&mut out, b"ENDB", 0, 0, 0, 0);
-
-    out
+    mesh_to_blend(entity_name, &placeholder)
 }
 
 #[cfg(test)]

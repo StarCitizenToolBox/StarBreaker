@@ -8,6 +8,11 @@
 //! from a live Blender 5.1.1 instance and cross-checked against the bundled DNA1
 //! block (`dna1_blender501.bin`).
 
+use std::io::Write;
+
+use flate2::Compression;
+use flate2::write::GzEncoder;
+
 pub const DNA1_BYTES: &[u8] = include_bytes!("dna1_blender501.bin");
 
 /// Blender 5.1.x file magic (17 bytes).
@@ -124,6 +129,21 @@ pub fn write_block(
 ) {
     write_block_header(out, code, sdna_idx, old_ptr, data.len() as u32, count);
     out.extend_from_slice(data);
+}
+
+/// Compress raw `.blend` bytes to Blender's optional gzip-wrapped format.
+///
+/// If compression fails, returns the original input bytes so callers still get
+/// a valid uncompressed `.blend` payload.
+pub fn compress_blend_bytes(raw_blend: &[u8]) -> Vec<u8> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    if encoder.write_all(raw_blend).is_err() {
+        return raw_blend.to_vec();
+    }
+    match encoder.finish() {
+        Ok(compressed) => compressed,
+        Err(_) => raw_blend.to_vec(),
+    }
 }
 
 // ── Byte-level field writers ──────────────────────────────────────────────────

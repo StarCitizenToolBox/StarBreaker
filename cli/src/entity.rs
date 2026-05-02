@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Subcommand;
 use starbreaker_datacore::database::Database;
@@ -360,6 +362,78 @@ fn export_blend(
         eprintln!("Found {} candidates, using shortest match: {rname}", candidates.len());
     }
 
+    let is_decomposed = opts.kind.to_lowercase() == "decomposed";
+
+    if is_decomposed {
+        // Blend decomposed export: keep the Rust-owned decomposed graph from
+        // `starbreaker_3d`, then assemble `scene.blend` via a Rust-launched
+        // background Blender process from the emitted `scene.json`.
+        let idx = EntityIndex::new(&db);
+        let tree = resolve_loadout_indexed(&idx, record);
+        let mut export_opts = starbreaker_3d::ExportOptions::from(&opts);
+        export_opts.kind = starbreaker_3d::ExportKind::Decomposed;
+        // The decomposed pipeline emits scene.json + mesh assets in GLB.
+        export_opts.format = starbreaker_3d::ExportFormat::Glb;
+
+        let output_dir = output.unwrap_or_else(|| PathBuf::from(&name));
+        let package_name = format!(
+            "{export_name}_LOD{}_TEX{}",
+            export_opts.lod_level, export_opts.texture_mip
+        );
+        prepare_decomposed_output_root(&output_dir, &package_name)?;
+
+        let existing_asset_paths = if opts.skip_existing_assets {
+            Some(collect_existing_decomposed_assets(&output_dir)?)
+        } else {
+            None
+        };
+
+        let result = starbreaker_3d::assemble_glb_with_loadout_with_progress(
+            &db,
+            &p4k,
+            record,
+            &tree,
+            &export_opts,
+            None,
+            existing_asset_paths.as_ref(),
+        )?;
+
+        let decomposed = result
+            .decomposed
+            .as_ref()
+            .ok_or_else(|| CliError::InvalidInput("entity export returned no decomposed files".into()))?;
+
+        for file in &decomposed.files {
+            let output_path = output_dir.join(&file.relative_path);
+            if let Some(parent) = output_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| CliError::IoPath {
+                    source: e,
+                    path: parent.display().to_string(),
+                })?;
+            }
+            write_decomposed_file(file, &output_path, opts.skip_existing_assets)?;
+        }
+
+        let scene_json_path = output_dir.join("Packages").join(&package_name).join("scene.json");
+        if !scene_json_path.is_file() {
+            return Err(CliError::NotFound(format!(
+                "decomposed scene manifest missing after export: {}",
+                scene_json_path.display()
+            )));
+        }
+
+        let master_path = output_dir.join("Packages").join(&package_name).join("scene.blend");
+        assemble_master_blend_from_scene_json(
+            &output_dir,
+            &scene_json_path,
+            &master_path,
+            &export_name,
+        )?;
+
+        eprintln!("Written to {}", master_path.display());
+        return Ok(());
+    }
+
     // Resolve geometry path from DataCore
     let geom_compiled = db
         .compile_path::<String>(
@@ -417,41 +491,496 @@ fn export_blend(
         mesh.colors.is_some(),
     );
 
-    let is_decomposed = opts.kind.to_lowercase() == "decomposed";
-    
-    if is_decomposed {
-        // Phase 68C: Decomposed export
-        let output_dir = output.unwrap_or_else(|| PathBuf::from(&export_name));
-        std::fs::create_dir_all(&output_dir)
-            .map_err(|e| CliError::IoPath { source: e, path: output_dir.display().to_string() })?;
-        
-        let meshes_dir = output_dir.join("meshes");
-        std::fs::create_dir_all(&meshes_dir)
-            .map_err(|e| CliError::IoPath { source: e, path: meshes_dir.display().to_string() })?;
-        
-        // Export root mesh to meshes/{export_name}.blend
-        let mesh_blend_bytes = crate::blend::mesh_to_blend(&export_name, &mesh);
-        let mesh_path = meshes_dir.join(format!("{export_name}.blend"));
-        std::fs::write(&mesh_path, &mesh_blend_bytes)
-            .map_err(|e| CliError::IoPath { source: e, path: mesh_path.display().to_string() })?;
-        eprintln!("Written {} bytes to {}", mesh_blend_bytes.len(), mesh_path.display());
-        
-        // Create master .blend
-        let master_blend_bytes = crate::blend::create_master_blend(&export_name);
-        let master_path = output_dir.join(format!("{export_name}.blend"));
-        std::fs::write(&master_path, &master_blend_bytes)
-            .map_err(|e| CliError::IoPath { source: e, path: master_path.display().to_string() })?;
-        eprintln!("Written {} bytes to {} (master assembly)", master_blend_bytes.len(), master_path.display());
-        eprintln!("Decomposed .blend export ready. Addon can link meshes from: {}", meshes_dir.display());
-    } else {
-        // Phase 67J: Bundled export (single monolithic mesh)
-        let blend_bytes = crate::blend::mesh_to_blend(&export_name, &mesh);
+    // Bundled blend export (single monolithic mesh).
+    let blend_bytes = crate::blend::mesh_to_blend(&export_name, &mesh);
+    let output = output.unwrap_or_else(|| PathBuf::from(format!("{export_name}.blend")));
+    std::fs::write(&output, &blend_bytes)
+        .map_err(|e| CliError::IoPath { source: e, path: output.display().to_string() })?;
+    eprintln!("Written {} bytes to {}", blend_bytes.len(), output.display());
+    Ok(())
+}
 
-        let output = output.unwrap_or_else(|| PathBuf::from(format!("{export_name}.blend")));
-        std::fs::write(&output, &blend_bytes)
-            .map_err(|e| CliError::IoPath { source: e, path: output.display().to_string() })?;
-        eprintln!("Written {} bytes to {}", blend_bytes.len(), output.display());
+fn assemble_master_blend_from_scene_json(
+    export_root: &Path,
+    scene_json_path: &Path,
+    output_blend_path: &Path,
+    package_name: &str,
+) -> Result<()> {
+    const SCRIPT: &str = r#"
+import json
+import sys
+from pathlib import Path
+
+import bpy
+import mathutils
+
+
+def sc_matrix_to_blender(sc_matrix):
+    if sc_matrix is None:
+        return mathutils.Matrix.Identity(4)
+    m = mathutils.Matrix(sc_matrix).transposed()
+    conv = mathutils.Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)))
+    return conv @ m @ conv.inverted()
+
+
+def canonical_name(name):
+    if len(name) > 4 and name[-4] == "." and name[-3:].isdigit():
+        return name[:-4]
+    return name
+
+
+def clear_scene():
+    bpy.ops.object.select_all(action="SELECT")
+    bpy.ops.object.delete(use_global=False)
+    for datablocks in (bpy.data.meshes, bpy.data.materials, bpy.data.cameras, bpy.data.lights):
+        for block in list(datablocks):
+            if block.users == 0:
+                datablocks.remove(block)
+
+
+def ensure_collection(name):
+    collection = bpy.data.collections.get(name)
+    if collection is None:
+        collection = bpy.data.collections.new(name)
+        bpy.context.scene.collection.children.link(collection)
+    return collection
+
+
+def cleanup_orphans():
+    for datablocks in (
+        bpy.data.meshes,
+        bpy.data.materials,
+        bpy.data.images,
+        bpy.data.cameras,
+        bpy.data.lights,
+    ):
+        for block in list(datablocks):
+            if block.users == 0:
+                datablocks.remove(block)
+
+
+def unique_library_name(prefix, raw_name, used_names):
+    base = f"{prefix}__{canonical_name(raw_name)}"
+    candidate = base
+    suffix = 1
+    while candidate in used_names:
+        suffix += 1
+        candidate = f"{base}_{suffix}"
+    used_names.add(candidate)
+    return candidate
+
+
+def build_material_vertex_groups(obj):
+    if obj.type != "MESH" or obj.data is None:
+        return
+    if len(obj.vertex_groups) > 0:
+        for group in list(obj.vertex_groups):
+            obj.vertex_groups.remove(group)
+
+    vertices_by_group = {}
+    for poly in obj.data.polygons:
+        slot_index = poly.material_index
+        if slot_index < 0 or slot_index >= len(obj.material_slots):
+            continue
+        slot = obj.material_slots[slot_index]
+        material_name = ""
+        if slot.material is not None:
+            material_name = canonical_name(slot.material.name)
+        if not material_name:
+            material_name = canonical_name(slot.name) or f"material_{slot_index}"
+        bucket = vertices_by_group.setdefault(material_name, set())
+        for vertex_index in poly.vertices:
+            bucket.add(int(vertex_index))
+
+    for group_name, vertex_indices in vertices_by_group.items():
+        if not vertex_indices:
+            continue
+        group = obj.vertex_groups.new(name=group_name)
+        group.add(sorted(vertex_indices), 1.0, "REPLACE")
+
+
+def import_gltf_template(full_path):
+    before = {obj.as_pointer() for obj in bpy.data.objects}
+    result = bpy.ops.import_scene.gltf(
+        filepath=str(full_path),
+        import_pack_images=False,
+        merge_vertices=False,
+        import_select_created_objects=False,
+    )
+    if "FINISHED" not in result:
+        return []
+    return [obj for obj in bpy.data.objects if obj.as_pointer() not in before]
+
+
+def write_mesh_libraries(full_path, imported):
+    full_path.parent.mkdir(parents=True, exist_ok=True)
+
+    used_object_names = set()
+    used_mesh_names = set()
+    prefix = full_path.stem
+    mesh_libraries = {}
+    for obj in imported:
+        obj.name = unique_library_name(prefix, obj.name, used_object_names)
+        if obj.type != "MESH" or obj.data is None:
+            continue
+        mesh = obj.data
+        if mesh.as_pointer() not in mesh_libraries:
+            mesh.name = unique_library_name(prefix, mesh.name, used_mesh_names)
+            mesh_library_path = full_path.with_name(f"{mesh.name}.blend")
+            bpy.data.libraries.write(str(mesh_library_path), {mesh}, path_remap="RELATIVE_ALL")
+            mesh_libraries[mesh.as_pointer()] = {
+                "mesh_name": mesh.name,
+                "mesh_library_path": str(mesh_library_path),
+            }
+    return mesh_libraries
+
+
+def template_sidecar_path(full_path):
+    return full_path.with_suffix(".blend.template.json")
+
+
+def build_and_write_asset_template(full_path):
+    imported = import_gltf_template(full_path)
+    if not imported:
+        return None
+
+    imported_ptrs = {obj.as_pointer() for obj in imported}
+    source_names = {obj.as_pointer(): canonical_name(obj.name) for obj in imported}
+    mesh_libraries = write_mesh_libraries(full_path, imported)
+
+    nodes = []
+    root_names = []
+    for obj in imported:
+        source_name = source_names[obj.as_pointer()]
+        parent_name = None
+        if obj.parent is not None and obj.parent.as_pointer() in imported_ptrs:
+            parent_name = source_names[obj.parent.as_pointer()]
+        if parent_name is None:
+            root_names.append(source_name)
+        mesh_info = mesh_libraries.get(obj.data.as_pointer()) if obj.type == "MESH" and obj.data is not None else None
+        nodes.append(
+            {
+                "source_name": source_name,
+                "parent_source_name": parent_name,
+                "matrix_local": [list(row) for row in obj.matrix_basis.copy()],
+                "mesh_name": mesh_info["mesh_name"] if mesh_info is not None else None,
+                "mesh_library_path": mesh_info["mesh_library_path"] if mesh_info is not None else None,
+                "object_type": obj.type,
+            }
+        )
+
+    template = {
+        "nodes": nodes,
+        "root_names": root_names,
     }
+    sidecar_path = template_sidecar_path(full_path)
+    with sidecar_path.open("w", encoding="utf-8") as handle:
+        json.dump(template, handle)
+
+    for obj in reversed(imported):
+        bpy.data.objects.remove(obj, do_unlink=True)
+    cleanup_orphans()
+    return template
+
+
+def load_asset_template(full_path, asset_cache):
+    cached = asset_cache.get(str(full_path))
+    if cached is not None:
+        return cached
+
+    sidecar_path = template_sidecar_path(full_path)
+    if not sidecar_path.is_file():
+        return None
+    with sidecar_path.open("r", encoding="utf-8") as handle:
+        template = json.load(handle)
+    asset_cache[str(full_path)] = template
+    return template
+
+
+def ensure_linked_mesh(mesh_library_path, mesh_name, linked_mesh_cache):
+    cache_key = (mesh_library_path, mesh_name)
+    cached = linked_mesh_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    with bpy.data.libraries.load(mesh_library_path, link=True) as (data_from, data_to):
+        data_to.meshes = [mesh_name] if mesh_name in data_from.meshes else []
+
+    mesh = data_to.meshes[0] if data_to.meshes else None
+    if mesh is not None:
+        linked_mesh_cache[cache_key] = mesh
+    return mesh
+
+
+def instantiate_template(template, collection, instance_name, linked_mesh_cache):
+    instances = {}
+    created = []
+
+    for node in template["nodes"]:
+        object_name = node["source_name"]
+        if node["parent_source_name"] is None:
+            object_name = instance_name
+        linked_data = None
+        if node.get("mesh_name") and node.get("mesh_library_path"):
+            linked_data = ensure_linked_mesh(node["mesh_library_path"], node["mesh_name"], linked_mesh_cache)
+        obj = bpy.data.objects.new(object_name, linked_data)
+        collection.objects.link(obj)
+        instances[node["source_name"]] = obj
+        created.append((obj, node))
+
+    for obj, node in created:
+        parent_name = node["parent_source_name"]
+        obj.parent = None
+        if parent_name is not None:
+            obj.parent = instances[parent_name]
+            obj.matrix_parent_inverse = mathutils.Matrix.Identity(4)
+        obj.matrix_basis = mathutils.Matrix(node["matrix_local"])
+        build_material_vertex_groups(obj)
+
+    roots = [instances[name] for name in template["root_names"] if name in instances]
+    if len(roots) == 1:
+        anchor = roots[0]
+    else:
+        anchor = bpy.data.objects.new(instance_name, None)
+        collection.objects.link(anchor)
+        for root in roots:
+            world = root.matrix_world.copy()
+            root.parent = anchor
+            root.matrix_world = world
+
+    node_index = {}
+    for source_name, obj in instances.items():
+        node_index[source_name] = obj
+        node_index[source_name.strip().lower()] = obj
+    return anchor, node_index
+
+
+def import_mesh_asset(export_root, rel_path, collection, asset_cache, linked_mesh_cache, instance_name):
+    if not rel_path:
+        return None, {}
+    full_path = (export_root / rel_path).resolve()
+    if not full_path.is_file():
+        return None, {}
+
+    template = load_asset_template(full_path, asset_cache)
+    if template is None:
+        return None, {}
+    return instantiate_template(template, collection, instance_name, linked_mesh_cache)
+
+
+def iter_scene_mesh_assets(scene):
+    seen = set()
+
+    def add_asset(rel_path):
+        if rel_path and rel_path not in seen:
+            seen.add(rel_path)
+            return rel_path
+        return None
+
+    root_asset = add_asset((scene.get("root_entity") or {}).get("mesh_asset"))
+    if root_asset:
+        yield root_asset
+    for child in scene.get("children", []):
+        rel_path = add_asset(child.get("mesh_asset"))
+        if rel_path:
+            yield rel_path
+    for interior in scene.get("interiors", []):
+        for placement in interior.get("placements", []):
+            rel_path = add_asset(placement.get("mesh_asset"))
+            if rel_path:
+                yield rel_path
+
+
+def build_libraries(scene, export_root):
+    clear_scene()
+    for rel_path in iter_scene_mesh_assets(scene):
+        full_path = (export_root / rel_path).resolve()
+        if full_path.is_file():
+            build_and_write_asset_template(full_path)
+    clear_scene()
+
+
+def apply_local_transform(anchor, parent, local_transform_sc):
+    local = sc_matrix_to_blender(local_transform_sc)
+    if parent is not None:
+        anchor.parent = parent
+        anchor.matrix_parent_inverse = mathutils.Matrix.Identity(4)
+        anchor.matrix_basis = local
+    else:
+        anchor.matrix_world = local
+
+
+def find_parent_node(index_by_entity, parent_entity_name, parent_node_name):
+    if not parent_entity_name or not parent_node_name:
+        return None
+    candidates = index_by_entity.get(parent_entity_name, [])
+    for node_index in reversed(candidates):
+        node = node_index.get(parent_node_name)
+        if node is not None:
+            return node
+        node = node_index.get(parent_node_name.strip().lower())
+        if node is not None:
+            return node
+    return None
+
+
+def instantiate_record(record, export_root, collection, parent_default, parent_node, index_by_entity):
+    entity_name = record.get("entity_name") or "SceneInstance"
+    anchor, nodes = import_mesh_asset(
+        export_root,
+        record.get("mesh_asset"),
+        collection,
+        ASSET_CACHE,
+        LINKED_MESH_CACHE,
+        entity_name,
+    )
+    if anchor is None:
+        anchor = bpy.data.objects.new(entity_name, None)
+        collection.objects.link(anchor)
+        nodes = {}
+
+    anchor.name = entity_name
+    apply_local_transform(anchor, parent_node if parent_node is not None else parent_default, record.get("local_transform_sc"))
+    index_by_entity.setdefault(entity_name, []).append(nodes)
+    return anchor, nodes
+
+
+def assemble_scene(scene, export_root, output_blend, package_name):
+    clear_scene()
+    package_collection = ensure_collection(f"StarBreaker {package_name}")
+    package_root = bpy.data.objects.new(f"StarBreaker {package_name}", None)
+    package_collection.objects.link(package_root)
+
+    index_by_entity = {}
+    global ASSET_CACHE, LINKED_MESH_CACHE
+    ASSET_CACHE = {}
+    LINKED_MESH_CACHE = {}
+
+    root_record = scene.get("root_entity") or {}
+    root_anchor, root_nodes = instantiate_record(
+        root_record,
+        export_root,
+        package_collection,
+        package_root,
+        None,
+        index_by_entity,
+    )
+
+    for child in scene.get("children", []):
+        parent_node = find_parent_node(
+            index_by_entity,
+            child.get("parent_entity_name"),
+            child.get("parent_node_name"),
+        )
+        instantiate_record(
+            child,
+            export_root,
+            package_collection,
+            root_anchor,
+            parent_node,
+            index_by_entity,
+        )
+
+    for interior in scene.get("interiors", []):
+        interior_anchor = bpy.data.objects.new("InteriorContainer", None)
+        package_collection.objects.link(interior_anchor)
+        apply_local_transform(interior_anchor, root_anchor, interior.get("container_transform"))
+        for placement in interior.get("placements", []):
+            mesh_asset = placement.get("mesh_asset")
+            instance_name = Path(mesh_asset).stem if mesh_asset else "InteriorInstance"
+            anchor, _nodes = import_mesh_asset(
+                export_root,
+                mesh_asset,
+                package_collection,
+                ASSET_CACHE,
+                LINKED_MESH_CACHE,
+                instance_name,
+            )
+            if anchor is None:
+                continue
+            anchor.parent = interior_anchor
+            placement_transform = placement.get("transform")
+            if placement_transform is not None:
+                anchor.matrix_parent_inverse = mathutils.Matrix.Identity(4)
+                anchor.matrix_basis = sc_matrix_to_blender(placement_transform)
+
+    bpy.ops.wm.save_as_mainfile(filepath=str(output_blend), copy=True)
+
+
+def main():
+    argv = sys.argv
+    if "--" not in argv:
+        raise RuntimeError("missing -- separator")
+    args = argv[argv.index("--") + 1 :]
+    if len(args) != 5:
+        raise RuntimeError(f"expected 5 args, got {len(args)}")
+
+    mode = args[0]
+    scene_json_path = Path(args[1])
+    export_root = Path(args[2])
+    output_blend = Path(args[3])
+    package_name = args[4]
+
+    with scene_json_path.open("r", encoding="utf-8") as handle:
+        scene = json.load(handle)
+
+    if mode == "libraries":
+        build_libraries(scene, export_root)
+        return
+    if mode == "scene":
+        assemble_scene(scene, export_root, output_blend, package_name)
+        return
+    raise RuntimeError(f"unknown mode: {mode}")
+
+
+if __name__ == "__main__":
+    main()
+"#;
+
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| CliError::InvalidInput(format!("system time error: {e}")))?
+        .as_millis();
+    let script_path = std::env::temp_dir().join(format!("starbreaker_blend_assembly_{ts}.py"));
+    std::fs::write(&script_path, SCRIPT)
+        .map_err(|e| CliError::IoPath { source: e, path: script_path.display().to_string() })?;
+
+    if let Some(parent) = output_blend_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| CliError::IoPath { source: e, path: parent.display().to_string() })?;
+    }
+
+    for mode in ["libraries", "scene"] {
+        let output = Command::new("blender")
+            .arg("--background")
+            .arg("--factory-startup")
+            .arg("--python")
+            .arg(&script_path)
+            .arg("--")
+            .arg(mode)
+            .arg(scene_json_path)
+            .arg(export_root)
+            .arg(output_blend_path)
+            .arg(package_name)
+            .output()
+            .map_err(|e| CliError::InvalidInput(format!("failed to run blender for scene assembly ({mode}): {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let message = format!(
+                "blender scene assembly failed in {mode} mode (status {:?})\nstdout:\n{}\nstderr:\n{}",
+                output.status.code(),
+                stdout,
+                stderr
+            );
+            let _ = std::fs::remove_file(&script_path);
+            return Err(CliError::InvalidInput(message));
+        }
+    }
+
+    let _ = std::fs::remove_file(&script_path);
+
     Ok(())
 }
 
