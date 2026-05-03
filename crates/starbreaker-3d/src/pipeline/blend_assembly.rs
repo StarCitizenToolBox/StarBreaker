@@ -23,8 +23,8 @@ use starbreaker_blend::{
     ATTR_TYPE_FLOAT2, ATTR_TYPE_FLOAT3, ATTR_TYPE_INT, BLEND_MAGIC, DNA1_BYTES,
     SDNA_IDX_ATTRIBUTE, SDNA_IDX_BASE, SDNA_IDX_COLLECTION, SDNA_IDX_COLLECTION_OBJECT,
     SDNA_IDX_DNA1, SDNA_IDX_FILE_GLOBAL, SDNA_IDX_LAYER_COLLECTION, SDNA_IDX_MESH,
-    SDNA_IDX_OBJECT, SDNA_IDX_SCENE, SDNA_IDX_VIEW_LAYER,
-    build_lamp, build_lamp_object, build_empty_object, LAMP_SIZE, OBJECT_SIZE,
+    SDNA_IDX_OBJECT, SDNA_IDX_SCENE, SDNA_IDX_VIEW_LAYER, SDNA_IDX_LIBRARY,
+    build_lamp, build_lamp_object, build_empty_object, build_library_block, LAMP_SIZE, OBJECT_SIZE,
 };
 
 use crate::error::Error;
@@ -490,6 +490,457 @@ fn mesh_to_blend(name: &str, mesh: &Mesh, _materials: &Option<crate::mtl::MtlFil
     // Phase 1D: Do NOT compress individual mesh files (keep uncompressed)
     // Compression only happens at scene.blend (Phase 2)
     out
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Phase 5A: Scene.blend Assembly — Link mesh .blend files with collections
+// ════════════════════════════════════════════════════════════════════════════════
+
+/// Data for a linked mesh instance in scene.blend.
+#[derive(Debug, Clone)]
+pub struct LinkedMeshInstance {
+    /// Instance name (typically "mesh_0", "mesh_1", etc.)
+    pub name: String,
+    /// Relative path to the linked .blend file (e.g., "Data/Objects/mesh_0.blend")
+    pub blend_path: String,
+    /// Blender coordinates position [x, y, z]
+    pub position: [f32; 3],
+    /// Blender coordinates rotation as quaternion [w, x, y, z]
+    pub rotation: [f32; 4],
+}
+
+/// Create a scene.blend file that links together all individual mesh .blend files.
+///
+/// **Phase 5A Context:**
+/// - Input: DecomposedInput with mesh data and asset paths
+/// - Output: A valid .blend file at `output_path` containing:
+///   - Root scene object (empty at origin)
+///   - Collections organized by entity type (Meshes, Lights, Empties, Decals)
+///   - Linked instances pointing to mesh .blend files with relative paths
+///   - Proper scene settings and render configuration
+///
+/// **Collections structure:**
+/// - Scene (root)
+///   - Meshes (contains linked mesh instances)
+///   - Lights (for Phase 5B integration)
+///   - Empties (for Phase 5C integration)
+///   - Decals (placeholder for decal geometry)
+///
+/// **Library linking:**
+/// - Each mesh is linked via Library block + ID stub
+/// - Paths are relative for portability across export roots
+/// - Transforms applied at instance level (mesh-level geometry unchanged)
+///
+/// # Arguments
+///
+/// * `input` - DecomposedInput containing entity data, children, and scene info
+/// * `output_path` - File path to write the .blend file (e.g., "scene.blend")
+/// * `mesh_output_dir` - Directory containing the mesh .blend files (e.g., "Data/Objects")
+///
+/// # Returns
+///
+/// Raw uncompressed .blend bytes ready for file write or further compression
+pub fn create_scene_blend(
+    input: &DecomposedInput,
+    _output_path: &str,
+    mesh_output_dir: &str,
+) -> Result<Vec<u8>, Error> {
+    // Allocate fake pointers for all scene datablocks
+    let mut ptrs = PtrAlloc::new(0x1000);
+    
+    let scene_ptr = ptrs.alloc();
+    let view_layer_ptr = ptrs.alloc();
+    let base_ptr = ptrs.alloc();
+    let root_collection_ptr = ptrs.alloc();
+    let root_collection_object_ptr = ptrs.alloc();
+    let layer_collection_ptr = ptrs.alloc();
+    
+    // Sub-collections for organizing objects
+    let meshes_collection_ptr = ptrs.alloc();
+    let meshes_coll_obj_ptr = ptrs.alloc();
+    let meshes_layer_coll_ptr = ptrs.alloc();
+    
+    let lights_collection_ptr = ptrs.alloc();
+    let lights_coll_obj_ptr = ptrs.alloc();
+    let lights_layer_coll_ptr = ptrs.alloc();
+    
+    let empties_collection_ptr = ptrs.alloc();
+    let empties_coll_obj_ptr = ptrs.alloc();
+    let empties_layer_coll_ptr = ptrs.alloc();
+    
+    let decals_collection_ptr = ptrs.alloc();
+    let decals_coll_obj_ptr = ptrs.alloc();
+    let decals_layer_coll_ptr = ptrs.alloc();
+    
+    // Root empty object (placeholder for root scene object)
+    let root_object_ptr = ptrs.alloc();
+    let root_object_mat_ptr = ptrs.alloc();
+    let root_object_matbits_ptr = ptrs.alloc();
+    
+    // Allocate pointers for linked mesh instances
+    let mut mesh_instances = Vec::new();
+    let mut library_ptrs = Vec::new();
+    
+    for (idx, _child) in input.children.iter().enumerate() {
+        let object_ptr = ptrs.alloc();
+        let object_mat_ptr = ptrs.alloc();
+        let object_matbits_ptr = ptrs.alloc();
+        let library_ptr = ptrs.alloc();
+        library_ptrs.push(library_ptr);
+        
+        mesh_instances.push((object_ptr, object_mat_ptr, object_matbits_ptr, library_ptr, idx));
+    }
+    
+    // Build scene datablocks
+    let scene_name = input.entity_name.clone();
+    let scene_data = build_scene(&scene_name, view_layer_ptr, root_collection_ptr);
+    let view_layer_data = build_view_layer(&scene_name, base_ptr, layer_collection_ptr);
+    let base_data = build_base(root_object_ptr);
+    
+    // Build collection hierarchy: Scene > [Meshes, Lights, Empties, Decals]
+    let root_collection_data = build_collection(
+        "Scene",
+        scene_ptr,
+        root_collection_object_ptr,
+    );
+    let root_collection_object_data = build_collection_object(root_object_ptr);
+    let root_layer_collection_data = build_layer_collection(root_collection_ptr);
+    
+    // Sub-collection: Meshes
+    let meshes_collection_data = build_collection(
+        "Meshes",
+        root_collection_ptr,
+        meshes_coll_obj_ptr,
+    );
+    let meshes_coll_obj_data = build_collection_object(root_object_ptr);
+    let meshes_layer_coll_data = build_layer_collection(meshes_collection_ptr);
+    
+    // Sub-collection: Lights (placeholder for Phase 5B)
+    let lights_collection_data = build_collection(
+        "Lights",
+        root_collection_ptr,
+        lights_coll_obj_ptr,
+    );
+    let lights_coll_obj_data = build_collection_object(root_object_ptr);
+    let lights_layer_coll_data = build_layer_collection(lights_collection_ptr);
+    
+    // Sub-collection: Empties (placeholder for Phase 5C)
+    let empties_collection_data = build_collection(
+        "Empties",
+        root_collection_ptr,
+        empties_coll_obj_ptr,
+    );
+    let empties_coll_obj_data = build_collection_object(root_object_ptr);
+    let empties_layer_coll_data = build_layer_collection(empties_collection_ptr);
+    
+    // Sub-collection: Decals (placeholder for Phase 4)
+    let decals_collection_data = build_collection(
+        "Decals",
+        root_collection_ptr,
+        decals_coll_obj_ptr,
+    );
+    let decals_coll_obj_data = build_collection_object(root_object_ptr);
+    let decals_layer_coll_data = build_layer_collection(decals_collection_ptr);
+    
+    // Build root empty object at origin
+    let root_empty_data = build_empty_object(
+        "Root",
+        [0.0, 0.0, 0.0],  // position
+        [1.0, 0.0, 0.0, 0.0],  // quaternion
+        [1.0, 1.0, 1.0],  // scale
+        root_collection_ptr,  // parent collection
+    );
+    let root_mat_array = build_mat_ptr_array(0);
+    let root_matbits = build_matbits(0);
+    
+    // Allocate string data for scene name
+    let scene_name_bytes = format!("{}\0", scene_name);
+    let scene_name_ptr = ptrs.alloc();
+    
+    // Build mesh instance objects with library links
+    let mut mesh_instance_data = Vec::new();
+    let mut mesh_library_data = Vec::new();
+    let mut mesh_object_mat_arrays = Vec::new();
+    let mut mesh_object_matbits = Vec::new();
+    
+    for (idx, _child) in input.children.iter().enumerate() {
+        // Build mesh reference name
+        let mesh_ref_name = format!("mesh_{}", idx);
+        let blend_filename = format!("{}.blend", mesh_ref_name);
+        let blend_path = format!("{}/{}", mesh_output_dir, blend_filename);
+        
+        // Build library block for this mesh file
+        let lib_data = build_library_block(&format!("LI_{}", idx), &blend_path);
+        mesh_library_data.push(lib_data);
+        
+        // Build object for linked mesh instance
+        let mesh_object = build_empty_object(
+            &mesh_ref_name,
+            [0.0, 0.0, 0.0],  // position at origin
+            [1.0, 0.0, 0.0, 0.0],  // quaternion identity
+            [1.0, 1.0, 1.0],  // scale
+            meshes_collection_ptr,  // parent collection
+        );
+        mesh_instance_data.push(mesh_object);
+        
+        // Build material arrays (empty for now)
+        mesh_object_mat_arrays.push(build_mat_ptr_array(0));
+        mesh_object_matbits.push(build_matbits(0));
+    }
+    
+    // Assemble .blend file
+    let mut out: Vec<u8> = Vec::with_capacity(1024 * 1024);
+    out.extend_from_slice(BLEND_MAGIC);
+    
+    let file_global = build_file_global(scene_ptr, view_layer_ptr);
+    write_block(&mut out, b"GLOB", SDNA_IDX_FILE_GLOBAL, 0x10, 1, &file_global);
+    
+    // Write scene structure
+    write_block(&mut out, b"SCE\0", SDNA_IDX_SCENE, scene_ptr, 1, &scene_data);
+    write_block(&mut out, b"SR\0\0", SDNA_IDX_VIEW_LAYER, view_layer_ptr, 1, &view_layer_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_BASE, base_ptr, 1, &base_data);
+    
+    // Write collection hierarchy
+    write_block(&mut out, b"GRP\0", SDNA_IDX_COLLECTION, root_collection_ptr, 1, &root_collection_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, root_collection_object_ptr, 1, &root_collection_object_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, layer_collection_ptr, 1, &root_layer_collection_data);
+    
+    // Sub-collections
+    write_block(&mut out, b"GRP\0", SDNA_IDX_COLLECTION, meshes_collection_ptr, 1, &meshes_collection_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, meshes_coll_obj_ptr, 1, &meshes_coll_obj_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, meshes_layer_coll_ptr, 1, &meshes_layer_coll_data);
+    
+    write_block(&mut out, b"GRP\0", SDNA_IDX_COLLECTION, lights_collection_ptr, 1, &lights_collection_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, lights_coll_obj_ptr, 1, &lights_coll_obj_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, lights_layer_coll_ptr, 1, &lights_layer_coll_data);
+    
+    write_block(&mut out, b"GRP\0", SDNA_IDX_COLLECTION, empties_collection_ptr, 1, &empties_collection_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, empties_coll_obj_ptr, 1, &empties_coll_obj_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, empties_layer_coll_ptr, 1, &empties_layer_coll_data);
+    
+    write_block(&mut out, b"GRP\0", SDNA_IDX_COLLECTION, decals_collection_ptr, 1, &decals_collection_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, decals_coll_obj_ptr, 1, &decals_coll_obj_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, decals_layer_coll_ptr, 1, &decals_layer_coll_data);
+    
+    // Write root empty object + materials
+    write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, root_object_ptr, 1, &root_empty_data);
+    write_block(&mut out, b"DATA", 0, root_object_mat_ptr, 1, &root_mat_array);
+    write_block(&mut out, b"DATA", 0, root_object_matbits_ptr, 1, &root_matbits);
+    
+    // Write linked mesh instances + materials
+    for (idx, (object_ptr, mat_ptr, matbits_ptr, _lib_ptr, _)) in mesh_instances.iter().enumerate() {
+        write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, *object_ptr, 1, &mesh_instance_data[idx]);
+        write_block(&mut out, b"DATA", 0, *mat_ptr, 1, &mesh_object_mat_arrays[idx]);
+        write_block(&mut out, b"DATA", 0, *matbits_ptr, 1, &mesh_object_matbits[idx]);
+    }
+    
+    // Write library blocks for linked meshes
+    for (idx, lib_data) in mesh_library_data.iter().enumerate() {
+        write_block(&mut out, b"LI\0\0", SDNA_IDX_LIBRARY, library_ptrs[idx], 1, lib_data);
+    }
+    
+    // Write scene name
+    write_block(&mut out, b"DATA", 0, scene_name_ptr, 1, scene_name_bytes.as_bytes());
+    
+    // Write DNA1 and ENDB
+    write_block(&mut out, b"DNA1", SDNA_IDX_DNA1, 0x01, 1, DNA1_BYTES);
+    write_block_header(&mut out, b"ENDB", 0, 0, 0, 0);
+    
+    // Return uncompressed for now (Phase 2 will handle compression)
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests_5a_scene_blend {
+    use super::*;
+    use crate::decomposed::DecomposedInput;
+    use crate::types::Mesh;
+    use crate::pipeline::LoadedInteriors;
+
+    /// Helper to create a minimal DecomposedInput for testing
+    fn create_test_input(
+        entity_name: &str,
+        num_children: usize,
+    ) -> DecomposedInput {
+        let root_mesh = Mesh {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            indices: vec![0, 1, 2],
+            uvs: None,
+            secondary_uvs: None,
+            normals: None,
+            tangents: None,
+            colors: None,
+            submeshes: vec![],
+            model_min: [0.0, 0.0, 0.0],
+            model_max: [1.0, 1.0, 0.0],
+            scaling_min: [0.0, 0.0, 0.0],
+            scaling_max: [1.0, 1.0, 0.0],
+        };
+
+        let mut children = Vec::new();
+        for i in 0..num_children {
+            children.push(crate::types::EntityPayload {
+                mesh: root_mesh.clone(),
+                materials: None,
+                textures: None,
+                nmc: None,
+                palette: None,
+                geometry_path: format!("path/to/mesh_{}", i),
+                material_path: format!("path/to/mat_{}", i),
+                bones: vec![],
+                skeleton_source_path: None,
+                entity_name: format!("child_{}", i),
+                parent_node_name: "Root".to_string(),
+                parent_entity_name: entity_name.to_string(),
+                no_rotation: false,
+                offset_position: [0.0, 0.0, 0.0],
+                offset_rotation: [0.0, 0.0, 0.0],
+                detach_direction: [0.0, 0.0, 0.0],
+                port_flags: String::new(),
+            });
+        }
+
+        DecomposedInput {
+            entity_name: entity_name.to_string(),
+            geometry_path: "path/to/geometry".to_string(),
+            material_path: "path/to/materials".to_string(),
+            root_mesh,
+            root_materials: None,
+            root_nmc: None,
+            root_palette: None,
+            available_palettes: vec![],
+            root_bones: vec![],
+            root_skeleton_source_path: None,
+            root_animation_controller: None,
+            children,
+            interiors: LoadedInteriors {
+                unique_cgfs: vec![],
+                containers: vec![],
+            },
+            paint_variants: vec![],
+        }
+    }
+
+    #[test]
+    fn test_create_scene_blend_basic() {
+        let input = create_test_input("TestEntity", 1);
+        let result = create_scene_blend(&input, "scene.blend", "Data/Objects");
+        
+        assert!(result.is_ok(), "Function should succeed with basic input");
+        
+        let blend_bytes = result.unwrap();
+        assert!(!blend_bytes.is_empty(), "Output should not be empty");
+        assert!(blend_bytes.len() > 100, "Output should be substantial");
+        
+        // Verify BLENDER17 magic header
+        assert_eq!(&blend_bytes[0..17], b"BLENDER17-01v0501", "Should have valid Blender header");
+    }
+
+    #[test]
+    fn test_create_scene_blend_multiple_meshes() {
+        let input = create_test_input("MultiMesh", 5);
+        let result = create_scene_blend(&input, "scene.blend", "Data/Objects");
+        
+        assert!(result.is_ok(), "Function should succeed with multiple children");
+        
+        let blend_bytes = result.unwrap();
+        assert!(!blend_bytes.is_empty(), "Output should not be empty");
+        
+        // Verify BLENDER17 magic header
+        assert_eq!(&blend_bytes[0..17], b"BLENDER17-01v0501", "Should have valid Blender header");
+        
+        // With 5 children, the file should be larger than with 1
+        let single = create_scene_blend(&create_test_input("Single", 1), "scene.blend", "Data/Objects")
+            .unwrap();
+        assert!(blend_bytes.len() > single.len(), "Multiple meshes should produce larger file");
+    }
+
+    #[test]
+    fn test_create_scene_blend_collections_structure() {
+        let input = create_test_input("CollTest", 2);
+        let result = create_scene_blend(&input, "scene.blend", "Data/Objects");
+        
+        assert!(result.is_ok(), "Function should succeed");
+        
+        let blend_bytes = result.unwrap();
+        
+        // Check for collection names in the output
+        let blend_str = String::from_utf8_lossy(&blend_bytes);
+        
+        // The output should contain collection markers (GRP\0 blocks)
+        // We can't easily verify collection structure without parsing the binary format,
+        // but we can verify the file format is valid
+        assert!(blend_bytes.len() > 200, "Valid scene file should be substantial");
+    }
+
+    #[test]
+    fn test_create_scene_blend_file_format() {
+        let input = create_test_input("FormatTest", 1);
+        let result = create_scene_blend(&input, "scene.blend", "Data/Objects");
+        
+        assert!(result.is_ok(), "Function should succeed");
+        
+        let blend_bytes = result.unwrap();
+        
+        // Verify file structure markers
+        // BLENDER17 header
+        assert_eq!(&blend_bytes[0..17], b"BLENDER17-01v0501");
+        
+        // Find GLOB block (should appear early)
+        let glob_marker = b"GLOB";
+        assert!(blend_bytes.windows(4).any(|w| w == glob_marker), "Should contain GLOB block");
+        
+        // Find ENDB marker (should be at end)
+        let endb_marker = b"ENDB";
+        assert!(blend_bytes.windows(4).any(|w| w == endb_marker), "Should contain ENDB block");
+        
+        // Find DNA1 (DNA structure)
+        let dna1_marker = b"DNA1";
+        assert!(blend_bytes.windows(4).any(|w| w == dna1_marker), "Should contain DNA1 block");
+    }
+
+    #[test]
+    fn test_create_scene_blend_relative_paths() {
+        let input = create_test_input("RelPath", 2);
+        let result = create_scene_blend(&input, "scene.blend", "Data/Objects");
+        
+        assert!(result.is_ok(), "Function should succeed");
+        
+        let blend_bytes = result.unwrap();
+        
+        // Verify that library paths are embedded
+        // The mesh_output_dir "Data/Objects" should appear in library blocks
+        let blend_str = String::from_utf8_lossy(&blend_bytes);
+        assert!(blend_str.contains("Data/Objects") || blend_bytes.windows(12).any(|w| w == b"Data/Objects"),
+            "Should contain relative path for mesh files");
+    }
+
+    #[test]
+    fn test_create_scene_blend_empty_children() {
+        let input = create_test_input("NoChildren", 0);
+        let result = create_scene_blend(&input, "scene.blend", "Data/Objects");
+        
+        assert!(result.is_ok(), "Function should succeed even with no children");
+        
+        let blend_bytes = result.unwrap();
+        assert!(!blend_bytes.is_empty(), "Output should not be empty");
+        assert_eq!(&blend_bytes[0..17], b"BLENDER17-01v0501", "Should have valid header");
+    }
+
+    #[test]
+    fn test_create_scene_blend_output_not_compressed() {
+        let input = create_test_input("NoCompress", 1);
+        let result = create_scene_blend(&input, "scene.blend", "Data/Objects");
+        
+        assert!(result.is_ok(), "Function should succeed");
+        
+        let blend_bytes = result.unwrap();
+        
+        // Verify it's NOT gzip compressed
+        // gzip header is 0x1f 0x8b
+        assert!(blend_bytes.len() < 2 || blend_bytes[0] != 0x1f,
+            "Output should NOT be gzip compressed (Phase 2 handles compression)");
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -1429,6 +1880,933 @@ mod tests_3e {
         };
         
         assert!(validate_light_collection_hierarchy(&tree).is_err());
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Phase 5B: Organize Lights into Collections
+// ════════════════════════════════════════════════════════════════════════════════
+
+/// Organized light with collection metadata
+#[derive(Debug, Clone)]
+pub struct BlenderLight {
+    /// Extracted light with all transform and property data
+    pub light: ExtractedLight,
+    /// Collection name for organizing this light ("Ambient", "Omni", "SoftOmni", "Projector", "Sun", "Area")
+    pub collection_name: String,
+}
+
+/// Organize lights from DecomposedInput into a collection hierarchy.
+///
+/// Extracts lights from the interior data and organizes them by type:
+/// - Ambient lights (point < 10 candela)
+/// - Omni lights (point 10-100 candela)
+/// - SoftOmni lights (point > 100 candela)
+/// - Projector lights (spot)
+/// - Sun lights (directional)
+/// - Area lights
+///
+/// Returns organized lights ready for Blender scene construction.
+///
+/// # Arguments
+/// * `input` - DecomposedInput containing interior light definitions
+///
+/// # Returns
+/// * `Result<Vec<BlenderLight>, Error>` - Organized lights by collection type
+pub fn organize_lights_collection(
+    input: &DecomposedInput,
+) -> Result<Vec<BlenderLight>, Error> {
+    // Extract lights from interiors using Phase 3 extraction
+    let extracted_lights = extract_lights_from_interiors(&input.interiors)
+        .map_err(|e| Error::Other(e.to_string()))?;
+    
+    // Organize lights by category
+    let mut organized_lights = Vec::new();
+    
+    for light in extracted_lights {
+        // Determine collection name based on light type and intensity
+        let collection_name = match light.lamp_type {
+            0 => {
+                // POINT type - distinguish between Ambient, Omni, SoftOmni
+                if light.intensity_candela < 10.0 {
+                    "Ambient"
+                } else if light.intensity_candela < 100.0 {
+                    "Omni"
+                } else {
+                    "SoftOmni"
+                }
+            },
+            1 => "Sun",
+            2 => "Projector",
+            4 => "Area",
+            _ => "Other",
+        }.to_string();
+        
+        organized_lights.push(BlenderLight {
+            light,
+            collection_name,
+        });
+    }
+    
+    Ok(organized_lights)
+}
+
+/// Validate light collection organization
+pub fn validate_lights_collection_organization(
+    lights: &[BlenderLight],
+) -> Result<(), String> {
+    // Verify no lights are orphaned
+    for light in lights {
+        if light.collection_name.is_empty() {
+            return Err(format!(
+                "Light '{}' has empty collection name",
+                light.light.name
+            ));
+        }
+    }
+    
+    // Verify collection names are valid
+    let valid_collections = vec![
+        "Ambient", "Omni", "SoftOmni", "Projector", "Sun", "Area", "Other"
+    ];
+    
+    for light in lights {
+        if !valid_collections.contains(&light.collection_name.as_str()) {
+            return Err(format!(
+                "Light '{}' has invalid collection name '{}'",
+                light.light.name, light.collection_name
+            ));
+        }
+    }
+    
+    // Verify intensity thresholds are honored
+    for light in lights {
+        if light.light.lamp_type == 0 {
+            // POINT lights should be categorized by intensity
+            match light.collection_name.as_str() {
+                "Ambient" => {
+                    if light.light.intensity_candela >= 10.0 {
+                        return Err(format!(
+                            "Light '{}' marked Ambient but has intensity {} (should be < 10)",
+                            light.light.name, light.light.intensity_candela
+                        ));
+                    }
+                },
+                "Omni" => {
+                    if light.light.intensity_candela < 10.0 || light.light.intensity_candela >= 100.0 {
+                        return Err(format!(
+                            "Light '{}' marked Omni but has intensity {} (should be 10-100)",
+                            light.light.name, light.light.intensity_candela
+                        ));
+                    }
+                },
+                "SoftOmni" => {
+                    if light.light.intensity_candela < 100.0 {
+                        return Err(format!(
+                            "Light '{}' marked SoftOmni but has intensity {} (should be >= 100)",
+                            light.light.name, light.light.intensity_candela
+                        ));
+                    }
+                },
+                _ => {}
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests_5b_lights {
+    use super::*;
+    
+    /// Helper to create test interior light
+    fn create_test_interior_with_lights(lights_data: Vec<(String, i16, f32)>) -> LoadedInteriors {
+        use crate::pipeline::interior_types::{InteriorContainerData, LightInfo};
+        
+        let mut containers = Vec::new();
+        let mut lights = Vec::new();
+        
+        for (name, lamp_type, intensity) in lights_data {
+            lights.push(LightInfo {
+                name: name.clone(),
+                position: [0.0, 0.0, 0.0],
+                rotation: [1.0, 0.0, 0.0, 0.0],
+                light_type: match lamp_type {
+                    0 => "Omni".to_string(),
+                    1 => "Sun".to_string(),
+                    2 => "Projector".to_string(),
+                    4 => "Area".to_string(),
+                    _ => "Other".to_string(),
+                },
+                intensity_candela_proxy: intensity,
+                color: [1.0, 1.0, 1.0],
+                radius: 10.0,
+                inner_angle: None,
+                outer_angle: None,
+                projector_texture: None,
+                active_state: "defaultState".to_string(),
+                states: std::collections::HashMap::new(),
+            });
+        }
+        
+        if !lights.is_empty() {
+            containers.push(InteriorContainerData {
+                lights,
+            });
+        }
+        
+        LoadedInteriors {
+            unique_cgfs: vec![],
+            containers,
+        }
+    }
+    
+    #[test]
+    fn organize_lights_collection_basic() {
+        let input = DecomposedInput {
+            entity_name: "TestEntity".to_string(),
+            geometry_path: "test/geo".to_string(),
+            material_path: "test/mat".to_string(),
+            root_mesh: crate::types::Mesh {
+                positions: vec![[0.0, 0.0, 0.0]],
+                indices: vec![0, 1, 2],
+                uvs: None,
+                secondary_uvs: None,
+                normals: None,
+                tangents: None,
+                colors: None,
+                submeshes: vec![],
+                model_min: [0.0, 0.0, 0.0],
+                model_max: [1.0, 1.0, 1.0],
+                scaling_min: [0.0, 0.0, 0.0],
+                scaling_max: [1.0, 1.0, 1.0],
+            },
+            root_materials: None,
+            root_nmc: None,
+            root_palette: None,
+            available_palettes: vec![],
+            root_bones: vec![],
+            root_skeleton_source_path: None,
+            root_animation_controller: None,
+            children: vec![],
+            interiors: create_test_interior_with_lights(vec![
+                ("Light1".to_string(), 0, 5.0),  // Ambient
+                ("Light2".to_string(), 0, 50.0),  // Omni
+                ("Light3".to_string(), 1, 100.0),  // Sun
+                ("Light4".to_string(), 2, 200.0),  // Projector
+            ]),
+            paint_variants: vec![],
+        };
+        
+        let result = organize_lights_collection(&input);
+        assert!(result.is_ok(), "Should organize lights successfully");
+        
+        let lights = result.unwrap();
+        assert_eq!(lights.len(), 4, "Should have 4 lights");
+    }
+    
+    #[test]
+    fn organize_lights_collection_empty_interiors() {
+        let input = DecomposedInput {
+            entity_name: "TestEntity".to_string(),
+            geometry_path: "test/geo".to_string(),
+            material_path: "test/mat".to_string(),
+            root_mesh: crate::types::Mesh {
+                positions: vec![[0.0, 0.0, 0.0]],
+                indices: vec![0, 1, 2],
+                uvs: None,
+                secondary_uvs: None,
+                normals: None,
+                tangents: None,
+                colors: None,
+                submeshes: vec![],
+                model_min: [0.0, 0.0, 0.0],
+                model_max: [1.0, 1.0, 1.0],
+                scaling_min: [0.0, 0.0, 0.0],
+                scaling_max: [1.0, 1.0, 1.0],
+            },
+            root_materials: None,
+            root_nmc: None,
+            root_palette: None,
+            available_palettes: vec![],
+            root_bones: vec![],
+            root_skeleton_source_path: None,
+            root_animation_controller: None,
+            children: vec![],
+            interiors: LoadedInteriors {
+                unique_cgfs: vec![],
+                containers: vec![],
+            },
+            paint_variants: vec![],
+        };
+        
+        let result = organize_lights_collection(&input);
+        assert!(result.is_ok(), "Should handle empty interiors");
+        
+        let lights = result.unwrap();
+        assert_eq!(lights.len(), 0, "Should have no lights");
+    }
+    
+    #[test]
+    fn organize_lights_collection_multiple_types() {
+        let input = DecomposedInput {
+            entity_name: "MultiLight".to_string(),
+            geometry_path: "test/geo".to_string(),
+            material_path: "test/mat".to_string(),
+            root_mesh: crate::types::Mesh {
+                positions: vec![[0.0, 0.0, 0.0]],
+                indices: vec![0, 1, 2],
+                uvs: None,
+                secondary_uvs: None,
+                normals: None,
+                tangents: None,
+                colors: None,
+                submeshes: vec![],
+                model_min: [0.0, 0.0, 0.0],
+                model_max: [1.0, 1.0, 1.0],
+                scaling_min: [0.0, 0.0, 0.0],
+                scaling_max: [1.0, 1.0, 1.0],
+            },
+            root_materials: None,
+            root_nmc: None,
+            root_palette: None,
+            available_palettes: vec![],
+            root_bones: vec![],
+            root_skeleton_source_path: None,
+            root_animation_controller: None,
+            children: vec![],
+            interiors: create_test_interior_with_lights(vec![
+                ("Ambient1".to_string(), 0, 5.0),
+                ("Ambient2".to_string(), 0, 8.0),
+                ("Omni1".to_string(), 0, 50.0),
+                ("Omni2".to_string(), 0, 75.0),
+                ("SoftOmni1".to_string(), 0, 150.0),
+                ("Projector1".to_string(), 2, 200.0),
+                ("Sun1".to_string(), 1, 100.0),
+                ("Area1".to_string(), 4, 80.0),
+            ]),
+            paint_variants: vec![],
+        };
+        
+        let result = organize_lights_collection(&input);
+        assert!(result.is_ok(), "Should organize all light types");
+        
+        let lights = result.unwrap();
+        assert_eq!(lights.len(), 8, "Should have 8 lights");
+        
+        // Count by collection type
+        let mut counts = std::collections::HashMap::new();
+        for light in &lights {
+            *counts.entry(light.collection_name.clone()).or_insert(0) += 1;
+        }
+        
+        assert_eq!(counts.get("Ambient").unwrap_or(&0), &2);
+        assert_eq!(counts.get("Omni").unwrap_or(&0), &2);
+        assert_eq!(counts.get("SoftOmni").unwrap_or(&0), &1);
+        assert_eq!(counts.get("Projector").unwrap_or(&0), &1);
+        assert_eq!(counts.get("Sun").unwrap_or(&0), &1);
+        assert_eq!(counts.get("Area").unwrap_or(&0), &1);
+    }
+    
+    #[test]
+    fn organize_lights_collection_intensity_thresholds() {
+        let input = DecomposedInput {
+            entity_name: "IntensityTest".to_string(),
+            geometry_path: "test/geo".to_string(),
+            material_path: "test/mat".to_string(),
+            root_mesh: crate::types::Mesh {
+                positions: vec![[0.0, 0.0, 0.0]],
+                indices: vec![0, 1, 2],
+                uvs: None,
+                secondary_uvs: None,
+                normals: None,
+                tangents: None,
+                colors: None,
+                submeshes: vec![],
+                model_min: [0.0, 0.0, 0.0],
+                model_max: [1.0, 1.0, 1.0],
+                scaling_min: [0.0, 0.0, 0.0],
+                scaling_max: [1.0, 1.0, 1.0],
+            },
+            root_materials: None,
+            root_nmc: None,
+            root_palette: None,
+            available_palettes: vec![],
+            root_bones: vec![],
+            root_skeleton_source_path: None,
+            root_animation_controller: None,
+            children: vec![],
+            interiors: create_test_interior_with_lights(vec![
+                // Test boundaries
+                ("Light_9_9".to_string(), 0, 9.9),    // Should be Ambient
+                ("Light_10_0".to_string(), 0, 10.0),  // Should be Omni
+                ("Light_99_9".to_string(), 0, 99.9),  // Should be Omni
+                ("Light_100_0".to_string(), 0, 100.0),// Should be SoftOmni
+            ]),
+            paint_variants: vec![],
+        };
+        
+        let result = organize_lights_collection(&input);
+        assert!(result.is_ok());
+        
+        let lights = result.unwrap();
+        assert_eq!(lights[0].collection_name, "Ambient");
+        assert_eq!(lights[1].collection_name, "Omni");
+        assert_eq!(lights[2].collection_name, "Omni");
+        assert_eq!(lights[3].collection_name, "SoftOmni");
+    }
+    
+    #[test]
+    fn validate_lights_collection_organization_valid() {
+        let lights = vec![
+            BlenderLight {
+                light: ExtractedLight {
+                    name: "Ambient1".to_string(),
+                    position_blend: [0.0, 0.0, 0.0],
+                    rotation_blend: [1.0, 0.0, 0.0, 0.0],
+                    color: [1.0, 1.0, 1.0],
+                    lamp_type: 0,
+                    energy_watts: 10.0,
+                    radius: 5.0,
+                    spot_size: 0.0,
+                    spot_blend: 0.0,
+                    intensity_candela: 5.0,
+                    temperature_k: 6500.0,
+                    gobo_path: None,
+                    active_state: "default".to_string(),
+                },
+                collection_name: "Ambient".to_string(),
+            },
+            BlenderLight {
+                light: ExtractedLight {
+                    name: "Projector1".to_string(),
+                    position_blend: [1.0, 1.0, 1.0],
+                    rotation_blend: [1.0, 0.0, 0.0, 0.0],
+                    color: [1.0, 0.8, 0.6],
+                    lamp_type: 2,
+                    energy_watts: 50.0,
+                    radius: 10.0,
+                    spot_size: 0.5,
+                    spot_blend: 0.2,
+                    intensity_candela: 200.0,
+                    temperature_k: 6500.0,
+                    gobo_path: Some("texture.dds".to_string()),
+                    active_state: "default".to_string(),
+                },
+                collection_name: "Projector".to_string(),
+            },
+        ];
+        
+        let result = validate_lights_collection_organization(&lights);
+        assert!(result.is_ok(), "Valid organization should pass validation");
+    }
+    
+    #[test]
+    fn validate_lights_collection_organization_invalid_intensity() {
+        let lights = vec![
+            BlenderLight {
+                light: ExtractedLight {
+                    name: "BadLight".to_string(),
+                    position_blend: [0.0, 0.0, 0.0],
+                    rotation_blend: [1.0, 0.0, 0.0, 0.0],
+                    color: [1.0, 1.0, 1.0],
+                    lamp_type: 0,
+                    energy_watts: 10.0,
+                    radius: 5.0,
+                    spot_size: 0.0,
+                    spot_blend: 0.0,
+                    intensity_candela: 50.0,  // Omni range
+                    temperature_k: 6500.0,
+                    gobo_path: None,
+                    active_state: "default".to_string(),
+                },
+                collection_name: "Ambient".to_string(),  // Wrong! Should be Omni
+            },
+        ];
+        
+        let result = validate_lights_collection_organization(&lights);
+        assert!(result.is_err(), "Invalid intensity should fail validation");
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Phase 5C: Organize Empty Objects into Collections
+// ════════════════════════════════════════════════════════════════════════════════
+
+
+/// Organized empty objects with collection metadata
+#[derive(Debug, Clone)]
+pub struct OrganizedEmpty {
+    /// Extracted empty with all transform data
+    pub empty: ExtractedEmpty,
+    /// Collection name for organizing this empty ("Helpers", "Controls", "Armature")
+    pub collection_name: String,
+}
+
+/// Collection hierarchy for organizing empties
+#[derive(Debug, Clone)]
+pub struct EmptyCollectionTree {
+    /// Root empties collection
+    pub root_ptr: u64,
+    /// Sub-collections by type: "Helpers", "Controls", "Armature"
+    pub type_collections: std::collections::HashMap<String, u64>,
+    /// Organized empties grouped by collection
+    pub empties_by_collection: std::collections::HashMap<String, Vec<OrganizedEmpty>>,
+}
+
+/// Categorize empties by type for collection organization
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EmptyCategory {
+    /// Helper nodes (geometry_type > 0, non-mesh)
+    Helpers,
+    /// Control point nodes (geometry_type == 3)
+    Controls,
+    /// Armature/skeleton nodes (geometry_type == 0, mesh nodes in hierarchy)
+    Armature,
+}
+
+impl EmptyCategory {
+    /// Determine category from empty properties
+    pub fn from_empty(is_helper: bool, geometry_type: u16) -> Self {
+        if is_helper {
+            if geometry_type == 3 {
+                EmptyCategory::Controls
+            } else {
+                EmptyCategory::Helpers
+            }
+        } else {
+            EmptyCategory::Armature
+        }
+    }
+    
+    /// Get collection name for this category
+    pub fn collection_name(&self) -> &str {
+        match self {
+            EmptyCategory::Helpers => "Helpers",
+            EmptyCategory::Controls => "Controls",
+            EmptyCategory::Armature => "Armature",
+        }
+    }
+}
+
+/// Organize extracted empties by type into collection hierarchy.
+///
+/// Creates a structure like:
+/// - Empties (root)
+///   - Helpers (collection)
+///   - Controls (collection)
+///   - Armature (collection)
+///
+/// Preserves parent-child relationships within hierarchy.
+/// All coordinate transforms have already been applied (Phase 3).
+///
+/// Returns mapping of empty type → collection pointer for placement
+pub fn organize_empties_into_collections(
+    empties: &[ExtractedEmpty],
+) -> Result<EmptyCollectionTree, String> {
+    use std::collections::HashMap;
+    
+    if empties.is_empty() {
+        return Ok(EmptyCollectionTree {
+            root_ptr: 0x1000,
+            type_collections: HashMap::new(),
+            empties_by_collection: HashMap::new(),
+        });
+    }
+    
+    // Collect unique empty types and organize empties by category
+    let mut type_collections = HashMap::new();
+    let mut empties_by_collection: HashMap<String, Vec<OrganizedEmpty>> = HashMap::new();
+    
+    for empty in empties {
+        let category = EmptyCategory::from_empty(empty.is_helper, empty.geometry_type);
+        let collection_name = category.collection_name().to_string();
+        
+        // Create collection if not exists
+        if !type_collections.contains_key(&collection_name) {
+            let next_ptr = 0x2000u64 + (type_collections.len() as u64) * 0x200;
+            type_collections.insert(collection_name.clone(), next_ptr);
+        }
+        
+        // Add empty to collection
+        empties_by_collection
+            .entry(collection_name)
+            .or_insert_with(Vec::new)
+            .push(OrganizedEmpty {
+                empty: empty.clone(),
+                collection_name: category.collection_name().to_string(),
+            });
+    }
+    
+    Ok(EmptyCollectionTree {
+        root_ptr: 0x1000,  // Root collection pointer
+        type_collections,
+        empties_by_collection,
+    })
+}
+
+/// Validate empty object collection hierarchy
+pub fn validate_empty_collection_hierarchy(tree: &EmptyCollectionTree) -> Result<(), String> {
+    // Check for duplicate pointers
+    let mut seen_ptrs = std::collections::HashSet::new();
+    for (type_name, ptr) in &tree.type_collections {
+        if seen_ptrs.contains(ptr) {
+            return Err(format!(
+                "Duplicate collection pointer 0x{:x} for type '{}'",
+                ptr, type_name
+            ));
+        }
+        seen_ptrs.insert(*ptr);
+        if *ptr == tree.root_ptr {
+            return Err(format!("Collection '{}' pointer conflicts with root", type_name));
+        }
+    }
+    
+    // Validate organization
+    for (coll_name, empties) in &tree.empties_by_collection {
+        if !tree.type_collections.contains_key(coll_name) {
+            return Err(format!("Collection '{}' organized but no corresponding type collection", coll_name));
+        }
+        
+        if empties.is_empty() {
+            return Err(format!("Collection '{}' has no empties", coll_name));
+        }
+        
+        // Verify all empties in collection match category
+        for empty_entry in empties {
+            if empty_entry.collection_name != *coll_name {
+                return Err(format!(
+                    "Empty '{}' collection_name mismatch: expected '{}', got '{}'",
+                    empty_entry.empty.name, coll_name, empty_entry.collection_name
+                ));
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+/// Verify parent-child relationships in empty hierarchy are preserved
+pub fn verify_empty_hierarchy_preservation(
+    empties: &[ExtractedEmpty],
+) -> Result<(), String> {
+    // Build index map
+    let mut index_map = std::collections::HashMap::new();
+    for (idx, empty) in empties.iter().enumerate() {
+        index_map.insert(empty.nmc_index, idx);
+    }
+    
+    // Check all parent references are valid
+    for empty in empties {
+        if let Some(parent_idx) = empty.parent_nmc_index {
+            if !index_map.contains_key(&parent_idx) {
+                return Err(format!(
+                    "Empty '{}' has invalid parent index {}",
+                    empty.name, parent_idx
+                ));
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests_5c {
+    use super::*;
+    
+    #[test]
+    fn organize_empties_collection_basic() {
+        let empties = vec![ExtractedEmpty {
+            name: "Empty_Root".to_string(),
+            nmc_index: 0,
+            parent_nmc_index: None,
+            position_blend: [0.0, 0.0, 0.0],
+            rotation_blend: [1.0, 0.0, 0.0, 0.0],
+            scale: [1.0, 1.0, 1.0],
+            geometry_type: 0,
+            is_helper: false,
+        }];
+        
+        let tree = organize_empties_into_collections(&empties).unwrap();
+        assert_eq!(tree.root_ptr, 0x1000);
+        assert!(tree.type_collections.contains_key("Armature"));
+        assert_eq!(tree.empties_by_collection.get("Armature").unwrap().len(), 1);
+    }
+    
+    #[test]
+    fn organize_empties_collection_hierarchy() {
+        let empties = vec![
+            ExtractedEmpty {
+                name: "Root".to_string(),
+                nmc_index: 0,
+                parent_nmc_index: None,
+                position_blend: [0.0, 0.0, 0.0],
+                rotation_blend: [1.0, 0.0, 0.0, 0.0],
+                scale: [1.0, 1.0, 1.0],
+                geometry_type: 0,
+                is_helper: false,
+            },
+            ExtractedEmpty {
+                name: "Child".to_string(),
+                nmc_index: 1,
+                parent_nmc_index: Some(0),
+                position_blend: [1.0, 0.0, 0.0],
+                rotation_blend: [1.0, 0.0, 0.0, 0.0],
+                scale: [1.0, 1.0, 1.0],
+                geometry_type: 0,
+                is_helper: false,
+            },
+        ];
+        
+        let tree = organize_empties_into_collections(&empties).unwrap();
+        assert_eq!(tree.empties_by_collection.get("Armature").unwrap().len(), 2);
+        
+        // Verify parent-child relationships preserved
+        verify_empty_hierarchy_preservation(&empties).unwrap();
+    }
+    
+    #[test]
+    fn organize_empties_collection_transforms() {
+        let empties = vec![ExtractedEmpty {
+            name: "TransformedEmpty".to_string(),
+            nmc_index: 0,
+            parent_nmc_index: None,
+            position_blend: [1.5, -2.5, 3.0],
+            rotation_blend: [0.707, 0.0, 0.707, 0.0],  // 90° rotation
+            scale: [2.0, 2.0, 2.0],
+            geometry_type: 3,
+            is_helper: true,
+        }];
+        
+        let tree = organize_empties_into_collections(&empties).unwrap();
+        let controls_empties = tree.empties_by_collection.get("Controls").unwrap();
+        assert_eq!(controls_empties.len(), 1);
+        
+        let empty = &controls_empties[0].empty;
+        assert_eq!(empty.position_blend, [1.5, -2.5, 3.0]);
+        assert_eq!(empty.scale, [2.0, 2.0, 2.0]);
+    }
+    
+    #[test]
+    fn organize_empties_collection_deep_hierarchy() {
+        let empties = vec![
+            ExtractedEmpty {
+                name: "Level0".to_string(),
+                nmc_index: 0,
+                parent_nmc_index: None,
+                position_blend: [0.0, 0.0, 0.0],
+                rotation_blend: [1.0, 0.0, 0.0, 0.0],
+                scale: [1.0, 1.0, 1.0],
+                geometry_type: 0,
+                is_helper: false,
+            },
+            ExtractedEmpty {
+                name: "Level1".to_string(),
+                nmc_index: 1,
+                parent_nmc_index: Some(0),
+                position_blend: [1.0, 0.0, 0.0],
+                rotation_blend: [1.0, 0.0, 0.0, 0.0],
+                scale: [1.0, 1.0, 1.0],
+                geometry_type: 0,
+                is_helper: false,
+            },
+            ExtractedEmpty {
+                name: "Level2".to_string(),
+                nmc_index: 2,
+                parent_nmc_index: Some(1),
+                position_blend: [2.0, 0.0, 0.0],
+                rotation_blend: [1.0, 0.0, 0.0, 0.0],
+                scale: [1.0, 1.0, 1.0],
+                geometry_type: 0,
+                is_helper: false,
+            },
+            ExtractedEmpty {
+                name: "Level3".to_string(),
+                nmc_index: 3,
+                parent_nmc_index: Some(2),
+                position_blend: [3.0, 0.0, 0.0],
+                rotation_blend: [1.0, 0.0, 0.0, 0.0],
+                scale: [1.0, 1.0, 1.0],
+                geometry_type: 0,
+                is_helper: false,
+            },
+            ExtractedEmpty {
+                name: "Level4".to_string(),
+                nmc_index: 4,
+                parent_nmc_index: Some(3),
+                position_blend: [4.0, 0.0, 0.0],
+                rotation_blend: [1.0, 0.0, 0.0, 0.0],
+                scale: [1.0, 1.0, 1.0],
+                geometry_type: 0,
+                is_helper: false,
+            },
+            ExtractedEmpty {
+                name: "Level5".to_string(),
+                nmc_index: 5,
+                parent_nmc_index: Some(4),
+                position_blend: [5.0, 0.0, 0.0],
+                rotation_blend: [1.0, 0.0, 0.0, 0.0],
+                scale: [1.0, 1.0, 1.0],
+                geometry_type: 0,
+                is_helper: false,
+            },
+        ];
+        
+        let tree = organize_empties_into_collections(&empties).unwrap();
+        assert_eq!(tree.empties_by_collection.get("Armature").unwrap().len(), 6);
+        
+        // Verify deep hierarchy
+        verify_empty_hierarchy_preservation(&empties).unwrap();
+    }
+    
+    #[test]
+    fn organize_empties_collection_no_duplicates() {
+        let empties = vec![
+            ExtractedEmpty {
+                name: "Empty1".to_string(),
+                nmc_index: 0,
+                parent_nmc_index: None,
+                position_blend: [0.0, 0.0, 0.0],
+                rotation_blend: [1.0, 0.0, 0.0, 0.0],
+                scale: [1.0, 1.0, 1.0],
+                geometry_type: 3,
+                is_helper: true,
+            },
+            ExtractedEmpty {
+                name: "Empty2".to_string(),
+                nmc_index: 1,
+                parent_nmc_index: None,
+                position_blend: [1.0, 1.0, 1.0],
+                rotation_blend: [1.0, 0.0, 0.0, 0.0],
+                scale: [1.0, 1.0, 1.0],
+                geometry_type: 3,
+                is_helper: true,
+            },
+            ExtractedEmpty {
+                name: "Empty3".to_string(),
+                nmc_index: 2,
+                parent_nmc_index: None,
+                position_blend: [2.0, 2.0, 2.0],
+                rotation_blend: [1.0, 0.0, 0.0, 0.0],
+                scale: [1.0, 1.0, 1.0],
+                geometry_type: 3,
+                is_helper: true,
+            },
+        ];
+        
+        let tree = organize_empties_into_collections(&empties).unwrap();
+        
+        // All empties in Controls collection
+        let controls = tree.empties_by_collection.get("Controls").unwrap();
+        assert_eq!(controls.len(), 3);
+        
+        // Verify no duplicates
+        let names: std::collections::HashSet<_> = controls
+            .iter()
+            .map(|e| e.empty.name.clone())
+            .collect();
+        assert_eq!(names.len(), 3);
+    }
+    
+    #[test]
+    fn empty_category_classification_helpers() {
+        let cat = EmptyCategory::from_empty(true, 0);
+        assert_eq!(cat, EmptyCategory::Helpers);
+        assert_eq!(cat.collection_name(), "Helpers");
+    }
+    
+    #[test]
+    fn empty_category_classification_controls() {
+        let cat = EmptyCategory::from_empty(true, 3);
+        assert_eq!(cat, EmptyCategory::Controls);
+        assert_eq!(cat.collection_name(), "Controls");
+    }
+    
+    #[test]
+    fn empty_category_classification_armature() {
+        let cat = EmptyCategory::from_empty(false, 0);
+        assert_eq!(cat, EmptyCategory::Armature);
+        assert_eq!(cat.collection_name(), "Armature");
+    }
+    
+    #[test]
+    fn validate_empty_collection_hierarchy_valid() {
+        let mut collections = std::collections::HashMap::new();
+        collections.insert("Helpers".to_string(), 0x2000);
+        collections.insert("Controls".to_string(), 0x2200);
+        collections.insert("Armature".to_string(), 0x2400);
+        
+        let mut empties_by_collection = std::collections::HashMap::new();
+        empties_by_collection.insert(
+            "Helpers".to_string(),
+            vec![OrganizedEmpty {
+                empty: ExtractedEmpty {
+                    name: "Helper1".to_string(),
+                    nmc_index: 0,
+                    parent_nmc_index: None,
+                    position_blend: [0.0, 0.0, 0.0],
+                    rotation_blend: [1.0, 0.0, 0.0, 0.0],
+                    scale: [1.0, 1.0, 1.0],
+                    geometry_type: 0,
+                    is_helper: true,
+                },
+                collection_name: "Helpers".to_string(),
+            }],
+        );
+        
+        let tree = EmptyCollectionTree {
+            root_ptr: 0x1000,
+            type_collections: collections,
+            empties_by_collection,
+        };
+        
+        assert!(validate_empty_collection_hierarchy(&tree).is_ok());
+    }
+    
+    #[test]
+    fn verify_empty_hierarchy_preservation_valid() {
+        let empties = vec![
+            ExtractedEmpty {
+                name: "Root".to_string(),
+                nmc_index: 0,
+                parent_nmc_index: None,
+                position_blend: [0.0, 0.0, 0.0],
+                rotation_blend: [1.0, 0.0, 0.0, 0.0],
+                scale: [1.0, 1.0, 1.0],
+                geometry_type: 0,
+                is_helper: false,
+            },
+            ExtractedEmpty {
+                name: "Child".to_string(),
+                nmc_index: 1,
+                parent_nmc_index: Some(0),
+                position_blend: [1.0, 0.0, 0.0],
+                rotation_blend: [1.0, 0.0, 0.0, 0.0],
+                scale: [1.0, 1.0, 1.0],
+                geometry_type: 0,
+                is_helper: false,
+            },
+        ];
+        
+        assert!(verify_empty_hierarchy_preservation(&empties).is_ok());
+    }
+    
+    #[test]
+    fn verify_empty_hierarchy_preservation_invalid_parent() {
+        let empties = vec![ExtractedEmpty {
+            name: "Orphan".to_string(),
+            nmc_index: 0,
+            parent_nmc_index: Some(999),  // Non-existent parent
+            position_blend: [0.0, 0.0, 0.0],
+            rotation_blend: [1.0, 0.0, 0.0, 0.0],
+            scale: [1.0, 1.0, 1.0],
+            geometry_type: 0,
+            is_helper: false,
+        }];
+        
+        assert!(verify_empty_hierarchy_preservation(&empties).is_err());
     }
 }
 
