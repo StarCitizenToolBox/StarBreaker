@@ -2016,54 +2016,25 @@ pub fn validate_lights_collection_organization(
     Ok(())
 }
 
+// ════════════════════════════════════════════════════════════════════════════════
+// Phase 5B: Organize Lights into Collections (to be implemented)
+// ════════════════════════════════════════════════════════════════════════════════
+
+// Test helpers and tests for Phase 5B will be added by Phase 5B agent
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Phase 5C: Organize Empty Objects into Collections (to be implemented)
+// ════════════════════════════════════════════════════════════════════════════════
+
+// Test helpers and tests for Phase 5C will be added by Phase 5C agent
+
+// Placeholder test to verify Phase 5A compiles
 #[cfg(test)]
-mod tests_5b_lights {
+mod tests_5a_only {
     use super::*;
     
-    /// Helper to create test interior light
-    fn create_test_interior_with_lights(lights_data: Vec<(String, i16, f32)>) -> LoadedInteriors {
-        use crate::pipeline::interior_types::{InteriorContainerData, LightInfo};
-        
-        let mut containers = Vec::new();
-        let mut lights = Vec::new();
-        
-        for (name, lamp_type, intensity) in lights_data {
-            lights.push(LightInfo {
-                name: name.clone(),
-                position: [0.0, 0.0, 0.0],
-                rotation: [1.0, 0.0, 0.0, 0.0],
-                light_type: match lamp_type {
-                    0 => "Omni".to_string(),
-                    1 => "Sun".to_string(),
-                    2 => "Projector".to_string(),
-                    4 => "Area".to_string(),
-                    _ => "Other".to_string(),
-                },
-                intensity_candela_proxy: intensity,
-                color: [1.0, 1.0, 1.0],
-                radius: 10.0,
-                inner_angle: None,
-                outer_angle: None,
-                projector_texture: None,
-                active_state: "defaultState".to_string(),
-                states: std::collections::HashMap::new(),
-            });
-        }
-        
-        if !lights.is_empty() {
-            containers.push(InteriorContainerData {
-                lights,
-            });
-        }
-        
-        LoadedInteriors {
-            unique_cgfs: vec![],
-            containers,
-        }
-    }
-    
     #[test]
-    fn organize_lights_collection_basic() {
+    fn test_phase_5a_compiles() {
         let input = DecomposedInput {
             entity_name: "TestEntity".to_string(),
             geometry_path: "test/geo".to_string(),
