@@ -420,3 +420,36 @@ mod tests {
         assert_eq!(result[2], 2.0);   // Y
     }
 }
+
+/// Phase 2C: Create root scene and collection structures.
+///
+/// Scene.blend needs minimal scaffolding:
+/// - FileGlobal (GLOB) pointing to scene and view layer
+/// - Scene (SCE) with world, view layers, master collection
+/// - ViewLayer (SR) for rendering
+/// - Master Collection (GRP) as scene root
+/// - Base objects linking scene to collection
+///
+/// This creates the container hierarchy; actual mesh instances are added in Phase 2D.
+fn build_scene_structure() -> SceneStructure {
+    // These pointers are arbitrary; they just need to be unique and consistent
+    // The magic is in writing them in the correct order and linking them via these addresses
+    
+    SceneStructure {
+        scene_ptr: 0x1000,
+        view_layer_ptr: 0x2000,
+        base_ptr: 0x3000,
+        master_collection_ptr: 0x4000,
+        collection_object_ptr: 0x5000,
+        layer_collection_ptr: 0x6000,
+    }
+}
+
+struct SceneStructure {
+    scene_ptr: u64,
+    view_layer_ptr: u64,
+    base_ptr: u64,
+    master_collection_ptr: u64,
+    collection_object_ptr: u64,
+    layer_collection_ptr: u64,
+}

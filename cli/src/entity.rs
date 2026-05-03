@@ -373,8 +373,11 @@ fn export_blend(
         let tree = resolve_loadout_indexed(&idx, record);
         let mut export_opts = starbreaker_3d::ExportOptions::from(&opts);
         export_opts.kind = starbreaker_3d::ExportKind::Decomposed;
-        // The decomposed pipeline emits scene.json + mesh assets in GLB.
-        export_opts.format = starbreaker_3d::ExportFormat::Glb;
+        // The decomposed pipeline emits scene.json + mesh assets in GLB (or .blend if requested).
+        // Preserve the format from the command line if it was explicitly set.
+        if opts.format.to_lowercase() != "blend" {
+            export_opts.format = starbreaker_3d::ExportFormat::Glb;
+        }
 
         let output_dir = output.unwrap_or_else(|| PathBuf::from(&name));
         let package_name = format!(

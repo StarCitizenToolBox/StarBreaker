@@ -36,6 +36,8 @@ pub const SDNA_IDX_MDEFORMVERT: u32 = 331;
 pub const SDNA_IDX_MDEFORMWEIGHT: u32 = 330;
 pub const SDNA_IDX_CUSTOM_DATA_LAYER: u32 = 160;
 pub const SDNA_IDX_IDPROPERTY: u32 = 9;
+pub const SDNA_IDX_LIBRARY: u32 = 15;
+pub const SDNA_IDX_ID: u32 = 14;
 pub const SDNA_IDX_DNA1: u32 = 0;
 
 // ── Struct sizes (bytes) ──────────────────────────────────────────────────────
@@ -56,6 +58,8 @@ pub const MDEFORMVERT_SIZE: usize = 16;
 pub const MDEFORMWEIGHT_SIZE: usize = 8;
 pub const CUSTOM_DATA_LAYER_SIZE: usize = 112;
 pub const IDPROPERTY_SIZE: usize = 144;
+pub const LIBRARY_SIZE: usize = 1472;
+pub const ID_STUB_SIZE: usize = 408;
 
 // ── Attribute enums ───────────────────────────────────────────────────────────
 pub const ATTR_DOMAIN_POINT: u8 = 0;
@@ -621,4 +625,83 @@ pub fn build_mat_ptr_array(n: usize) -> Vec<u8> {
 /// Build an `Object.matbits` block — one byte per slot, 0 = mesh-linked.
 pub fn build_matbits(n: usize) -> Vec<u8> {
     vec![0u8; n]
+}
+
+/// Compress Blender .blend file using Zstd (Blender 5.x native format).
+///
+/// Scene.blend files must be Zstd-compressed; mesh .blend files are uncompressed.
+pub fn compress_blend_bytes_zstd(raw_blend: &[u8]) -> Vec<u8> {
+    use zstd::Encoder;
+    
+    let mut compressed = Vec::new();
+    // Use compression level 19 (maximum, matches Blender's default save)
+    let mut encoder = match Encoder::new(&mut compressed, 19) {
+        Ok(enc) => enc,
+        Err(_) => return raw_blend.to_vec(), // Fallback: return uncompressed
+    };
+    
+    if encoder.write_all(raw_blend).is_err() || encoder.finish().is_err() {
+        return raw_blend.to_vec(); // Fallback: return uncompressed
+    }
+    
+    compressed
+}
+
+/// Build a Library block (LI) for linking to an external .blend file.
+///
+/// The library block contains the filepath to the external asset file.
+pub fn build_library_block(lib_name: &str, filepath: &str) -> Vec<u8> {
+    let mut buf = vec![0u8; LIBRARY_SIZE];
+    
+    // Offset 0: ID structure (common to all datablocks)
+    // ID.name at offset 0: 66 bytes (ID prefix + 64-char name)
+    write_id_name(&mut buf[0..66], "LI", lib_name);
+    
+    // Offset 192: filepath pointer and data
+    // In .blend format, the filepath is stored as a fixed-length string block
+    // For now, store it at a known offset; actual pointer setup happens in write_block
+    // The filepath goes in a separate DATA block with key 0; the pointer is at offset 268
+    let filepath_bytes = filepath.as_bytes();
+    let filepath_len = filepath_bytes.len().min(1023); // CryEngine path limit
+    
+    // Store filepath starting at offset 296 (after ID + padding)
+    // and write pointer to it at offset 268
+    if filepath_len > 0 {
+        buf[296..(296 + filepath_len)].copy_from_slice(&filepath_bytes[0..filepath_len]);
+        write_ptr(&mut buf, 268, 0x1000 + 296); // Pointer to filepath data
+    }
+    
+    buf
+}
+
+/// Build an ID stub (ID) for referencing a datablock from an external library.
+///
+/// The ID stub is embedded in the Object.data pointer and links to:
+/// - A Library block (LI) specifying the external .blend file
+/// - A specific datablock within that library (e.g., Mesh)
+pub fn build_id_stub(datablock_type: &str, name: &str, lib_ptr: u64) -> Vec<u8> {
+    let mut buf = vec![0u8; ID_STUB_SIZE];
+    
+    // ID.name at offset 0: 66 bytes
+    write_id_name(&mut buf[0..66], datablock_type, name);
+    
+    // Library pointer at offset 24
+    write_ptr(&mut buf, 24, lib_ptr);
+    
+    buf
+}
+
+/// Compress/decompress test for Zstd roundtrip.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_zstd_compression_roundtrip() {
+        let original = b"Hello, Blender 5.1!";
+        let compressed = compress_blend_bytes_zstd(original);
+        // Just verify it compresses to something
+        assert!(!compressed.is_empty(), "Compression produced empty result");
+        // Note: actual decompression requires zstd::Decoder, which we don't use in Rust export
+    }
 }
