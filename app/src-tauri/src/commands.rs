@@ -1003,6 +1003,7 @@ fn bundled_extension(format: starbreaker_3d::ExportFormat) -> &'static str {
     match format {
         starbreaker_3d::ExportFormat::Glb => "glb",
         starbreaker_3d::ExportFormat::Stl => "stl",
+        starbreaker_3d::ExportFormat::Blend => "blend",
     }
 }
 
@@ -1054,7 +1055,7 @@ pub struct ExportRequest {
     pub export_kind: String,
     /// "none", "colors", "textures", "all"
     pub material_mode: String,
-    /// "glb" or "stl"
+    /// "glb", "stl", or "blend"
     pub format: String,
     pub include_attachments: bool,
     pub include_interior: bool,
@@ -1304,6 +1305,7 @@ pub async fn start_export(
     };
     let format = match request.format.to_lowercase().as_str() {
         "stl" => starbreaker_3d::ExportFormat::Stl,
+        "blend" => starbreaker_3d::ExportFormat::Blend,
         _ => starbreaker_3d::ExportFormat::Glb,
     };
     let existing_asset_paths = if kind == starbreaker_3d::ExportKind::Decomposed

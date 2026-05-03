@@ -89,6 +89,8 @@ pub enum ExportFormat {
     Glb,
     /// 3D print export (STL, no materials, no decals, glass solid, no interior).
     Stl,
+    /// Blender decomposed export (separate .blend files with scene.blend linking).
+    Blend,
 }
 
 /// Options for controlling the export pipeline.

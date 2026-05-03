@@ -40,7 +40,7 @@ pub struct ExportOpts {
     /// Material detail: none, colors, textures, all
     #[arg(long, default_value = "textures")]
     pub materials: String,
-    /// Output format: glb or stl
+    /// Output format: glb, stl, or blend
     #[arg(long, default_value = "glb")]
     pub format: String,
     /// Texture mip level (0=full, 2=1/4 res, 4=1/16 res)
@@ -87,6 +87,7 @@ impl From<&ExportOpts> for starbreaker_3d::ExportOptions {
         };
         let format = match opts.format.to_lowercase().as_str() {
             "stl" => starbreaker_3d::ExportFormat::Stl,
+            "blend" => starbreaker_3d::ExportFormat::Blend,
             _ => starbreaker_3d::ExportFormat::Glb,
         };
         starbreaker_3d::ExportOptions {

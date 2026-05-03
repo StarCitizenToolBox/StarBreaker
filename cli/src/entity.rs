@@ -15,6 +15,7 @@ fn bundled_extension(format: starbreaker_3d::ExportFormat) -> &'static str {
     match format {
         starbreaker_3d::ExportFormat::Glb => "glb",
         starbreaker_3d::ExportFormat::Stl => "stl",
+        starbreaker_3d::ExportFormat::Blend => "blend",
     }
 }
 
