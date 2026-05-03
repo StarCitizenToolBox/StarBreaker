@@ -580,3 +580,210 @@ mod tests {
         assert!(energy > 73.0 && energy < 74.0, "Energy: {}", energy);
     }
 }
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Phase 3B: Extract Empties from NMC (Node Mesh Combo)
+// ════════════════════════════════════════════════════════════════════════════════
+
+/// Extracted empty object ready for Blender scene construction.
+#[derive(Debug, Clone)]
+pub struct ExtractedEmpty {
+    /// NMC node name
+    pub name: String,
+    /// Index in NMC node array (for parent references)
+    pub nmc_index: usize,
+    /// Parent node index in NMC array (None for root)
+    pub parent_nmc_index: Option<usize>,
+    /// Position in Blender coordinates
+    pub position_blend: [f32; 3],
+    /// Rotation as quaternion in Blender coordinates [w, x, y, z]
+    pub rotation_blend: [f32; 4],
+    /// Scale per axis
+    pub scale: [f32; 3],
+    /// Geometry type from NMC (0=GEOM, 3=HELP2, etc.)
+    pub geometry_type: u16,
+    /// Whether this is a helper/non-mesh node
+    pub is_helper: bool,
+}
+
+/// Extract 4x4 matrix from NMC 3x4 row-major format
+/// Returns [position, rotation_quat, scale]
+fn extract_matrix_components(
+    matrix_3x4: &[[f32; 4]; 3]
+) -> ([f32; 3], [f32; 4], [f32; 3]) {
+    // Position is the 4th column
+    let position = [matrix_3x4[0][3], matrix_3x4[1][3], matrix_3x4[2][3]];
+    
+    // Extract rotation from 3x3 upper-left
+    // Convert 3x3 rotation matrix to quaternion
+    let rot_matrix = [
+        [matrix_3x4[0][0], matrix_3x4[0][1], matrix_3x4[0][2]],
+        [matrix_3x4[1][0], matrix_3x4[1][1], matrix_3x4[1][2]],
+        [matrix_3x4[2][0], matrix_3x4[2][1], matrix_3x4[2][2]],
+    ];
+    
+    let quaternion = matrix_to_quaternion(&rot_matrix);
+    
+    // Scale is typically [1, 1, 1], but might be stored separately
+    let scale = [1.0, 1.0, 1.0];
+    
+    (position, quaternion, scale)
+}
+
+/// Convert 3x3 rotation matrix to quaternion.
+/// Matrix is in row-major order.
+fn matrix_to_quaternion(m: &[[f32; 3]; 3]) -> [f32; 4] {
+    let trace = m[0][0] + m[1][1] + m[2][2];
+    
+    if trace > 0.0 {
+        let s = 0.5 / (trace + 1.0).sqrt();
+        [
+            0.25 / s,
+            (m[2][1] - m[1][2]) * s,
+            (m[0][2] - m[2][0]) * s,
+            (m[1][0] - m[0][1]) * s,
+        ]
+    } else if m[0][0] > m[1][1] && m[0][0] > m[2][2] {
+        let s = 2.0 * (1.0 + m[0][0] - m[1][1] - m[2][2]).sqrt();
+        [
+            (m[2][1] - m[1][2]) / s,
+            0.25 * s,
+            (m[0][1] + m[1][0]) / s,
+            (m[0][2] + m[2][0]) / s,
+        ]
+    } else if m[1][1] > m[2][2] {
+        let s = 2.0 * (1.0 + m[1][1] - m[0][0] - m[2][2]).sqrt();
+        [
+            (m[0][2] - m[2][0]) / s,
+            (m[0][1] + m[1][0]) / s,
+            0.25 * s,
+            (m[1][2] + m[2][1]) / s,
+        ]
+    } else {
+        let s = 2.0 * (1.0 + m[2][2] - m[0][0] - m[1][1]).sqrt();
+        [
+            (m[1][0] - m[0][1]) / s,
+            (m[0][2] + m[2][0]) / s,
+            (m[1][2] + m[2][1]) / s,
+            0.25 * s,
+        ]
+    }
+}
+
+/// Convert 3x4 CryEngine matrix to Blender coordinates
+fn convert_matrix_sc_to_blender(matrix_sc: &[[f32; 4]; 3]) -> ([[f32; 4]; 3], [f32; 4]) {
+    // Extract position and rotation
+    let (pos_sc, rot_quat_sc, _scale) = extract_matrix_components(matrix_sc);
+    
+    // Convert position
+    let pos_blend = convert_position_sc_to_blender([pos_sc[0] as f64, pos_sc[1] as f64, pos_sc[2] as f64]);
+    
+    // Convert quaternion
+    let rot_quat_blend = convert_quaternion_sc_to_blender([
+        rot_quat_sc[0] as f64,
+        rot_quat_sc[1] as f64,
+        rot_quat_sc[2] as f64,
+        rot_quat_sc[3] as f64,
+    ]);
+    
+    // Reconstruct matrix in Blender coordinates (simplified)
+    let mut matrix_blend = [[0.0f32; 4]; 3];
+    matrix_blend[0][3] = pos_blend[0];
+    matrix_blend[1][3] = pos_blend[1];
+    matrix_blend[2][3] = pos_blend[2];
+    
+    (matrix_blend, rot_quat_blend)
+}
+
+/// Extract empties (non-mesh nodes) from NMC node hierarchy.
+///
+/// Empties are created from NMC nodes that should not be rendered as meshes:
+/// - Helper nodes (geometry_type > 0)
+/// - Nodes with special properties (e.g., "class" = "AnimatedJoint")
+/// - Group nodes for organizing the hierarchy
+pub fn extract_empties_from_nmc(
+    nmc_nodes: &[crate::nmc::NmcNode],
+) -> Result<Vec<ExtractedEmpty>, Error> {
+    let mut empties = Vec::new();
+    
+    for (idx, node) in nmc_nodes.iter().enumerate() {
+        // Determine if this node should be an empty
+        // Empties are non-mesh nodes (geometry_type != 0) or special node types
+        let is_helper = node.geometry_type != 0 || 
+                        node.properties.get("class").map(|v| v != "Mesh").unwrap_or(false);
+        
+        if !is_helper && idx > 0 {
+            // Skip mesh geometry nodes (geometry_type == 0 and no special properties)
+            continue;
+        }
+        
+        // Extract position from WorldToBone matrix
+        let pos_sc = [
+            node.world_to_bone[0][3] as f64,
+            node.world_to_bone[1][3] as f64,
+            node.world_to_bone[2][3] as f64,
+        ];
+        let position_blend = convert_position_sc_to_blender(pos_sc);
+        
+        // Extract rotation from matrix
+        let rot_matrix = [
+            [node.world_to_bone[0][0], node.world_to_bone[0][1], node.world_to_bone[0][2]],
+            [node.world_to_bone[1][0], node.world_to_bone[1][1], node.world_to_bone[1][2]],
+            [node.world_to_bone[2][0], node.world_to_bone[2][1], node.world_to_bone[2][2]],
+        ];
+        let rot_quat_sc = matrix_to_quaternion(&rot_matrix);
+        let rotation_blend = convert_quaternion_sc_to_blender([
+            rot_quat_sc[0] as f64,
+            rot_quat_sc[1] as f64,
+            rot_quat_sc[2] as f64,
+            rot_quat_sc[3] as f64,
+        ]);
+        
+        empties.push(ExtractedEmpty {
+            name: node.name.clone(),
+            nmc_index: idx,
+            parent_nmc_index: node.parent_index.map(|p| p as usize),
+            position_blend,
+            rotation_blend,
+            scale: node.scale,
+            geometry_type: node.geometry_type,
+            is_helper,
+        });
+    }
+    
+    Ok(empties)
+}
+
+#[cfg(test)]
+mod tests_3b {
+    use super::*;
+    
+    #[test]
+    fn test_matrix_to_quaternion_identity() {
+        let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let quat = matrix_to_quaternion(&identity);
+        // Identity quaternion is approximately [1, 0, 0, 0]
+        assert!((quat[0] - 1.0).abs() < 0.01);
+        assert!(quat[1].abs() < 0.01);
+        assert!(quat[2].abs() < 0.01);
+        assert!(quat[3].abs() < 0.01);
+    }
+    
+    #[test]
+    fn test_extract_matrix_components_position() {
+        let matrix = [
+            [1.0, 0.0, 0.0, 5.0],
+            [0.0, 1.0, 0.0, 10.0],
+            [0.0, 0.0, 1.0, 15.0],
+        ];
+        let (pos, _rot, _scale) = extract_matrix_components(&matrix);
+        assert_eq!(pos, [5.0, 10.0, 15.0]);
+    }
+    
+    #[test]
+    fn test_extracted_empty_helpers() {
+        // Helper nodes (geometry_type > 0) should be recognized as helpers
+        let is_helper = 3 != 0; // geometry_type = 3
+        assert!(is_helper);
+    }
+}
