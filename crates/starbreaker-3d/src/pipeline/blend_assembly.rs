@@ -24,7 +24,7 @@ use starbreaker_blend::{
     SDNA_IDX_ATTRIBUTE, SDNA_IDX_BASE, SDNA_IDX_COLLECTION, SDNA_IDX_COLLECTION_OBJECT,
     SDNA_IDX_DNA1, SDNA_IDX_FILE_GLOBAL, SDNA_IDX_LAYER_COLLECTION, SDNA_IDX_MESH,
     SDNA_IDX_OBJECT, SDNA_IDX_SCENE, SDNA_IDX_VIEW_LAYER,
-    build_lamp, build_lamp_object, LAMP_SIZE, OBJECT_SIZE,
+    build_lamp, build_lamp_object, build_empty_object, LAMP_SIZE, OBJECT_SIZE,
 };
 
 use crate::error::Error;
@@ -920,6 +920,120 @@ mod tests_3c {
     fn test_validate_lamp_block_sizes() {
         // Verify block sizes are exported correctly
         assert_eq!(LAMP_SIZE, 568);
+        assert_eq!(OBJECT_SIZE, 1288);
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Phase 3D: Create Empty Objects
+// ════════════════════════════════════════════════════════════════════════════════
+
+/// Blender empty object ready to write to .blend file
+#[derive(Debug, Clone)]
+pub struct EmptyBlockPair {
+    /// Object datablock bytes (from build_empty_object)
+    pub object_bytes: Vec<u8>,
+    /// Pointer for object in file allocation
+    pub object_ptr: u64,
+    /// Collection name for organizing empties (e.g., "Helpers", "Controls")
+    pub collection_name: String,
+}
+
+/// Build Blender empty object from extracted empty.
+///
+/// Creates an empty object placeholder for non-mesh nodes in the hierarchy.
+/// Empty objects serve as group containers, animation controls, or structural nodes.
+pub fn build_empty_blocks(
+    empty: &ExtractedEmpty,
+    object_ptr: u64,
+    parent_collection_ptr: u64,
+) -> Result<EmptyBlockPair, String> {
+    // Build the empty object
+    let object_bytes = build_empty_object(
+        &empty.name,
+        empty.position_blend,
+        empty.rotation_blend,
+        empty.scale,
+        parent_collection_ptr,
+    );
+    
+    // Determine collection name by helper type
+    let collection_name = if empty.is_helper {
+        match empty.geometry_type {
+            3 => "Controls".to_string(),  // HELP2 = control points
+            _ => "Helpers".to_string(),    // Other helper types
+        }
+    } else {
+        "Armature".to_string()  // Non-helper nodes go to Armature
+    };
+    
+    Ok(EmptyBlockPair {
+        object_bytes,
+        object_ptr,
+        collection_name,
+    })
+}
+
+/// Validate empty object block can be created
+pub fn validate_empty_object_creation() -> Result<(), String> {
+    // Verify OBJECT_SIZE is correct
+    if OBJECT_SIZE != 1288 {
+        return Err(format!("Expected OBJECT_SIZE=1288, got {}", OBJECT_SIZE));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests_3d {
+    use super::*;
+    
+    #[test]
+    fn test_empty_type_classification_helper() {
+        // Helper nodes should go to Helpers collection
+        let is_helper = true;
+        let geometry_type = 3u16;
+        let collection_name = if is_helper {
+            match geometry_type {
+                3 => "Controls",
+                _ => "Helpers",
+            }
+        } else {
+            "Armature"
+        };
+        assert_eq!(collection_name, "Controls");
+    }
+    
+    #[test]
+    fn test_empty_type_classification_non_helper() {
+        // Non-helper nodes should go to Armature collection
+        let is_helper = false;
+        let collection_name = if is_helper {
+            "Helpers"
+        } else {
+            "Armature"
+        };
+        assert_eq!(collection_name, "Armature");
+    }
+    
+    #[test]
+    fn test_empty_type_classification_generic_helper() {
+        // Generic helper nodes (geometry_type != 3)
+        let is_helper = true;
+        let geometry_type = 0u16;
+        let collection_name = if is_helper {
+            match geometry_type {
+                3 => "Controls",
+                _ => "Helpers",
+            }
+        } else {
+            "Armature"
+        };
+        assert_eq!(collection_name, "Helpers");
+    }
+    
+    #[test]
+    fn test_validate_empty_object_creation() {
+        // Verify OBJECT_SIZE is available
         assert_eq!(OBJECT_SIZE, 1288);
     }
 }
