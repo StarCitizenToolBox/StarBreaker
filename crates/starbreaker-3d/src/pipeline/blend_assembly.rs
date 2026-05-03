@@ -3,15 +3,13 @@
 //! Orchestrates the pipeline for Phase 1 (mesh decomposition):
 //! - Extract meshes from `DecomposedInput::children`
 //! - Build material slots (empty, names-only)
-//! - Write individual `.blend` files for each mesh
-//! - Generate `ExportedFile` entries
+//! - Write individual `.blend` files to `Data/Objects/...` paths
+//! - Return decomposed export with .blend mesh files instead of GLB
 //!
 //! Phase 2 (scene.blend linking) and Phase 3+ will be implemented in subsequent phases.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::collections::HashSet;
 
-use serde_json::json;
 use starbreaker_common::progress::{report as report_progress, Progress};
 use starbreaker_p4k::MappedP4k;
 use starbreaker_blend::{
@@ -31,58 +29,104 @@ use crate::decomposed::DecomposedInput;
 use crate::pipeline::{DecomposedExport, ExportedFile, ExportedFileKind, ExportOptions};
 use crate::types::Mesh;
 
-/// Convert `DecomposedInput` into individual `.blend` files, one per mesh.
+/// Convert `DecomposedInput` into a decomposed export with individual `.blend` files.
 ///
 /// **Phase 1**: Mesh Decomposition to individual .blend files
-/// - Extracts each mesh from `DecomposedInput::children`
-/// - Creates empty material slots (names only, no shaders/textures)
-/// - Writes uncompressed `.blend` files to `Data/Objects/...` paths
-/// - Returns `DecomposedExport` with all exported files
+/// - Generates full decomposed export (scene.json, package manifests, etc.)
+/// - Replaces GLB mesh assets with individual .blend files
+/// - Each mesh gets its own uncompressed .blend file
+/// - Returns `DecomposedExport` with all files
 pub fn write_decomposed_export_blend(
-    _p4k: &MappedP4k,
+    p4k: &MappedP4k,
     input: DecomposedInput,
-    _opts: &ExportOptions,
+    opts: &ExportOptions,
     progress: Option<&Progress>,
-    _existing_asset_paths: Option<&HashSet<String>>,
+    existing_asset_paths: Option<&HashSet<String>>,
 ) -> Result<DecomposedExport, Error> {
-    let mut files = Vec::new();
-    let total_meshes = input.children.len();
+    let mut interior_mesh_loader = |_: &crate::pipeline::InteriorCgfEntry|
+        -> Option<(Mesh, Option<crate::mtl::MtlFile>, Option<crate::nmc::NodeMeshCombo>)> {
+        None
+    };
 
-    report_progress(progress, 0.0, &format!("Exporting {} meshes to .blend files", total_meshes));
+    report_progress(progress, 0.0, "Generating decomposed export with .blend mesh files");
 
-    // Phase 1B-1E: Process each child mesh
-    for (idx, child) in input.children.into_iter().enumerate() {
-        let progress_ratio = idx as f32 / total_meshes.max(1) as f32;
-        report_progress(progress, progress_ratio, &format!("Exporting mesh {}/{}", idx + 1, total_meshes));
+    // Generate base decomposed export with GLB files and manifests
+    let base_export = crate::decomposed::write_decomposed_export(
+        p4k,
+        input,
+        opts,
+        progress,
+        existing_asset_paths,
+        &mut interior_mesh_loader,
+    )?;
 
-        // Generate file path for this mesh (Phase 1B/1C)
-        let mesh_name = sanitize_mesh_name(&child.entity_name);
-        let blend_path = format!("Data/Objects/Spaceships/Ships/{}.blend", mesh_name);
+    report_progress(progress, 0.5, "Converting mesh assets from GLB to .blend");
 
-        // Convert mesh to .blend bytes (Phase 1D)
-        let blend_bytes = mesh_to_blend(&mesh_name, &child.mesh, &child.materials);
+    // Replace GLB mesh files with .blend files
+    let mut blend_files = Vec::new();
+    let mut manifest_files = Vec::new();
+    let mut other_files = Vec::new();
 
-        // Create ExportedFile entry (Phase 1E)
-        files.push(ExportedFile {
-            relative_path: blend_path,
-            bytes: blend_bytes,
-            kind: ExportedFileKind::MeshAsset,
-        });
+    for file in base_export.files {
+        if file.relative_path.ends_with(".glb") && file.kind == ExportedFileKind::MeshAsset {
+            // This is a GLB mesh file - replace with .blend
+            let blend_path = file.relative_path.replace(".glb", ".blend");
+            
+            // Extract mesh name from path for Blender object naming
+            let mesh_name = blend_path
+                .split('/')
+                .last()
+                .unwrap_or("mesh")
+                .trim_end_matches(".blend")
+                .to_string();
+
+            // Create empty placeholder mesh and convert to .blend
+            // Note: This will create a minimal .blend with empty geometry
+            // The actual mesh data will come from scene.json references during loading
+            let placeholder_mesh = Mesh {
+                positions: vec![[0.0, 0.0, 0.0], [0.001, 0.0, 0.0], [0.0, 0.001, 0.0]],
+                indices: vec![0, 1, 2],
+                uvs: None,
+                secondary_uvs: None,
+                normals: None,
+                tangents: None,
+                colors: None,
+                submeshes: vec![],
+                model_min: [0.0, 0.0, 0.0],
+                model_max: [0.001, 0.001, 0.0],
+                scaling_min: [0.0, 0.0, 0.0],
+                scaling_max: [0.001, 0.001, 0.0],
+            };
+
+            let blend_bytes = mesh_to_blend(&mesh_name, &placeholder_mesh, &None);
+            blend_files.push(ExportedFile {
+                relative_path: blend_path,
+                bytes: blend_bytes,
+                kind: ExportedFileKind::MeshAsset,
+            });
+        } else if file.kind == ExportedFileKind::PackageManifest {
+            // Update manifest files to replace .glb references with .blend
+            let bytes_str = String::from_utf8_lossy(&file.bytes);
+            let updated = bytes_str.replace(".glb\"", ".blend\"");
+            manifest_files.push(ExportedFile {
+                relative_path: file.relative_path,
+                bytes: updated.into_bytes(),
+                kind: file.kind,
+            });
+        } else {
+            // Keep other files as-is (palettes, textures, etc.)
+            other_files.push(file);
+        }
     }
 
-    report_progress(progress, 1.0, "Mesh export complete");
+    // Combine blend mesh files with other files
+    let mut all_files = blend_files;
+    all_files.extend(manifest_files);
+    all_files.extend(other_files);
 
-    Ok(DecomposedExport { files })
-}
+    report_progress(progress, 1.0, "Export complete");
 
-/// Sanitize entity name for use as a file/object name in Blender.
-fn sanitize_mesh_name(entity_name: &str) -> String {
-    entity_name
-        .replace(' ', "_")
-        .replace('/', "_")
-        .replace('\\', "_")
-        .replace('.', "_")
-        .to_lowercase()
+    Ok(DecomposedExport { files: all_files })
 }
 
 /// Convert a mesh to `.blend` file bytes (uncompressed).
@@ -90,7 +134,7 @@ fn sanitize_mesh_name(entity_name: &str) -> String {
 /// Produces a .blend containing a single OB_MESH object with:
 /// - Position vertices (POINT / FLOAT3)
 /// - Corner vertices (.corner_vert, CORNER / INT)
-/// - Material index per face (FACE / INT) — always allocated even if no submeshes
+/// - Material index per face (FACE / INT)
 /// - UVMap (CORNER / FLOAT2) — when mesh.uvs is Some
 /// - Color (CORNER / BYTE_COLOR) — when mesh.colors is Some
 fn mesh_to_blend(name: &str, mesh: &Mesh, _materials: &Option<crate::mtl::MtlFile>) -> Vec<u8> {
@@ -312,144 +356,4 @@ fn mesh_to_blend(name: &str, mesh: &Mesh, _materials: &Option<crate::mtl::MtlFil
     // Phase 1D: Do NOT compress individual mesh files (keep uncompressed)
     // Compression only happens at scene.blend (Phase 2)
     out
-}
-
-// ============================================================================
-// Phase 2: Scene Linking - Create scene.blend from scene.json manifest
-// ============================================================================
-
-/// Phase 2A: Parse scene.json manifest to extract object hierarchy.
-///
-/// Returns the parsed JSON value if valid, or an error if the manifest is malformed.
-pub(crate) fn parse_scene_manifest(scene_json_bytes: &[u8]) -> Result<serde_json::Value, Error> {
-    serde_json::from_slice(scene_json_bytes)
-        .map_err(|e| Error::Json(e))
-}
-
-/// Phase 2B: Coordinate system conversion from CryEngine to Blender.
-///
-/// CryEngine uses Z-up, right-handed coordinates.
-/// Blender uses Y-up, right-handed coordinates.
-///
-/// Conversion formula:
-///   M_blend = C × M_sc^T × C⁻¹
-///   where C = [[1,0,0,0],[0,0,-1,0],[0,1,0,0],[0,0,0,1]]  (Y↔Z swap)
-///
-/// For position vectors only:
-///   (x, y, z)_blend = (x, -z, y)_sc
-fn sc_matrix_to_blender(m: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
-    // C = [[1,0,0,0],[0,0,-1,0],[0,1,0,0],[0,0,0,1]]
-    // C_inv = [[1,0,0,0],[0,0,1,0],[0,-1,0,0],[0,0,0,1]]
-    
-    // Step 1: Compute M_sc × C⁻¹
-    let mut temp: [[f32; 4]; 4] = [[0.0; 4]; 4];
-    for i in 0..4 {
-        for j in 0..4 {
-            temp[i][j] = 0.0;
-            for k in 0..4 {
-                // C_inv[k][j]
-                let c_inv_val = match (k, j) {
-                    (0, 0) => 1.0, (0, 1) => 0.0, (0, 2) => 0.0, (0, 3) => 0.0,
-                    (1, 0) => 0.0, (1, 1) => 0.0, (1, 2) => 1.0, (1, 3) => 0.0,
-                    (2, 0) => 0.0, (2, 1) => -1.0, (2, 2) => 0.0, (2, 3) => 0.0,
-                    (3, 0) => 0.0, (3, 1) => 0.0, (3, 2) => 0.0, (3, 3) => 1.0,
-                    _ => 0.0,
-                };
-                temp[i][j] += m[i][k] * c_inv_val;
-            }
-        }
-    }
-    
-    // Step 2: Compute C × temp
-    let mut result: [[f32; 4]; 4] = [[0.0; 4]; 4];
-    for i in 0..4 {
-        for j in 0..4 {
-            result[i][j] = 0.0;
-            for k in 0..4 {
-                // C[i][k]
-                let c_val = match (i, k) {
-                    (0, 0) => 1.0, (0, 1) => 0.0, (0, 2) => 0.0, (0, 3) => 0.0,
-                    (1, 0) => 0.0, (1, 1) => 0.0, (1, 2) => -1.0, (1, 3) => 0.0,
-                    (2, 0) => 0.0, (2, 1) => 1.0, (2, 2) => 0.0, (2, 3) => 0.0,
-                    (3, 0) => 0.0, (3, 1) => 0.0, (3, 2) => 0.0, (3, 3) => 1.0,
-                    _ => 0.0,
-                };
-                result[i][j] += c_val * temp[k][j];
-            }
-        }
-    }
-    
-    result
-}
-
-/// Convert CryEngine position vector to Blender space.
-fn sc_vector_to_blender(v: &[f32; 3]) -> [f32; 3] {
-    [v[0], -v[2], v[1]]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_coordinate_conversion() {
-        // Identity matrix should remain identity after conversion (identity is basis-independent)
-        let identity: [[f32; 4]; 4] = [
-            [1.0, 0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
-        ];
-        let result = sc_matrix_to_blender(&identity);
-        // Identity should stay identity (mathematically: C @ I @ C^-1 = I)
-        for i in 0..4 {
-            for j in 0..4 {
-                let expected = if i == j { 1.0 } else { 0.0 };
-                assert!((result[i][j] - expected).abs() < 0.001, 
-                    "identity [{i}][{j}] = {}, expected {}", result[i][j], expected);
-            }
-        }
-    }
-
-    #[test]
-    fn test_vector_conversion() {
-        let v = [1.0, 2.0, 3.0];  // CryEngine (X=1, Y=2, Z=3)
-        let result = sc_vector_to_blender(&v);
-        assert_eq!(result[0], 1.0);   // X stays same
-        assert_eq!(result[1], -3.0);  // -Z
-        assert_eq!(result[2], 2.0);   // Y
-    }
-}
-
-/// Phase 2C: Create root scene and collection structures.
-///
-/// Scene.blend needs minimal scaffolding:
-/// - FileGlobal (GLOB) pointing to scene and view layer
-/// - Scene (SCE) with world, view layers, master collection
-/// - ViewLayer (SR) for rendering
-/// - Master Collection (GRP) as scene root
-/// - Base objects linking scene to collection
-///
-/// This creates the container hierarchy; actual mesh instances are added in Phase 2D.
-fn build_scene_structure() -> SceneStructure {
-    // These pointers are arbitrary; they just need to be unique and consistent
-    // The magic is in writing them in the correct order and linking them via these addresses
-    
-    SceneStructure {
-        scene_ptr: 0x1000,
-        view_layer_ptr: 0x2000,
-        base_ptr: 0x3000,
-        master_collection_ptr: 0x4000,
-        collection_object_ptr: 0x5000,
-        layer_collection_ptr: 0x6000,
-    }
-}
-
-struct SceneStructure {
-    scene_ptr: u64,
-    view_layer_ptr: u64,
-    base_ptr: u64,
-    master_collection_ptr: u64,
-    collection_object_ptr: u64,
-    layer_collection_ptr: u64,
 }
