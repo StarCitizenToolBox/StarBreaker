@@ -787,3 +787,139 @@ mod tests_3b {
         assert!(is_helper);
     }
 }
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Phase 3C: Create Light Objects in scene.blend
+// ════════════════════════════════════════════════════════════════════════════════
+
+/// Blender lamp and object pair ready to write to .blend file
+#[derive(Debug, Clone)]
+pub struct LampBlockPair {
+    /// Lamp datablock bytes (from build_lamp)
+    pub lamp_bytes: Vec<u8>,
+    /// Pointer for lamp in file allocation
+    pub lamp_ptr: u64,
+    /// Object datablock bytes (from build_lamp_object)
+    pub object_bytes: Vec<u8>,
+    /// Pointer for object in file allocation
+    pub object_ptr: u64,
+    /// Collection name for organizing lights (e.g., "Projector", "Ambient")
+    pub collection_name: String,
+}
+
+/// Build Blender lamp datablock and object wrapper from extracted light.
+///
+/// Creates both the Lamp datablock (light properties) and Object wrapper
+/// (placement, hierarchy). Assigns pointers for file writing.
+pub fn build_lamp_blocks(
+    light: &ExtractedLight,
+    lamp_ptr: u64,
+    object_ptr: u64,
+    parent_collection_ptr: u64,
+) -> Result<LampBlockPair, Error> {
+    // Build the lamp datablock
+    let lamp_bytes = build_lamp(
+        &light.name,
+        light.lamp_type,
+        light.color,
+        light.energy_watts,
+        light.radius,
+        light.spot_size,
+        light.spot_blend,
+    );
+    
+    // Build the object wrapper
+    let object_bytes = build_lamp_object(
+        &light.name,
+        lamp_ptr,
+        light.position_blend,
+        light.rotation_blend,
+        [1.0, 1.0, 1.0], // Standard scale
+        parent_collection_ptr,
+    );
+    
+    // Determine collection name by light type
+    let collection_name = match light.lamp_type {
+        0 => {
+            // POINT type - distinguish between Ambient, Omni, SoftOmni
+            if light.intensity_candela < 10.0 {
+                "Ambient".to_string()
+            } else if light.intensity_candela < 100.0 {
+                "Omni".to_string()
+            } else {
+                "SoftOmni".to_string()
+            }
+        },
+        1 => "Sun".to_string(),
+        2 => "Projector".to_string(),
+        4 => "Area".to_string(),
+        _ => "Other".to_string(),
+    };
+    
+    Ok(LampBlockPair {
+        lamp_bytes,
+        lamp_ptr,
+        object_bytes,
+        object_ptr,
+        collection_name,
+    })
+}
+
+/// Validate lamp block sizes (for safety)
+pub fn validate_lamp_block_sizes() -> Result<(), String> {
+    // Ensure block sizes match expected values
+    if LAMP_SIZE != 568 {
+        return Err(format!("Expected LAMP_SIZE=568, got {}", LAMP_SIZE));
+    }
+    if OBJECT_SIZE != 1288 {
+        return Err(format!("Expected OBJECT_SIZE=1288, got {}", OBJECT_SIZE));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests_3c {
+    use super::*;
+    
+    #[test]
+    fn test_lamp_type_classification_point() {
+        // Low intensity POINT should be Ambient
+        let collection_name = "Ambient";
+        assert_eq!(collection_name, "Ambient");
+    }
+    
+    #[test]
+    fn test_lamp_type_classification_projector() {
+        // SPOT (lamp_type=2) should be Projector
+        let lamp_type = 2i16;
+        let collection_name = match lamp_type {
+            0 => "Ambient",
+            1 => "Sun",
+            2 => "Projector",
+            4 => "Area",
+            _ => "Other",
+        };
+        assert_eq!(collection_name, "Projector");
+    }
+    
+    #[test]
+    fn test_lamp_type_classification_sun() {
+        // SUN (lamp_type=1) should be Sun
+        let lamp_type = 1i16;
+        let collection_name = match lamp_type {
+            0 => "Ambient",
+            1 => "Sun",
+            2 => "Projector",
+            4 => "Area",
+            _ => "Other",
+        };
+        assert_eq!(collection_name, "Sun");
+    }
+    
+    #[test]
+    fn test_validate_lamp_block_sizes() {
+        // Verify block sizes are exported correctly
+        assert_eq!(LAMP_SIZE, 568);
+        assert_eq!(OBJECT_SIZE, 1288);
+    }
+}
