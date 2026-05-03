@@ -1037,3 +1037,266 @@ mod tests_3d {
         assert_eq!(OBJECT_SIZE, 1288);
     }
 }
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Phase 3E: Organize Lights into Collections
+// ════════════════════════════════════════════════════════════════════════════════
+
+/// Collection hierarchy for organizing lights
+#[derive(Debug, Clone)]
+pub struct LightCollectionTree {
+    /// Root lights collection
+    pub root_ptr: u64,
+    /// Sub-collections by type: "Ambient", "Omni", "SoftOmni", "Projector", "Sun"
+    pub type_collections: std::collections::HashMap<String, u64>,
+}
+
+/// Organize extracted lights by type into collection hierarchy.
+///
+/// Creates a structure like:
+/// - Lights (root)
+///   - Ambient (collection)
+///   - Omni (collection)
+///   - SoftOmni (collection)
+///   - Projector (collection)
+///   - Sun (collection)
+///
+/// Returns mapping of light type → collection pointer for placement
+pub fn organize_lights_into_collections(
+    lights: &[ExtractedLight],
+) -> Result<LightCollectionTree, String> {
+    use std::collections::HashMap;
+    
+    // Collect unique light types
+    let mut light_types = HashMap::new();
+    for light in lights {
+        let light_type = match light.lamp_type {
+            0 => {
+                // POINT - distinguish by intensity
+                if light.intensity_candela < 10.0 {
+                    "Ambient"
+                } else if light.intensity_candela < 100.0 {
+                    "Omni"
+                } else {
+                    "SoftOmni"
+                }
+            },
+            1 => "Sun",
+            2 => "Projector",
+            4 => "Area",
+            _ => "Other",
+        };
+        light_types.entry(light_type.to_string()).or_insert_with(|| 0);
+    }
+    
+    // Build collection map with placeholder pointers
+    let mut type_collections = HashMap::new();
+    let mut next_ptr = 0x2000u64;
+    for light_type in light_types.keys() {
+        type_collections.insert(light_type.clone(), next_ptr);
+        next_ptr += 0x200;  // Space for each collection
+    }
+    
+    Ok(LightCollectionTree {
+        root_ptr: 0x1000,  // Root collection pointer
+        type_collections,
+    })
+}
+
+/// Categorize lights by type for collection organization
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum LightCategory {
+    Ambient,
+    Omni,
+    SoftOmni,
+    Projector,
+    Sun,
+    Area,
+    Other,
+}
+
+impl LightCategory {
+    /// Determine category from lamp type and intensity
+    pub fn from_light(lamp_type: i16, intensity_candela: f32) -> Self {
+        match lamp_type {
+            0 => {  // POINT
+                if intensity_candela < 10.0 {
+                    LightCategory::Ambient
+                } else if intensity_candela < 100.0 {
+                    LightCategory::Omni
+                } else {
+                    LightCategory::SoftOmni
+                }
+            },
+            1 => LightCategory::Sun,
+            2 => LightCategory::Projector,
+            4 => LightCategory::Area,
+            _ => LightCategory::Other,
+        }
+    }
+    
+    /// Get collection name
+    pub fn collection_name(&self) -> &'static str {
+        match self {
+            LightCategory::Ambient => "Ambient",
+            LightCategory::Omni => "Omni",
+            LightCategory::SoftOmni => "SoftOmni",
+            LightCategory::Projector => "Projector",
+            LightCategory::Sun => "Sun",
+            LightCategory::Area => "Area",
+            LightCategory::Other => "Other",
+        }
+    }
+}
+
+/// Validate light collection organization
+pub fn validate_light_collection_hierarchy(
+    tree: &LightCollectionTree,
+) -> Result<(), String> {
+    // Root must have valid pointer
+    if tree.root_ptr == 0 {
+        return Err("Root collection pointer cannot be 0".to_string());
+    }
+    
+    // All type collections must be unique and valid
+    let mut seen_ptrs = std::collections::HashSet::new();
+    for (type_name, ptr) in &tree.type_collections {
+        if *ptr == 0 {
+            return Err(format!("Collection '{}' has invalid pointer 0", type_name));
+        }
+        if !seen_ptrs.insert(*ptr) {
+            return Err(format!("Duplicate pointer for collection '{}'", type_name));
+        }
+        if *ptr == tree.root_ptr {
+            return Err(format!("Collection '{}' pointer conflicts with root", type_name));
+        }
+    }
+    
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests_3e {
+    use super::*;
+    
+    #[test]
+    fn test_light_category_ambient() {
+        let cat = LightCategory::from_light(0, 5.0);
+        assert_eq!(cat, LightCategory::Ambient);
+        assert_eq!(cat.collection_name(), "Ambient");
+    }
+    
+    #[test]
+    fn test_light_category_omni() {
+        let cat = LightCategory::from_light(0, 50.0);
+        assert_eq!(cat, LightCategory::Omni);
+        assert_eq!(cat.collection_name(), "Omni");
+    }
+    
+    #[test]
+    fn test_light_category_soft_omni() {
+        let cat = LightCategory::from_light(0, 150.0);
+        assert_eq!(cat, LightCategory::SoftOmni);
+        assert_eq!(cat.collection_name(), "SoftOmni");
+    }
+    
+    #[test]
+    fn test_light_category_projector() {
+        let cat = LightCategory::from_light(2, 200.0);
+        assert_eq!(cat, LightCategory::Projector);
+        assert_eq!(cat.collection_name(), "Projector");
+    }
+    
+    #[test]
+    fn test_light_category_sun() {
+        let cat = LightCategory::from_light(1, 100.0);
+        assert_eq!(cat, LightCategory::Sun);
+        assert_eq!(cat.collection_name(), "Sun");
+    }
+    
+    #[test]
+    fn test_organize_lights_empty() {
+        let lights = vec![];
+        let tree = organize_lights_into_collections(&lights).unwrap();
+        assert_eq!(tree.root_ptr, 0x1000);
+        assert_eq!(tree.type_collections.len(), 0);
+    }
+    
+    #[test]
+    fn test_organize_lights_creates_type_collections() {
+        let lights = vec![
+            ExtractedLight {
+                name: "Ambient1".to_string(),
+                position_blend: [0.0, 0.0, 0.0],
+                rotation_blend: [1.0, 0.0, 0.0, 0.0],
+                color: [1.0, 1.0, 1.0],
+                lamp_type: 0,
+                energy_watts: 1.0,
+                radius: 5.0,
+                spot_size: 0.0,
+                spot_blend: 0.0,
+                intensity_candela: 5.0,  // Ambient threshold < 10
+                temperature_k: 6500.0,
+                gobo_path: None,
+                active_state: "defaultState".to_string(),
+            },
+            ExtractedLight {
+                name: "Projector1".to_string(),
+                position_blend: [1.0, 1.0, 1.0],
+                rotation_blend: [1.0, 0.0, 0.0, 0.0],
+                color: [1.0, 0.8, 0.6],
+                lamp_type: 2,  // SPOT
+                energy_watts: 50.0,
+                radius: 10.0,
+                spot_size: 0.5,
+                spot_blend: 0.2,
+                intensity_candela: 200.0,
+                temperature_k: 6500.0,
+                gobo_path: Some("path/to/gobo.dds".to_string()),
+                active_state: "defaultState".to_string(),
+            },
+        ];
+        
+        let tree = organize_lights_into_collections(&lights).unwrap();
+        assert_eq!(tree.root_ptr, 0x1000);
+        assert!(tree.type_collections.contains_key("Ambient"));
+        assert!(tree.type_collections.contains_key("Projector"));
+    }
+    
+    #[test]
+    fn test_validate_light_collection_hierarchy_valid() {
+        let tree = LightCollectionTree {
+            root_ptr: 0x1000,
+            type_collections: vec![
+                ("Ambient".to_string(), 0x2000),
+                ("Projector".to_string(), 0x2200),
+            ].into_iter().collect(),
+        };
+        
+        assert!(validate_light_collection_hierarchy(&tree).is_ok());
+    }
+    
+    #[test]
+    fn test_validate_light_collection_hierarchy_zero_root() {
+        let tree = LightCollectionTree {
+            root_ptr: 0,
+            type_collections: std::collections::HashMap::new(),
+        };
+        
+        assert!(validate_light_collection_hierarchy(&tree).is_err());
+    }
+    
+    #[test]
+    fn test_validate_light_collection_hierarchy_duplicate_ptr() {
+        let mut collections = std::collections::HashMap::new();
+        collections.insert("Ambient".to_string(), 0x2000);
+        collections.insert("Projector".to_string(), 0x2000);  // Same pointer!
+        
+        let tree = LightCollectionTree {
+            root_ptr: 0x1000,
+            type_collections: collections,
+        };
+        
+        assert!(validate_light_collection_hierarchy(&tree).is_err());
+    }
+}
