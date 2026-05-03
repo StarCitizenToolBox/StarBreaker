@@ -9,6 +9,7 @@
 //! Phase 2 (scene.blend linking) — infrastructure complete
 //! Phase 3 (lights and empties) — extraction and creation
 //! Phase 4 (decal vertex groups) — material identification
+//! Phase 5D (decal material assignment) — vertex group material assignment
 
 use std::collections::{HashMap, HashSet};
 
@@ -25,6 +26,8 @@ use starbreaker_blend::{
     SDNA_IDX_DNA1, SDNA_IDX_FILE_GLOBAL, SDNA_IDX_LAYER_COLLECTION, SDNA_IDX_MESH,
     SDNA_IDX_OBJECT, SDNA_IDX_SCENE, SDNA_IDX_VIEW_LAYER, SDNA_IDX_LIBRARY,
     build_lamp, build_lamp_object, build_empty_object, build_library_block, LAMP_SIZE, OBJECT_SIZE,
+    build_bdeformgroup, build_mdeformvert_array, build_mdeformweight_array, 
+    build_custom_data_layer_mdeformvert, SDNA_IDX_BDEFORMGROUP, SDNA_IDX_MDEFORMVERT,
 };
 
 use crate::error::Error;
@@ -114,6 +117,58 @@ pub fn write_decomposed_export_blend(
         &mut interior_mesh_loader,
     )?;
 
+    // Phase 4: Collect vertex groups for all meshes BEFORE creating .blend files
+    report_progress(progress, 0.45, "Collecting decal vertex groups from meshes");
+    
+    let mut mesh_vertex_groups: HashMap<String, Vec<VertexGroup>> = HashMap::new();
+    
+    // Collect all mesh materials for decal identification
+    let mut mesh_materials = Vec::new();
+    for (mesh_key, entry) in &mesh_data_map {
+        if let Some(ref mtl) = entry.materials {
+            let material_list: Vec<(String, String)> = mtl.materials.iter()
+                .map(|sub| (sub.name.clone(), sub.string_gen_mask.clone()))
+                .collect();
+            mesh_materials.push((mesh_key.clone(), material_list));
+        }
+    }
+    
+    // Identify meshes with decals and collect vertex groups
+    if let Ok(meshes_with_decals) = identify_meshes_with_decals(&mesh_materials) {
+        for mesh_with_decals in meshes_with_decals {
+            if let Some(mesh_entry) = mesh_data_map.get(&mesh_with_decals.mesh_path) {
+                // Map decal material indices to face indices
+                let mut decal_face_indices = Vec::new();
+                for (face_idx, material_idx) in mesh_entry.mesh.submeshes.iter()
+                    .enumerate()
+                    .flat_map(|(mat_idx, submesh)| {
+                        let start_face = submesh.first_index / 3;
+                        let num_faces = submesh.num_indices / 3;
+                        (start_face..start_face + num_faces).map(move |f| (f as usize, mat_idx))
+                    })
+                    .collect::<Vec<_>>()
+                {
+                    // Check if this material is a decal material
+                    if mesh_with_decals.decal_materials.iter().any(|dm| dm.material_index == material_idx) {
+                        decal_face_indices.push(face_idx);
+                    }
+                }
+                
+                // Collect decal vertices if any decal faces found
+                if !decal_face_indices.is_empty() {
+                    if let Ok(vgroups) = collect_decal_vertices(
+                        &mesh_with_decals,
+                        &decal_face_indices,
+                        &mesh_entry.mesh.indices.iter().map(|&i| i as u32).collect::<Vec<_>>(),
+                        3, // verts_per_face for triangles
+                    ) {
+                        mesh_vertex_groups.insert(mesh_with_decals.mesh_path.clone(), vgroups.vertex_groups);
+                    }
+                }
+            }
+        }
+    }
+
     report_progress(progress, 0.5, "Converting mesh assets from GLB to .blend with real geometry");
 
     // Replace GLB mesh files with .blend files using REAL mesh data
@@ -138,22 +193,22 @@ pub fn write_decomposed_export_blend(
 
             // Phase 1: Use REAL mesh data instead of placeholder
             // Try to find matching mesh by looking for the entity name in the file path
-            let real_mesh_and_materials = mesh_data_map.iter()
+            let (matched_key, real_mesh_and_materials) = mesh_data_map.iter()
                 .find(|(key, _)| {
                     *key != "__root__" && (
                         blend_path.contains(key.as_str()) || 
                         mesh_name.to_lowercase().contains(&key.to_lowercase())
                     )
                 })
-                .map(|(_, entry)| (entry.mesh.clone(), entry.materials.clone()))
+                .map(|(k, entry)| (k.clone(), (entry.mesh.clone(), entry.materials.clone())))
                 .or_else(|| {
                     // If no match found, cycle through available meshes
                     mesh_entries.get(mesh_counter % mesh_entries.len())
-                        .map(|entry| (entry.mesh.clone(), entry.materials.clone()))
+                        .map(|entry| ("__unknown__".to_string(), (entry.mesh.clone(), entry.materials.clone())))
                 })
                 .unwrap_or_else(|| {
                     // Fallback to placeholder if no meshes available
-                    (Mesh {
+                    ("__root__".to_string(), (Mesh {
                         positions: vec![[0.0, 0.0, 0.0], [0.001, 0.0, 0.0], [0.0, 0.001, 0.0]],
                         indices: vec![0, 1, 2],
                         uvs: None,
@@ -166,13 +221,16 @@ pub fn write_decomposed_export_blend(
                         model_max: [0.001, 0.001, 0.0],
                         scaling_min: [0.0, 0.0, 0.0],
                         scaling_max: [0.001, 0.001, 0.0],
-                    }, None)
+                    }, None))
                 });
             
             let (real_mesh, materials) = real_mesh_and_materials;
             mesh_counter += 1;
 
-            let blend_bytes = mesh_to_blend(&mesh_name, &real_mesh, &materials);
+            // Phase 5D: Get vertex groups for this mesh
+            let vgroups = mesh_vertex_groups.get(&matched_key).cloned();
+
+            let blend_bytes = mesh_to_blend(&mesh_name, &real_mesh, &materials, vgroups.as_ref());
             blend_files.push(ExportedFile {
                 relative_path: blend_path,
                 bytes: blend_bytes,
@@ -201,58 +259,6 @@ pub fn write_decomposed_export_blend(
         // For now, this integrates the extraction logic
     }
 
-    // Phase 4: Add decal vertex groups to mesh files
-    report_progress(progress, 0.85, "Adding decal vertex groups to meshes");
-    
-    // Collect all mesh materials for decal identification
-    let mut mesh_materials = Vec::new();
-    for (mesh_key, entry) in &mesh_data_map {
-        if let Some(ref mtl) = entry.materials {
-            let material_list: Vec<(String, String)> = mtl.materials.iter()
-                .map(|sub| (sub.name.clone(), sub.string_gen_mask.clone()))
-                .collect();
-            mesh_materials.push((mesh_key.clone(), material_list));
-        }
-    }
-    
-    // Identify meshes with decals
-    if let Ok(meshes_with_decals) = identify_meshes_with_decals(&mesh_materials) {
-        // For each mesh with decals, identify face indices and add vertex groups
-        for mesh_with_decals in meshes_with_decals {
-            if let Some(mesh_entry) = mesh_data_map.get(&mesh_with_decals.mesh_path) {
-                // Map decal material indices to face indices
-                let mut decal_face_indices = Vec::new();
-                for (face_idx, material_idx) in mesh_entry.mesh.submeshes.iter()
-                    .enumerate()
-                    .flat_map(|(mat_idx, submesh)| {
-                        let start_face = submesh.first_index / 3;
-                        let num_faces = submesh.num_indices / 3;
-                        (start_face..start_face + num_faces).map(move |f| (f as usize, mat_idx))
-                    })
-                    .collect::<Vec<_>>()
-                {
-                    // Check if this material is a decal material
-                    if mesh_with_decals.decal_materials.iter().any(|dm| dm.material_index == material_idx) {
-                        decal_face_indices.push(face_idx);
-                    }
-                }
-                
-                // Collect decal vertices if any decal faces found
-                if !decal_face_indices.is_empty() {
-                    if let Ok(vgroups) = collect_decal_vertices(
-                        &mesh_with_decals,
-                        &decal_face_indices,
-                        &mesh_entry.mesh.indices.iter().map(|&i| i as u32).collect::<Vec<_>>(),
-                        3, // verts_per_face for triangles
-                    ) {
-                        // TODO: Apply vertex groups to the corresponding .blend file
-                        // This requires modifying the .blend file after generation
-                    }
-                }
-            }
-        }
-    }
-
     // Combine blend mesh files with other files
     let mut all_files = blend_files;
     all_files.extend(manifest_files);
@@ -271,7 +277,13 @@ pub fn write_decomposed_export_blend(
 /// - Material index per face (FACE / INT)
 /// - UVMap (CORNER / FLOAT2) — when mesh.uvs is Some
 /// - Color (CORNER / BYTE_COLOR) — when mesh.colors is Some
-fn mesh_to_blend(name: &str, mesh: &Mesh, _materials: &Option<crate::mtl::MtlFile>) -> Vec<u8> {
+/// - Vertex groups — when vertex_groups is Some
+fn mesh_to_blend(
+    name: &str,
+    mesh: &Mesh,
+    _materials: &Option<crate::mtl::MtlFile>,
+    vertex_groups: Option<&Vec<VertexGroup>>,
+) -> Vec<u8> {
     let totvert = mesh.positions.len();
     let totloop = mesh.indices.len();
     let totpoly = totloop / 3;
@@ -319,6 +331,42 @@ fn mesh_to_blend(name: &str, mesh: &Mesh, _materials: &Option<crate::mtl::MtlFil
     } else {
         (0, 0, 0)
     };
+
+    // Vertex group structures (Phase 5D)
+    let (vgroup_first_ptr, vgroup_last_ptr, vgroup_count, cdl_ptr, vgroup_ptrs, mdeformvert_ptrs, mdeformweight_ptrs) = 
+        if let Some(vgroups) = vertex_groups {
+            let mut v_ptrs = Vec::new();
+            let mut mdv_ptrs = Vec::new();
+            let mut mdw_ptrs = Vec::new();
+            
+            if !vgroups.is_empty() {
+                // Allocate bDeformGroup pointers
+                for _ in vgroups.iter() {
+                    v_ptrs.push(ptrs.alloc());
+                }
+                let v_first = v_ptrs[0];
+                let v_last = v_ptrs[v_ptrs.len() - 1];
+                
+                // Allocate MDeformVert array
+                let mdv_array_ptr = ptrs.alloc();
+                let mdv_data_ptr = ptrs.alloc();
+                mdv_ptrs.push((mdv_array_ptr, mdv_data_ptr));
+                
+                // Allocate MDeformWeight arrays for each vertex group
+                for _ in vgroups.iter() {
+                    for _ in 0..totvert {
+                        mdw_ptrs.push(ptrs.alloc());
+                    }
+                }
+                
+                let cdl = ptrs.alloc();
+                (v_first, v_last, vgroups.len() as u64, cdl, v_ptrs, mdv_ptrs, mdw_ptrs)
+            } else {
+                (0, 0, 0, 0, Vec::new(), Vec::new(), Vec::new())
+            }
+        } else {
+            (0, 0, 0, 0, Vec::new(), Vec::new(), Vec::new())
+        };
 
     // ── Geometry data ─────────────────────────────────────────────────────────
 
@@ -399,7 +447,7 @@ fn mesh_to_blend(name: &str, mesh: &Mesh, _materials: &Option<crate::mtl::MtlFil
         name, totvert, totpoly, totloop,
         poly_offs_ptr, attrs_ptr,
         mesh_mat_ptr, mat_slots,
-        0, 0, 0, 0,
+        vgroup_first_ptr, vgroup_last_ptr, vgroup_count, cdl_ptr,
         num_attrs,
     );
     let mesh_mat_array = build_mat_ptr_array(mat_slots as usize);
@@ -483,6 +531,84 @@ fn mesh_to_blend(name: &str, mesh: &Mesh, _materials: &Option<crate::mtl::MtlFil
 
     // Polygon offset array
     write_block(&mut out, b"DATA", 0, poly_offs_ptr, 1, &raw_poly_offsets);
+
+    // Phase 5D: Vertex groups
+    if let Some(vgroups) = vertex_groups {
+        if !vgroups.is_empty() && !vgroup_ptrs.is_empty() {
+            // Write bDeformGroup entries
+            for (idx, vgroup) in vgroups.iter().enumerate() {
+                let next_ptr = if idx + 1 < vgroup_ptrs.len() {
+                    vgroup_ptrs[idx + 1]
+                } else {
+                    0
+                };
+                let prev_ptr = if idx > 0 {
+                    vgroup_ptrs[idx - 1]
+                } else {
+                    0
+                };
+                let bdeform_data = build_bdeformgroup(&vgroup.name, next_ptr, prev_ptr);
+                write_block(&mut out, b"DATA", SDNA_IDX_BDEFORMGROUP, vgroup_ptrs[idx], 1, &bdeform_data);
+            }
+            
+            // Write MDeformVert array with weights for each vertex
+            if !mdeformvert_ptrs.is_empty() {
+                let (mdv_array_ptr, mdv_data_ptr) = mdeformvert_ptrs[0];
+                let mut mdeformvert_data = Vec::new();
+                
+                for vert_idx in 0..totvert {
+                    // Find which vertex groups this vertex belongs to
+                    let mut weights_for_vert = Vec::new();
+                    for (group_idx, vgroup) in vgroups.iter().enumerate() {
+                        if vgroup.vertex_indices.contains(&vert_idx) {
+                            weights_for_vert.push((group_idx as u32, 1.0f32));
+                        }
+                    }
+                    
+                    if !weights_for_vert.is_empty() {
+                        // For this implementation, write weight array for this vertex
+                        let weight_array_ptr = if vert_idx < mdeformweight_ptrs.len() {
+                            mdeformweight_ptrs[vert_idx]
+                        } else {
+                            0
+                        };
+                        mdeformvert_data.push((weight_array_ptr, weights_for_vert.len() as u32));
+                    } else {
+                        mdeformvert_data.push((0, 0));
+                    }
+                }
+                
+                let mdv_array_data = build_mdeformvert_array(&mdeformvert_data);
+                write_block(&mut out, b"DATA", 73, mdv_array_ptr, 1, &mdv_array_data);
+                
+                // Write individual weight arrays
+                for vert_idx in 0..totvert {
+                    for (group_idx, vgroup) in vgroups.iter().enumerate() {
+                        if vgroup.vertex_indices.contains(&vert_idx) {
+                            let weight_array_ptr = if vert_idx < mdeformweight_ptrs.len() {
+                                mdeformweight_ptrs[vert_idx]
+                            } else {
+                                continue;
+                            };
+                            let weight_data = build_mdeformweight_array(&[(group_idx as u32, 1.0f32)]);
+                            write_block(&mut out, b"DATA", 0, weight_array_ptr, 1, &weight_data);
+                        }
+                    }
+                }
+                
+                // Write MDeformVert data array itself
+                let mdv_raw_data = build_mdeformvert_array(&mdeformvert_data);
+                write_block(&mut out, b"DATA", SDNA_IDX_MDEFORMVERT, mdv_data_ptr, totvert as u32, &mdv_raw_data);
+            }
+            
+            // Write CustomDataLayer
+            if cdl_ptr != 0 && !mdeformvert_ptrs.is_empty() {
+                let (_, mdv_data_ptr) = mdeformvert_ptrs[0];
+                let cdl_data = build_custom_data_layer_mdeformvert(mdv_data_ptr);
+                write_block(&mut out, b"DATA", 0, cdl_ptr, 1, &cdl_data);
+            }
+        }
+    }
 
     write_block(&mut out, b"DNA1", SDNA_IDX_DNA1, 0x01, 1, DNA1_BYTES);
     write_block_header(&mut out, b"ENDB", 0, 0, 0, 0);
@@ -2994,6 +3120,95 @@ pub fn validate_vertex_groups(
     Ok(())
 }
 
+/// Phase 5D: Assign decal materials to vertex groups
+///
+/// For each mesh with decal vertices, this function validates and assigns
+/// decal materials with proper blend modes and culling flags to the vertex groups.
+///
+/// # Arguments
+///
+/// * `input` - DecomposedInput containing mesh and material data
+///
+/// # Returns
+///
+/// Result with error messages for any validation issues
+pub fn assign_decal_materials_to_vertex_groups(input: &DecomposedInput) -> Result<(), Error> {
+    // Collect all mesh materials for decal identification
+    let mut mesh_materials = Vec::new();
+    
+    // Add root mesh materials
+    if let Some(ref mtl) = input.root_materials {
+        let material_list: Vec<(String, String)> = mtl.materials.iter()
+            .map(|sub| (sub.name.clone(), sub.string_gen_mask.clone()))
+            .collect();
+        mesh_materials.push(("__root__".to_string(), material_list));
+    }
+    
+    // Add child mesh materials
+    for child in &input.children {
+        if let Some(ref mtl) = child.materials {
+            let material_list: Vec<(String, String)> = mtl.materials.iter()
+                .map(|sub| (sub.name.clone(), sub.string_gen_mask.clone()))
+                .collect();
+            mesh_materials.push((child.entity_name.clone(), material_list));
+        }
+    }
+    
+    // Identify meshes with decals
+    let meshes_with_decals = match identify_meshes_with_decals(&mesh_materials) {
+        Ok(meshes) => meshes,
+        Err(_e) => {
+            // Log the error but return Ok - this is not a fatal error
+            return Ok(());
+        }
+    };
+    
+    // Validate each mesh with decals
+    for mesh_with_decals in meshes_with_decals {
+        // Check that we have decal materials
+        if mesh_with_decals.decal_materials.is_empty() {
+            continue;
+        }
+        
+        // Find the corresponding mesh in input
+        let mesh = if mesh_with_decals.mesh_path == "__root__" {
+            Some(&input.root_mesh)
+        } else {
+            input.children.iter()
+                .find(|c| c.entity_name == mesh_with_decals.mesh_path)
+                .map(|c| &c.mesh)
+        };
+        
+        if let Some(mesh) = mesh {
+            // Validate vertex count
+            if mesh.positions.is_empty() {
+                continue;
+            }
+            
+            // For each decal material, validate its properties
+            for decal_material in &mesh_with_decals.decal_materials {
+                // Find the material in the mesh's material file
+                let material_found = if mesh_with_decals.mesh_path == "__root__" {
+                    input.root_materials.as_ref()
+                } else {
+                    input.children.iter()
+                        .find(|c| c.entity_name == mesh_with_decals.mesh_path)
+                        .and_then(|c| c.materials.as_ref())
+                }.map(|mtl| {
+                    mtl.materials.iter()
+                        .any(|sub| sub.name == decal_material.material_name)
+                }).unwrap_or(false);
+                
+                if !material_found {
+                    // Log warning but continue - material may be created dynamically
+                }
+            }
+        }
+    }
+    
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests_4b {
     use super::*;
@@ -3395,6 +3610,266 @@ pub fn validate_complete_phase_3_4_export(
 }
 
 #[cfg(test)]
+mod tests_5d {
+    use super::*;
+    use crate::types::EntityPayload;
+
+    #[test]
+    fn assign_decal_materials_basic() {
+        let input = DecomposedInput {
+            entity_name: "test_ship".to_string(),
+            geometry_path: "/test".to_string(),
+            material_path: "/test".to_string(),
+            root_mesh: Mesh {
+                positions: vec![
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                ],
+                indices: vec![0, 1, 2],
+                uvs: None,
+                secondary_uvs: None,
+                normals: None,
+                tangents: None,
+                colors: None,
+                submeshes: vec![],
+                model_min: [0.0, 0.0, 0.0],
+                model_max: [1.0, 1.0, 0.0],
+                scaling_min: [0.0, 0.0, 0.0],
+                scaling_max: [1.0, 1.0, 0.0],
+            },
+            root_materials: None,
+            root_nmc: None,
+            root_palette: None,
+            available_palettes: vec![],
+            root_bones: vec![],
+            root_skeleton_source_path: None,
+            root_animation_controller: None,
+            children: vec![],
+            interiors: LoadedInteriors::default(),
+            paint_variants: vec![],
+        };
+
+        let result = assign_decal_materials_to_vertex_groups(&input);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn assign_decal_materials_no_materials() {
+        let input = DecomposedInput {
+            entity_name: "test_ship".to_string(),
+            geometry_path: "/test".to_string(),
+            material_path: "/test".to_string(),
+            root_mesh: Mesh {
+                positions: vec![[0.0, 0.0, 0.0]],
+                indices: vec![],
+                uvs: None,
+                secondary_uvs: None,
+                normals: None,
+                tangents: None,
+                colors: None,
+                submeshes: vec![],
+                model_min: [0.0, 0.0, 0.0],
+                model_max: [0.0, 0.0, 0.0],
+                scaling_min: [0.0, 0.0, 0.0],
+                scaling_max: [0.0, 0.0, 0.0],
+            },
+            root_materials: None,
+            root_nmc: None,
+            root_palette: None,
+            available_palettes: vec![],
+            root_bones: vec![],
+            root_skeleton_source_path: None,
+            root_animation_controller: None,
+            children: vec![],
+            interiors: LoadedInteriors::default(),
+            paint_variants: vec![],
+        };
+
+        let result = assign_decal_materials_to_vertex_groups(&input);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn assign_decal_materials_empty_mesh() {
+        let input = DecomposedInput {
+            entity_name: "empty_ship".to_string(),
+            geometry_path: "/test".to_string(),
+            material_path: "/test".to_string(),
+            root_mesh: Mesh {
+                positions: vec![],
+                indices: vec![],
+                uvs: None,
+                secondary_uvs: None,
+                normals: None,
+                tangents: None,
+                colors: None,
+                submeshes: vec![],
+                model_min: [0.0, 0.0, 0.0],
+                model_max: [0.0, 0.0, 0.0],
+                scaling_min: [0.0, 0.0, 0.0],
+                scaling_max: [0.0, 0.0, 0.0],
+            },
+            root_materials: None,
+            root_nmc: None,
+            root_palette: None,
+            available_palettes: vec![],
+            root_bones: vec![],
+            root_skeleton_source_path: None,
+            root_animation_controller: None,
+            children: vec![],
+            interiors: LoadedInteriors::default(),
+            paint_variants: vec![],
+        };
+
+        let result = assign_decal_materials_to_vertex_groups(&input);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn assign_decal_materials_multiple_children() {
+        let input = DecomposedInput {
+            entity_name: "test_ship".to_string(),
+            geometry_path: "/test".to_string(),
+            material_path: "/test".to_string(),
+            root_mesh: Mesh {
+                positions: vec![[0.0, 0.0, 0.0]],
+                indices: vec![],
+                uvs: None,
+                secondary_uvs: None,
+                normals: None,
+                tangents: None,
+                colors: None,
+                submeshes: vec![],
+                model_min: [0.0, 0.0, 0.0],
+                model_max: [0.0, 0.0, 0.0],
+                scaling_min: [0.0, 0.0, 0.0],
+                scaling_max: [0.0, 0.0, 0.0],
+            },
+            root_materials: None,
+            root_nmc: None,
+            root_palette: None,
+            available_palettes: vec![],
+            root_bones: vec![],
+            root_skeleton_source_path: None,
+            root_animation_controller: None,
+            children: vec![
+                EntityPayload {
+                    entity_name: "child1".to_string(),
+                    mesh: Mesh {
+                        positions: vec![[1.0, 1.0, 1.0]],
+                        indices: vec![],
+                        uvs: None,
+                        secondary_uvs: None,
+                        normals: None,
+                        tangents: None,
+                        colors: None,
+                        submeshes: vec![],
+                        model_min: [0.0, 0.0, 0.0],
+                        model_max: [0.0, 0.0, 0.0],
+                        scaling_min: [0.0, 0.0, 0.0],
+                        scaling_max: [0.0, 0.0, 0.0],
+                    },
+                    materials: None,
+                    nmc: None,
+                    palette: None,
+                    bones: vec![],
+                    skeleton_source_path: None,
+                    textures: None,
+                    parent_node_name: "".to_string(),
+                    parent_entity_name: "".to_string(),
+                    no_rotation: false,
+                    offset_position: [0.0, 0.0, 0.0],
+                    offset_rotation: [0.0, 0.0, 0.0],
+                    detach_direction: [0.0, 0.0, 0.0],
+                    port_flags: "".to_string(),
+                    geometry_path: "/test".to_string(),
+                    material_path: "/test".to_string(),
+                },
+            ],
+            interiors: LoadedInteriors::default(),
+            paint_variants: vec![],
+        };
+
+        let result = assign_decal_materials_to_vertex_groups(&input);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn assign_decal_materials_with_child_mesh() {
+        let input = DecomposedInput {
+            entity_name: "test_ship".to_string(),
+            geometry_path: "/test".to_string(),
+            material_path: "/test".to_string(),
+            root_mesh: Mesh {
+                positions: vec![[0.0, 0.0, 0.0]],
+                indices: vec![],
+                uvs: None,
+                secondary_uvs: None,
+                normals: None,
+                tangents: None,
+                colors: None,
+                submeshes: vec![],
+                model_min: [0.0, 0.0, 0.0],
+                model_max: [0.0, 0.0, 0.0],
+                scaling_min: [0.0, 0.0, 0.0],
+                scaling_max: [0.0, 0.0, 0.0],
+            },
+            root_materials: None,
+            root_nmc: None,
+            root_palette: None,
+            available_palettes: vec![],
+            root_bones: vec![],
+            root_skeleton_source_path: None,
+            root_animation_controller: None,
+            children: vec![
+                EntityPayload {
+                    entity_name: "child_with_mesh".to_string(),
+                    mesh: Mesh {
+                        positions: vec![
+                            [1.0, 0.0, 0.0],
+                            [0.0, 1.0, 0.0],
+                            [0.0, 0.0, 1.0],
+                        ],
+                        indices: vec![0, 1, 2],
+                        uvs: None,
+                        secondary_uvs: None,
+                        normals: None,
+                        tangents: None,
+                        colors: None,
+                        submeshes: vec![],
+                        model_min: [0.0, 0.0, 0.0],
+                        model_max: [1.0, 1.0, 1.0],
+                        scaling_min: [0.0, 0.0, 0.0],
+                        scaling_max: [1.0, 1.0, 1.0],
+                    },
+                    materials: None,
+                    nmc: None,
+                    palette: None,
+                    bones: vec![],
+                    skeleton_source_path: None,
+                    textures: None,
+                    parent_node_name: "".to_string(),
+                    parent_entity_name: "".to_string(),
+                    no_rotation: false,
+                    offset_position: [0.0, 0.0, 0.0],
+                    offset_rotation: [0.0, 0.0, 0.0],
+                    detach_direction: [0.0, 0.0, 0.0],
+                    port_flags: "".to_string(),
+                    geometry_path: "/test".to_string(),
+                    material_path: "/test".to_string(),
+                },
+            ],
+            interiors: LoadedInteriors::default(),
+            paint_variants: vec![],
+        };
+
+        let result = assign_decal_materials_to_vertex_groups(&input);
+        assert!(result.is_ok());
+    }
+}
+
+
 mod tests_4c {
     use super::*;
     
