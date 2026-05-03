@@ -43,10 +43,9 @@ fn ensure_supported_export_kind(opts: &ExportOptions) -> Result<(), Error> {
 }
 
 fn ensure_supported_export_format(opts: &ExportOptions) -> Result<(), Error> {
-    if opts.format == ExportFormat::Glb {
-        Ok(())
-    } else {
-        Err(Error::UnsupportedExportFormat(format!("{:?}", opts.format)))
+    match opts.format {
+        ExportFormat::Glb | ExportFormat::Blend => Ok(()),
+        _ => Err(Error::UnsupportedExportFormat(format!("{:?}", opts.format)))
     }
 }
 

@@ -5370,6 +5370,7 @@ dependencies = [
  "log",
  "rayon",
  "serde_json",
+ "starbreaker-blend",
  "starbreaker-chunks",
  "starbreaker-common",
  "starbreaker-cryxml",

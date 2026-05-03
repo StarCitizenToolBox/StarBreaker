@@ -337,29 +337,45 @@ pub fn assemble_glb_with_loadout_with_progress(
         }
         let paint_variants = enumerate_paint_variants_for_entity(db, p4k, record, &paint_display_names);
         let decomposed_progress = progress.map(|progress| progress.sub(ASSEMBLY_STAGE_START, ASSEMBLY_STAGE_END));
-        let decomposed = crate::decomposed::write_decomposed_export(
-            p4k,
-            crate::decomposed::DecomposedInput {
-                entity_name: resolved.entity_name.clone(),
-                geometry_path: geometry_path.clone(),
-                material_path: material_path.clone(),
-                root_mesh,
-                root_materials: root_mtl,
-                root_nmc: resolved.nmc,
-                root_palette: root_palette.clone(),
-                available_palettes,
-                root_bones,
-                root_skeleton_source_path,
-                root_animation_controller,
-                children: child_payloads,
-                interiors: loaded_interiors,
-                paint_variants,
+        
+        let decomposed_input = crate::decomposed::DecomposedInput {
+            entity_name: resolved.entity_name.clone(),
+            geometry_path: geometry_path.clone(),
+            material_path: material_path.clone(),
+            root_mesh,
+            root_materials: root_mtl,
+            root_nmc: resolved.nmc,
+            root_palette: root_palette.clone(),
+            available_palettes,
+            root_bones,
+            root_skeleton_source_path,
+            root_animation_controller,
+            children: child_payloads,
+            interiors: loaded_interiors,
+            paint_variants,
+        };
+        
+        let decomposed = match opts.format {
+            crate::pipeline::ExportFormat::Blend => {
+                crate::pipeline::write_decomposed_export_blend(
+                    p4k,
+                    decomposed_input,
+                    opts,
+                    decomposed_progress.as_ref(),
+                    existing_asset_paths,
+                )?
             },
-            opts,
-            decomposed_progress.as_ref(),
-            existing_asset_paths,
-            &mut interior_mesh_loader,
-        )?;
+            _ => {
+                crate::decomposed::write_decomposed_export(
+                    p4k,
+                    decomposed_input,
+                    opts,
+                    decomposed_progress.as_ref(),
+                    existing_asset_paths,
+                    &mut interior_mesh_loader,
+                )?
+            }
+        };
 
         report_progress(progress, ASSEMBLY_STAGE_END, "Writing structured package");
 

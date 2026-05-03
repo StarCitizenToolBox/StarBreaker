@@ -8,8 +8,10 @@
 //!
 //! Phase 2 (scene.blend linking) and Phase 3+ will be implemented in subsequent phases.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
+use serde_json::json;
 use starbreaker_common::progress::{report as report_progress, Progress};
 use starbreaker_p4k::MappedP4k;
 use starbreaker_blend::{
@@ -310,4 +312,111 @@ fn mesh_to_blend(name: &str, mesh: &Mesh, _materials: &Option<crate::mtl::MtlFil
     // Phase 1D: Do NOT compress individual mesh files (keep uncompressed)
     // Compression only happens at scene.blend (Phase 2)
     out
+}
+
+// ============================================================================
+// Phase 2: Scene Linking - Create scene.blend from scene.json manifest
+// ============================================================================
+
+/// Phase 2A: Parse scene.json manifest to extract object hierarchy.
+///
+/// Returns the parsed JSON value if valid, or an error if the manifest is malformed.
+pub(crate) fn parse_scene_manifest(scene_json_bytes: &[u8]) -> Result<serde_json::Value, Error> {
+    serde_json::from_slice(scene_json_bytes)
+        .map_err(|e| Error::Json(e))
+}
+
+/// Phase 2B: Coordinate system conversion from CryEngine to Blender.
+///
+/// CryEngine uses Z-up, right-handed coordinates.
+/// Blender uses Y-up, right-handed coordinates.
+///
+/// Conversion formula:
+///   M_blend = C × M_sc^T × C⁻¹
+///   where C = [[1,0,0,0],[0,0,-1,0],[0,1,0,0],[0,0,0,1]]  (Y↔Z swap)
+///
+/// For position vectors only:
+///   (x, y, z)_blend = (x, -z, y)_sc
+fn sc_matrix_to_blender(m: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    // C = [[1,0,0,0],[0,0,-1,0],[0,1,0,0],[0,0,0,1]]
+    // C_inv = [[1,0,0,0],[0,0,1,0],[0,-1,0,0],[0,0,0,1]]
+    
+    // Step 1: Compute M_sc × C⁻¹
+    let mut temp: [[f32; 4]; 4] = [[0.0; 4]; 4];
+    for i in 0..4 {
+        for j in 0..4 {
+            temp[i][j] = 0.0;
+            for k in 0..4 {
+                // C_inv[k][j]
+                let c_inv_val = match (k, j) {
+                    (0, 0) => 1.0, (0, 1) => 0.0, (0, 2) => 0.0, (0, 3) => 0.0,
+                    (1, 0) => 0.0, (1, 1) => 0.0, (1, 2) => 1.0, (1, 3) => 0.0,
+                    (2, 0) => 0.0, (2, 1) => -1.0, (2, 2) => 0.0, (2, 3) => 0.0,
+                    (3, 0) => 0.0, (3, 1) => 0.0, (3, 2) => 0.0, (3, 3) => 1.0,
+                    _ => 0.0,
+                };
+                temp[i][j] += m[i][k] * c_inv_val;
+            }
+        }
+    }
+    
+    // Step 2: Compute C × temp
+    let mut result: [[f32; 4]; 4] = [[0.0; 4]; 4];
+    for i in 0..4 {
+        for j in 0..4 {
+            result[i][j] = 0.0;
+            for k in 0..4 {
+                // C[i][k]
+                let c_val = match (i, k) {
+                    (0, 0) => 1.0, (0, 1) => 0.0, (0, 2) => 0.0, (0, 3) => 0.0,
+                    (1, 0) => 0.0, (1, 1) => 0.0, (1, 2) => -1.0, (1, 3) => 0.0,
+                    (2, 0) => 0.0, (2, 1) => 1.0, (2, 2) => 0.0, (2, 3) => 0.0,
+                    (3, 0) => 0.0, (3, 1) => 0.0, (3, 2) => 0.0, (3, 3) => 1.0,
+                    _ => 0.0,
+                };
+                result[i][j] += c_val * temp[k][j];
+            }
+        }
+    }
+    
+    result
+}
+
+/// Convert CryEngine position vector to Blender space.
+fn sc_vector_to_blender(v: &[f32; 3]) -> [f32; 3] {
+    [v[0], -v[2], v[1]]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_coordinate_conversion() {
+        // Identity matrix should remain identity after conversion (identity is basis-independent)
+        let identity: [[f32; 4]; 4] = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let result = sc_matrix_to_blender(&identity);
+        // Identity should stay identity (mathematically: C @ I @ C^-1 = I)
+        for i in 0..4 {
+            for j in 0..4 {
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!((result[i][j] - expected).abs() < 0.001, 
+                    "identity [{i}][{j}] = {}, expected {}", result[i][j], expected);
+            }
+        }
+    }
+
+    #[test]
+    fn test_vector_conversion() {
+        let v = [1.0, 2.0, 3.0];  // CryEngine (X=1, Y=2, Z=3)
+        let result = sc_vector_to_blender(&v);
+        assert_eq!(result[0], 1.0);   // X stays same
+        assert_eq!(result[1], -3.0);  // -Z
+        assert_eq!(result[2], 2.0);   // Y
+    }
 }
