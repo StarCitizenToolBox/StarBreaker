@@ -1300,3 +1300,232 @@ mod tests_3e {
         assert!(validate_light_collection_hierarchy(&tree).is_err());
     }
 }
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Phase 4A: Identify Decal/POM Materials
+// ════════════════════════════════════════════════════════════════════════════════
+
+/// Material with decal or POM properties
+#[derive(Debug, Clone)]
+pub struct DecalMaterial {
+    /// Material name from mesh submesh
+    pub material_name: String,
+    /// Whether this is a decal material
+    pub is_decal: bool,
+    /// Whether this is a POM (parallax occlusion mapping) material
+    pub is_pom: bool,
+    /// Material index in the mesh
+    pub material_index: usize,
+}
+
+/// Mesh with decal/POM materials requiring vertex group
+#[derive(Debug, Clone)]
+pub struct MeshWithDecals {
+    /// Mesh name/path
+    pub mesh_path: String,
+    /// Materials in this mesh that are decals
+    pub decal_materials: Vec<DecalMaterial>,
+    /// Indices of faces using decal materials
+    pub decal_face_indices: Vec<usize>,
+}
+
+/// Identify materials with decal or POM properties by name pattern.
+///
+/// Scans material names for keywords:
+/// - "Decal" (case-insensitive)
+/// - "POM" (case-insensitive, parallax occlusion mapping)
+pub fn identify_decal_materials(material_name: &str) -> (bool, bool) {
+    let lower = material_name.to_lowercase();
+    let is_decal = lower.contains("decal");
+    let is_pom = lower.contains("pom");
+    (is_decal, is_pom)
+}
+
+/// Identify all meshes with decal/POM materials from a list of mesh materials.
+///
+/// Returns list of meshes that have decal materials and need vertex groups.
+pub fn identify_meshes_with_decals(
+    mesh_materials: &[(String, Vec<String>)],  // (mesh_path, material_names)
+) -> Result<Vec<MeshWithDecals>, String> {
+    let mut result = Vec::new();
+    
+    for (mesh_path, materials) in mesh_materials {
+        let mut decal_materials = Vec::new();
+        
+        for (mat_idx, material_name) in materials.iter().enumerate() {
+            let (is_decal, is_pom) = identify_decal_materials(material_name);
+            if is_decal || is_pom {
+                decal_materials.push(DecalMaterial {
+                    material_name: material_name.clone(),
+                    is_decal,
+                    is_pom,
+                    material_index: mat_idx,
+                });
+            }
+        }
+        
+        if !decal_materials.is_empty() {
+            result.push(MeshWithDecals {
+                mesh_path: mesh_path.clone(),
+                decal_materials,
+                decal_face_indices: Vec::new(),  // Will be populated by 4B
+            });
+        }
+    }
+    
+    Ok(result)
+}
+
+/// Validate decal material identification
+pub fn validate_decal_material_identification(
+    meshes: &[MeshWithDecals],
+) -> Result<(), String> {
+    for mesh in meshes {
+        if mesh.decal_materials.is_empty() {
+            return Err(format!(
+                "Mesh '{}' has no decal materials (shouldn't be in list)",
+                mesh.mesh_path
+            ));
+        }
+        
+        for material in &mesh.decal_materials {
+            if !material.is_decal && !material.is_pom {
+                return Err(format!(
+                    "Material '{}' in mesh '{}' marked as decal but has no decal properties",
+                    material.material_name, mesh.mesh_path
+                ));
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests_4a {
+    use super::*;
+    
+    #[test]
+    fn test_identify_decal_material_decal() {
+        let (is_decal, is_pom) = identify_decal_materials("Decal_Glass");
+        assert!(is_decal);
+        assert!(!is_pom);
+    }
+    
+    #[test]
+    fn test_identify_decal_material_pom() {
+        let (is_decal, is_pom) = identify_decal_materials("POM_Concrete");
+        assert!(!is_decal);
+        assert!(is_pom);
+    }
+    
+    #[test]
+    fn test_identify_decal_material_both() {
+        let (is_decal, is_pom) = identify_decal_materials("Decal_POM_Metal");
+        assert!(is_decal);
+        assert!(is_pom);
+    }
+    
+    #[test]
+    fn test_identify_decal_material_case_insensitive() {
+        let (is_decal, is_pom) = identify_decal_materials("DECAL_pom_glass");
+        assert!(is_decal);
+        assert!(is_pom);
+    }
+    
+    #[test]
+    fn test_identify_decal_material_none() {
+        let (is_decal, is_pom) = identify_decal_materials("Diffuse_Material");
+        assert!(!is_decal);
+        assert!(!is_pom);
+    }
+    
+    #[test]
+    fn test_identify_meshes_with_decals_single() {
+        let mesh_materials = vec![
+            (
+                "Mesh_001".to_string(),
+                vec![
+                    "Base_Material".to_string(),
+                    "Decal_Glass".to_string(),
+                    "Metal".to_string(),
+                ],
+            ),
+        ];
+        
+        let result = identify_meshes_with_decals(&mesh_materials).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].mesh_path, "Mesh_001");
+        assert_eq!(result[0].decal_materials.len(), 1);
+        assert_eq!(result[0].decal_materials[0].material_index, 1);
+    }
+    
+    #[test]
+    fn test_identify_meshes_with_decals_multiple() {
+        let mesh_materials = vec![
+            (
+                "Mesh_A".to_string(),
+                vec!["Decal_001".to_string(), "Normal_Mat".to_string()],
+            ),
+            (
+                "Mesh_B".to_string(),
+                vec!["POM_Rock".to_string(), "Decal_002".to_string()],
+            ),
+            (
+                "Mesh_C".to_string(),
+                vec!["Base".to_string(), "Diffuse".to_string()],
+            ),
+        ];
+        
+        let result = identify_meshes_with_decals(&mesh_materials).unwrap();
+        assert_eq!(result.len(), 2);  // Only Mesh_A and Mesh_B have decals
+        assert_eq!(result[0].decal_materials.len(), 1);
+        assert_eq!(result[1].decal_materials.len(), 2);
+    }
+    
+    #[test]
+    fn test_identify_meshes_with_decals_none() {
+        let mesh_materials = vec![
+            (
+                "Mesh_001".to_string(),
+                vec!["Material_A".to_string(), "Material_B".to_string()],
+            ),
+        ];
+        
+        let result = identify_meshes_with_decals(&mesh_materials).unwrap();
+        assert_eq!(result.len(), 0);
+    }
+    
+    #[test]
+    fn test_validate_decal_material_identification_valid() {
+        let meshes = vec![
+            MeshWithDecals {
+                mesh_path: "Mesh_001".to_string(),
+                decal_materials: vec![
+                    DecalMaterial {
+                        material_name: "Decal_Glass".to_string(),
+                        is_decal: true,
+                        is_pom: false,
+                        material_index: 0,
+                    },
+                ],
+                decal_face_indices: vec![],
+            },
+        ];
+        
+        assert!(validate_decal_material_identification(&meshes).is_ok());
+    }
+    
+    #[test]
+    fn test_validate_decal_material_identification_no_materials() {
+        let meshes = vec![
+            MeshWithDecals {
+                mesh_path: "Mesh_001".to_string(),
+                decal_materials: vec![],
+                decal_face_indices: vec![],
+            },
+        ];
+        
+        assert!(validate_decal_material_identification(&meshes).is_err());
+    }
+}
