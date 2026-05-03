@@ -1743,3 +1743,436 @@ mod tests_4b {
         assert!(validate_vertex_groups(&vgroups, 10).is_err());
     }
 }
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Phase 4C: Validate in Blender
+// ════════════════════════════════════════════════════════════════════════════════
+
+/// Validation result for a Blender export
+#[derive(Debug, Clone)]
+pub struct BlendValidationResult {
+    /// Total lights found
+    pub light_count: usize,
+    /// Lights by type
+    pub lights_by_type: std::collections::HashMap<String, usize>,
+    /// Total empties found
+    pub empty_count: usize,
+    /// Total collections
+    pub collection_count: usize,
+    /// Meshes with decal vertex groups
+    pub meshes_with_decals: usize,
+    /// Validation errors
+    pub errors: Vec<String>,
+    /// Validation warnings
+    pub warnings: Vec<String>,
+    /// Overall validation passed
+    pub is_valid: bool,
+}
+
+/// Validate light export results
+///
+/// Checks that lights have been properly extracted and converted.
+/// Expected: ~62 lights in Aurora Mk2
+///  - Ambient: ~10
+///  - Omni: ~5
+///  - SoftOmni: ~2
+///  - Projector: ~45
+pub fn validate_lights_extraction(
+    lights: &[ExtractedLight],
+) -> Result<BlendValidationResult, String> {
+    let mut result = BlendValidationResult {
+        light_count: lights.len(),
+        lights_by_type: std::collections::HashMap::new(),
+        empty_count: 0,
+        collection_count: 0,
+        meshes_with_decals: 0,
+        errors: Vec::new(),
+        warnings: Vec::new(),
+        is_valid: true,
+    };
+    
+    // Categorize lights
+    for light in lights {
+        let category = match light.lamp_type {
+            0 => {
+                if light.intensity_candela < 10.0 {
+                    "Ambient"
+                } else if light.intensity_candela < 100.0 {
+                    "Omni"
+                } else {
+                    "SoftOmni"
+                }
+            },
+            1 => "Sun",
+            2 => "Projector",
+            4 => "Area",
+            _ => "Other",
+        };
+        
+        *result.lights_by_type.entry(category.to_string()).or_insert(0) += 1;
+    }
+    
+    // Validate results
+    if lights.is_empty() {
+        result.errors.push("No lights extracted".to_string());
+        result.is_valid = false;
+    }
+    
+    // Check for expected Aurora Mk2 light counts (approximate)
+    if lights.len() < 50 {
+        result.warnings.push(format!(
+            "Light count {} is lower than expected ~62 for Aurora Mk2",
+            lights.len()
+        ));
+    }
+    
+    // Validate light properties
+    for light in lights {
+        if light.position_blend[0].is_nan() || light.position_blend[1].is_nan() || light.position_blend[2].is_nan() {
+            result.errors.push(format!("Light '{}' has NaN position", light.name));
+            result.is_valid = false;
+        }
+        
+        if light.rotation_blend[0].is_nan() {
+            result.errors.push(format!("Light '{}' has NaN rotation", light.name));
+            result.is_valid = false;
+        }
+        
+        if light.energy_watts <= 0.0 {
+            result.warnings.push(format!(
+                "Light '{}' has non-positive energy: {}",
+                light.name, light.energy_watts
+            ));
+        }
+    }
+    
+    Ok(result)
+}
+
+/// Validate empties extraction
+pub fn validate_empties_extraction(
+    empties: &[ExtractedEmpty],
+) -> Result<BlendValidationResult, String> {
+    let mut result = BlendValidationResult {
+        light_count: 0,
+        lights_by_type: std::collections::HashMap::new(),
+        empty_count: empties.len(),
+        collection_count: 0,
+        meshes_with_decals: 0,
+        errors: Vec::new(),
+        warnings: Vec::new(),
+        is_valid: true,
+    };
+    
+    if empties.is_empty() {
+        result.warnings.push("No empties extracted".to_string());
+    }
+    
+    // Validate empty properties
+    for empty in empties {
+        if empty.position_blend[0].is_nan() || empty.position_blend[1].is_nan() || empty.position_blend[2].is_nan() {
+            result.errors.push(format!("Empty '{}' has NaN position", empty.name));
+            result.is_valid = false;
+        }
+        
+        if empty.rotation_blend[0].is_nan() {
+            result.errors.push(format!("Empty '{}' has NaN rotation", empty.name));
+            result.is_valid = false;
+        }
+    }
+    
+    Ok(result)
+}
+
+/// Validate decal mesh identification
+pub fn validate_decals_extraction(
+    meshes: &[MeshWithDecals],
+) -> Result<BlendValidationResult, String> {
+    let mut result = BlendValidationResult {
+        light_count: 0,
+        lights_by_type: std::collections::HashMap::new(),
+        empty_count: 0,
+        collection_count: 0,
+        meshes_with_decals: meshes.len(),
+        errors: Vec::new(),
+        warnings: Vec::new(),
+        is_valid: true,
+    };
+    
+    // Validate decal materials
+    for mesh in meshes {
+        if mesh.decal_materials.is_empty() {
+            result.errors.push(format!(
+                "Mesh '{}' marked as having decals but has none",
+                mesh.mesh_path
+            ));
+            result.is_valid = false;
+        }
+        
+        for material in &mesh.decal_materials {
+            if !material.is_decal && !material.is_pom {
+                result.errors.push(format!(
+                    "Material '{}' in mesh '{}' has no decal/POM properties",
+                    material.material_name, mesh.mesh_path
+                ));
+                result.is_valid = false;
+            }
+        }
+    }
+    
+    Ok(result)
+}
+
+/// Comprehensive validation of entire Phase 3-4 pipeline
+pub fn validate_complete_phase_3_4_export(
+    lights: &[ExtractedLight],
+    empties: &[ExtractedEmpty],
+    decals: &[MeshWithDecals],
+) -> BlendValidationResult {
+    let mut result = BlendValidationResult {
+        light_count: lights.len(),
+        lights_by_type: std::collections::HashMap::new(),
+        empty_count: empties.len(),
+        collection_count: 5,  // Ambient, Omni, SoftOmni, Projector, Sun (typical)
+        meshes_with_decals: decals.len(),
+        errors: Vec::new(),
+        warnings: Vec::new(),
+        is_valid: true,
+    };
+    
+    // Categorize lights
+    for light in lights {
+        let category = match light.lamp_type {
+            0 => {
+                if light.intensity_candela < 10.0 {
+                    "Ambient"
+                } else if light.intensity_candela < 100.0 {
+                    "Omni"
+                } else {
+                    "SoftOmni"
+                }
+            },
+            1 => "Sun",
+            2 => "Projector",
+            4 => "Area",
+            _ => "Other",
+        };
+        
+        *result.lights_by_type.entry(category.to_string()).or_insert(0) += 1;
+    }
+    
+    // Basic validation checks
+    if lights.is_empty() && empties.is_empty() && decals.is_empty() {
+        result.errors.push("No lights, empties, or decals extracted".to_string());
+        result.is_valid = false;
+    }
+    
+    if lights.is_empty() {
+        result.warnings.push("No lights extracted".to_string());
+    }
+    
+    if empties.is_empty() {
+        result.warnings.push("No empties extracted".to_string());
+    }
+    
+    if decals.is_empty() {
+        result.warnings.push("No decal materials identified".to_string());
+    }
+    
+    result
+}
+
+#[cfg(test)]
+mod tests_4c {
+    use super::*;
+    
+    #[test]
+    fn test_validate_lights_extraction_empty() {
+        let lights = vec![];
+        let result = validate_lights_extraction(&lights).unwrap();
+        
+        assert_eq!(result.light_count, 0);
+        assert!(!result.is_valid);
+        assert!(result.errors.len() > 0);
+    }
+    
+    #[test]
+    fn test_validate_lights_extraction_single_ambient() {
+        let lights = vec![
+            ExtractedLight {
+                name: "Ambient_001".to_string(),
+                position_blend: [0.0, 0.0, 0.0],
+                rotation_blend: [1.0, 0.0, 0.0, 0.0],
+                color: [1.0, 1.0, 1.0],
+                lamp_type: 0,
+                energy_watts: 1.0,
+                radius: 5.0,
+                spot_size: 0.0,
+                spot_blend: 0.0,
+                intensity_candela: 5.0,
+                temperature_k: 6500.0,
+                gobo_path: None,
+                active_state: "defaultState".to_string(),
+            },
+        ];
+        
+        let result = validate_lights_extraction(&lights).unwrap();
+        assert_eq!(result.light_count, 1);
+        assert!(result.lights_by_type.contains_key("Ambient"));
+        assert_eq!(result.lights_by_type["Ambient"], 1);
+    }
+    
+    #[test]
+    fn test_validate_lights_extraction_categorization() {
+        let lights = vec![
+            ExtractedLight {
+                name: "Ambient".to_string(),
+                position_blend: [0.0, 0.0, 0.0],
+                rotation_blend: [1.0, 0.0, 0.0, 0.0],
+                color: [1.0, 1.0, 1.0],
+                lamp_type: 0,
+                energy_watts: 1.0,
+                radius: 5.0,
+                spot_size: 0.0,
+                spot_blend: 0.0,
+                intensity_candela: 5.0,
+                temperature_k: 6500.0,
+                gobo_path: None,
+                active_state: "defaultState".to_string(),
+            },
+            ExtractedLight {
+                name: "Projector".to_string(),
+                position_blend: [1.0, 1.0, 1.0],
+                rotation_blend: [1.0, 0.0, 0.0, 0.0],
+                color: [1.0, 0.8, 0.6],
+                lamp_type: 2,
+                energy_watts: 50.0,
+                radius: 10.0,
+                spot_size: 0.5,
+                spot_blend: 0.2,
+                intensity_candela: 200.0,
+                temperature_k: 6500.0,
+                gobo_path: None,
+                active_state: "defaultState".to_string(),
+            },
+        ];
+        
+        let result = validate_lights_extraction(&lights).unwrap();
+        assert_eq!(result.light_count, 2);
+        assert_eq!(result.lights_by_type.get("Ambient").unwrap_or(&0), &1);
+        assert_eq!(result.lights_by_type.get("Projector").unwrap_or(&0), &1);
+    }
+    
+    #[test]
+    fn test_validate_empties_extraction_empty() {
+        let empties = vec![];
+        let result = validate_empties_extraction(&empties).unwrap();
+        
+        assert_eq!(result.empty_count, 0);
+        assert!(result.warnings.len() > 0);
+    }
+    
+    #[test]
+    fn test_validate_empties_extraction_valid() {
+        let empties = vec![
+            ExtractedEmpty {
+                name: "Helper_001".to_string(),
+                nmc_index: 0,
+                parent_nmc_index: None,
+                position_blend: [0.0, 0.0, 0.0],
+                rotation_blend: [1.0, 0.0, 0.0, 0.0],
+                scale: [1.0, 1.0, 1.0],
+                geometry_type: 3,
+                is_helper: true,
+            },
+        ];
+        
+        let result = validate_empties_extraction(&empties).unwrap();
+        assert_eq!(result.empty_count, 1);
+        assert!(result.is_valid);
+    }
+    
+    #[test]
+    fn test_validate_decals_extraction_valid() {
+        let decals = vec![
+            MeshWithDecals {
+                mesh_path: "Mesh_001".to_string(),
+                decal_materials: vec![
+                    DecalMaterial {
+                        material_name: "Decal_001".to_string(),
+                        is_decal: true,
+                        is_pom: false,
+                        material_index: 0,
+                    },
+                ],
+                decal_face_indices: vec![],
+            },
+        ];
+        
+        let result = validate_decals_extraction(&decals).unwrap();
+        assert_eq!(result.meshes_with_decals, 1);
+        assert!(result.is_valid);
+    }
+    
+    #[test]
+    fn test_validate_complete_phase_3_4_export_full() {
+        let lights = vec![
+            ExtractedLight {
+                name: "Light1".to_string(),
+                position_blend: [0.0, 0.0, 0.0],
+                rotation_blend: [1.0, 0.0, 0.0, 0.0],
+                color: [1.0, 1.0, 1.0],
+                lamp_type: 0,
+                energy_watts: 1.0,
+                radius: 5.0,
+                spot_size: 0.0,
+                spot_blend: 0.0,
+                intensity_candela: 5.0,
+                temperature_k: 6500.0,
+                gobo_path: None,
+                active_state: "defaultState".to_string(),
+            },
+        ];
+        
+        let empties = vec![
+            ExtractedEmpty {
+                name: "Empty1".to_string(),
+                nmc_index: 0,
+                parent_nmc_index: None,
+                position_blend: [0.0, 0.0, 0.0],
+                rotation_blend: [1.0, 0.0, 0.0, 0.0],
+                scale: [1.0, 1.0, 1.0],
+                geometry_type: 3,
+                is_helper: true,
+            },
+        ];
+        
+        let decals = vec![
+            MeshWithDecals {
+                mesh_path: "Mesh_001".to_string(),
+                decal_materials: vec![
+                    DecalMaterial {
+                        material_name: "Decal".to_string(),
+                        is_decal: true,
+                        is_pom: false,
+                        material_index: 0,
+                    },
+                ],
+                decal_face_indices: vec![],
+            },
+        ];
+        
+        let result = validate_complete_phase_3_4_export(&lights, &empties, &decals);
+        assert_eq!(result.light_count, 1);
+        assert_eq!(result.empty_count, 1);
+        assert_eq!(result.meshes_with_decals, 1);
+        assert!(result.is_valid);
+    }
+    
+    #[test]
+    fn test_validate_complete_phase_3_4_export_empty() {
+        let result = validate_complete_phase_3_4_export(&[], &[], &[]);
+        assert!(!result.is_valid);
+        assert!(result.errors.len() > 0);
+    }
+}
