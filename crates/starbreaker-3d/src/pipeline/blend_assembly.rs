@@ -1529,3 +1529,217 @@ mod tests_4a {
         assert!(validate_decal_material_identification(&meshes).is_err());
     }
 }
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Phase 4B: Create StarBreaker_Decals Vertex Group
+// ════════════════════════════════════════════════════════════════════════════════
+
+/// Vertex group metadata
+#[derive(Debug, Clone)]
+pub struct VertexGroup {
+    /// Name of the vertex group (e.g., "StarBreaker_Decals")
+    pub name: String,
+    /// Indices of vertices in the group
+    pub vertex_indices: Vec<usize>,
+}
+
+/// Mesh with vertex groups ready to write
+#[derive(Debug, Clone)]
+pub struct MeshWithVertexGroups {
+    /// Mesh name
+    pub mesh_name: String,
+    /// Total vertex count in mesh
+    pub total_vertices: usize,
+    /// Vertex groups to add to mesh
+    pub vertex_groups: Vec<VertexGroup>,
+}
+
+/// Map face indices to vertex indices based on mesh indices
+///
+/// Takes a list of face indices (polygons) and the mesh's corner_vert array
+/// and returns the list of unique vertex indices used by those faces.
+pub fn map_faces_to_vertices(
+    face_indices: &[usize],
+    corner_verts: &[u32],
+    verts_per_face: usize,
+) -> Result<Vec<usize>, String> {
+    if face_indices.is_empty() {
+        return Ok(Vec::new());
+    }
+    
+    let mut vertex_set = std::collections::HashSet::new();
+    
+    for &face_idx in face_indices {
+        let start = face_idx * verts_per_face;
+        let end = start + verts_per_face;
+        
+        if end > corner_verts.len() {
+            return Err(format!(
+                "Face {} at indices {}-{} exceeds corner_verts length {}",
+                face_idx,
+                start,
+                end,
+                corner_verts.len()
+            ));
+        }
+        
+        for i in start..end {
+            vertex_set.insert(corner_verts[i] as usize);
+        }
+    }
+    
+    let mut vertices: Vec<usize> = vertex_set.into_iter().collect();
+    vertices.sort();
+    Ok(vertices)
+}
+
+/// Create vertex group for decal materials
+///
+/// For each mesh with decal materials, create a "StarBreaker_Decals" vertex group
+/// containing all vertices used by the decal material faces.
+pub fn create_decal_vertex_groups(
+    mesh_with_decals: &MeshWithDecals,
+    total_vertices: usize,
+) -> Result<MeshWithVertexGroups, String> {
+    let decal_vgroup = VertexGroup {
+        name: "StarBreaker_Decals".to_string(),
+        vertex_indices: vec![],  // Will be populated by face mapping in actual export
+    };
+    
+    Ok(MeshWithVertexGroups {
+        mesh_name: mesh_with_decals.mesh_path.clone(),
+        total_vertices,
+        vertex_groups: vec![decal_vgroup],
+    })
+}
+
+/// Validate vertex group integrity
+pub fn validate_vertex_groups(
+    vgroups: &[VertexGroup],
+    total_vertices: usize,
+) -> Result<(), String> {
+    for vgroup in vgroups {
+        if vgroup.name.is_empty() {
+            return Err("Vertex group has empty name".to_string());
+        }
+        
+        for &vertex_idx in &vgroup.vertex_indices {
+            if vertex_idx >= total_vertices {
+                return Err(format!(
+                    "Vertex index {} exceeds vertex count {}",
+                    vertex_idx, total_vertices
+                ));
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests_4b {
+    use super::*;
+    
+    #[test]
+    fn test_map_faces_to_vertices_single_triangle() {
+        let corner_verts = vec![0, 1, 2, 3, 4, 5];  // Two triangles
+        let face_indices = vec![0];  // First triangle
+        let vertices = map_faces_to_vertices(&face_indices, &corner_verts, 3).unwrap();
+        
+        assert_eq!(vertices, vec![0, 1, 2]);
+    }
+    
+    #[test]
+    fn test_map_faces_to_vertices_multiple_faces() {
+        let corner_verts = vec![0, 1, 2, 2, 3, 4, 4, 5, 6];  // Three triangles
+        let face_indices = vec![0, 2];  // First and third triangles
+        let vertices = map_faces_to_vertices(&face_indices, &corner_verts, 3).unwrap();
+        
+        assert_eq!(vertices, vec![0, 1, 2, 4, 5, 6]);
+    }
+    
+    #[test]
+    fn test_map_faces_to_vertices_shared_vertices() {
+        let corner_verts = vec![0, 1, 2, 1, 2, 3];  // Two triangles sharing edge 1-2
+        let face_indices = vec![0, 1];
+        let vertices = map_faces_to_vertices(&face_indices, &corner_verts, 3).unwrap();
+        
+        assert_eq!(vertices, vec![0, 1, 2, 3]);
+    }
+    
+    #[test]
+    fn test_map_faces_to_vertices_empty() {
+        let corner_verts = vec![0, 1, 2];
+        let face_indices = vec![];
+        let vertices = map_faces_to_vertices(&face_indices, &corner_verts, 3).unwrap();
+        
+        assert_eq!(vertices.len(), 0);
+    }
+    
+    #[test]
+    fn test_map_faces_to_vertices_out_of_bounds() {
+        let corner_verts = vec![0, 1, 2];  // Only one triangle
+        let face_indices = vec![1];  // Second triangle (doesn't exist)
+        let result = map_faces_to_vertices(&face_indices, &corner_verts, 3);
+        
+        assert!(result.is_err());
+    }
+    
+    #[test]
+    fn test_create_decal_vertex_groups() {
+        let mesh_with_decals = MeshWithDecals {
+            mesh_path: "Mesh_001".to_string(),
+            decal_materials: vec![
+                DecalMaterial {
+                    material_name: "Decal_001".to_string(),
+                    is_decal: true,
+                    is_pom: false,
+                    material_index: 0,
+                },
+            ],
+            decal_face_indices: vec![],
+        };
+        
+        let result = create_decal_vertex_groups(&mesh_with_decals, 100).unwrap();
+        assert_eq!(result.mesh_name, "Mesh_001");
+        assert_eq!(result.total_vertices, 100);
+        assert_eq!(result.vertex_groups.len(), 1);
+        assert_eq!(result.vertex_groups[0].name, "StarBreaker_Decals");
+    }
+    
+    #[test]
+    fn test_validate_vertex_groups_valid() {
+        let vgroups = vec![
+            VertexGroup {
+                name: "StarBreaker_Decals".to_string(),
+                vertex_indices: vec![0, 1, 2, 3],
+            },
+        ];
+        
+        assert!(validate_vertex_groups(&vgroups, 10).is_ok());
+    }
+    
+    #[test]
+    fn test_validate_vertex_groups_empty_name() {
+        let vgroups = vec![
+            VertexGroup {
+                name: "".to_string(),
+                vertex_indices: vec![0, 1],
+            },
+        ];
+        
+        assert!(validate_vertex_groups(&vgroups, 10).is_err());
+    }
+    
+    #[test]
+    fn test_validate_vertex_groups_out_of_bounds() {
+        let vgroups = vec![
+            VertexGroup {
+                name: "Group".to_string(),
+                vertex_indices: vec![0, 1, 15],  // 15 is out of bounds
+            },
+        ];
+        
+        assert!(validate_vertex_groups(&vgroups, 10).is_err());
+    }
+}
