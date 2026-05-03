@@ -1729,20 +1729,33 @@ pub fn map_faces_to_vertices(
 
 /// Create vertex group for decal materials
 ///
-/// For each mesh with decal materials, create a "StarBreaker_Decals" vertex group
-/// containing all vertices used by the decal material faces.
-pub fn create_decal_vertex_groups(
+/// Consolidates all vertices from all decal/POM materials into a single
+/// "StarBreaker_Decals" vertex group. This allows Blender addons to target
+/// all decal vertices with modifiers.
+///
+/// Returns the combined set of vertex indices from all decal material faces.
+pub fn collect_decal_vertices(
     mesh_with_decals: &MeshWithDecals,
-    total_vertices: usize,
+    decal_face_indices: &[usize],
+    corner_verts: &[u32],
+    verts_per_face: usize,
 ) -> Result<MeshWithVertexGroups, String> {
+    // Map all decal face indices to their vertex indices
+    let vertex_indices = if decal_face_indices.is_empty() {
+        Vec::new()
+    } else {
+        map_faces_to_vertices(decal_face_indices, corner_verts, verts_per_face)?
+    };
+    
+    // Create single consolidated vertex group
     let decal_vgroup = VertexGroup {
         name: "StarBreaker_Decals".to_string(),
-        vertex_indices: vec![],  // Will be populated by face mapping in actual export
+        vertex_indices,
     };
     
     Ok(MeshWithVertexGroups {
         mesh_name: mesh_with_decals.mesh_path.clone(),
-        total_vertices,
+        total_vertices: corner_verts.len(),
         vertex_groups: vec![decal_vgroup],
     })
 }
@@ -1820,7 +1833,7 @@ mod tests_4b {
     }
     
     #[test]
-    fn test_create_decal_vertex_groups() {
+    fn test_collect_decal_vertices_single_face() {
         let mesh_with_decals = MeshWithDecals {
             mesh_path: "Mesh_001".to_string(),
             decal_materials: vec![
@@ -1831,14 +1844,68 @@ mod tests_4b {
                     material_index: 0,
                 },
             ],
+            decal_face_indices: vec![0],
+        };
+        
+        let corner_verts = vec![0, 1, 2, 3, 4, 5];  // Two triangles
+        let face_indices = vec![0];  // First triangle
+        
+        let result = collect_decal_vertices(&mesh_with_decals, &face_indices, &corner_verts, 3).unwrap();
+        assert_eq!(result.mesh_name, "Mesh_001");
+        assert_eq!(result.total_vertices, 6);
+        assert_eq!(result.vertex_groups.len(), 1);
+        assert_eq!(result.vertex_groups[0].name, "StarBreaker_Decals");
+        assert_eq!(result.vertex_groups[0].vertex_indices, vec![0, 1, 2]);
+    }
+    
+    #[test]
+    fn test_collect_decal_vertices_multiple_faces() {
+        let mesh_with_decals = MeshWithDecals {
+            mesh_path: "Mesh_002".to_string(),
+            decal_materials: vec![
+                DecalMaterial {
+                    material_name: "Decal_001".to_string(),
+                    is_decal: true,
+                    is_pom: false,
+                    material_index: 0,
+                },
+                DecalMaterial {
+                    material_name: "POM_001".to_string(),
+                    is_decal: false,
+                    is_pom: true,
+                    material_index: 2,
+                },
+            ],
             decal_face_indices: vec![],
         };
         
-        let result = create_decal_vertex_groups(&mesh_with_decals, 100).unwrap();
-        assert_eq!(result.mesh_name, "Mesh_001");
-        assert_eq!(result.total_vertices, 100);
-        assert_eq!(result.vertex_groups.len(), 1);
+        let corner_verts = vec![
+            0, 1, 2,      // Face 0
+            2, 3, 4,      // Face 1 (shares edge with Face 0)
+            4, 5, 6,      // Face 2
+        ];
+        let face_indices = vec![0, 2];  // First and third faces
+        
+        let result = collect_decal_vertices(&mesh_with_decals, &face_indices, &corner_verts, 3).unwrap();
         assert_eq!(result.vertex_groups[0].name, "StarBreaker_Decals");
+        // Should contain vertices from faces 0 and 2: {0, 1, 2, 4, 5, 6}
+        assert_eq!(result.vertex_groups[0].vertex_indices.len(), 6);
+    }
+    
+    #[test]
+    fn test_collect_decal_vertices_empty_faces() {
+        let mesh_with_decals = MeshWithDecals {
+            mesh_path: "Mesh_003".to_string(),
+            decal_materials: vec![],
+            decal_face_indices: vec![],
+        };
+        
+        let corner_verts = vec![0, 1, 2, 3, 4, 5];
+        let face_indices = vec![];
+        
+        let result = collect_decal_vertices(&mesh_with_decals, &face_indices, &corner_verts, 3).unwrap();
+        assert_eq!(result.vertex_groups[0].name, "StarBreaker_Decals");
+        assert_eq!(result.vertex_groups[0].vertex_indices.len(), 0);
     }
     
     #[test]
