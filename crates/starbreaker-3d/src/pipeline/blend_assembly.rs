@@ -1,12 +1,14 @@
 //! Blender decomposed export: convert `DecomposedInput` to individual `.blend` files.
 //!
-//! Orchestrates the pipeline for Phase 1 (mesh decomposition):
+//! Phase 1 (mesh decomposition):
 //! - Extract meshes from `DecomposedInput::children`
 //! - Build material slots (empty, names-only)
 //! - Write individual `.blend` files to `Data/Objects/...` paths
 //! - Return decomposed export with .blend mesh files instead of GLB
 //!
-//! Phase 2 (scene.blend linking) and Phase 3+ will be implemented in subsequent phases.
+//! Phase 2 (scene.blend linking) — infrastructure complete
+//! Phase 3 (lights and empties) — extraction and creation
+//! Phase 4 (decal vertex groups) — material identification
 
 use std::collections::HashSet;
 
@@ -22,11 +24,12 @@ use starbreaker_blend::{
     SDNA_IDX_ATTRIBUTE, SDNA_IDX_BASE, SDNA_IDX_COLLECTION, SDNA_IDX_COLLECTION_OBJECT,
     SDNA_IDX_DNA1, SDNA_IDX_FILE_GLOBAL, SDNA_IDX_LAYER_COLLECTION, SDNA_IDX_MESH,
     SDNA_IDX_OBJECT, SDNA_IDX_SCENE, SDNA_IDX_VIEW_LAYER,
+    build_lamp, build_lamp_object, LAMP_SIZE, OBJECT_SIZE,
 };
 
 use crate::error::Error;
 use crate::decomposed::DecomposedInput;
-use crate::pipeline::{DecomposedExport, ExportedFile, ExportedFileKind, ExportOptions};
+use crate::pipeline::{DecomposedExport, ExportedFile, ExportedFileKind, ExportOptions, LoadedInteriors};
 use crate::types::Mesh;
 
 /// Convert `DecomposedInput` into a decomposed export with individual `.blend` files.
@@ -356,4 +359,224 @@ fn mesh_to_blend(name: &str, mesh: &Mesh, _materials: &Option<crate::mtl::MtlFil
     // Phase 1D: Do NOT compress individual mesh files (keep uncompressed)
     // Compression only happens at scene.blend (Phase 2)
     out
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Phase 3A: Extract Light Data from Manifest
+// ════════════════════════════════════════════════════════════════════════════════
+
+/// Extracted light ready for Blender scene construction.
+#[derive(Debug, Clone)]
+pub struct ExtractedLight {
+    /// CryEngine light name
+    pub name: String,
+    /// Position in Blender coordinates
+    pub position_blend: [f32; 3],
+    /// Rotation as quaternion in Blender coordinates [w, x, y, z]
+    pub rotation_blend: [f32; 4],
+    /// Linear RGB color 0..1
+    pub color: [f32; 3],
+    /// Blender lamp type: 0=POINT, 1=SUN, 2=SPOT, 4=AREA
+    pub lamp_type: i16,
+    /// Energy in Watts (radiant flux)
+    pub energy_watts: f32,
+    /// Attenuation radius in meters
+    pub radius: f32,
+    /// Spot cone full aperture in radians (0 for POINT)
+    pub spot_size: f32,
+    /// Spot cone feather width 0..1 (0 for POINT)
+    pub spot_blend: f32,
+    /// Intensity in candelas (for reference)
+    pub intensity_candela: f32,
+    /// Color temperature in Kelvin
+    pub temperature_k: f32,
+    /// Optional projector gobo texture path (for SPOTs)
+    pub gobo_path: Option<String>,
+    /// Currently active state name
+    pub active_state: String,
+}
+
+/// Convert CryEngine position to Blender coordinates.
+///
+/// CryEngine uses Z-up: (x, y, z) → Blender Y-up: (x, -z, y)
+fn convert_position_sc_to_blender(pos_sc: [f64; 3]) -> [f32; 3] {
+    [
+        pos_sc[0] as f32,
+        -(pos_sc[2] as f32),
+        pos_sc[1] as f32,
+    ]
+}
+
+/// Convert CryEngine quaternion to Blender coordinates.
+///
+/// CryEngine quaternion: [w, x, y, z]
+/// Apply same coordinate transformation as position
+fn convert_quaternion_sc_to_blender(quat_sc: [f64; 4]) -> [f32; 4] {
+    let w = quat_sc[0] as f32;
+    let x = quat_sc[1] as f32;
+    let y = quat_sc[2] as f32;
+    let z = quat_sc[3] as f32;
+    
+    // Swap y/z, negate z (same as position conversion)
+    [w, x, -z, y]
+}
+
+/// Extract all lights from loaded interiors.
+///
+/// Reads LightInfo from all interior containers and converts to Blender format.
+/// Returns vector of extracted lights ready for scene construction.
+pub fn extract_lights_from_interiors(
+    interiors: &LoadedInteriors,
+) -> Result<Vec<ExtractedLight>, Error> {
+    let mut lights = Vec::new();
+    
+    for container in &interiors.containers {
+        for light_info in &container.lights {
+            // Convert position from CryEngine to Blender coordinates
+            let position_blend = convert_position_sc_to_blender(light_info.position);
+            
+            // Convert quaternion rotation
+            let rotation_blend = convert_quaternion_sc_to_blender(light_info.rotation);
+            
+            // Map CryEngine light type to Blender lamp_type
+            let lamp_type = match light_info.light_type.as_str() {
+                "Omni" | "SoftOmni" => 0,  // POINT
+                "Projector" => 2,          // SPOT
+                "Ambient" => 0,            // POINT (ambient = low-energy point)
+                "Directional" | "Sun" => 1, // SUN
+                _ => 0,                    // Default to POINT
+            };
+            
+            // Intensity conversion: candela proxy → Watts
+            // KHR_lights_punctual: lm = cd × 4π (lumens from candelas)
+            // Cycles: W = lm / 683 (Watt to candela conversion)
+            // Visual gain: × 20 (empirical scaling for SC lights)
+            let energy_watts = (light_info.intensity_candela_proxy * 4.0 * std::f32::consts::PI / 683.0) * 20.0;
+            
+            // Spot angles (if present)
+            let (spot_size, spot_blend) = if let (Some(inner), Some(outer)) = (
+                light_info.inner_angle,
+                light_info.outer_angle,
+            ) {
+                let spot_size = outer.to_radians() * 2.0;  // Full cone aperture
+                let spot_blend = if outer > 0.0 {
+                    (1.0 - (inner / outer)).max(0.0).min(1.0)  // Feather width, clamped
+                } else {
+                    0.0
+                };
+                (spot_size, spot_blend)
+            } else {
+                (0.0, 0.0)
+            };
+            
+            // Get active state info for temperature
+            let temperature_k = light_info.states
+                .get(&light_info.active_state)
+                .map(|s| s.temperature)
+                .unwrap_or(6500.0);
+            
+            lights.push(ExtractedLight {
+                name: light_info.name.clone(),
+                position_blend,
+                rotation_blend,
+                color: light_info.color,
+                lamp_type,
+                energy_watts,
+                radius: light_info.radius,
+                spot_size,
+                spot_blend,
+                intensity_candela: light_info.intensity_candela_proxy,
+                temperature_k,
+                gobo_path: light_info.projector_texture.clone(),
+                active_state: light_info.active_state.clone(),
+            });
+        }
+    }
+    
+    Ok(lights)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_convert_position_sc_to_blender() {
+        // CryEngine position (1, 2, 3) → Blender (1, -3, 2)
+        let result = convert_position_sc_to_blender([1.0, 2.0, 3.0]);
+        assert_eq!(result, [1.0, -3.0, 2.0]);
+    }
+    
+    #[test]
+    fn test_convert_position_origin() {
+        let result = convert_position_sc_to_blender([0.0, 0.0, 0.0]);
+        assert_eq!(result, [0.0, 0.0, 0.0]);
+    }
+    
+    #[test]
+    fn test_convert_position_negative() {
+        let result = convert_position_sc_to_blender([-1.0, -2.0, -3.0]);
+        assert_eq!(result, [-1.0, 3.0, -2.0]);
+    }
+    
+    #[test]
+    fn test_convert_quaternion_sc_to_blender() {
+        // [w, x, y, z] → [w, x, -z, y]
+        let result = convert_quaternion_sc_to_blender([1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(result, [1.0, 0.0, 0.0, 0.0]);
+    }
+    
+    #[test]
+    fn test_convert_quaternion_with_values() {
+        let result = convert_quaternion_sc_to_blender([0.707, 0.5, 0.5, 0.0]);
+        assert_eq!(result, [0.707, 0.5, 0.0, 0.5]);
+    }
+    
+    #[test]
+    fn test_lamp_type_mapping_omni() {
+        // Create a minimal light info for testing
+        let light_type = "Omni";
+        let lamp_type = match light_type {
+            "Omni" | "SoftOmni" => 0,
+            "Projector" => 2,
+            "Ambient" => 0,
+            "Directional" | "Sun" => 1,
+            _ => 0,
+        };
+        assert_eq!(lamp_type, 0); // POINT
+    }
+    
+    #[test]
+    fn test_lamp_type_mapping_projector() {
+        let light_type = "Projector";
+        let lamp_type = match light_type {
+            "Omni" | "SoftOmni" => 0,
+            "Projector" => 2,
+            "Ambient" => 0,
+            "Directional" | "Sun" => 1,
+            _ => 0,
+        };
+        assert_eq!(lamp_type, 2); // SPOT
+    }
+    
+    #[test]
+    fn test_lamp_type_mapping_sun() {
+        let light_type = "Sun";
+        let lamp_type = match light_type {
+            "Omni" | "SoftOmni" => 0,
+            "Projector" => 2,
+            "Ambient" => 0,
+            "Directional" | "Sun" => 1,
+            _ => 0,
+        };
+        assert_eq!(lamp_type, 1); // SUN
+    }
+    
+    #[test]
+    fn test_energy_conversion() {
+        // 200 candelas → ~73.6 W (200 * 4π / 683 * 20)
+        let cd = 200.0;
+        let energy = (cd * 4.0 * std::f32::consts::PI / 683.0) * 20.0;
+        assert!(energy > 73.0 && energy < 74.0, "Energy: {}", energy);
+    }
 }
