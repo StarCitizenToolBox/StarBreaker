@@ -45,7 +45,7 @@ pub const FILE_GLOBAL_SIZE: usize = 1216;
 pub const SCENE_SIZE: usize = 6920;
 pub const VIEW_LAYER_SIZE: usize = 328;
 pub const BASE_SIZE: usize = 48;
-pub const COLLECTION_SIZE: usize = 520;
+pub const COLLECTION_SIZE: usize = 544;
 pub const COLLECTION_OBJECT_SIZE: usize = 32;
 pub const LAYER_COLLECTION_SIZE: usize = 64;
 pub const OBJECT_SIZE: usize = 1288;
@@ -58,7 +58,7 @@ pub const MDEFORMVERT_SIZE: usize = 16;
 pub const MDEFORMWEIGHT_SIZE: usize = 8;
 pub const CUSTOM_DATA_LAYER_SIZE: usize = 112;
 pub const IDPROPERTY_SIZE: usize = 144;
-pub const LIBRARY_SIZE: usize = 1426;  // ID (370) + filepath[1024] + flag (2) + undo_runtime_tag (2) + padding (4) + pointers (24)
+pub const LIBRARY_SIZE: usize = 1472;  // ID (408) + filepath[1024] + flag (2) + undo_runtime_tag (2) + _pad (4) + archive_parent_library (8) + packedfile (8) + runtime (8) + _pad2 (8)
 pub const ID_STUB_SIZE: usize = 408;
 
 // ── Attribute enums ───────────────────────────────────────────────────────────
@@ -301,20 +301,20 @@ pub fn build_collection(
     write_id_name(&mut data, "GR", collection_name);
     write_i16(&mut data, 298, 1024);
     
-    // Offset 128-135: ListBase.first (CollectionObject* head)
-    write_ptr(&mut data, 128, collection_object_head_ptr);
+    // Offset 408-415: Collection.owner_id (8-byte pointer to owning Scene ID)
+    write_ptr(&mut data, 408, owner_scene_ptr);
     
-    // Offset 136-143: ListBase.last (CollectionObject* tail)
-    write_ptr(&mut data, 136, collection_object_tail_ptr);
+    // Offset 416-423: Collection.gobject ListBase.first (CollectionObject* head)
+    write_ptr(&mut data, 416, collection_object_head_ptr);
     
-    // Offset 144-151: children ListBase.first (nested Collections)
-    write_ptr(&mut data, 144, 0);  // No nested collections for now
+    // Offset 424-431: Collection.gobject ListBase.last (CollectionObject* tail)
+    write_ptr(&mut data, 424, collection_object_tail_ptr);
     
-    // Offset 152-159: children ListBase.last
-    write_ptr(&mut data, 152, 0);
+    // Offset 432-439: Collection.children ListBase.first (nested Collections)
+    write_ptr(&mut data, 432, 0);  // No nested collections for now
     
-    // Offset 168-175: scene owner pointer
-    write_ptr(&mut data, 168, owner_scene_ptr);
+    // Offset 440-447: Collection.children ListBase.last
+    write_ptr(&mut data, 440, 0);
     
     data
 }
@@ -343,11 +343,56 @@ pub fn build_collection_object_linked(
     data
 }
 
-pub fn build_layer_collection(collection_ptr: u64) -> Vec<u8> {
+/// Build a LayerCollection with proper doubly-linked list support.
+///
+/// LayerCollection struct (DNA_layer_types.h:189):
+/// - Offset 0-7: prev pointer (LinkNode)
+/// - Offset 8-15: next pointer (LinkNode)  
+/// - Offset 16-23: collection pointer (Collection*)
+/// - Offset 24-39: flag/pad
+/// - Offset 40-55: layer_collections ListBase (for nested children)
+/// - Offset 56-63: padding/other fields
+///
+/// Parameters:
+/// - collection_ptr: Pointer to Collection that this LayerCollection represents
+/// - prev_ptr: Previous LayerCollection (0 for first/root)
+/// - next_ptr: Next LayerCollection (0 for last/only)
+/// - child_layer_collections_head: Head of nested LayerCollections (0 if none)
+/// - child_layer_collections_tail: Tail of nested LayerCollections (0 if none)
+pub fn build_layer_collection_linked(
+    collection_ptr: u64,
+    prev_ptr: u64,
+    next_ptr: u64,
+    child_layer_collections_head: u64,
+    child_layer_collections_tail: u64,
+) -> Vec<u8> {
     let mut data = vec![0u8; LAYER_COLLECTION_SIZE];
+    
+    // Offset 0-7: prev pointer (doubly-linked list)
+    write_ptr(&mut data, 0, prev_ptr);
+    
+    // Offset 8-15: next pointer (doubly-linked list)
+    write_ptr(&mut data, 8, next_ptr);
+    
+    // Offset 16-23: collection pointer
     write_ptr(&mut data, 16, collection_ptr);
+    
+    // Offset 40-47: layer_collections ListBase.first (nested children head)
+    write_ptr(&mut data, 40, child_layer_collections_head);
+    
+    // Offset 48-55: layer_collections ListBase.last (nested children tail)
+    write_ptr(&mut data, 48, child_layer_collections_tail);
+    
+    // Offset 32: flag (0x0001 = LAYER_COLLECTION_VISIBLE)
     write_u16(&mut data, 32, 0x0001);
+    
     data
+}
+
+/// Build a simple LayerCollection (for backward compatibility).
+/// This variant creates a standalone LayerCollection with no siblings and no children.
+pub fn build_layer_collection(collection_ptr: u64) -> Vec<u8> {
+    build_layer_collection_linked(collection_ptr, 0, 0, 0, 0)
 }
 
 /// Build a mesh `Object` block (`OB_MESH`, type=1).
@@ -503,6 +548,9 @@ pub fn build_mesh(
     cdl_ptr: u64,
     num_attributes: u32,
 ) -> Vec<u8> {
+    // Initialize mesh with all zeros. Edge/polygon/loop CustomData domains (edata, pdata, ldata)
+    // are intentionally left empty since geometry is represented via the Attribute system
+    // (standard in Blender 4.0+). Only vdata.CustomData is used for vertex groups (MDeformVert).
     let mut data = vec![0u8; MESH_SIZE];
     write_id_name(&mut data, "ME", mesh_name);
     write_u32(&mut data, 432, totvert as u32);
@@ -522,6 +570,7 @@ pub fn build_mesh(
         write_i32(&mut data, 488 + 2 * 4, 0); // typemap[CD_MDEFORMVERT=2] = 0
         write_i32(&mut data, 700, 1); // totlayer
         write_i32(&mut data, 704, 1); // maxlayer
+        write_i32(&mut data, 708, 16); // vdata.totsize = MDEFORMVERT_SIZE
     }
     data
 }
@@ -556,6 +605,7 @@ pub fn build_bdeformgroup(name: &str, next_ptr: u64, prev_ptr: u64) -> Vec<u8> {
 pub fn build_custom_data_layer_mdeformvert(data_ptr: u64) -> Vec<u8> {
     let mut buf = vec![0u8; CUSTOM_DATA_LAYER_SIZE];
     write_i32(&mut buf, 0, 2); // type = CD_MDEFORMVERT
+    write_i32(&mut buf, 4, 0); // offset = 0 (first/only layer in interleaved data)
     write_ptr(&mut buf, 96, data_ptr);
     buf
 }
@@ -740,36 +790,36 @@ pub fn compress_blend_bytes_zstd(raw_blend: &[u8]) -> Vec<u8> {
 pub fn build_library_block(lib_name: &str, filepath: &str) -> Vec<u8> {
     let mut buf = vec![0u8; LIBRARY_SIZE];
     
-    // Offset 0-66: ID.name (common to all datablocks)
-    // Format: "LI" + null padding + 64-char name
-    write_id_name(&mut buf[0..66], "LI", lib_name);
+    // Offset 0-408: ID struct (embedded within Library)
+    // ID.name is at offset 40 within this struct (char[258])
+    write_id_name(&mut buf[0..408], "LI", lib_name);
     
-    // Offset 370-1394: filepath[1024] UTF-8, null-terminated, zero-padded
+    // Offset 408-1432: filepath[1024] UTF-8, null-terminated, zero-padded
     let filepath_bytes = filepath.as_bytes();
     let filepath_len = filepath_bytes.len().min(1023); // Max 1023 chars + null terminator
     
     if filepath_len > 0 {
-        buf[370..(370 + filepath_len)].copy_from_slice(&filepath_bytes[0..filepath_len]);
+        buf[408..(408 + filepath_len)].copy_from_slice(&filepath_bytes[0..filepath_len]);
     }
     // Null-terminate and zero-pad (already initialized to zeros)
-    buf[370 + filepath_len] = 0;
+    buf[408 + filepath_len] = 0;
     
-    // Offset 1394-1396: flag (uint16, 0 = no special flags)
-    write_u16(&mut buf, 1394, 0);
+    // Offset 1432-1434: flag (uint16, 0 = no special flags)
+    write_u16(&mut buf, 1432, 0);
     
-    // Offset 1396-1398: undo_runtime_tag (uint16, 0)
-    write_u16(&mut buf, 1396, 0);
+    // Offset 1434-1436: undo_runtime_tag (uint16, 0)
+    write_u16(&mut buf, 1434, 0);
     
-    // Offset 1398-1402: _pad (4 bytes, already zero)
+    // Offset 1436-1440: _pad (4 bytes, already zero)
     
-    // Offset 1402-1410: archive_parent_library (8 bytes pointer, nullptr)
-    write_ptr(&mut buf, 1402, 0);
+    // Offset 1440-1448: archive_parent_library (8 bytes pointer, nullptr)
+    write_ptr(&mut buf, 1440, 0);
     
-    // Offset 1410-1418: packedfile (8 bytes pointer, nullptr)
-    write_ptr(&mut buf, 1410, 0);
+    // Offset 1448-1456: packedfile (8 bytes pointer, nullptr)
+    write_ptr(&mut buf, 1448, 0);
     
-    // Offset 1418-1426: runtime (8 bytes pointer, always nullptr)
-    write_ptr(&mut buf, 1418, 0);
+    // Offset 1456-1464: runtime (8 bytes pointer, always nullptr)
+    write_ptr(&mut buf, 1456, 0);
     
     buf
 }
@@ -782,8 +832,8 @@ pub fn build_library_block(lib_name: &str, filepath: &str) -> Vec<u8> {
 pub fn build_id_stub(datablock_type: &str, name: &str, lib_ptr: u64) -> Vec<u8> {
     let mut buf = vec![0u8; ID_STUB_SIZE];
     
-    // ID.name at offset 0: 66 bytes
-    write_id_name(&mut buf[0..66], datablock_type, name);
+    // ID.name at offset 40 within the ID struct
+    write_id_name(&mut buf, datablock_type, name);
     
     // Library pointer at offset 24
     write_ptr(&mut buf, 24, lib_ptr);

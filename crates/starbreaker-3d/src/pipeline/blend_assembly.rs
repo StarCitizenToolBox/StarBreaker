@@ -17,7 +17,7 @@ use starbreaker_common::progress::{report as report_progress, Progress};
 use starbreaker_p4k::MappedP4k;
 use starbreaker_blend::{
     bytes4_data, build_attribute, build_attribute_array, build_base, build_collection,
-    build_collection_object, build_collection_object_linked, build_file_global, build_layer_collection, build_mat_ptr_array,
+    build_collection_object, build_collection_object_linked, build_file_global, build_layer_collection, build_layer_collection_linked, build_mat_ptr_array,
     build_matbits, build_mesh, build_object, build_scene, build_view_layer,
     floats2_data, floats3_data, ints_data, write_block, write_block_header, PtrAlloc,
     ATTR_DOMAIN_CORNER, ATTR_DOMAIN_FACE, ATTR_DOMAIN_POINT, ATTR_TYPE_BYTE_COLOR,
@@ -793,7 +793,6 @@ pub fn create_scene_blend(
         root_collection_object_ptr,  // Both head and tail point to single member
     );
     let root_collection_object_data = build_collection_object(root_object_ptr);
-    let root_layer_collection_data = build_layer_collection(root_collection_ptr);
     
     // Build mesh collection object linked list
     let mut meshes_coll_obj_data_list = Vec::new();
@@ -810,7 +809,6 @@ pub fn create_scene_blend(
         mesh_head_ptr,
         mesh_tail_ptr,
     );
-    let meshes_layer_coll_data = build_layer_collection(meshes_collection_ptr);
     
     // Build light collection object linked list
     let mut lights_coll_obj_data_list = Vec::new();
@@ -827,7 +825,6 @@ pub fn create_scene_blend(
         light_head_ptr,
         light_tail_ptr,
     );
-    let lights_layer_coll_data = build_layer_collection(lights_collection_ptr);
     
     // Sub-collection: Empties (placeholder for Phase 5C)
     let empties_collection_data = build_collection(
@@ -836,7 +833,6 @@ pub fn create_scene_blend(
         0,  // No empties yet
         0,  // tail = head when empty
     );
-    let empties_layer_coll_data = build_layer_collection(empties_collection_ptr);
     
     // Sub-collection: Decals (placeholder for Phase 4)
     let decals_collection_data = build_collection(
@@ -845,7 +841,54 @@ pub fn create_scene_blend(
         0,  // No decals yet
         0,  // tail = head when empty
     );
-    let decals_layer_coll_data = build_layer_collection(decals_collection_ptr);
+    
+    // Build LayerCollection hierarchy: root contains [Meshes, Lights, Empties, Decals] as siblings
+    // Determine head/tail of child LayerCollections
+    let child_layer_coll_head = meshes_layer_coll_ptr;  // First child
+    let child_layer_coll_tail = decals_layer_coll_ptr;   // Last child
+    
+    // Update root LayerCollection to have children linked in its layer_collections ListBase
+    let root_layer_collection_data = build_layer_collection_linked(
+        root_collection_ptr,  // Collection pointer
+        0,                    // prev = NULL (root has no siblings)
+        0,                    // next = NULL (root has no siblings)
+        child_layer_coll_head,  // layer_collections.first = Meshes (first child)
+        child_layer_coll_tail,   // layer_collections.last = Decals (last child)
+    );
+    
+    // Build child LayerCollections with proper prev/next pointers
+    // Meshes is first, Lights comes after, then Empties, then Decals
+    let meshes_layer_coll_data = build_layer_collection_linked(
+        meshes_collection_ptr,
+        0,                      // prev = NULL (first child)
+        lights_layer_coll_ptr,  // next = Lights
+        0,                      // No children in Meshes collection
+        0,
+    );
+    
+    let lights_layer_coll_data = build_layer_collection_linked(
+        lights_collection_ptr,
+        meshes_layer_coll_ptr,  // prev = Meshes
+        empties_layer_coll_ptr, // next = Empties
+        0,                      // No children in Lights collection
+        0,
+    );
+    
+    let empties_layer_coll_data = build_layer_collection_linked(
+        empties_collection_ptr,
+        lights_layer_coll_ptr,  // prev = Lights
+        decals_layer_coll_ptr,  // next = Decals
+        0,                      // No children in Empties collection (placeholder)
+        0,
+    );
+    
+    let decals_layer_coll_data = build_layer_collection_linked(
+        decals_collection_ptr,
+        empties_layer_coll_ptr, // prev = Empties
+        0,                      // next = NULL (last child)
+        0,                      // No children in Decals collection (placeholder)
+        0,
+    );
     
     // Build root empty object at origin
     let root_empty_data = build_empty_object(
