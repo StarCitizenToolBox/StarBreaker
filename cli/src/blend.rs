@@ -154,7 +154,7 @@ pub(crate) fn mesh_to_blend(name: &str, mesh: &Mesh) -> Vec<u8> {
     let scene_data = build_scene(name, view_layer_ptr, collection_ptr);
     let view_layer_data = build_view_layer(name, base_ptr, layer_collection_ptr);
     let base_data = build_base(object_ptr);
-    let collection_data = build_collection(name, scene_ptr, collection_object_ptr);
+    let collection_data = build_collection(name, scene_ptr, collection_object_ptr, collection_object_ptr);  // Single member: head = tail
     let collection_object_data = build_collection_object(object_ptr);
     let layer_collection_data = build_layer_collection(collection_ptr);
     let mesh_data = build_mesh(

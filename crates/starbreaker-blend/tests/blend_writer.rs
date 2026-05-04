@@ -442,17 +442,22 @@ fn collection_object_linked_multiple_elements() {
 
 #[test]
 fn collection_size_is_520_bytes() {
-    let c = build_collection("TestColl", 0, 0);
+    let c = build_collection("TestColl", 0, 0, 0);
     assert_eq!(c.len(), COLLECTION_SIZE);
     assert_eq!(COLLECTION_SIZE, 520);
 }
 
 #[test]
-fn collection_gobject_offset_at_416() {
-    // Collection writes object pointer at offset 416 (head of linked list)
-    let coll_obj_ptr = 0xdeadbeef_u64;
-    let c = build_collection("TestColl", 0x1000, coll_obj_ptr);
-    assert_eq!(u64::from_le_bytes(c[416..424].try_into().unwrap()), coll_obj_ptr);
-    // Offset 424 should also have the same pointer (tail == head for single element)
-    assert_eq!(u64::from_le_bytes(c[424..432].try_into().unwrap()), coll_obj_ptr);
+fn collection_gobject_offsets_128_143() {
+    // Collection writes object pointers at correct offsets for ListBase.gobject:
+    // Offset 128-135: ListBase.first (head of linked list)
+    // Offset 136-143: ListBase.last (tail of linked list)
+    let head_ptr = 0xdeadbeef_u64;
+    let tail_ptr = 0xcafebabe_u64;
+    let c = build_collection("TestColl", 0x1000, head_ptr, tail_ptr);
+    
+    // Verify head pointer at offset 128
+    assert_eq!(u64::from_le_bytes(c[128..136].try_into().unwrap()), head_ptr);
+    // Verify tail pointer at offset 136
+    assert_eq!(u64::from_le_bytes(c[136..144].try_into().unwrap()), tail_ptr);
 }
