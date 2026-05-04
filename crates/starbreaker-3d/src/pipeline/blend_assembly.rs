@@ -18,7 +18,7 @@ use starbreaker_p4k::MappedP4k;
 use starbreaker_blend::{
     bytes4_data, build_attribute, build_attribute_array, build_base, build_collection,
     build_collection_object, build_collection_object_linked, build_file_global, build_layer_collection, build_layer_collection_linked, build_mat_ptr_array,
-    build_matbits, build_mesh, build_object, build_scene, build_view_layer,
+    build_matbits, build_mesh, build_mesh_stub, build_object, build_scene, build_view_layer, write_ptr,
     floats2_data, floats3_data, ints_data, write_block, write_block_header, PtrAlloc,
     ATTR_DOMAIN_CORNER, ATTR_DOMAIN_FACE, ATTR_DOMAIN_POINT, ATTR_TYPE_BYTE_COLOR,
     ATTR_TYPE_FLOAT2, ATTR_TYPE_FLOAT3, ATTR_TYPE_INT, BLEND_MAGIC, DNA1_BYTES,
@@ -261,8 +261,10 @@ pub fn write_decomposed_export_blend(
     report_progress(progress, 0.7, "Creating scene.blend with linked mesh instances");
     
     // Create scene.blend with properly linked mesh instances and lights
+    // Library paths are relative to scene.blend location, which is in Packages/{package}/
+    // So we need ../../Data/Objects to reach the shared assets
     log::info!("[blend-debug] Creating scene.blend with {} children and {} lights", children_for_scene.len(), extracted_lights.len());
-    let scene_blend_bytes = create_scene_blend(&scene_entity_name, children_for_scene.len(), "Data/Objects", &extracted_lights)?;
+    let scene_blend_bytes = create_scene_blend(&scene_entity_name, children_for_scene.len(), "../../Data/Objects", &extracted_lights)?;
     log::info!("[blend-debug] scene.blend created, size: {} bytes", scene_blend_bytes.len());
     
     // Compress scene.blend with Zstd (Blender 5.1 native format)
@@ -771,9 +773,9 @@ pub fn create_scene_blend(
     }
     
     // Build scene datablocks
-    let scene_name = entity_name.to_string();
-    let scene_data = build_scene(&scene_name, view_layer_ptr, root_collection_ptr);
-    let view_layer_data = build_view_layer(&scene_name, base_ptr, layer_collection_ptr);
+    // Scene must always be named "Scene" for Blender to recognize it as the primary scene
+    let scene_data = build_scene("Scene", view_layer_ptr, root_collection_ptr);
+    let view_layer_data = build_view_layer(&entity_name, base_ptr, layer_collection_ptr);
     let base_data = build_base(root_object_ptr);
     
     // Build collection hierarchy: Scene > [Meshes, Lights, Empties, Decals]
@@ -785,13 +787,17 @@ pub fn create_scene_blend(
     let light_head_ptr = if !light_coll_obj_ptrs.is_empty() { light_coll_obj_ptrs[0].0 } else { 0 };
     let light_tail_ptr = if !light_coll_obj_ptrs.is_empty() { light_coll_obj_ptrs[light_coll_obj_ptrs.len() - 1].0 } else { 0 };
     
-    // Root collection: single member (Scene root object)
-    let root_collection_data = build_collection(
+    // Root collection: contains Root object + child collections
+    let mut root_collection_data = build_collection(
         "Scene",
         scene_ptr,
         root_collection_object_ptr,
-        root_collection_object_ptr,  // Both head and tail point to single member
+        root_collection_object_ptr,  // Both head and tail point to single member (Root object)
     );
+    // Add child collections: Meshes -> Lights -> Empties -> Decals
+    // Collection.children ListBase.first at offset 432, .last at offset 440
+    write_ptr(&mut root_collection_data, 432, meshes_collection_ptr);  // children.first = Meshes
+    write_ptr(&mut root_collection_data, 440, decals_collection_ptr);  // children.last = Decals
     let root_collection_object_data = build_collection_object(root_object_ptr);
     
     // Build mesh collection object linked list
@@ -802,10 +808,10 @@ pub fn create_scene_blend(
         meshes_coll_obj_data_list.push((coll_obj_ptr, build_collection_object_linked(obj_ptr, prev_ptr, next_ptr)));
     }
     
-    // Sub-collection: Meshes
+    // Sub-collection: Meshes (child of root collection)
     let meshes_collection_data = build_collection(
         "Meshes",
-        root_collection_ptr,
+        scene_ptr,  // Owner is the Scene, not the root collection
         mesh_head_ptr,
         mesh_tail_ptr,
     );
@@ -818,26 +824,26 @@ pub fn create_scene_blend(
         lights_coll_obj_data_list.push((coll_obj_ptr, build_collection_object_linked(obj_ptr, prev_ptr, next_ptr)));
     }
     
-    // Sub-collection: Lights
+    // Sub-collection: Lights (child of root collection)
     let lights_collection_data = build_collection(
         "Lights",
-        root_collection_ptr,
+        scene_ptr,  // Owner is the Scene, not the root collection
         light_head_ptr,
         light_tail_ptr,
     );
     
-    // Sub-collection: Empties (placeholder for Phase 5C)
+    // Sub-collection: Empties (placeholder for Phase 5C, child of root)
     let empties_collection_data = build_collection(
         "Empties",
-        root_collection_ptr,
+        scene_ptr,  // Owner is the Scene
         0,  // No empties yet
         0,  // tail = head when empty
     );
     
-    // Sub-collection: Decals (placeholder for Phase 4)
+    // Sub-collection: Decals (placeholder for Phase 4, child of root)
     let decals_collection_data = build_collection(
         "Decals",
-        root_collection_ptr,
+        scene_ptr,  // Owner is the Scene
         0,  // No decals yet
         0,  // tail = head when empty
     );
@@ -901,20 +907,20 @@ pub fn create_scene_blend(
     let root_mat_array = build_mat_ptr_array(0);
     let root_matbits = build_matbits(0);
     
-    // Allocate string data for scene name
-    let scene_name_bytes = format!("{}\0", scene_name);
+    // Allocate string data for library filenames (uses entity name, not scene name)
+    let scene_name_bytes = format!("{}\0", entity_name);
     let scene_name_ptr = ptrs.alloc();
     
-    // Allocate pointers for ID stubs (one per mesh)
-    let mut id_stub_ptrs = Vec::new();
+    // Allocate pointers for mesh stubs (one per mesh) - these will be actual Mesh datablocks
+    let mut mesh_stub_ptrs = Vec::new();
     for _idx in 0..children_count {
-        id_stub_ptrs.push(ptrs.alloc());
+        mesh_stub_ptrs.push(ptrs.alloc());
     }
     
     // Build mesh instance objects with library links
     let mut mesh_instance_data = Vec::new();
     let mut mesh_library_data = Vec::new();
-    let mut mesh_id_stub_data = Vec::new();
+    let mut mesh_stub_data = Vec::new();
     let mut mesh_object_mat_arrays = Vec::new();
     let mut mesh_object_matbits = Vec::new();
     
@@ -928,15 +934,15 @@ pub fn create_scene_blend(
         let lib_data = build_library_block(&format!("LI_{}", idx), &blend_path);
         mesh_library_data.push((idx, lib_data));
         
-        // Build ID stub that points to the mesh from the external library
-        let id_stub_name = format!("mesh_stub_{}", idx);
-        let id_stub_data = build_id_stub("ME", &id_stub_name, library_ptrs[idx]);
-        mesh_id_stub_data.push((idx, id_stub_data));
+        // Build empty mesh stub that points to the external library mesh
+        // The actual geometry comes from the linked .blend file, this is just a placeholder
+        let stub_mesh_data = build_mesh_stub(&mesh_ref_name);
+        mesh_stub_data.push((idx, stub_mesh_data));
         
-        // Build object for linked mesh instance (using ID stub pointer)
+        // Build object for linked mesh instance (using mesh stub pointer instead of ID stub)
         let mesh_object = build_linked_instance_object(
             &mesh_ref_name,
-            id_stub_ptrs[idx],  // Point to ID stub
+            mesh_stub_ptrs[idx],  // Point to mesh stub
             [0.0, 0.0, 0.0],  // position at origin
             [1.0, 0.0, 0.0, 0.0],  // quaternion identity
             [1.0, 1.0, 1.0],  // scale
@@ -1055,12 +1061,14 @@ pub fn create_scene_blend(
         write_block(&mut out, b"DATA", 0, *matbits_ptr, 1, &light_object_matbits[idx]);
     }
     
-    // Write ID stubs for external mesh references
-    eprintln!("[DEBUG] Writing {} ID stubs", mesh_id_stub_data.len());
-    for (idx, id_stub_data) in mesh_id_stub_data.iter() {
-        write_block(&mut out, b"ID\0\0", SDNA_IDX_ID, id_stub_ptrs[*idx], 1, &id_stub_data);
+    // Write mesh stub blocks (empty Mesh datablocks that Objects point to)
+    // These satisfy Blender's requirement that Objects have valid data pointers
+    // The actual geometry comes from the linked external .blend files
+    eprintln!("[DEBUG] Writing {} mesh stubs", mesh_stub_data.len());
+    for (idx, stub_mesh) in mesh_stub_data.iter() {
+        write_block(&mut out, b"ME\0\0", SDNA_IDX_MESH, mesh_stub_ptrs[*idx], 1, stub_mesh);
     }
-    eprintln!("[DEBUG] Done writing ID stubs");
+    eprintln!("[DEBUG] Done writing mesh stubs");
     
     // Write library blocks for linked meshes
     eprintln!("[DEBUG] Writing {} library blocks", mesh_library_data.len());

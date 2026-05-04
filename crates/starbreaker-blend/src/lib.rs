@@ -575,6 +575,17 @@ pub fn build_mesh(
     data
 }
 
+/// Build an empty mesh stub for linked instances (0 vertices, 0 polygons).
+/// This provides a valid Mesh datablock that Objects can point to, satisfying Blender's
+/// requirement that Objects have valid data pointers. The actual geometry comes from the
+/// linked external .blend file.
+pub fn build_mesh_stub(mesh_name: &str) -> Vec<u8> {
+    let mut data = vec![0u8; MESH_SIZE];
+    write_id_name(&mut data, "ME", mesh_name);
+    // All other fields remain zero: totvert=0, totpoly=0, totloop=0, no materials, no data pointers
+    data
+}
+
 pub fn build_attribute(name_ptr: u64, data_type: i16, domain: u8, data_ptr: u64) -> Vec<u8> {
     let mut data = vec![0u8; ATTRIBUTE_SIZE];
     write_ptr(&mut data, 0, name_ptr);
