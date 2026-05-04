@@ -373,8 +373,10 @@ pub fn assemble_glb_with_loadout_with_progress(
         };
         
         let phase_start = Instant::now();
+        log::info!("[format-debug] Decomposed export format: {:?}", opts.format);
         let decomposed = match opts.format {
             crate::pipeline::ExportFormat::Blend => {
+                log::info!("[format-debug] Using Blend format path");
                 crate::pipeline::write_decomposed_export_blend(
                     p4k,
                     decomposed_input,
@@ -384,6 +386,7 @@ pub fn assemble_glb_with_loadout_with_progress(
                 )?
             },
             _ => {
+                log::info!("[format-debug] Using default (GLB) format path, opts.format = {:?}", opts.format);
                 crate::decomposed::write_decomposed_export(
                     p4k,
                     decomposed_input,

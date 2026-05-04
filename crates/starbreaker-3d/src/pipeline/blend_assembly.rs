@@ -261,7 +261,9 @@ pub fn write_decomposed_export_blend(
     report_progress(progress, 0.7, "Creating scene.blend with linked mesh instances");
     
     // Create scene.blend with properly linked mesh instances and lights
+    log::info!("[blend-debug] Creating scene.blend with {} children and {} lights", children_for_scene.len(), extracted_lights.len());
     let scene_blend_bytes = create_scene_blend(&scene_entity_name, children_for_scene.len(), "Data/Objects", &extracted_lights)?;
+    log::info!("[blend-debug] scene.blend created, size: {} bytes", scene_blend_bytes.len());
     
     // Compress scene.blend with Zstd (Blender 5.1 native format)
     let compressed_scene = starbreaker_blend::compress_blend_bytes_zstd(&scene_blend_bytes);
@@ -979,11 +981,16 @@ pub fn create_scene_blend(
     write_block(&mut out, b"DATA", 0, root_object_matbits_ptr, 1, &root_matbits);
     
     // Write linked mesh instances + materials
+    eprintln!("[DEBUG] Writing {} mesh instances", mesh_instances.len());
     for (idx, (object_ptr, mat_ptr, matbits_ptr, _lib_ptr, _)) in mesh_instances.iter().enumerate() {
         write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, *object_ptr, 1, &mesh_instance_data[idx]);
         write_block(&mut out, b"DATA", 0, *mat_ptr, 1, &mesh_object_mat_arrays[idx]);
         write_block(&mut out, b"DATA", 0, *matbits_ptr, 1, &mesh_object_matbits[idx]);
+        if idx == 0 || idx % 10 == 0 {
+            eprintln!("[DEBUG] Wrote mesh instance {} OB block", idx);
+        }
     }
+    eprintln!("[DEBUG] Done writing mesh instances");
     
     // Write light blocks (Phase 5B)
     for (idx, (lamp_ptr, object_ptr, mat_ptr, matbits_ptr, _)) in light_instances.iter().enumerate() {
@@ -998,14 +1005,18 @@ pub fn create_scene_blend(
     }
     
     // Write ID stubs for external mesh references
+    eprintln!("[DEBUG] Writing {} ID stubs", mesh_id_stub_data.len());
     for (idx, id_stub_data) in mesh_id_stub_data.iter() {
         write_block(&mut out, b"ID\0\0", SDNA_IDX_ID, id_stub_ptrs[*idx], 1, &id_stub_data);
     }
+    eprintln!("[DEBUG] Done writing ID stubs");
     
     // Write library blocks for linked meshes
+    eprintln!("[DEBUG] Writing {} library blocks", mesh_library_data.len());
     for (idx, lib_data) in mesh_library_data.iter() {
         write_block(&mut out, b"LI\0\0", SDNA_IDX_LIBRARY, library_ptrs[*idx], 1, lib_data);
     }
+    eprintln!("[DEBUG] Done writing library blocks");
     
     // Write scene name
     write_block(&mut out, b"DATA", 0, scene_name_ptr, 1, scene_name_bytes.as_bytes());
