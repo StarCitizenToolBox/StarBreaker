@@ -24,8 +24,9 @@ use starbreaker_blend::{
     ATTR_TYPE_FLOAT2, ATTR_TYPE_FLOAT3, ATTR_TYPE_INT, BLEND_MAGIC, DNA1_BYTES,
     SDNA_IDX_ATTRIBUTE, SDNA_IDX_BASE, SDNA_IDX_COLLECTION, SDNA_IDX_COLLECTION_OBJECT,
     SDNA_IDX_DNA1, SDNA_IDX_FILE_GLOBAL, SDNA_IDX_LAYER_COLLECTION, SDNA_IDX_MESH,
-    SDNA_IDX_OBJECT, SDNA_IDX_SCENE, SDNA_IDX_VIEW_LAYER, SDNA_IDX_LIBRARY,
-    build_lamp, build_lamp_object, build_empty_object, build_library_block, LAMP_SIZE, OBJECT_SIZE,
+    SDNA_IDX_OBJECT, SDNA_IDX_SCENE, SDNA_IDX_VIEW_LAYER, SDNA_IDX_LIBRARY, SDNA_IDX_ID,
+    build_lamp, build_lamp_object, build_empty_object, build_linked_instance_object,
+    build_library_block, build_id_stub, LAMP_SIZE, OBJECT_SIZE, ID_STUB_SIZE,
     build_bdeformgroup, build_mdeformvert_array, build_mdeformweight_array, 
     build_custom_data_layer_mdeformvert, SDNA_IDX_BDEFORMGROUP, SDNA_IDX_MDEFORMVERT,
 };
@@ -91,6 +92,10 @@ pub fn write_decomposed_export_blend(
         
         mesh_data_map.insert(entity_key, entry);
     }
+    
+    // Extract minimal data needed for scene.blend before passing input to write_decomposed_export
+    let scene_entity_name = input.entity_name.clone();
+    let children_for_scene = input.children.iter().map(|c| c.entity_name.clone()).collect::<Vec<_>>();
     
     // Phase 3: Extract lights and empties BEFORE calling write_decomposed_export
     let extracted_lights = extract_lights_from_interiors(&input.interiors)
@@ -252,12 +257,17 @@ pub fn write_decomposed_export_blend(
     }
 
     // Phase 3: Create scene.blend with lights and empties
-    if !extracted_lights.is_empty() || !extracted_empties.is_empty() {
-        report_progress(progress, 0.7, "Creating scene.blend with lights and empties");
-        
-        // TODO: Implement scene.blend creation with lights and empties
-        // For now, this integrates the extraction logic
-    }
+    report_progress(progress, 0.7, "Creating scene.blend with linked mesh instances");
+    
+    // Create scene.blend with properly linked mesh instances
+    let scene_blend_bytes = create_scene_blend(&scene_entity_name, children_for_scene.len(), "Data/Objects")?;
+    
+    // Add scene.blend to the export
+    blend_files.push(ExportedFile {
+        relative_path: "scene.blend".to_string(),
+        bytes: scene_blend_bytes,
+        kind: ExportedFileKind::MeshAsset,
+    });
 
     // Combine blend mesh files with other files
     let mut all_files = blend_files;
@@ -638,8 +648,8 @@ pub struct LinkedMeshInstance {
 /// Create a scene.blend file that links together all individual mesh .blend files.
 ///
 /// **Phase 5A Context:**
-/// - Input: DecomposedInput with mesh data and asset paths
-/// - Output: A valid .blend file at `output_path` containing:
+/// - Input: Entity name and number of children
+/// - Output: A valid .blend file containing:
 ///   - Root scene object (empty at origin)
 ///   - Collections organized by entity type (Meshes, Lights, Empties, Decals)
 ///   - Linked instances pointing to mesh .blend files with relative paths
@@ -659,19 +669,19 @@ pub struct LinkedMeshInstance {
 ///
 /// # Arguments
 ///
-/// * `input` - DecomposedInput containing entity data, children, and scene info
-/// * `output_path` - File path to write the .blend file (e.g., "scene.blend")
+/// * `entity_name` - Name of the scene entity
+/// * `children_count` - Number of mesh child objects to create
 /// * `mesh_output_dir` - Directory containing the mesh .blend files (e.g., "Data/Objects")
 ///
 /// # Returns
 ///
 /// Raw uncompressed .blend bytes ready for file write or further compression
 pub fn create_scene_blend(
-    input: &DecomposedInput,
-    _output_path: &str,
+    entity_name: &str,
+    children_count: usize,
     mesh_output_dir: &str,
 ) -> Result<Vec<u8>, Error> {
-    // Allocate fake pointers for all scene datablocks
+    // Build a minimal input structure for compatibility with internal logic
     let mut ptrs = PtrAlloc::new(0x1000);
     
     let scene_ptr = ptrs.alloc();
@@ -707,7 +717,7 @@ pub fn create_scene_blend(
     let mut mesh_instances = Vec::new();
     let mut library_ptrs = Vec::new();
     
-    for (idx, _child) in input.children.iter().enumerate() {
+        for idx in 0..children_count {
         let object_ptr = ptrs.alloc();
         let object_mat_ptr = ptrs.alloc();
         let object_matbits_ptr = ptrs.alloc();
@@ -718,7 +728,7 @@ pub fn create_scene_blend(
     }
     
     // Build scene datablocks
-    let scene_name = input.entity_name.clone();
+    let scene_name = entity_name.to_string();
     let scene_data = build_scene(&scene_name, view_layer_ptr, root_collection_ptr);
     let view_layer_data = build_view_layer(&scene_name, base_ptr, layer_collection_ptr);
     let base_data = build_base(root_object_ptr);
@@ -783,13 +793,20 @@ pub fn create_scene_blend(
     let scene_name_bytes = format!("{}\0", scene_name);
     let scene_name_ptr = ptrs.alloc();
     
+    // Allocate pointers for ID stubs (one per mesh)
+    let mut id_stub_ptrs = Vec::new();
+    for _idx in 0..children_count {
+        id_stub_ptrs.push(ptrs.alloc());
+    }
+    
     // Build mesh instance objects with library links
     let mut mesh_instance_data = Vec::new();
     let mut mesh_library_data = Vec::new();
+    let mut mesh_id_stub_data = Vec::new();
     let mut mesh_object_mat_arrays = Vec::new();
     let mut mesh_object_matbits = Vec::new();
     
-    for (idx, _child) in input.children.iter().enumerate() {
+    for idx in 0..children_count {
         // Build mesh reference name
         let mesh_ref_name = format!("mesh_{}", idx);
         let blend_filename = format!("{}.blend", mesh_ref_name);
@@ -797,11 +814,17 @@ pub fn create_scene_blend(
         
         // Build library block for this mesh file
         let lib_data = build_library_block(&format!("LI_{}", idx), &blend_path);
-        mesh_library_data.push(lib_data);
+        mesh_library_data.push((idx, lib_data));
         
-        // Build object for linked mesh instance
-        let mesh_object = build_empty_object(
+        // Build ID stub that points to the mesh from the external library
+        let id_stub_name = format!("mesh_stub_{}", idx);
+        let id_stub_data = build_id_stub("ME", &id_stub_name, library_ptrs[idx]);
+        mesh_id_stub_data.push((idx, id_stub_data));
+        
+        // Build object for linked mesh instance (using ID stub pointer)
+        let mesh_object = build_linked_instance_object(
             &mesh_ref_name,
+            id_stub_ptrs[idx],  // Point to ID stub
             [0.0, 0.0, 0.0],  // position at origin
             [1.0, 0.0, 0.0, 0.0],  // quaternion identity
             [1.0, 1.0, 1.0],  // scale
@@ -860,9 +883,14 @@ pub fn create_scene_blend(
         write_block(&mut out, b"DATA", 0, *matbits_ptr, 1, &mesh_object_matbits[idx]);
     }
     
+    // Write ID stubs for external mesh references
+    for (idx, id_stub_data) in mesh_id_stub_data.iter() {
+        write_block(&mut out, b"ID\0\0", SDNA_IDX_ID, id_stub_ptrs[*idx], 1, &id_stub_data);
+    }
+    
     // Write library blocks for linked meshes
-    for (idx, lib_data) in mesh_library_data.iter().enumerate() {
-        write_block(&mut out, b"LI\0\0", SDNA_IDX_LIBRARY, library_ptrs[idx], 1, lib_data);
+    for (idx, lib_data) in mesh_library_data.iter() {
+        write_block(&mut out, b"LI\0\0", SDNA_IDX_LIBRARY, library_ptrs[*idx], 1, lib_data);
     }
     
     // Write scene name
@@ -950,7 +978,7 @@ mod tests_5a_scene_blend {
     #[test]
     fn test_create_scene_blend_basic() {
         let input = create_test_input("TestEntity", 1);
-        let result = create_scene_blend(&input, "scene.blend", "Data/Objects");
+        let result = create_scene_blend("TestEntity", 1, "Data/Objects");
         
         assert!(result.is_ok(), "Function should succeed with basic input");
         
@@ -964,8 +992,7 @@ mod tests_5a_scene_blend {
 
     #[test]
     fn test_create_scene_blend_multiple_meshes() {
-        let input = create_test_input("MultiMesh", 5);
-        let result = create_scene_blend(&input, "scene.blend", "Data/Objects");
+        let result = create_scene_blend("MultiMesh", 5, "Data/Objects");
         
         assert!(result.is_ok(), "Function should succeed with multiple children");
         
@@ -976,15 +1003,14 @@ mod tests_5a_scene_blend {
         assert_eq!(&blend_bytes[0..17], b"BLENDER17-01v0501", "Should have valid Blender header");
         
         // With 5 children, the file should be larger than with 1
-        let single = create_scene_blend(&create_test_input("Single", 1), "scene.blend", "Data/Objects")
+        let single = create_scene_blend("Single", 1, "Data/Objects")
             .unwrap();
         assert!(blend_bytes.len() > single.len(), "Multiple meshes should produce larger file");
     }
 
     #[test]
     fn test_create_scene_blend_collections_structure() {
-        let input = create_test_input("CollTest", 2);
-        let result = create_scene_blend(&input, "scene.blend", "Data/Objects");
+        let result = create_scene_blend("CollTest", 2, "Data/Objects");
         
         assert!(result.is_ok(), "Function should succeed");
         
@@ -1001,8 +1027,7 @@ mod tests_5a_scene_blend {
 
     #[test]
     fn test_create_scene_blend_file_format() {
-        let input = create_test_input("FormatTest", 1);
-        let result = create_scene_blend(&input, "scene.blend", "Data/Objects");
+        let result = create_scene_blend("FormatTest", 1, "Data/Objects");
         
         assert!(result.is_ok(), "Function should succeed");
         
@@ -1027,8 +1052,7 @@ mod tests_5a_scene_blend {
 
     #[test]
     fn test_create_scene_blend_relative_paths() {
-        let input = create_test_input("RelPath", 2);
-        let result = create_scene_blend(&input, "scene.blend", "Data/Objects");
+        let result = create_scene_blend("RelPath", 2, "Data/Objects");
         
         assert!(result.is_ok(), "Function should succeed");
         
@@ -1043,8 +1067,7 @@ mod tests_5a_scene_blend {
 
     #[test]
     fn test_create_scene_blend_empty_children() {
-        let input = create_test_input("NoChildren", 0);
-        let result = create_scene_blend(&input, "scene.blend", "Data/Objects");
+        let result = create_scene_blend("NoChildren", 0, "Data/Objects");
         
         assert!(result.is_ok(), "Function should succeed even with no children");
         
@@ -1055,8 +1078,7 @@ mod tests_5a_scene_blend {
 
     #[test]
     fn test_create_scene_blend_output_not_compressed() {
-        let input = create_test_input("NoCompress", 1);
-        let result = create_scene_blend(&input, "scene.blend", "Data/Objects");
+        let result = create_scene_blend("NoCompress", 1, "Data/Objects");
         
         assert!(result.is_ok(), "Function should succeed");
         

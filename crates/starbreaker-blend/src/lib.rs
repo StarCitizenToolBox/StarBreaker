@@ -385,6 +385,33 @@ pub fn build_lamp_object(
     data
 }
 
+/// Build an `OB_EMPTY` Object that links to an external mesh via an ID stub.
+///
+/// This creates an instance that references a mesh datablock from an external library.
+/// The object contains a pointer to an ID stub which in turn points to the library.
+pub fn build_linked_instance_object(
+    object_name: &str,
+    id_stub_ptr: u64,
+    loc: [f32; 3],
+    quat: [f32; 4],
+    scale: [f32; 3],
+    parent_ptr: u64,
+) -> Vec<u8> {
+    let mut data = vec![0u8; OBJECT_SIZE];
+    write_id_name(&mut data, "OB", object_name);
+    write_i16(&mut data, 416, 0); // OB_EMPTY
+    write_ptr(&mut data, 496, parent_ptr);
+    write_ptr(&mut data, 552, id_stub_ptr); // Point to the ID stub instead of leaving blank
+    for i in 0..3 { write_f32(&mut data, 736 + i * 4, loc[i]); }
+    for i in 0..3 { write_f32(&mut data, 760 + i * 4, scale[i]); }
+    for i in 0..4 { write_f32(&mut data, 820 + i * 4, quat[i]); }
+    write_i16(&mut data, 1040, 0);
+    if parent_ptr != 0 {
+        write_identity_matrix4x4(&mut data, 884);
+    }
+    data
+}
+
 /// Build a `Lamp` (Light) datablock.
 ///
 /// `lamp_type`: 0 = POINT, 1 = SUN, 2 = SPOT, 4 = AREA.

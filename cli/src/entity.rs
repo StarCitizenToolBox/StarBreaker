@@ -220,8 +220,9 @@ fn export(
     dump_hierarchy: bool,
     opts: ExportOpts,
 ) -> Result<()> {
-    // Route blend format to a dedicated code path
-    if opts.format.to_lowercase() == "blend" {
+    // Route blend format or decomposed exports to dedicated blend code path
+    // Decomposed exports now generate scene.blend with linked mesh instances (Phase 5A)
+    if opts.format.to_lowercase() == "blend" || opts.kind.to_lowercase() == "decomposed" {
         return export_blend(name, output, p4k_path, opts);
     }
 
@@ -373,11 +374,8 @@ fn export_blend(
         let tree = resolve_loadout_indexed(&idx, record);
         let mut export_opts = starbreaker_3d::ExportOptions::from(&opts);
         export_opts.kind = starbreaker_3d::ExportKind::Decomposed;
-        // The decomposed pipeline emits scene.json + mesh assets in GLB (or .blend if requested).
-        // Preserve the format from the command line if it was explicitly set.
-        if opts.format.to_lowercase() != "blend" {
-            export_opts.format = starbreaker_3d::ExportFormat::Glb;
-        }
+        // For decomposed exports, always use Blend format to generate scene.blend with linked mesh instances (Phase 5A)
+        export_opts.format = starbreaker_3d::ExportFormat::Blend;
 
         let output_dir = output.unwrap_or_else(|| PathBuf::from(&name));
         let package_name = format!(
