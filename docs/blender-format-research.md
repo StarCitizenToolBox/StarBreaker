@@ -160,7 +160,7 @@ _Extracted from SDNA in Blender 5.1 source using official struct definitions._
 | Struct           | SDNA size (bytes) | SDNA struct_idx | SDNA type_idx |
 |------------------|-------------------|-----------------|---------------|
 | `ID`             | 408               | —               | 26            |
-| `Object`         | 1280              | —               | 51            |
+| `Object`         | 1288              | —               | 51            |
 | `Mesh`           | 1960              | —               | 248           |
 | `Lamp`           | 568               | 253             | 343           |
 | `Scene`          | 6920              | —               | 242           |
@@ -179,7 +179,7 @@ _Extracted from SDNA in Blender 5.1 source using official struct definitions._
 | `Link`           | 16                | —               | 397           |
 | `Base`           | 48                | —               | 334           |
 
-### 11.2 Object struct (size=1280)
+### 11.2 Object struct (size=1288)
 
 Confirmed from Blender 5.1 SDNA:
 
@@ -314,6 +314,20 @@ Stored via a legacy array (not a `CustomData` layer in Blender 5.x):
 > layers on the `vert` domain for the Geometry Nodes pipeline. However, the legacy
 > `MDeformVert` path is still the authoritative source for armature/skin weights and
 > is what the StarBreaker addon reads. Use the legacy path.
+
+### Attribute type enums (from DNA_customdata_types.h)
+
+Complete enumeration of attribute type numeric codes:
+
+| Symbolic Name | Value | Size (bytes) | Description |
+|---------------|-------|--------------|-------------|
+| `CD_PROP_INT16_2D` | 2 | 4 | Two i16 values (custom normals in octahedral format) |
+| `CD_PROP_INT` | 3 | 4 | Single i32 integer |
+| `CD_PROP_FLOAT2` | 6 | 8 | Two float32 values (UVs, 2D texture coordinates) |
+| `CD_PROP_FLOAT3` | 7 | 12 | Three float32 values (positions, normals, colors) |
+| `CD_PROP_BYTE_COLOR` | 9 | 4 | Four u8 values (RGBA vertex colors, 0-255 range) |
+
+**Source**: `makesdna/DNA_customdata_types.h` — CMake-generated enum from DNA source
 
 ---
 
@@ -604,7 +618,7 @@ Library blocks represent references to external .blend files. This is essential 
 
 **Location**: `DNA_ID.h:210 - struct Library`
 
-**Total Serialized Size**: **1456 bytes** (408 ID + 1024 filepath + others)
+**Total Serialized Size**: **1426 bytes** (408 ID + 1024 filepath + 2 flag + 2 undo_tag + 4 pad + 24 pointers)
 
 | Field | Offset | Size | Type | Description |
 |-------|--------|------|------|-------------|
@@ -626,7 +640,7 @@ Library blocks represent references to external .blend files. This is essential 
 |-------|-------|
 | `code` | `ID_LI` |
 | `sdna_idx` | Points to Library struct SDNA index |
-| `len` | 1456 (serialized Library struct size) |
+| `len` | 1426 (serialized Library struct size) |
 | `count` | 1 (one struct per block) |
 
 ### Multiple Library Blocks
@@ -639,7 +653,7 @@ Library blocks represent references to external .blend files. This is essential 
 
 1. Create `BHead` with:
    - `code = ID_LI`
-   - `len = 1456`
+   - `len = 1426`
    - `sdna_idx = <SDNA index of Library struct>`
 2. Serialize Library struct:
    - Set `id.name` to unique identifier
