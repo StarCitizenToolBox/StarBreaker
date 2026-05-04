@@ -19,14 +19,15 @@ use starbreaker_blend::{
     bytes4_data, build_attribute, build_attribute_array, build_base, build_collection,
     build_master_collection, build_collection_object, build_collection_object_linked,
     build_file_global, build_layer_collection, build_layer_collection_linked, build_mat_ptr_array,
-    build_mat_ptr_array_from_ptrs, build_material, build_matbits, build_mesh, build_object, build_scene, build_tool_settings,
+    build_empty_shader_node_tree, build_mat_ptr_array_from_ptrs, build_material_with_node_tree,
+    build_matbits, build_mesh, build_object, build_scene, build_tool_settings,
     build_view_layer,
     floats2_data, floats3_data, ints_data, startup_ui_prefix_bytes, write_block, write_block_header, PtrAlloc,
     ATTR_DOMAIN_CORNER, ATTR_DOMAIN_EDGE, ATTR_DOMAIN_FACE, ATTR_DOMAIN_POINT, ATTR_TYPE_BYTE_COLOR,
     ATTR_TYPE_FLOAT2, ATTR_TYPE_FLOAT3, ATTR_TYPE_INT, BLEND_MAGIC, DNA1_BYTES,
     SDNA_IDX_ATTRIBUTE, SDNA_IDX_ATTRIBUTE_ARRAY, SDNA_IDX_BASE, SDNA_IDX_COLLECTION, SDNA_IDX_COLLECTION_CHILD,
     SDNA_IDX_COLLECTION_OBJECT, SDNA_IDX_DNA1, SDNA_IDX_FILE_GLOBAL, SDNA_IDX_LAYER_COLLECTION,
-    SDNA_IDX_MATERIAL, SDNA_IDX_MESH, SDNA_IDX_OBJECT, SDNA_IDX_SCENE, SDNA_IDX_TOOL_SETTINGS,
+    SDNA_IDX_BNODE_TREE, SDNA_IDX_MATERIAL, SDNA_IDX_MESH, SDNA_IDX_OBJECT, SDNA_IDX_SCENE, SDNA_IDX_TOOL_SETTINGS,
     SDNA_IDX_VIEW_LAYER, SDNA_IDX_LIBRARY, SDNA_IDX_ID,
     build_lamp, build_lamp_object, build_empty_object,
     build_library_block, build_id_stub, LAMP_SIZE, OBJECT_SIZE,
@@ -120,7 +121,7 @@ fn blend_mesh_asset_relative_path(
 ///
 /// **Phase 4**: Decal Vertex Groups Integration
 /// - Identifies decal materials in each mesh
-/// - Creates StarBreaker_Decals vertex groups with decal vertices
+/// - Creates starbreaker_decal_offset vertex groups with decal vertices
 /// - Adds vertex groups to individual mesh .blend files
 ///
 /// Returns `DecomposedExport` with all files including real mesh geometry
@@ -486,6 +487,7 @@ fn mesh_to_blend_flat(
     let obj_mat_ptr    = ptrs.alloc();
     let obj_matbits_ptr = ptrs.alloc();
     let material_ptrs: Vec<u64> = (0..material_names.len()).map(|_| ptrs.alloc()).collect();
+    let material_node_tree_ptrs: Vec<u64> = (0..material_names.len()).map(|_| ptrs.alloc()).collect();
     let scene_ptr      = ptrs.alloc();
     let view_layer_ptr = ptrs.alloc();
     let tool_settings_ptr = ptrs.alloc();
@@ -816,9 +818,15 @@ fn mesh_to_blend_flat(
         }
     }
 
-    for (material_ptr, material_name) in material_ptrs.iter().zip(material_names.iter()) {
-        let material_data = build_material(material_name);
+    for ((material_ptr, node_tree_ptr), material_name) in material_ptrs
+        .iter()
+        .zip(material_node_tree_ptrs.iter())
+        .zip(material_names.iter())
+    {
+        let material_data = build_material_with_node_tree(material_name, *node_tree_ptr);
         write_block(&mut out, b"MA\0\0", SDNA_IDX_MATERIAL, *material_ptr, 1, &material_data);
+        let node_tree_data = build_empty_shader_node_tree(*material_ptr);
+        write_block(&mut out, b"DATA", SDNA_IDX_BNODE_TREE, *node_tree_ptr, 1, &node_tree_data);
     }
 
     write_block(&mut out, b"DNA1", SDNA_IDX_DNA1, 0x01, 1, DNA1_BYTES);
@@ -886,6 +894,7 @@ struct MeshBlockData {
     raw_uv: Option<Vec<u8>>,
     raw_color: Option<Vec<u8>>,
     attr_blob: Vec<u8>,
+    material_slot_indices: Vec<usize>,
 }
 
 fn strip_lod_suffix(name: &str) -> String {
@@ -1166,11 +1175,35 @@ fn subset_mesh_for_submeshes(
     )
 }
 
+fn local_material_slot_map(
+    mesh: &Mesh,
+    global_slot_by_material_id: &HashMap<u32, usize>,
+) -> (HashMap<u32, usize>, Vec<usize>) {
+    let mut local_slot_by_material_id = HashMap::new();
+    let mut global_slot_indices = Vec::new();
+    for submesh in &mesh.submeshes {
+        if local_slot_by_material_id.contains_key(&submesh.material_id) {
+            continue;
+        }
+        let Some(&global_slot) = global_slot_by_material_id.get(&submesh.material_id) else {
+            continue;
+        };
+        let local_slot = global_slot_indices.len();
+        local_slot_by_material_id.insert(submesh.material_id, local_slot);
+        global_slot_indices.push(global_slot);
+    }
+    if global_slot_indices.is_empty() {
+        global_slot_indices.push(0);
+    }
+    (local_slot_by_material_id, global_slot_indices)
+}
+
 fn allocate_mesh_block(
     ptrs: &mut PtrAlloc,
     mesh: &Mesh,
     vertex_groups: Option<&Vec<VertexGroup>>,
     submesh_slot_by_material_id: &HashMap<u32, usize>,
+    material_slot_indices: Vec<usize>,
 ) -> MeshBlockData {
     let totvert = mesh.positions.len();
     let totloop = mesh.indices.len();
@@ -1333,6 +1366,7 @@ fn allocate_mesh_block(
         raw_uv,
         raw_color,
         attr_blob,
+        material_slot_indices,
     }
 }
 
@@ -1341,11 +1375,15 @@ fn write_mesh_block(
     block: &MeshBlockData,
     object: &MeshObjectExport,
     material_ptrs: &[u64],
-    material_names: &[String],
-    mat_slots: i16,
     parent_ptr: u64,
     transform: ([f32; 3], [f32; 4], [f32; 3]),
 ) {
+    let object_material_ptrs = block
+        .material_slot_indices
+        .iter()
+        .filter_map(|&slot| material_ptrs.get(slot).copied())
+        .collect::<Vec<_>>();
+    let mat_slots = object_material_ptrs.len() as i16;
     let mut object_data = build_object(
         &object.name,
         block.mesh_ptr,
@@ -1371,7 +1409,7 @@ fn write_mesh_block(
         block.cdl_ptr,
         block.num_attrs,
     );
-    let mesh_mat_array = build_mat_ptr_array_from_ptrs(material_ptrs);
+    let mesh_mat_array = build_mat_ptr_array_from_ptrs(&object_material_ptrs);
     let obj_mat_array = build_mat_ptr_array(mat_slots as usize);
     let obj_matbits = build_matbits(mat_slots as usize);
     write_block(out, b"OB\0\0", SDNA_IDX_OBJECT, block.object_ptr, 1, &object_data);
@@ -1451,7 +1489,6 @@ fn mesh_to_blend_hierarchy(
     vertex_groups: Option<&Vec<VertexGroup>>,
 ) -> Vec<u8> {
     let (material_names, full_submesh_slots) = blend_material_slots(name, mesh, materials);
-    let mat_slots = material_names.len() as i16;
     let mut submesh_slot_by_material_id = HashMap::new();
     for (submesh, slot) in mesh.submeshes.iter().zip(full_submesh_slots.iter().copied()) {
         submesh_slot_by_material_id.entry(submesh.material_id).or_insert(slot);
@@ -1513,16 +1550,20 @@ fn mesh_to_blend_hierarchy(
         .iter()
         .map(|object| {
             object.as_ref().map(|object| {
+                let (local_slot_by_material_id, material_slot_indices) =
+                    local_material_slot_map(&object.mesh, &submesh_slot_by_material_id);
                 allocate_mesh_block(
                     &mut ptrs,
                     &object.mesh,
                     object.vertex_groups.as_ref(),
-                    &submesh_slot_by_material_id,
+                    &local_slot_by_material_id,
+                    material_slot_indices,
                 )
             })
         })
         .collect::<Vec<_>>();
     let material_ptrs = (0..material_names.len()).map(|_| ptrs.alloc()).collect::<Vec<_>>();
+    let material_node_tree_ptrs = (0..material_names.len()).map(|_| ptrs.alloc()).collect::<Vec<_>>();
     let scene_ptr = ptrs.alloc();
     let view_layer_ptr = ptrs.alloc();
     let tool_settings_ptr = ptrs.alloc();
@@ -1615,7 +1656,7 @@ fn mesh_to_blend_hierarchy(
         };
         if let (Some(object), Some(block)) = (&mesh_objects[node_index], &mesh_blocks[node_index]) {
             if block.object_ptr == nmc_object_ptrs[node_index] {
-                write_mesh_block(&mut out, block, object, &material_ptrs, &material_names, mat_slots, parent_ptr, transform);
+                write_mesh_block(&mut out, block, object, &material_ptrs, parent_ptr, transform);
             } else {
                 let cloned = MeshBlockData {
                     object_ptr: nmc_object_ptrs[node_index],
@@ -1667,8 +1708,9 @@ fn mesh_to_blend_hierarchy(
                     raw_uv: block.raw_uv.clone(),
                     raw_color: block.raw_color.clone(),
                     attr_blob: block.attr_blob.clone(),
+                    material_slot_indices: block.material_slot_indices.clone(),
                 };
-                write_mesh_block(&mut out, &cloned, object, &material_ptrs, &material_names, mat_slots, parent_ptr, transform);
+                write_mesh_block(&mut out, &cloned, object, &material_ptrs, parent_ptr, transform);
             }
         } else {
             let object_name = nmc_export_names[node_index].clone();
@@ -1679,9 +1721,15 @@ fn mesh_to_blend_hierarchy(
         }
     }
 
-    for (material_ptr, material_name) in material_ptrs.iter().zip(material_names.iter()) {
-        let material_data = build_material(material_name);
+    for ((material_ptr, node_tree_ptr), material_name) in material_ptrs
+        .iter()
+        .zip(material_node_tree_ptrs.iter())
+        .zip(material_names.iter())
+    {
+        let material_data = build_material_with_node_tree(material_name, *node_tree_ptr);
         write_block(&mut out, b"MA\0\0", SDNA_IDX_MATERIAL, *material_ptr, 1, &material_data);
+        let node_tree_data = build_empty_shader_node_tree(*material_ptr);
+        write_block(&mut out, b"DATA", SDNA_IDX_BNODE_TREE, *node_tree_ptr, 1, &node_tree_data);
     }
 
     write_block(&mut out, b"DNA1", SDNA_IDX_DNA1, 0x01, 1, DNA1_BYTES);
@@ -2342,6 +2390,24 @@ mod tests_5a_scene_blend {
                 .count(),
             2,
             "each geometry-bearing NMC node should get its own mesh"
+        );
+        let mesh_material_counts = blocks
+            .iter()
+            .filter(|block| block.code == b"ME\0\0")
+            .map(|block| i16::from_le_bytes(block.data[1618..1620].try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            mesh_material_counts,
+            vec![1, 1],
+            "split NMC mesh objects should only reference the material slots used by that object"
+        );
+        assert_eq!(
+            blocks
+                .iter()
+                .filter(|block| block.code == b"MA\0\0")
+                .count(),
+            2,
+            "the file should still contain the full material table for all split objects"
         );
         assert!(
             object_names.len() > 1,
@@ -4865,13 +4931,13 @@ mod tests_4a {
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
-// Phase 4B: Create StarBreaker_Decals Vertex Group
+// Phase 4B: Create starbreaker_decal_offset Vertex Group
 // ════════════════════════════════════════════════════════════════════════════════
 
 /// Vertex group metadata
 #[derive(Debug, Clone)]
 pub struct VertexGroup {
-    /// Name of the vertex group (e.g., "StarBreaker_Decals")
+    /// Name of the vertex group (e.g., "starbreaker_decal_offset")
     pub name: String,
     /// Indices of vertices in the group
     pub vertex_indices: Vec<usize>,
@@ -4930,7 +4996,7 @@ pub fn map_faces_to_vertices(
 /// Create vertex group for decal materials
 ///
 /// Consolidates all vertices from all decal/POM materials into a single
-/// "StarBreaker_Decals" vertex group. This allows Blender addons to target
+/// "starbreaker_decal_offset" vertex group. This allows Blender addons to target
 /// all decal vertices with modifiers.
 ///
 /// Returns the combined set of vertex indices from all decal material faces.
@@ -4949,7 +5015,7 @@ pub fn collect_decal_vertices(
     
     // Create single consolidated vertex group
     let decal_vgroup = VertexGroup {
-        name: "StarBreaker_Decals".to_string(),
+        name: "starbreaker_decal_offset".to_string(),
         vertex_indices,
     };
     
@@ -5146,7 +5212,7 @@ mod tests_4b {
         assert_eq!(result.mesh_name, "Mesh_001");
         assert_eq!(result.total_vertices, 6);
         assert_eq!(result.vertex_groups.len(), 1);
-        assert_eq!(result.vertex_groups[0].name, "StarBreaker_Decals");
+        assert_eq!(result.vertex_groups[0].name, "starbreaker_decal_offset");
         assert_eq!(result.vertex_groups[0].vertex_indices, vec![0, 1, 2]);
     }
     
@@ -5179,7 +5245,7 @@ mod tests_4b {
         let face_indices = vec![0, 2];  // First and third faces
         
         let result = collect_decal_vertices(&mesh_with_decals, &face_indices, &corner_verts, 3).unwrap();
-        assert_eq!(result.vertex_groups[0].name, "StarBreaker_Decals");
+        assert_eq!(result.vertex_groups[0].name, "starbreaker_decal_offset");
         // Should contain vertices from faces 0 and 2: {0, 1, 2, 4, 5, 6}
         assert_eq!(result.vertex_groups[0].vertex_indices.len(), 6);
     }
@@ -5196,7 +5262,7 @@ mod tests_4b {
         let face_indices = vec![];
         
         let result = collect_decal_vertices(&mesh_with_decals, &face_indices, &corner_verts, 3).unwrap();
-        assert_eq!(result.vertex_groups[0].name, "StarBreaker_Decals");
+        assert_eq!(result.vertex_groups[0].name, "starbreaker_decal_offset");
         assert_eq!(result.vertex_groups[0].vertex_indices.len(), 0);
     }
     
@@ -5204,7 +5270,7 @@ mod tests_4b {
     fn test_validate_vertex_groups_valid() {
         let vgroups = vec![
             VertexGroup {
-                name: "StarBreaker_Decals".to_string(),
+                name: "starbreaker_decal_offset".to_string(),
                 vertex_indices: vec![0, 1, 2, 3],
             },
         ];

@@ -95,6 +95,13 @@ fn material_size_is_584() {
 }
 
 #[test]
+fn bnode_tree_size_is_736() {
+    let ntree = build_empty_shader_node_tree(0x2000);
+    assert_eq!(ntree.len(), BNODE_TREE_SIZE);
+    assert_eq!(BNODE_TREE_SIZE, 736);
+}
+
+#[test]
 fn empty_object_size_is_1288() {
     let ob = build_empty_object("Empty", [0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 0);
     assert_eq!(ob.len(), OBJECT_SIZE);
@@ -226,6 +233,55 @@ fn material_uses_visible_opaque_defaults() {
     assert_eq!(ma[532], 0); // blend_method = MA_BM_SOLID
     assert_eq!(ma[533], 1); // blend_shadow = MA_BS_SOLID
     assert_eq!(ma[534], 1 << 6); // blend_flag = MA_BL_TRANSPARENT_SHADOW
+}
+
+#[test]
+fn material_with_node_tree_sets_nodetree_pointer() {
+    let ma = build_material_with_node_tree("Hull", 0xfeed_cafe_u64);
+
+    assert_eq!(ma[472], 1); // use_nodes compatibility byte
+    assert_eq!(u64::from_le_bytes(ma[480..488].try_into().unwrap()), 0xfeed_cafe_u64);
+}
+
+#[test]
+fn empty_shader_node_tree_has_embedded_shader_identity() {
+    let ntree = build_empty_shader_node_tree(0xaaaa_bbbb_u64);
+
+    let name = ntree[40..100].split(|&c| c == 0).next().unwrap();
+    assert_eq!(name, b"NTShader Nodetree");
+    assert_eq!(i16::from_le_bytes(ntree[298..300].try_into().unwrap()), 0x0400);
+    assert_eq!(u64::from_le_bytes(ntree[416..424].try_into().unwrap()), 0xaaaa_bbbb_u64);
+    let idname = ntree[432..496].split(|&c| c == 0).next().unwrap();
+    assert_eq!(idname, b"ShaderNodeTree");
+    assert_eq!(i32::from_le_bytes(ntree[552..556].try_into().unwrap()), 0); // NTREE_SHADER
+    assert_eq!(u64::from_le_bytes(ntree[520..528].try_into().unwrap()), 0); // nodes.first
+    assert_eq!(u64::from_le_bytes(ntree[528..536].try_into().unwrap()), 0); // nodes.last
+    assert_eq!(u64::from_le_bytes(ntree[536..544].try_into().unwrap()), 0); // links.first
+    assert_eq!(u64::from_le_bytes(ntree[544..552].try_into().unwrap()), 0); // links.last
+}
+
+#[test]
+fn material_node_tree_blocks_use_ma_then_embedded_data_order() {
+    let ma_ptr = 0x1000_u64;
+    let ntree_ptr = 0x1010_u64;
+    let ma = build_material_with_node_tree("Hull", ntree_ptr);
+    let ntree = build_empty_shader_node_tree(ma_ptr);
+    let mut out = Vec::new();
+
+    write_block(&mut out, b"MA\0\0", SDNA_IDX_MATERIAL, ma_ptr, 1, &ma);
+    write_block(&mut out, b"DATA", SDNA_IDX_BNODE_TREE, ntree_ptr, 1, &ntree);
+
+    assert_eq!(&out[0..4], b"MA\0\0");
+    assert_eq!(u64::from_le_bytes(out[8..16].try_into().unwrap()), ma_ptr);
+    assert_eq!(&out[32 + MATERIAL_SIZE..32 + MATERIAL_SIZE + 4], b"DATA");
+    assert_eq!(
+        u32::from_le_bytes(out[32 + MATERIAL_SIZE + 4..32 + MATERIAL_SIZE + 8].try_into().unwrap()),
+        SDNA_IDX_BNODE_TREE
+    );
+    assert_eq!(
+        u64::from_le_bytes(out[32 + MATERIAL_SIZE + 8..32 + MATERIAL_SIZE + 16].try_into().unwrap()),
+        ntree_ptr
+    );
 }
 
 #[test]

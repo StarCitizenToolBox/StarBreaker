@@ -34,6 +34,7 @@ pub const SDNA_IDX_BASE: u32 = 246;
 pub const SDNA_IDX_VIEW_LAYER: u32 = 252;
 pub const SDNA_IDX_MATERIAL: u32 = 321;
 pub const SDNA_IDX_MESH: u32 = 322;
+pub const SDNA_IDX_BNODE_TREE: u32 = 473;
 pub const SDNA_IDX_OBJECT: u32 = 692;
 pub const SDNA_IDX_SCENE: u32 = 757;
 pub const SDNA_IDX_TOOL_SETTINGS: u32 = 747;
@@ -64,6 +65,7 @@ pub const OBJECT_SIZE: usize = 1288;
 pub const MESH_SIZE: usize = 1960;
 pub const LAMP_SIZE: usize = 568;
 pub const MATERIAL_SIZE: usize = 584;
+pub const BNODE_TREE_SIZE: usize = 736;
 pub const ATTRIBUTE_SIZE: usize = 24;
 pub const ATTRIBUTE_ARRAY_SIZE: usize = 32;
 pub const BDEFORMGROUP_SIZE: usize = 88;
@@ -1061,10 +1063,16 @@ pub fn build_matbits(n: usize) -> Vec<u8> {
 }
 
 /// Build a minimal named `Material` datablock.
-///
-/// Phase 2 only needs empty material slots with stable names; node trees and
-/// shader reconstruction remain addon/material-template scope.
 pub fn build_material(material_name: &str) -> Vec<u8> {
+    build_material_with_node_tree(material_name, 0)
+}
+
+/// Build a minimal named `Material` datablock with an optional embedded node tree pointer.
+///
+/// Blender 5.1 keeps `Material.use_nodes` only as a deprecated compatibility
+/// byte; `Material.nodetree` must point at an embedded `bNodeTree` for the node
+/// editor to have an editable shader tree.
+pub fn build_material_with_node_tree(material_name: &str, node_tree_ptr: u64) -> Vec<u8> {
     let mut data = vec![0u8; MATERIAL_SIZE];
     write_id_name(&mut data, "MA", material_name);
     write_f32(&mut data, 420, 0.8); // r
@@ -1078,9 +1086,25 @@ pub fn build_material(material_name: &str) -> Vec<u8> {
     write_f32(&mut data, 464, 0.4); // roughness
     data[472] = 1; // use_nodes, deprecated but written by Blender 5.1 defaults
     data[473] = 1; // pr_type = MA_SPHERE
+    write_ptr(&mut data, 480, node_tree_ptr); // nodetree
     write_f32(&mut data, 524, 0.5); // alpha_threshold
     data[533] = 1; // blend_shadow = MA_BS_SOLID
     data[534] = 1 << 6; // blend_flag = MA_BL_TRANSPARENT_SHADOW
+    data
+}
+
+/// Build an empty embedded shader `bNodeTree` for a material.
+///
+/// Write this as a `DATA` block immediately after its owning `MA` block. An
+/// empty tree is valid in Blender 5.1 and lets Blender/Python/UI add shader
+/// nodes later; default Principled/Output nodes are intentionally not faked.
+pub fn build_empty_shader_node_tree(owner_material_ptr: u64) -> Vec<u8> {
+    let mut data = vec![0u8; BNODE_TREE_SIZE];
+    write_id_name(&mut data, "NT", "Shader Nodetree");
+    write_i16(&mut data, 298, 0x0400); // ID_FLAG_EMBEDDED_DATA
+    write_ptr(&mut data, 416, owner_material_ptr); // owner_id
+    write_cstr_fixed(&mut data, 432, 64, "ShaderNodeTree"); // idname
+    write_i32(&mut data, 552, 0); // type = NTREE_SHADER
     data
 }
 
