@@ -71,15 +71,15 @@ struct ExtractedMaterialEntry {
 }
 
 #[derive(Debug, Clone)]
-struct DecomposedMaterialView {
-    mesh: Mesh,
-    sidecar_materials: Option<MtlFile>,
+pub(crate) struct DecomposedMaterialView {
+    pub(crate) mesh: Mesh,
+    pub(crate) sidecar_materials: Option<MtlFile>,
     /// Original (pre-filter) index in the source `.mtl` for each entry in `sidecar_materials`.
     /// Empty when `sidecar_materials` is `None`; identity mapping (0, 1, 2, …) when no
     /// materials were hidden.
     sidecar_original_indices: Vec<u32>,
-    glb_materials: Option<MtlFile>,
-    glb_nmc: Option<NodeMeshCombo>,
+    pub(crate) glb_materials: Option<MtlFile>,
+    pub(crate) glb_nmc: Option<NodeMeshCombo>,
 }
 
 #[derive(Debug, Clone)]
@@ -342,7 +342,7 @@ fn package_relative_path(package_name: &str, file_name: &str) -> String {
     format!("Packages/{package_name}/{file_name}")
 }
 
-fn build_decomposed_material_view(
+pub(crate) fn build_decomposed_material_view(
     mesh: &Mesh,
     materials: Option<&MtlFile>,
     nmc: Option<&NodeMeshCombo>,

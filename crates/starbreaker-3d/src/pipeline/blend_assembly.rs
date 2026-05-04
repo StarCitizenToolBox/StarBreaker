@@ -17,24 +17,30 @@ use starbreaker_common::progress::{report as report_progress, Progress};
 use starbreaker_p4k::MappedP4k;
 use starbreaker_blend::{
     bytes4_data, build_attribute, build_attribute_array, build_base, build_collection,
-    build_collection_object, build_collection_object_linked, build_file_global, build_layer_collection, build_layer_collection_linked, build_mat_ptr_array,
-    build_matbits, build_mesh, build_mesh_stub, build_object, build_scene, build_view_layer, write_ptr,
-    floats2_data, floats3_data, ints_data, write_block, write_block_header, PtrAlloc,
-    ATTR_DOMAIN_CORNER, ATTR_DOMAIN_FACE, ATTR_DOMAIN_POINT, ATTR_TYPE_BYTE_COLOR,
+    build_master_collection, build_collection_object, build_collection_object_linked,
+    build_file_global, build_layer_collection, build_layer_collection_linked, build_mat_ptr_array,
+    build_mat_ptr_array_from_ptrs, build_material, build_matbits, build_mesh, build_object, build_scene, build_tool_settings,
+    build_view_layer,
+    floats2_data, floats3_data, ints_data, startup_ui_prefix_bytes, write_block, write_block_header, PtrAlloc,
+    ATTR_DOMAIN_CORNER, ATTR_DOMAIN_EDGE, ATTR_DOMAIN_FACE, ATTR_DOMAIN_POINT, ATTR_TYPE_BYTE_COLOR,
     ATTR_TYPE_FLOAT2, ATTR_TYPE_FLOAT3, ATTR_TYPE_INT, BLEND_MAGIC, DNA1_BYTES,
-    SDNA_IDX_ATTRIBUTE, SDNA_IDX_BASE, SDNA_IDX_COLLECTION, SDNA_IDX_COLLECTION_OBJECT,
-    SDNA_IDX_DNA1, SDNA_IDX_FILE_GLOBAL, SDNA_IDX_LAYER_COLLECTION, SDNA_IDX_MESH,
-    SDNA_IDX_OBJECT, SDNA_IDX_SCENE, SDNA_IDX_VIEW_LAYER, SDNA_IDX_LIBRARY, SDNA_IDX_ID,
-    build_lamp, build_lamp_object, build_empty_object, build_linked_instance_object,
-    build_library_block, build_id_stub, LAMP_SIZE, OBJECT_SIZE, ID_STUB_SIZE,
+    SDNA_IDX_ATTRIBUTE, SDNA_IDX_ATTRIBUTE_ARRAY, SDNA_IDX_BASE, SDNA_IDX_COLLECTION, SDNA_IDX_COLLECTION_CHILD,
+    SDNA_IDX_COLLECTION_OBJECT, SDNA_IDX_DNA1, SDNA_IDX_FILE_GLOBAL, SDNA_IDX_LAYER_COLLECTION,
+    SDNA_IDX_MATERIAL, SDNA_IDX_MESH, SDNA_IDX_OBJECT, SDNA_IDX_SCENE, SDNA_IDX_TOOL_SETTINGS,
+    SDNA_IDX_VIEW_LAYER, SDNA_IDX_LIBRARY, SDNA_IDX_ID,
+    build_lamp, build_lamp_object, build_empty_object,
+    build_library_block, build_id_stub, LAMP_SIZE, OBJECT_SIZE,
     build_bdeformgroup, build_mdeformvert_array, build_mdeformweight_array, 
     build_custom_data_layer_mdeformvert, SDNA_IDX_BDEFORMGROUP, SDNA_IDX_MDEFORMVERT, SDNA_IDX_LAMP,
+    ints2_data, triangle_edge_topology, write_f32, write_i16, write_identity_matrix4x4, write_ptr,
+    ATTR_TYPE_INT32_2D, STARTUP_UI_SCREEN_PTR,
 };
 
 use crate::error::Error;
 use crate::decomposed::DecomposedInput;
 use crate::pipeline::{DecomposedExport, ExportedFile, ExportedFileKind, ExportOptions, LoadedInteriors};
-use crate::types::Mesh;
+use crate::types::{Mesh, SubMesh};
+use crate::nmc::NodeMeshCombo;
 use crate::mtl::MtlFile;
 
 /// Internal structure to hold mesh data for .blend file generation
@@ -42,6 +48,61 @@ use crate::mtl::MtlFile;
 struct MeshDataEntry {
     mesh: Mesh,
     materials: Option<MtlFile>,
+    nmc: Option<NodeMeshCombo>,
+}
+
+fn insert_stem_suffix(path: &str, suffix: &str) -> String {
+    let (dir, file) = match path.rsplit_once('/') {
+        Some((dir, file)) => (format!("{dir}/"), file),
+        None => (String::new(), path),
+    };
+    let (stem, ext) = match file.find('.') {
+        Some(index) => (&file[..index], &file[index..]),
+        None => (file, ""),
+    };
+    format!("{dir}{stem}{suffix}{ext}")
+}
+
+fn replace_extension(path: &str, new_extension: &str) -> String {
+    let Some((stem, _)) = path.rsplit_once('.') else {
+        return format!("{path}{new_extension}");
+    };
+    stem.to_string() + new_extension
+}
+
+fn normalize_source_path(p4k: &MappedP4k, path: &str) -> String {
+    let p4k_path = crate::pipeline::datacore_path_to_p4k(path);
+    p4k.entry_case_insensitive(&p4k_path)
+        .map(|entry| entry.name.replace('\\', "/"))
+        .unwrap_or_else(|| p4k_path.replace('\\', "/"))
+}
+
+fn mesh_asset_relative_path_with_extension(
+    p4k: &MappedP4k,
+    geometry_path: &str,
+    fallback_name: &str,
+    lod: u32,
+    extension: &str,
+) -> String {
+    let base = if geometry_path.is_empty() {
+        format!(
+            "Data/generated/{}{}",
+            fallback_name.replace([' ', '\\', '/', ':'], "_"),
+            extension
+        )
+    } else {
+        replace_extension(&normalize_source_path(p4k, geometry_path), extension)
+    };
+    insert_stem_suffix(&base, &format!("_LOD{lod}"))
+}
+
+fn blend_mesh_asset_relative_path(
+    p4k: &MappedP4k,
+    geometry_path: &str,
+    fallback_name: &str,
+    lod: u32,
+) -> String {
+    mesh_asset_relative_path_with_extension(p4k, geometry_path, fallback_name, lod, ".blend")
 }
 
 /// Convert `DecomposedInput` into a decomposed export with individual `.blend` files.
@@ -49,7 +110,7 @@ struct MeshDataEntry {
 /// **Phase 1**: Mesh Decomposition to individual .blend files
 /// - Extracts real mesh data from DecomposedInput::children
 /// - Generates full decomposed export (scene.json, package manifests, etc.)
-/// - Replaces GLB mesh assets with individual .blend files using real geometry
+/// - Replaces generic mesh asset payloads with individual .blend files using real geometry
 /// - Each mesh gets its own uncompressed .blend file with actual mesh data
 ///
 /// **Phase 3**: Lights and Empties Integration
@@ -70,32 +131,47 @@ pub fn write_decomposed_export_blend(
     progress: Option<&Progress>,
     existing_asset_paths: Option<&HashSet<String>>,
 ) -> Result<DecomposedExport, Error> {
-    // Phase 1: Extract mesh data from input children BEFORE calling write_decomposed_export
-    // This preserves real mesh geometry instead of placeholders
-    // Create a mapping that uses entity name for matching
+    // Phase 1: Extract mesh data from input children BEFORE calling write_decomposed_export.
+    // Key by the exact final .blend mesh asset path; loose entity-name matching is not
+    // stable enough for similarly named ship parts.
     let mut mesh_data_map: HashMap<String, MeshDataEntry> = HashMap::new();
     
-    // Add root mesh with a special key
-    mesh_data_map.insert("__root__".to_string(), MeshDataEntry {
-        mesh: input.root_mesh.clone(),
-        materials: input.root_materials.clone(),
+    let root_mesh_asset = blend_mesh_asset_relative_path(p4k, &input.geometry_path, &input.entity_name, opts.lod_level);
+    let root_material_view = crate::decomposed::build_decomposed_material_view(
+        &input.root_mesh,
+        input.root_materials.as_ref(),
+        input.root_nmc.as_ref(),
+        opts.include_nodraw,
+        opts.include_shields,
+    );
+    mesh_data_map.insert(root_mesh_asset.to_ascii_lowercase(), MeshDataEntry {
+        mesh: root_material_view.mesh,
+        materials: root_material_view.glb_materials.or(root_material_view.sidecar_materials),
+        nmc: root_material_view.glb_nmc,
     });
     
     for child in &input.children {
-        // Create key from entity name for matching
-        let entity_key = format!("{}", child.entity_name);
-        
+        let mesh_asset = blend_mesh_asset_relative_path(p4k, &child.geometry_path, &child.entity_name, opts.lod_level);
+        let child_material_view = crate::decomposed::build_decomposed_material_view(
+            &child.mesh,
+            child.materials.as_ref(),
+            child.nmc.as_ref(),
+            opts.include_nodraw,
+            opts.include_shields,
+        );
         let entry = MeshDataEntry {
-            mesh: child.mesh.clone(),
-            materials: child.materials.clone(),
+            mesh: child_material_view.mesh,
+            materials: child_material_view.glb_materials.or(child_material_view.sidecar_materials),
+            nmc: child_material_view.glb_nmc,
         };
         
-        mesh_data_map.insert(entity_key, entry);
+        mesh_data_map.insert(mesh_asset.to_ascii_lowercase(), entry);
     }
     
     // Extract minimal data needed for scene.blend before passing input to write_decomposed_export
     let scene_entity_name = input.entity_name.clone();
     let children_for_scene = input.children.iter().map(|c| c.entity_name.clone()).collect::<Vec<_>>();
+    let mut scene_mesh_instances = Vec::new();
     
     // Phase 3: Extract lights and empties BEFORE calling write_decomposed_export
     let extracted_lights = extract_lights_from_interiors(&input.interiors)
@@ -112,7 +188,8 @@ pub fn write_decomposed_export_blend(
 
     report_progress(progress, 0.0, "Generating decomposed export with .blend mesh files");
 
-    // Generate base decomposed export with GLB files and manifests
+    // Generate the package manifest and reusable-asset list with the shared decomposed
+    // exporter, then replace its mesh asset payloads with native .blend bytes below.
     let base_export = crate::decomposed::write_decomposed_export(
         p4k,
         input,
@@ -174,18 +251,16 @@ pub fn write_decomposed_export_blend(
         }
     }
 
-    report_progress(progress, 0.5, "Converting mesh assets from GLB to .blend with real geometry");
+    report_progress(progress, 0.5, "Writing native .blend mesh assets with real geometry");
 
-    // Replace GLB mesh files with .blend files using REAL mesh data
+    // Replace generic mesh asset payloads with .blend files using REAL mesh data.
     let mut blend_files = Vec::new();
     let mut manifest_files = Vec::new();
     let mut other_files = Vec::new();
-    let mut mesh_counter = 0;
-    let mesh_entries: Vec<_> = mesh_data_map.values().cloned().collect();
-
     for file in base_export.files {
         if file.relative_path.ends_with(".glb") && file.kind == ExportedFileKind::MeshAsset {
-            // This is a GLB mesh file - replace with .blend using real mesh data
+            // This is a generic mesh asset placeholder from the shared decomposed enumerator.
+            // The native Blend workflow only keeps the corresponding .blend path and payload.
             let blend_path = file.relative_path.replace(".glb", ".blend");
             
             // Extract mesh name from path for Blender object naming
@@ -195,47 +270,34 @@ pub fn write_decomposed_export_blend(
                 .unwrap_or("mesh")
                 .trim_end_matches(".blend")
                 .to_string();
-
-            // Phase 1: Use REAL mesh data instead of placeholder
-            // Try to find matching mesh by looking for the entity name in the file path
-            let (matched_key, real_mesh_and_materials) = mesh_data_map.iter()
-                .find(|(key, _)| {
-                    *key != "__root__" && (
-                        blend_path.contains(key.as_str()) || 
-                        mesh_name.to_lowercase().contains(&key.to_lowercase())
-                    )
-                })
-                .map(|(k, entry)| (k.clone(), (entry.mesh.clone(), entry.materials.clone())))
-                .or_else(|| {
-                    // If no match found, cycle through available meshes
-                    mesh_entries.get(mesh_counter % mesh_entries.len())
-                        .map(|entry| ("__unknown__".to_string(), (entry.mesh.clone(), entry.materials.clone())))
-                })
-                .unwrap_or_else(|| {
-                    // Fallback to placeholder if no meshes available
-                    ("__root__".to_string(), (Mesh {
-                        positions: vec![[0.0, 0.0, 0.0], [0.001, 0.0, 0.0], [0.0, 0.001, 0.0]],
-                        indices: vec![0, 1, 2],
-                        uvs: None,
-                        secondary_uvs: None,
-                        normals: None,
-                        tangents: None,
-                        colors: None,
-                        submeshes: vec![],
-                        model_min: [0.0, 0.0, 0.0],
-                        model_max: [0.001, 0.001, 0.0],
-                        scaling_min: [0.0, 0.0, 0.0],
-                        scaling_max: [0.001, 0.001, 0.0],
-                    }, None))
-                });
-            
-            let (real_mesh, materials) = real_mesh_and_materials;
-            mesh_counter += 1;
-
+            let blend_key = blend_path.to_ascii_lowercase();
+            let mesh_entry = mesh_data_map.get(&blend_key).ok_or_else(|| {
+                Error::Other(format!(
+                    "native Blend export has no mesh payload for generated asset '{blend_path}'"
+                ))
+            })?;
             // Phase 5D: Get vertex groups for this mesh
-            let vgroups = mesh_vertex_groups.get(&matched_key).cloned();
+            let vgroups = mesh_vertex_groups.get(&blend_key).cloned();
 
-            let blend_bytes = mesh_to_blend(&mesh_name, &real_mesh, &materials, vgroups.as_ref());
+            let blend_bytes = mesh_to_blend(
+                &mesh_name,
+                &mesh_entry.mesh,
+                &mesh_entry.materials,
+                mesh_entry.nmc.as_ref(),
+                vgroups.as_ref(),
+            );
+            let mut linked_object_names = mesh_object_names_from_blend_bytes(&blend_bytes);
+            if linked_object_names.is_empty() {
+                linked_object_names.push(mesh_name.clone());
+            }
+            for linked_object_name in linked_object_names {
+                scene_mesh_instances.push(LinkedMeshInstance {
+                    name: linked_object_name,
+                    blend_path: format!("//../../{blend_path}"),
+                    position: [0.0, 0.0, 0.0],
+                    rotation: [1.0, 0.0, 0.0, 0.0],
+                });
+            }
             blend_files.push(ExportedFile {
                 relative_path: blend_path,
                 bytes: blend_bytes,
@@ -257,6 +319,32 @@ pub fn write_decomposed_export_blend(
         }
     }
 
+    let mut blend_file_order = Vec::new();
+    let mut blend_file_by_path = HashMap::new();
+    for file in blend_files {
+        if !blend_file_by_path.contains_key(&file.relative_path) {
+            blend_file_order.push(file.relative_path.clone());
+        }
+        blend_file_by_path.insert(file.relative_path.clone(), file);
+    }
+    blend_files = blend_file_order
+        .into_iter()
+        .filter_map(|path| blend_file_by_path.remove(&path))
+        .collect();
+
+    scene_mesh_instances.clear();
+    for file in &blend_files {
+        let linked_object_names = mesh_object_names_from_blend_bytes(&file.bytes);
+        for linked_object_name in linked_object_names {
+            scene_mesh_instances.push(LinkedMeshInstance {
+                name: linked_object_name,
+                blend_path: format!("//../../{}", file.relative_path),
+                position: [0.0, 0.0, 0.0],
+                rotation: [1.0, 0.0, 0.0, 0.0],
+            });
+        }
+    }
+
     // Phase 3: Create scene.blend with lights and empties
     report_progress(progress, 0.7, "Creating scene.blend with linked mesh instances");
     
@@ -264,11 +352,14 @@ pub fn write_decomposed_export_blend(
     // Library paths are relative to scene.blend location, which is in Packages/{package}/
     // So we need ../../Data/Objects to reach the shared assets
     log::info!("[blend-debug] Creating scene.blend with {} children and {} lights", children_for_scene.len(), extracted_lights.len());
-    let scene_blend_bytes = create_scene_blend(&scene_entity_name, children_for_scene.len(), "../../Data/Objects", &extracted_lights)?;
+    let scene_blend_bytes = create_scene_blend_with_instances(&scene_entity_name, &scene_mesh_instances, &extracted_lights)?;
     log::info!("[blend-debug] scene.blend created, size: {} bytes", scene_blend_bytes.len());
+    log::info!("[blend-debug] First 20 bytes of uncompressed: {:?}", &scene_blend_bytes[..20.min(scene_blend_bytes.len())]);
     
     // Compress scene.blend with Zstd (Blender 5.1 native format)
     let compressed_scene = starbreaker_blend::compress_blend_bytes_zstd(&scene_blend_bytes);
+    log::info!("[blend-debug] Compressed scene size: {} bytes", compressed_scene.len());
+    log::info!("[blend-debug] First 20 bytes of compressed: {:?}", &compressed_scene[..20.min(compressed_scene.len())]);
     
     // Combine blend mesh files with other files (NOT including base_export.scene.blend)
     let mut all_files = blend_files;
@@ -314,26 +405,90 @@ pub fn write_decomposed_export_blend(
 /// - UVMap (CORNER / FLOAT2) — when mesh.uvs is Some
 /// - Color (CORNER / BYTE_COLOR) — when mesh.colors is Some
 /// - Vertex groups — when vertex_groups is Some
+fn blend_material_slots(name: &str, mesh: &Mesh, materials: &Option<crate::mtl::MtlFile>) -> (Vec<String>, Vec<usize>) {
+    let source_stem = materials
+        .as_ref()
+        .and_then(|mtl| mtl.source_path.as_deref())
+        .and_then(|path| {
+            path.rsplit(['\\', '/'])
+                .next()
+                .and_then(|file| file.rsplit_once('.').map(|(stem, _)| stem).or(Some(file)))
+        })
+        .unwrap_or(name);
+
+    if mesh.submeshes.is_empty() {
+        return (vec![format!("{source_stem}_mtl_material_0_00")], Vec::new());
+    }
+
+    let mut slot_by_material_id: HashMap<u32, usize> = HashMap::new();
+    let mut material_names = Vec::new();
+    let mut submesh_slots = Vec::with_capacity(mesh.submeshes.len());
+
+    for (submesh_index, submesh) in mesh.submeshes.iter().enumerate() {
+        if let Some(&slot) = slot_by_material_id.get(&submesh.material_id) {
+            submesh_slots.push(slot);
+            continue;
+        }
+
+        let base_name = submesh
+            .material_name
+            .clone()
+            .or_else(|| {
+                materials
+                    .as_ref()
+                    .and_then(|mtl| mtl.materials.get(submesh.material_id as usize))
+                    .map(|mat| mat.name.clone())
+            })
+            .unwrap_or_else(|| format!("material_{submesh_index}"));
+        let slot = material_names.len();
+        material_names.push(format!("{source_stem}_mtl_{base_name}_0{}", submesh.material_id));
+        slot_by_material_id.insert(submesh.material_id, slot);
+        submesh_slots.push(slot);
+    }
+
+    (material_names, submesh_slots)
+}
+
 fn mesh_to_blend(
     name: &str,
     mesh: &Mesh,
-    _materials: &Option<crate::mtl::MtlFile>,
+    materials: &Option<crate::mtl::MtlFile>,
+    nmc: Option<&NodeMeshCombo>,
+    vertex_groups: Option<&Vec<VertexGroup>>,
+) -> Vec<u8> {
+    if let Some(nmc) = nmc.filter(|nmc| !nmc.nodes.is_empty()) {
+        return mesh_to_blend_hierarchy(name, mesh, materials, nmc, vertex_groups);
+    }
+    mesh_to_blend_flat(name, mesh, materials, vertex_groups)
+}
+
+fn mesh_to_blend_flat(
+    name: &str,
+    mesh: &Mesh,
+    materials: &Option<crate::mtl::MtlFile>,
     vertex_groups: Option<&Vec<VertexGroup>>,
 ) -> Vec<u8> {
     let totvert = mesh.positions.len();
     let totloop = mesh.indices.len();
     let totpoly = totloop / 3;
-    let mat_slots = mesh.submeshes.len().max(1) as i16;
+    let (edge_verts, corner_edges) = triangle_edge_topology(&mesh.indices);
+    let totedge = edge_verts.len();
+    let (material_names, submesh_material_slots) = blend_material_slots(name, mesh, materials);
+    let mat_slots = material_names.len() as i16;
 
     let mut ptrs = PtrAlloc::new(0x1000);
 
+    let _screen_ptr    = ptrs.alloc();
+    let _wm_ptr        = ptrs.alloc();
     let object_ptr     = ptrs.alloc();
     let mesh_ptr       = ptrs.alloc();
     let mesh_mat_ptr   = ptrs.alloc();
     let obj_mat_ptr    = ptrs.alloc();
     let obj_matbits_ptr = ptrs.alloc();
+    let material_ptrs: Vec<u64> = (0..material_names.len()).map(|_| ptrs.alloc()).collect();
     let scene_ptr      = ptrs.alloc();
     let view_layer_ptr = ptrs.alloc();
+    let tool_settings_ptr = ptrs.alloc();
     let base_ptr       = ptrs.alloc();
     let collection_ptr = ptrs.alloc();
     let collection_object_ptr = ptrs.alloc();
@@ -343,11 +498,17 @@ fn mesh_to_blend(
 
     // Always-present attributes
     let name_pos_ptr  = ptrs.alloc();
+    let name_ev_ptr   = ptrs.alloc();
     let name_cv_ptr   = ptrs.alloc();
+    let name_ce_ptr   = ptrs.alloc();
     let array_pos_ptr = ptrs.alloc();
+    let array_ev_ptr  = ptrs.alloc();
     let array_cv_ptr  = ptrs.alloc();
+    let array_ce_ptr  = ptrs.alloc();
     let raw_pos_ptr   = ptrs.alloc();
+    let raw_ev_ptr    = ptrs.alloc();
     let raw_cv_ptr    = ptrs.alloc();
+    let raw_ce_ptr    = ptrs.alloc();
 
     // material_index (FACE domain)
     let name_matidx_ptr = ptrs.alloc();
@@ -414,11 +575,14 @@ fn mesh_to_blend(
     let corner_verts: Vec<i32> = mesh.indices.iter().map(|&i| i as i32).collect();
 
     let raw_position   = floats3_data(&mesh.positions);
+    let raw_edge_verts = ints2_data(&edge_verts);
     let raw_corner_vert = ints_data(&corner_verts);
+    let raw_corner_edge = ints_data(&corner_edges);
 
     // Per-polygon material index: fill from submesh ranges
     let mut material_indices: Vec<i32> = vec![0; totpoly];
-    for (mat_idx, submesh) in mesh.submeshes.iter().enumerate() {
+    for (submesh_idx, submesh) in mesh.submeshes.iter().enumerate() {
+        let mat_idx = submesh_material_slots.get(submesh_idx).copied().unwrap_or(0);
         let start_face = submesh.first_index / 3;
         let num_faces = submesh.num_indices / 3;
         for i in 0..num_faces {
@@ -444,13 +608,19 @@ fn mesh_to_blend(
     // ── Attribute descriptor blob ─────────────────────────────────────────────
 
     let mut attr_blob: Vec<u8> = Vec::new();
-    let mut num_attrs: u32 = 3; // position + corner_vert + material_index always present
+    let mut num_attrs: u32 = 5; // position + edge_verts + corner_vert + corner_edge + material_index
 
     attr_blob.extend_from_slice(&build_attribute(
         name_pos_ptr, ATTR_TYPE_FLOAT3, ATTR_DOMAIN_POINT, array_pos_ptr,
     ));
     attr_blob.extend_from_slice(&build_attribute(
+        name_ev_ptr, ATTR_TYPE_INT32_2D, ATTR_DOMAIN_EDGE, array_ev_ptr,
+    ));
+    attr_blob.extend_from_slice(&build_attribute(
         name_cv_ptr, ATTR_TYPE_INT, ATTR_DOMAIN_CORNER, array_cv_ptr,
+    ));
+    attr_blob.extend_from_slice(&build_attribute(
+        name_ce_ptr, ATTR_TYPE_INT, ATTR_DOMAIN_CORNER, array_ce_ptr,
     ));
     attr_blob.extend_from_slice(&build_attribute(
         name_matidx_ptr, ATTR_TYPE_INT, ATTR_DOMAIN_FACE, array_matidx_ptr,
@@ -473,55 +643,49 @@ fn mesh_to_blend(
     let object_data = build_object(
         name, mesh_ptr, obj_mat_ptr, obj_matbits_ptr, mat_slots as i32, 0,
     );
-    let scene_data = build_scene(name, view_layer_ptr, collection_ptr);
-    let view_layer_data = build_view_layer(name, base_ptr, layer_collection_ptr);
+    let scene_data = build_scene(name, view_layer_ptr, collection_ptr, tool_settings_ptr);
+    let tool_settings_data = build_tool_settings();
+    let view_layer_data = build_view_layer("ViewLayer", base_ptr, layer_collection_ptr);
     let base_data = build_base(object_ptr);
-    let collection_data = build_collection(name, scene_ptr, collection_object_ptr, collection_object_ptr);  // Single member: head = tail
+    let collection_data = build_master_collection(collection_object_ptr, collection_object_ptr, 0, 0);
     let collection_object_data = build_collection_object(object_ptr);
     let layer_collection_data = build_layer_collection(collection_ptr);
     let mesh_data = build_mesh(
-        name, totvert, totpoly, totloop,
+        name, totvert, totedge, totpoly, totloop,
         poly_offs_ptr, attrs_ptr,
         mesh_mat_ptr, mat_slots,
         vgroup_first_ptr, vgroup_last_ptr, vgroup_count, cdl_ptr,
         num_attrs,
     );
-    let mesh_mat_array = build_mat_ptr_array(mat_slots as usize);
+    let mesh_mat_array = build_mat_ptr_array_from_ptrs(&material_ptrs);
     let obj_mat_array  = build_mat_ptr_array(mat_slots as usize);
     let obj_matbits    = build_matbits(mat_slots as usize);
 
     let arr_pos = build_attribute_array(raw_pos_ptr,  totvert as i64);
+    let arr_ev  = build_attribute_array(raw_ev_ptr,   totedge as i64);
     let arr_cv  = build_attribute_array(raw_cv_ptr,   totloop as i64);
+    let arr_ce  = build_attribute_array(raw_ce_ptr,   totloop as i64);
 
     // ── Assemble file ─────────────────────────────────────────────────────────
 
     let mut out: Vec<u8> = Vec::with_capacity(512 * 1024);
     out.extend_from_slice(BLEND_MAGIC);
 
-    let file_global = build_file_global(scene_ptr, view_layer_ptr);
+    let file_global = build_file_global(STARTUP_UI_SCREEN_PTR, scene_ptr, view_layer_ptr);
     write_block(&mut out, b"GLOB", SDNA_IDX_FILE_GLOBAL, 0x10, 1, &file_global);
+    out.extend_from_slice(&startup_ui_prefix_bytes());
 
     // Minimal scene graph so Blender opens this as a normal scene, not library-only data.
-    write_block(&mut out, b"SCE\0", SDNA_IDX_SCENE, scene_ptr, 1, &scene_data);
-    write_block(&mut out, b"SR\0\0", SDNA_IDX_VIEW_LAYER, view_layer_ptr, 1, &view_layer_data);
+    // CRITICAL: All DATA blocks for a given ID block must be consecutive immediately after it.
+    // Blender's readfile.cc reads them all into fd->datamap, then clears it after each ID block.
+    write_block(&mut out, b"SC\0\0", SDNA_IDX_SCENE, scene_ptr, 1, &scene_data);
+    // SC DATA sequence (all consecutive, no non-DATA blocks until OB):
+    write_block(&mut out, b"DATA", SDNA_IDX_TOOL_SETTINGS, tool_settings_ptr, 1, &tool_settings_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_VIEW_LAYER, view_layer_ptr, 1, &view_layer_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, layer_collection_ptr, 1, &layer_collection_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION, collection_ptr, 1, &collection_data);  // embedded master_collection
+    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, collection_object_ptr, 1, &collection_object_data);
     write_block(&mut out, b"DATA", SDNA_IDX_BASE, base_ptr, 1, &base_data);
-    write_block(&mut out, b"GRP\0", SDNA_IDX_COLLECTION, collection_ptr, 1, &collection_data);
-    write_block(
-        &mut out,
-        b"DATA",
-        SDNA_IDX_COLLECTION_OBJECT,
-        collection_object_ptr,
-        1,
-        &collection_object_data,
-    );
-    write_block(
-        &mut out,
-        b"DATA",
-        SDNA_IDX_LAYER_COLLECTION,
-        layer_collection_ptr,
-        1,
-        &layer_collection_data,
-    );
 
     // OB block + DATA blocks (gap=1 rule: mat** and matbits must immediately follow OB)
     write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, object_ptr, 1, &object_data);
@@ -537,23 +701,29 @@ fn mesh_to_blend(
 
     // Attribute name strings
     write_block(&mut out, b"DATA", 0, name_pos_ptr, 1, b"position\0");
+    write_block(&mut out, b"DATA", 0, name_ev_ptr,  1, b".edge_verts\0");
     write_block(&mut out, b"DATA", 0, name_cv_ptr,  1, b".corner_vert\0");
+    write_block(&mut out, b"DATA", 0, name_ce_ptr,  1, b".corner_edge\0");
     write_block(&mut out, b"DATA", 0, name_matidx_ptr, 1, b"material_index\0");
 
-    // Attribute array descriptors + raw data (position, corner_vert, material_index)
-    write_block(&mut out, b"DATA", 73, array_pos_ptr, 1, &arr_pos);
-    write_block(&mut out, b"DATA", 73, array_cv_ptr,  1, &arr_cv);
+    // Attribute array descriptors + raw data (topology, position, material_index)
+    write_block(&mut out, b"DATA", SDNA_IDX_ATTRIBUTE_ARRAY, array_pos_ptr, 1, &arr_pos);
+    write_block(&mut out, b"DATA", SDNA_IDX_ATTRIBUTE_ARRAY, array_ev_ptr,  1, &arr_ev);
+    write_block(&mut out, b"DATA", SDNA_IDX_ATTRIBUTE_ARRAY, array_cv_ptr,  1, &arr_cv);
+    write_block(&mut out, b"DATA", SDNA_IDX_ATTRIBUTE_ARRAY, array_ce_ptr,  1, &arr_ce);
     let arr_matidx = build_attribute_array(raw_matidx_ptr, totpoly as i64);
-    write_block(&mut out, b"DATA", 73, array_matidx_ptr, 1, &arr_matidx);
+    write_block(&mut out, b"DATA", SDNA_IDX_ATTRIBUTE_ARRAY, array_matidx_ptr, 1, &arr_matidx);
     write_block(&mut out, b"DATA", 0, raw_pos_ptr, 1, &raw_position);
+    write_block(&mut out, b"DATA", 0, raw_ev_ptr,  1, &raw_edge_verts);
     write_block(&mut out, b"DATA", 0, raw_cv_ptr,  1, &raw_corner_vert);
+    write_block(&mut out, b"DATA", 0, raw_ce_ptr,  1, &raw_corner_edge);
     write_block(&mut out, b"DATA", 0, raw_matidx_ptr, 1, &raw_material_index);
 
     // Optional: UV map
     if let Some(ref uv_data) = raw_uv {
         let arr_uv = build_attribute_array(raw_uv_ptr, totloop as i64);
         write_block(&mut out, b"DATA", 0,  name_uv_ptr,  1, b"UVMap\0");
-        write_block(&mut out, b"DATA", 73, array_uv_ptr, 1, &arr_uv);
+        write_block(&mut out, b"DATA", SDNA_IDX_ATTRIBUTE_ARRAY, array_uv_ptr, 1, &arr_uv);
         write_block(&mut out, b"DATA", 0,  raw_uv_ptr,   1, uv_data);
     }
 
@@ -561,7 +731,7 @@ fn mesh_to_blend(
     if let Some(ref color_data) = raw_color {
         let arr_col = build_attribute_array(raw_col_ptr, totloop as i64);
         write_block(&mut out, b"DATA", 0,  name_col_ptr,  1, b"Color\0");
-        write_block(&mut out, b"DATA", 73, array_col_ptr, 1, &arr_col);
+        write_block(&mut out, b"DATA", SDNA_IDX_ATTRIBUTE_ARRAY, array_col_ptr, 1, &arr_col);
         write_block(&mut out, b"DATA", 0,  raw_col_ptr,   1, color_data);
     }
 
@@ -615,7 +785,7 @@ fn mesh_to_blend(
                 }
                 
                 let mdv_array_data = build_mdeformvert_array(&mdeformvert_data);
-                write_block(&mut out, b"DATA", 73, mdv_array_ptr, 1, &mdv_array_data);
+                write_block(&mut out, b"DATA", SDNA_IDX_ATTRIBUTE_ARRAY, mdv_array_ptr, 1, &mdv_array_data);
                 
                 // Write individual weight arrays
                 for vert_idx in 0..totvert {
@@ -646,11 +816,876 @@ fn mesh_to_blend(
         }
     }
 
+    for (material_ptr, material_name) in material_ptrs.iter().zip(material_names.iter()) {
+        let material_data = build_material(material_name);
+        write_block(&mut out, b"MA\0\0", SDNA_IDX_MATERIAL, *material_ptr, 1, &material_data);
+    }
+
     write_block(&mut out, b"DNA1", SDNA_IDX_DNA1, 0x01, 1, DNA1_BYTES);
     write_block_header(&mut out, b"ENDB", 0, 0, 0, 0);
 
     // Phase 1D: Do NOT compress individual mesh files (keep uncompressed)
     // Compression only happens at scene.blend (Phase 2)
+    out
+}
+
+#[derive(Clone)]
+struct MeshObjectExport {
+    name: String,
+    mesh: Mesh,
+    vertex_groups: Option<Vec<VertexGroup>>,
+}
+
+struct MeshBlockData {
+    object_ptr: u64,
+    mesh_ptr: u64,
+    mesh_mat_ptr: u64,
+    obj_mat_ptr: u64,
+    obj_matbits_ptr: u64,
+    poly_offs_ptr: u64,
+    attrs_ptr: u64,
+    name_pos_ptr: u64,
+    name_ev_ptr: u64,
+    name_cv_ptr: u64,
+    name_ce_ptr: u64,
+    array_pos_ptr: u64,
+    array_ev_ptr: u64,
+    array_cv_ptr: u64,
+    array_ce_ptr: u64,
+    raw_pos_ptr: u64,
+    raw_ev_ptr: u64,
+    raw_cv_ptr: u64,
+    raw_ce_ptr: u64,
+    name_matidx_ptr: u64,
+    array_matidx_ptr: u64,
+    raw_matidx_ptr: u64,
+    name_uv_ptr: u64,
+    array_uv_ptr: u64,
+    raw_uv_ptr: u64,
+    name_col_ptr: u64,
+    array_col_ptr: u64,
+    raw_col_ptr: u64,
+    vgroup_first_ptr: u64,
+    vgroup_last_ptr: u64,
+    vgroup_count: u64,
+    cdl_ptr: u64,
+    vgroup_ptrs: Vec<u64>,
+    mdeformvert_ptrs: Vec<(u64, u64)>,
+    mdeformweight_ptrs: Vec<u64>,
+    totvert: usize,
+    totedge: usize,
+    totpoly: usize,
+    totloop: usize,
+    num_attrs: u32,
+    raw_poly_offsets: Vec<u8>,
+    raw_position: Vec<u8>,
+    raw_edge_verts: Vec<u8>,
+    raw_corner_vert: Vec<u8>,
+    raw_corner_edge: Vec<u8>,
+    raw_material_index: Vec<u8>,
+    raw_uv: Option<Vec<u8>>,
+    raw_color: Option<Vec<u8>>,
+    attr_blob: Vec<u8>,
+}
+
+fn strip_lod_suffix(name: &str) -> String {
+    let Some((stem, suffix)) = name.rsplit_once("_LOD") else {
+        return name.to_string();
+    };
+    if !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit()) {
+        stem.to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+fn linked_scene_object_names(
+    mesh_name: &str,
+    mesh: &Mesh,
+    nmc: Option<&NodeMeshCombo>,
+) -> Vec<String> {
+    let Some(nmc) = nmc.filter(|nmc| !nmc.nodes.is_empty()) else {
+        return vec![mesh_name.to_string()];
+    };
+
+    let export_names = nmc_export_object_names(mesh_name, nmc);
+    let mut names = Vec::new();
+    let mut seen = HashSet::new();
+    let mut node_submeshes: Vec<Vec<usize>> = vec![Vec::new(); nmc.nodes.len()];
+    for (submesh_index, submesh) in mesh.submeshes.iter().enumerate() {
+        let node_index = submesh.node_parent_index as usize;
+        if node_index < node_submeshes.len() {
+            node_submeshes[node_index].push(submesh_index);
+        }
+    }
+    for (node_index, submesh_indices) in node_submeshes.iter().enumerate() {
+        if submesh_indices.is_empty() {
+            continue;
+        }
+        let (node_mesh, _) = subset_mesh_for_submeshes(mesh, submesh_indices, None);
+        if node_mesh.indices.is_empty() {
+            continue;
+        }
+        let name = export_names[node_index].clone();
+        if seen.insert(name.clone()) {
+            names.push(name);
+        }
+    }
+
+    if names.is_empty() {
+        vec![mesh_name.to_string()]
+    } else {
+        names
+    }
+}
+
+fn mesh_object_names_from_blend_bytes(blend_bytes: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut offset = BLEND_MAGIC.len();
+    while offset + 32 <= blend_bytes.len() {
+        let code = &blend_bytes[offset..offset + 4];
+        let size = u32::from_le_bytes(blend_bytes[offset + 16..offset + 20].try_into().unwrap()) as usize;
+        let data_start = offset + 32;
+        let data_end = data_start.saturating_add(size);
+        if data_end > blend_bytes.len() {
+            break;
+        }
+        if code == b"OB\0\0" {
+            let data = &blend_bytes[data_start..data_end];
+            if data.len() >= OBJECT_SIZE && i16::from_le_bytes(data[416..418].try_into().unwrap()) == 1 {
+                let raw = &data[42..300];
+                let end = raw.iter().position(|&byte| byte == 0).unwrap_or(raw.len());
+                names.push(String::from_utf8_lossy(&raw[..end]).to_string());
+            }
+        }
+        if code == b"ENDB" {
+            break;
+        }
+        offset = data_end;
+    }
+    names
+}
+
+fn nmc_export_object_names(mesh_name: &str, nmc: &NodeMeshCombo) -> Vec<String> {
+    let wrapper_name = strip_lod_suffix(mesh_name);
+    let mut used = HashSet::new();
+    used.insert("CryEngine_Z_up".to_string());
+    used.insert(wrapper_name.clone());
+
+    nmc.nodes
+        .iter()
+        .enumerate()
+        .map(|(node_index, node)| {
+            let base_name = if node.name.is_empty() {
+                format!("{mesh_name}_node_{node_index}")
+            } else {
+                node.name.clone()
+            };
+            let mut name = if used.contains(&base_name) {
+                if base_name == wrapper_name {
+                    format!("{base_name}_mesh")
+                } else {
+                    format!("{base_name}_node_{node_index}")
+                }
+            } else {
+                base_name
+            };
+            while used.contains(&name) {
+                name = format!("{name}_{node_index}");
+            }
+            used.insert(name.clone());
+            name
+        })
+        .collect()
+}
+
+fn matrix_to_transform(matrix: [f32; 16]) -> ([f32; 3], [f32; 4], [f32; 3]) {
+    let mat = glam::Mat4::from_cols_array(&matrix);
+    let (scale, rotation, translation) = mat.to_scale_rotation_translation();
+    (
+        [translation.x, translation.y, translation.z],
+        [rotation.w, rotation.x, rotation.y, rotation.z],
+        [scale.x, scale.y, scale.z],
+    )
+}
+
+fn patch_object_parent_transform(
+    object_data: &mut [u8],
+    parent_ptr: u64,
+    loc: [f32; 3],
+    quat: [f32; 4],
+    scale: [f32; 3],
+) {
+    write_ptr(object_data, 496, parent_ptr);
+    for i in 0..3 {
+        write_f32(object_data, 736 + i * 4, loc[i]);
+        write_f32(object_data, 760 + i * 4, scale[i]);
+        write_f32(object_data, 784 + i * 4, 1.0);
+    }
+    for i in 0..4 {
+        write_f32(object_data, 820 + i * 4, quat[i]);
+    }
+    write_f32(object_data, 836, 1.0);
+    write_i16(object_data, 1040, 0);
+    if parent_ptr != 0 {
+        write_identity_matrix4x4(object_data, 884);
+    }
+}
+
+fn remap_vertex_groups(
+    vertex_groups: Option<&Vec<VertexGroup>>,
+    old_to_new: &HashMap<u32, u32>,
+) -> Option<Vec<VertexGroup>> {
+    let groups = vertex_groups?;
+    let remapped = groups
+        .iter()
+        .filter_map(|group| {
+            let mut vertex_indices = group
+                .vertex_indices
+                .iter()
+                .filter_map(|old| old_to_new.get(&(*old as u32)).copied().map(|new| new as usize))
+                .collect::<Vec<_>>();
+            vertex_indices.sort_unstable();
+            vertex_indices.dedup();
+            if vertex_indices.is_empty() {
+                None
+            } else {
+                Some(VertexGroup {
+                    name: group.name.clone(),
+                    vertex_indices,
+                })
+            }
+        })
+        .collect::<Vec<_>>();
+    if remapped.is_empty() { None } else { Some(remapped) }
+}
+
+fn subset_mesh_for_submeshes(
+    mesh: &Mesh,
+    submesh_indices: &[usize],
+    vertex_groups: Option<&Vec<VertexGroup>>,
+) -> (Mesh, Option<Vec<VertexGroup>>) {
+    let mut old_to_new: HashMap<u32, u32> = HashMap::new();
+    let mut positions = Vec::new();
+    let mut uvs = mesh.uvs.as_ref().map(|_| Vec::new());
+    let mut secondary_uvs = mesh.secondary_uvs.as_ref().map(|_| Vec::new());
+    let mut normals = mesh.normals.as_ref().map(|_| Vec::new());
+    let mut tangents = mesh.tangents.as_ref().map(|_| Vec::new());
+    let mut colors = mesh.colors.as_ref().map(|_| Vec::new());
+    let mut indices = Vec::new();
+    let mut submeshes = Vec::new();
+
+    for &submesh_index in submesh_indices {
+        let Some(source_submesh) = mesh.submeshes.get(submesh_index) else {
+            continue;
+        };
+        let first_index = indices.len() as u32;
+        let start = source_submesh.first_index as usize;
+        let end = (start + source_submesh.num_indices as usize).min(mesh.indices.len());
+        for &old_index in &mesh.indices[start..end] {
+            let new_index = if let Some(&new_index) = old_to_new.get(&old_index) {
+                new_index
+            } else {
+                let old = old_index as usize;
+                let new_index = positions.len() as u32;
+                positions.push(mesh.positions.get(old).copied().unwrap_or([0.0; 3]));
+                if let (Some(src), Some(dst)) = (mesh.uvs.as_ref(), uvs.as_mut()) {
+                    dst.push(src.get(old).copied().unwrap_or([0.0; 2]));
+                }
+                if let (Some(src), Some(dst)) = (mesh.secondary_uvs.as_ref(), secondary_uvs.as_mut()) {
+                    dst.push(src.get(old).copied().unwrap_or([0.0; 2]));
+                }
+                if let (Some(src), Some(dst)) = (mesh.normals.as_ref(), normals.as_mut()) {
+                    dst.push(src.get(old).copied().unwrap_or([0.0, 0.0, 1.0]));
+                }
+                if let (Some(src), Some(dst)) = (mesh.tangents.as_ref(), tangents.as_mut()) {
+                    dst.push(src.get(old).copied().unwrap_or([1.0, 0.0, 0.0, 1.0]));
+                }
+                if let (Some(src), Some(dst)) = (mesh.colors.as_ref(), colors.as_mut()) {
+                    dst.push(src.get(old).copied().unwrap_or([255, 255, 255, 255]));
+                }
+                old_to_new.insert(old_index, new_index);
+                new_index
+            };
+            indices.push(new_index);
+        }
+        let num_indices = indices.len() as u32 - first_index;
+        if num_indices == 0 {
+            continue;
+        }
+        let mut submesh = SubMesh {
+            material_name: source_submesh.material_name.clone(),
+            material_id: source_submesh.material_id,
+            source_material_id: source_submesh.source_material_id,
+            first_index,
+            num_indices,
+            first_vertex: 0,
+            num_vertices: positions.len() as u32,
+            node_parent_index: source_submesh.node_parent_index,
+        };
+        if let (Some(min), Some(max)) = (
+            old_to_new.values().min().copied(),
+            old_to_new.values().max().copied(),
+        ) {
+            submesh.first_vertex = min;
+            submesh.num_vertices = max.saturating_sub(min) + 1;
+        }
+        submeshes.push(submesh);
+    }
+
+    let (model_min, model_max) = if positions.is_empty() {
+        ([0.0; 3], [0.0; 3])
+    } else {
+        let mut min = [f32::INFINITY; 3];
+        let mut max = [f32::NEG_INFINITY; 3];
+        for position in &positions {
+            for axis in 0..3 {
+                min[axis] = min[axis].min(position[axis]);
+                max[axis] = max[axis].max(position[axis]);
+            }
+        }
+        (min, max)
+    };
+    let vertex_groups = remap_vertex_groups(vertex_groups, &old_to_new);
+    (
+        Mesh {
+            positions,
+            indices,
+            uvs,
+            secondary_uvs,
+            normals,
+            tangents,
+            colors,
+            submeshes,
+            model_min,
+            model_max,
+            scaling_min: mesh.scaling_min,
+            scaling_max: mesh.scaling_max,
+        },
+        vertex_groups,
+    )
+}
+
+fn allocate_mesh_block(
+    ptrs: &mut PtrAlloc,
+    mesh: &Mesh,
+    vertex_groups: Option<&Vec<VertexGroup>>,
+    submesh_slot_by_material_id: &HashMap<u32, usize>,
+) -> MeshBlockData {
+    let totvert = mesh.positions.len();
+    let totloop = mesh.indices.len();
+    let totpoly = totloop / 3;
+    let (edge_verts, corner_edges) = triangle_edge_topology(&mesh.indices);
+    let totedge = edge_verts.len();
+
+    let object_ptr = ptrs.alloc();
+    let mesh_ptr = ptrs.alloc();
+    let mesh_mat_ptr = ptrs.alloc();
+    let obj_mat_ptr = ptrs.alloc();
+    let obj_matbits_ptr = ptrs.alloc();
+    let poly_offs_ptr = ptrs.alloc();
+    let attrs_ptr = ptrs.alloc();
+    let name_pos_ptr = ptrs.alloc();
+    let name_ev_ptr = ptrs.alloc();
+    let name_cv_ptr = ptrs.alloc();
+    let name_ce_ptr = ptrs.alloc();
+    let array_pos_ptr = ptrs.alloc();
+    let array_ev_ptr = ptrs.alloc();
+    let array_cv_ptr = ptrs.alloc();
+    let array_ce_ptr = ptrs.alloc();
+    let raw_pos_ptr = ptrs.alloc();
+    let raw_ev_ptr = ptrs.alloc();
+    let raw_cv_ptr = ptrs.alloc();
+    let raw_ce_ptr = ptrs.alloc();
+    let name_matidx_ptr = ptrs.alloc();
+    let array_matidx_ptr = ptrs.alloc();
+    let raw_matidx_ptr = ptrs.alloc();
+    let (name_uv_ptr, array_uv_ptr, raw_uv_ptr) = if mesh.uvs.is_some() {
+        (ptrs.alloc(), ptrs.alloc(), ptrs.alloc())
+    } else {
+        (0, 0, 0)
+    };
+    let (name_col_ptr, array_col_ptr, raw_col_ptr) = if mesh.colors.is_some() {
+        (ptrs.alloc(), ptrs.alloc(), ptrs.alloc())
+    } else {
+        (0, 0, 0)
+    };
+    let (vgroup_first_ptr, vgroup_last_ptr, vgroup_count, cdl_ptr, vgroup_ptrs, mdeformvert_ptrs, mdeformweight_ptrs) =
+        if let Some(vgroups) = vertex_groups.filter(|groups| !groups.is_empty()) {
+            let vgroup_ptrs = (0..vgroups.len()).map(|_| ptrs.alloc()).collect::<Vec<_>>();
+            let mdeformvert_ptrs = vec![(ptrs.alloc(), ptrs.alloc())];
+            let mdeformweight_ptrs = (0..totvert).map(|_| ptrs.alloc()).collect::<Vec<_>>();
+            (
+                vgroup_ptrs[0],
+                *vgroup_ptrs.last().unwrap(),
+                vgroups.len() as u64,
+                ptrs.alloc(),
+                vgroup_ptrs,
+                mdeformvert_ptrs,
+                mdeformweight_ptrs,
+            )
+        } else {
+            (0, 0, 0, 0, Vec::new(), Vec::new(), Vec::new())
+        };
+
+    let poly_offsets = (0..=totpoly as i32).map(|i| i * 3).collect::<Vec<_>>();
+    let raw_poly_offsets = ints_data(&poly_offsets);
+    let corner_verts = mesh.indices.iter().map(|&i| i as i32).collect::<Vec<_>>();
+    let raw_position = floats3_data(&mesh.positions);
+    let raw_edge_verts = ints2_data(&edge_verts);
+    let raw_corner_vert = ints_data(&corner_verts);
+    let raw_corner_edge = ints_data(&corner_edges);
+    let mut material_indices = vec![0; totpoly];
+    for submesh in &mesh.submeshes {
+        let mat_idx = submesh_slot_by_material_id
+            .get(&submesh.material_id)
+            .copied()
+            .unwrap_or(0);
+        let start_face = submesh.first_index / 3;
+        let num_faces = submesh.num_indices / 3;
+        for i in 0..num_faces {
+            if (start_face + i) < totpoly as u32 {
+                material_indices[(start_face + i) as usize] = mat_idx as i32;
+            }
+        }
+    }
+    let raw_material_index = ints_data(&material_indices);
+    let raw_uv = mesh.uvs.as_ref().map(|uvs| {
+        let expanded = mesh
+            .indices
+            .iter()
+            .map(|&i| uvs.get(i as usize).copied().unwrap_or([0.0; 2]))
+            .collect::<Vec<_>>();
+        floats2_data(&expanded)
+    });
+    let raw_color = mesh.colors.as_ref().map(|colors| {
+        let expanded = mesh
+            .indices
+            .iter()
+            .map(|&i| colors.get(i as usize).copied().unwrap_or([255, 255, 255, 255]))
+            .collect::<Vec<_>>();
+        bytes4_data(&expanded)
+    });
+
+    let mut attr_blob = Vec::new();
+    let mut num_attrs = 5;
+    attr_blob.extend_from_slice(&build_attribute(name_pos_ptr, ATTR_TYPE_FLOAT3, ATTR_DOMAIN_POINT, array_pos_ptr));
+    attr_blob.extend_from_slice(&build_attribute(name_ev_ptr, ATTR_TYPE_INT32_2D, ATTR_DOMAIN_EDGE, array_ev_ptr));
+    attr_blob.extend_from_slice(&build_attribute(name_cv_ptr, ATTR_TYPE_INT, ATTR_DOMAIN_CORNER, array_cv_ptr));
+    attr_blob.extend_from_slice(&build_attribute(name_ce_ptr, ATTR_TYPE_INT, ATTR_DOMAIN_CORNER, array_ce_ptr));
+    attr_blob.extend_from_slice(&build_attribute(name_matidx_ptr, ATTR_TYPE_INT, ATTR_DOMAIN_FACE, array_matidx_ptr));
+    if mesh.uvs.is_some() {
+        attr_blob.extend_from_slice(&build_attribute(name_uv_ptr, ATTR_TYPE_FLOAT2, ATTR_DOMAIN_CORNER, array_uv_ptr));
+        num_attrs += 1;
+    }
+    if mesh.colors.is_some() {
+        attr_blob.extend_from_slice(&build_attribute(name_col_ptr, ATTR_TYPE_BYTE_COLOR, ATTR_DOMAIN_CORNER, array_col_ptr));
+        num_attrs += 1;
+    }
+
+    MeshBlockData {
+        object_ptr,
+        mesh_ptr,
+        mesh_mat_ptr,
+        obj_mat_ptr,
+        obj_matbits_ptr,
+        poly_offs_ptr,
+        attrs_ptr,
+        name_pos_ptr,
+        name_ev_ptr,
+        name_cv_ptr,
+        name_ce_ptr,
+        array_pos_ptr,
+        array_ev_ptr,
+        array_cv_ptr,
+        array_ce_ptr,
+        raw_pos_ptr,
+        raw_ev_ptr,
+        raw_cv_ptr,
+        raw_ce_ptr,
+        name_matidx_ptr,
+        array_matidx_ptr,
+        raw_matidx_ptr,
+        name_uv_ptr,
+        array_uv_ptr,
+        raw_uv_ptr,
+        name_col_ptr,
+        array_col_ptr,
+        raw_col_ptr,
+        vgroup_first_ptr,
+        vgroup_last_ptr,
+        vgroup_count,
+        cdl_ptr,
+        vgroup_ptrs,
+        mdeformvert_ptrs,
+        mdeformweight_ptrs,
+        totvert,
+        totedge,
+        totpoly,
+        totloop,
+        num_attrs,
+        raw_poly_offsets,
+        raw_position,
+        raw_edge_verts,
+        raw_corner_vert,
+        raw_corner_edge,
+        raw_material_index,
+        raw_uv,
+        raw_color,
+        attr_blob,
+    }
+}
+
+fn write_mesh_block(
+    out: &mut Vec<u8>,
+    block: &MeshBlockData,
+    object: &MeshObjectExport,
+    material_ptrs: &[u64],
+    material_names: &[String],
+    mat_slots: i16,
+    parent_ptr: u64,
+    transform: ([f32; 3], [f32; 4], [f32; 3]),
+) {
+    let mut object_data = build_object(
+        &object.name,
+        block.mesh_ptr,
+        block.obj_mat_ptr,
+        block.obj_matbits_ptr,
+        mat_slots as i32,
+        0,
+    );
+    patch_object_parent_transform(&mut object_data, parent_ptr, transform.0, transform.1, transform.2);
+    let mesh_data = build_mesh(
+        &object.name,
+        block.totvert,
+        block.totedge,
+        block.totpoly,
+        block.totloop,
+        block.poly_offs_ptr,
+        block.attrs_ptr,
+        block.mesh_mat_ptr,
+        mat_slots,
+        block.vgroup_first_ptr,
+        block.vgroup_last_ptr,
+        block.vgroup_count,
+        block.cdl_ptr,
+        block.num_attrs,
+    );
+    let mesh_mat_array = build_mat_ptr_array_from_ptrs(material_ptrs);
+    let obj_mat_array = build_mat_ptr_array(mat_slots as usize);
+    let obj_matbits = build_matbits(mat_slots as usize);
+    write_block(out, b"OB\0\0", SDNA_IDX_OBJECT, block.object_ptr, 1, &object_data);
+    write_block(out, b"DATA", 0, block.obj_mat_ptr, 1, &obj_mat_array);
+    write_block(out, b"DATA", 0, block.obj_matbits_ptr, 1, &obj_matbits);
+    write_block(out, b"ME\0\0", SDNA_IDX_MESH, block.mesh_ptr, 1, &mesh_data);
+    write_block(out, b"DATA", 0, block.mesh_mat_ptr, 1, &mesh_mat_array);
+    write_block(out, b"DATA", SDNA_IDX_ATTRIBUTE, block.attrs_ptr, block.num_attrs, &block.attr_blob);
+    write_block(out, b"DATA", 0, block.name_pos_ptr, 1, b"position\0");
+    write_block(out, b"DATA", 0, block.name_ev_ptr, 1, b".edge_verts\0");
+    write_block(out, b"DATA", 0, block.name_cv_ptr, 1, b".corner_vert\0");
+    write_block(out, b"DATA", 0, block.name_ce_ptr, 1, b".corner_edge\0");
+    write_block(out, b"DATA", 0, block.name_matidx_ptr, 1, b"material_index\0");
+    write_block(out, b"DATA", SDNA_IDX_ATTRIBUTE_ARRAY, block.array_pos_ptr, 1, &build_attribute_array(block.raw_pos_ptr, block.totvert as i64));
+    write_block(out, b"DATA", SDNA_IDX_ATTRIBUTE_ARRAY, block.array_ev_ptr, 1, &build_attribute_array(block.raw_ev_ptr, block.totedge as i64));
+    write_block(out, b"DATA", SDNA_IDX_ATTRIBUTE_ARRAY, block.array_cv_ptr, 1, &build_attribute_array(block.raw_cv_ptr, block.totloop as i64));
+    write_block(out, b"DATA", SDNA_IDX_ATTRIBUTE_ARRAY, block.array_ce_ptr, 1, &build_attribute_array(block.raw_ce_ptr, block.totloop as i64));
+    write_block(out, b"DATA", SDNA_IDX_ATTRIBUTE_ARRAY, block.array_matidx_ptr, 1, &build_attribute_array(block.raw_matidx_ptr, block.totpoly as i64));
+    write_block(out, b"DATA", 0, block.raw_pos_ptr, 1, &block.raw_position);
+    write_block(out, b"DATA", 0, block.raw_ev_ptr, 1, &block.raw_edge_verts);
+    write_block(out, b"DATA", 0, block.raw_cv_ptr, 1, &block.raw_corner_vert);
+    write_block(out, b"DATA", 0, block.raw_ce_ptr, 1, &block.raw_corner_edge);
+    write_block(out, b"DATA", 0, block.raw_matidx_ptr, 1, &block.raw_material_index);
+    if let Some(ref uv_data) = block.raw_uv {
+        write_block(out, b"DATA", 0, block.name_uv_ptr, 1, b"UVMap\0");
+        write_block(out, b"DATA", SDNA_IDX_ATTRIBUTE_ARRAY, block.array_uv_ptr, 1, &build_attribute_array(block.raw_uv_ptr, block.totloop as i64));
+        write_block(out, b"DATA", 0, block.raw_uv_ptr, 1, uv_data);
+    }
+    if let Some(ref color_data) = block.raw_color {
+        write_block(out, b"DATA", 0, block.name_col_ptr, 1, b"Color\0");
+        write_block(out, b"DATA", SDNA_IDX_ATTRIBUTE_ARRAY, block.array_col_ptr, 1, &build_attribute_array(block.raw_col_ptr, block.totloop as i64));
+        write_block(out, b"DATA", 0, block.raw_col_ptr, 1, color_data);
+    }
+    write_block(out, b"DATA", 0, block.poly_offs_ptr, 1, &block.raw_poly_offsets);
+    if let Some(vgroups) = object.vertex_groups.as_ref().filter(|groups| !groups.is_empty()) {
+        for (idx, vgroup) in vgroups.iter().enumerate() {
+            let next_ptr = if idx + 1 < block.vgroup_ptrs.len() { block.vgroup_ptrs[idx + 1] } else { 0 };
+            let prev_ptr = if idx > 0 { block.vgroup_ptrs[idx - 1] } else { 0 };
+            let bdeform_data = build_bdeformgroup(&vgroup.name, next_ptr, prev_ptr);
+            write_block(out, b"DATA", SDNA_IDX_BDEFORMGROUP, block.vgroup_ptrs[idx], 1, &bdeform_data);
+        }
+        if let Some((mdv_array_ptr, mdv_data_ptr)) = block.mdeformvert_ptrs.first().copied() {
+            let mut mdeformvert_data = Vec::with_capacity(block.totvert);
+            let mut weight_payloads = Vec::new();
+            for vert_idx in 0..block.totvert {
+                let weights_for_vert = vgroups
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(group_idx, vgroup)| {
+                        vgroup.vertex_indices.contains(&vert_idx).then_some((group_idx as u32, 1.0f32))
+                    })
+                    .collect::<Vec<_>>();
+                let weight_ptr = if weights_for_vert.is_empty() { 0 } else { block.mdeformweight_ptrs[vert_idx] };
+                mdeformvert_data.push((weight_ptr, weights_for_vert.len() as u32));
+                if !weights_for_vert.is_empty() {
+                    weight_payloads.push((weight_ptr, build_mdeformweight_array(&weights_for_vert)));
+                }
+            }
+            let mdv_array_data = build_mdeformvert_array(&mdeformvert_data);
+            write_block(out, b"DATA", SDNA_IDX_ATTRIBUTE_ARRAY, mdv_array_ptr, 1, &mdv_array_data);
+            for (weight_ptr, weight_data) in weight_payloads {
+                write_block(out, b"DATA", 0, weight_ptr, 1, &weight_data);
+            }
+            write_block(out, b"DATA", SDNA_IDX_MDEFORMVERT, mdv_data_ptr, block.totvert as u32, &mdv_array_data);
+            if block.cdl_ptr != 0 {
+                write_block(out, b"DATA", 0, block.cdl_ptr, 1, &build_custom_data_layer_mdeformvert(mdv_data_ptr));
+            }
+        }
+    }
+}
+
+fn mesh_to_blend_hierarchy(
+    name: &str,
+    mesh: &Mesh,
+    materials: &Option<crate::mtl::MtlFile>,
+    nmc: &NodeMeshCombo,
+    vertex_groups: Option<&Vec<VertexGroup>>,
+) -> Vec<u8> {
+    let (material_names, full_submesh_slots) = blend_material_slots(name, mesh, materials);
+    let mat_slots = material_names.len() as i16;
+    let mut submesh_slot_by_material_id = HashMap::new();
+    for (submesh, slot) in mesh.submeshes.iter().zip(full_submesh_slots.iter().copied()) {
+        submesh_slot_by_material_id.entry(submesh.material_id).or_insert(slot);
+    }
+
+    let mut node_submeshes: Vec<Vec<usize>> = vec![Vec::new(); nmc.nodes.len()];
+    for (submesh_index, submesh) in mesh.submeshes.iter().enumerate() {
+        let node_index = submesh.node_parent_index as usize;
+        if node_index < node_submeshes.len() {
+            node_submeshes[node_index].push(submesh_index);
+        }
+    }
+
+    let nmc_export_names = nmc_export_object_names(name, nmc);
+    let mut mesh_objects: Vec<Option<MeshObjectExport>> = vec![None; nmc.nodes.len()];
+    for (node_index, submesh_indices) in node_submeshes.iter().enumerate() {
+        if submesh_indices.is_empty() {
+            continue;
+        }
+        let (node_mesh, node_vertex_groups) = subset_mesh_for_submeshes(mesh, submesh_indices, vertex_groups);
+        if node_mesh.indices.is_empty() {
+            continue;
+        }
+        mesh_objects[node_index] = Some(MeshObjectExport {
+            name: nmc_export_names[node_index].clone(),
+            mesh: node_mesh,
+            vertex_groups: node_vertex_groups,
+        });
+    }
+    let wrapper_name = strip_lod_suffix(name);
+    let collapsed_wrapper_node = nmc.nodes.iter().enumerate().find_map(|(index, node)| {
+        (node.parent_index.is_none()
+            && node.name == wrapper_name
+            && mesh_objects.get(index).and_then(|object| object.as_ref()).is_none())
+        .then_some(index)
+    });
+
+    let mut ptrs = PtrAlloc::new(0x1000);
+    let _screen_ptr = ptrs.alloc();
+    let _wm_ptr = ptrs.alloc();
+    let coord_root_ptr = ptrs.alloc();
+    let coord_root_mat_ptr = ptrs.alloc();
+    let coord_root_matbits_ptr = ptrs.alloc();
+    let wrapper_ptr = ptrs.alloc();
+    let wrapper_mat_ptr = ptrs.alloc();
+    let wrapper_matbits_ptr = ptrs.alloc();
+    let nmc_object_ptrs = (0..nmc.nodes.len())
+        .map(|index| {
+            if collapsed_wrapper_node == Some(index) {
+                wrapper_ptr
+            } else {
+                ptrs.alloc()
+            }
+        })
+        .collect::<Vec<_>>();
+    let nmc_empty_mat_ptrs = (0..nmc.nodes.len()).map(|_| ptrs.alloc()).collect::<Vec<_>>();
+    let nmc_empty_matbits_ptrs = (0..nmc.nodes.len()).map(|_| ptrs.alloc()).collect::<Vec<_>>();
+    let mesh_blocks = mesh_objects
+        .iter()
+        .map(|object| {
+            object.as_ref().map(|object| {
+                allocate_mesh_block(
+                    &mut ptrs,
+                    &object.mesh,
+                    object.vertex_groups.as_ref(),
+                    &submesh_slot_by_material_id,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let material_ptrs = (0..material_names.len()).map(|_| ptrs.alloc()).collect::<Vec<_>>();
+    let scene_ptr = ptrs.alloc();
+    let view_layer_ptr = ptrs.alloc();
+    let tool_settings_ptr = ptrs.alloc();
+    let base_ptr = ptrs.alloc();
+    let collection_ptr = ptrs.alloc();
+    let layer_collection_ptr = ptrs.alloc();
+    let object_count = 2 + nmc.nodes.len() - usize::from(collapsed_wrapper_node.is_some());
+    let collection_object_ptrs = (0..object_count).map(|_| ptrs.alloc()).collect::<Vec<_>>();
+
+    let scene_data = build_scene(name, view_layer_ptr, collection_ptr, tool_settings_ptr);
+    let tool_settings_data = build_tool_settings();
+    let view_layer_data = build_view_layer("ViewLayer", base_ptr, layer_collection_ptr);
+    let base_data = build_base(coord_root_ptr);
+    let collection_data = build_master_collection(
+        collection_object_ptrs.first().copied().unwrap_or(0),
+        collection_object_ptrs.last().copied().unwrap_or(0),
+        0,
+        0,
+    );
+    let layer_collection_data = build_layer_collection(collection_ptr);
+    let object_ptr_sequence = std::iter::once(coord_root_ptr)
+        .chain(std::iter::once(wrapper_ptr))
+        .chain(
+            nmc_object_ptrs
+                .iter()
+                .enumerate()
+                .filter_map(|(index, &ptr)| (collapsed_wrapper_node != Some(index)).then_some(ptr)),
+        )
+        .collect::<Vec<_>>();
+    let collection_object_data = collection_object_ptrs
+        .iter()
+        .enumerate()
+        .map(|(idx, &coll_ptr)| {
+            let prev_ptr = if idx > 0 { collection_object_ptrs[idx - 1] } else { 0 };
+            let next_ptr = if idx + 1 < collection_object_ptrs.len() { collection_object_ptrs[idx + 1] } else { 0 };
+            (coll_ptr, build_collection_object_linked(object_ptr_sequence[idx], prev_ptr, next_ptr))
+        })
+        .collect::<Vec<_>>();
+
+    let mut out = Vec::with_capacity(1024 * 1024);
+    out.extend_from_slice(BLEND_MAGIC);
+    let file_global = build_file_global(STARTUP_UI_SCREEN_PTR, scene_ptr, view_layer_ptr);
+    write_block(&mut out, b"GLOB", SDNA_IDX_FILE_GLOBAL, 0x10, 1, &file_global);
+    out.extend_from_slice(&startup_ui_prefix_bytes());
+    write_block(&mut out, b"SC\0\0", SDNA_IDX_SCENE, scene_ptr, 1, &scene_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_TOOL_SETTINGS, tool_settings_ptr, 1, &tool_settings_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_VIEW_LAYER, view_layer_ptr, 1, &view_layer_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, layer_collection_ptr, 1, &layer_collection_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION, collection_ptr, 1, &collection_data);
+    for (coll_ptr, data) in &collection_object_data {
+        write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, *coll_ptr, 1, data);
+    }
+    write_block(&mut out, b"DATA", SDNA_IDX_BASE, base_ptr, 1, &base_data);
+
+    let coord_matrix = [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, -1.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    let (coord_loc, coord_quat, coord_scale) = matrix_to_transform(coord_matrix);
+    let coord_root_data = build_empty_object("CryEngine_Z_up", coord_loc, coord_quat, coord_scale, 0);
+    write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, coord_root_ptr, 1, &coord_root_data);
+    write_block(&mut out, b"DATA", 0, coord_root_mat_ptr, 1, &build_mat_ptr_array(0));
+    write_block(&mut out, b"DATA", 0, coord_root_matbits_ptr, 1, &build_matbits(0));
+
+    let wrapper_data = build_empty_object(
+        &wrapper_name,
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+        [1.0, 1.0, 1.0],
+        coord_root_ptr,
+    );
+    write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, wrapper_ptr, 1, &wrapper_data);
+    write_block(&mut out, b"DATA", 0, wrapper_mat_ptr, 1, &build_mat_ptr_array(0));
+    write_block(&mut out, b"DATA", 0, wrapper_matbits_ptr, 1, &build_matbits(0));
+
+    for (node_index, node) in nmc.nodes.iter().enumerate() {
+        if collapsed_wrapper_node == Some(node_index) {
+            continue;
+        }
+        let parent_ptr = node
+            .parent_index
+            .and_then(|parent| nmc_object_ptrs.get(parent as usize).copied())
+            .unwrap_or(wrapper_ptr);
+        let transform = if crate::gltf::is_identity_or_zero(&node.bone_to_world) {
+            ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+        } else {
+            matrix_to_transform(crate::gltf::mat3x4_to_gltf(&node.bone_to_world))
+        };
+        if let (Some(object), Some(block)) = (&mesh_objects[node_index], &mesh_blocks[node_index]) {
+            if block.object_ptr == nmc_object_ptrs[node_index] {
+                write_mesh_block(&mut out, block, object, &material_ptrs, &material_names, mat_slots, parent_ptr, transform);
+            } else {
+                let cloned = MeshBlockData {
+                    object_ptr: nmc_object_ptrs[node_index],
+                    mesh_ptr: block.mesh_ptr,
+                    mesh_mat_ptr: block.mesh_mat_ptr,
+                    obj_mat_ptr: block.obj_mat_ptr,
+                    obj_matbits_ptr: block.obj_matbits_ptr,
+                    poly_offs_ptr: block.poly_offs_ptr,
+                    attrs_ptr: block.attrs_ptr,
+                    name_pos_ptr: block.name_pos_ptr,
+                    name_ev_ptr: block.name_ev_ptr,
+                    name_cv_ptr: block.name_cv_ptr,
+                    name_ce_ptr: block.name_ce_ptr,
+                    array_pos_ptr: block.array_pos_ptr,
+                    array_ev_ptr: block.array_ev_ptr,
+                    array_cv_ptr: block.array_cv_ptr,
+                    array_ce_ptr: block.array_ce_ptr,
+                    raw_pos_ptr: block.raw_pos_ptr,
+                    raw_ev_ptr: block.raw_ev_ptr,
+                    raw_cv_ptr: block.raw_cv_ptr,
+                    raw_ce_ptr: block.raw_ce_ptr,
+                    name_matidx_ptr: block.name_matidx_ptr,
+                    array_matidx_ptr: block.array_matidx_ptr,
+                    raw_matidx_ptr: block.raw_matidx_ptr,
+                    name_uv_ptr: block.name_uv_ptr,
+                    array_uv_ptr: block.array_uv_ptr,
+                    raw_uv_ptr: block.raw_uv_ptr,
+                    name_col_ptr: block.name_col_ptr,
+                    array_col_ptr: block.array_col_ptr,
+                    raw_col_ptr: block.raw_col_ptr,
+                    vgroup_first_ptr: block.vgroup_first_ptr,
+                    vgroup_last_ptr: block.vgroup_last_ptr,
+                    vgroup_count: block.vgroup_count,
+                    cdl_ptr: block.cdl_ptr,
+                    vgroup_ptrs: block.vgroup_ptrs.clone(),
+                    mdeformvert_ptrs: block.mdeformvert_ptrs.clone(),
+                    mdeformweight_ptrs: block.mdeformweight_ptrs.clone(),
+                    totvert: block.totvert,
+                    totedge: block.totedge,
+                    totpoly: block.totpoly,
+                    totloop: block.totloop,
+                    num_attrs: block.num_attrs,
+                    raw_poly_offsets: block.raw_poly_offsets.clone(),
+                    raw_position: block.raw_position.clone(),
+                    raw_edge_verts: block.raw_edge_verts.clone(),
+                    raw_corner_vert: block.raw_corner_vert.clone(),
+                    raw_corner_edge: block.raw_corner_edge.clone(),
+                    raw_material_index: block.raw_material_index.clone(),
+                    raw_uv: block.raw_uv.clone(),
+                    raw_color: block.raw_color.clone(),
+                    attr_blob: block.attr_blob.clone(),
+                };
+                write_mesh_block(&mut out, &cloned, object, &material_ptrs, &material_names, mat_slots, parent_ptr, transform);
+            }
+        } else {
+            let object_name = nmc_export_names[node_index].clone();
+            let empty_data = build_empty_object(&object_name, transform.0, transform.1, transform.2, parent_ptr);
+            write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, nmc_object_ptrs[node_index], 1, &empty_data);
+            write_block(&mut out, b"DATA", 0, nmc_empty_mat_ptrs[node_index], 1, &build_mat_ptr_array(0));
+            write_block(&mut out, b"DATA", 0, nmc_empty_matbits_ptrs[node_index], 1, &build_matbits(0));
+        }
+    }
+
+    for (material_ptr, material_name) in material_ptrs.iter().zip(material_names.iter()) {
+        let material_data = build_material(material_name);
+        write_block(&mut out, b"MA\0\0", SDNA_IDX_MATERIAL, *material_ptr, 1, &material_data);
+    }
+
+    write_block(&mut out, b"DNA1", SDNA_IDX_DNA1, 0x01, 1, DNA1_BYTES);
+    write_block_header(&mut out, b"ENDB", 0, 0, 0, 0);
     out
 }
 
@@ -708,11 +1743,35 @@ pub fn create_scene_blend(
     mesh_output_dir: &str,
     lights: &[ExtractedLight],
 ) -> Result<Vec<u8>, Error> {
+    let mesh_instances: Vec<LinkedMeshInstance> = (0..children_count)
+        .map(|idx| {
+            let name = format!("mesh_{idx}");
+            LinkedMeshInstance {
+                blend_path: format!("{mesh_output_dir}/{name}.blend"),
+                name,
+                position: [0.0, 0.0, 0.0],
+                rotation: [1.0, 0.0, 0.0, 0.0],
+            }
+        })
+        .collect();
+
+    create_scene_blend_with_instances(entity_name, &mesh_instances, lights)
+}
+
+pub fn create_scene_blend_with_instances(
+    entity_name: &str,
+    mesh_instances_input: &[LinkedMeshInstance],
+    lights: &[ExtractedLight],
+) -> Result<Vec<u8>, Error> {
+    let children_count = mesh_instances_input.len();
     // Build a minimal input structure for compatibility with internal logic
     let mut ptrs = PtrAlloc::new(0x1000);
     
+    let _screen_ptr = ptrs.alloc();
+    let _wm_ptr = ptrs.alloc();
     let scene_ptr = ptrs.alloc();
     let view_layer_ptr = ptrs.alloc();
+    let tool_settings_ptr = ptrs.alloc();
     let base_ptr = ptrs.alloc();
     let root_collection_ptr = ptrs.alloc();
     let root_collection_object_ptr = ptrs.alloc();
@@ -740,21 +1799,26 @@ pub fn create_scene_blend(
     let root_object_mat_ptr = ptrs.alloc();
     let root_object_matbits_ptr = ptrs.alloc();
     
-    // Allocate pointers for linked mesh instances
-    let mut mesh_instances = Vec::new();
+    // Allocate pointers for linked mesh object ID stubs.
+    let mut linked_mesh_ids = Vec::new();
+    let mut library_ptr_by_path = HashMap::new();
     let mut library_ptrs = Vec::new();
     let mut mesh_coll_obj_ptrs = Vec::new();
     
-    for idx in 0..children_count {
-        let object_ptr = ptrs.alloc();
-        let object_mat_ptr = ptrs.alloc();
-        let object_matbits_ptr = ptrs.alloc();
-        let library_ptr = ptrs.alloc();
+    for (idx, instance) in mesh_instances_input.iter().enumerate() {
+        let object_id_ptr = ptrs.alloc();
+        let library_ptr = if let Some(&ptr) = library_ptr_by_path.get(&instance.blend_path) {
+            ptr
+        } else {
+            let ptr = ptrs.alloc();
+            library_ptr_by_path.insert(instance.blend_path.clone(), ptr);
+            library_ptrs.push((instance.blend_path.clone(), ptr));
+            ptr
+        };
         let coll_obj_ptr = ptrs.alloc();  // Collection object for this mesh instance
         
-        library_ptrs.push(library_ptr);
-        mesh_instances.push((object_ptr, object_mat_ptr, object_matbits_ptr, library_ptr, idx));
-        mesh_coll_obj_ptrs.push((coll_obj_ptr, object_ptr));
+        linked_mesh_ids.push((object_id_ptr, library_ptr, idx));
+        mesh_coll_obj_ptrs.push((coll_obj_ptr, object_id_ptr));
     }
     
     // Allocate pointers for light instances
@@ -781,8 +1845,9 @@ pub fn create_scene_blend(
     
     // Build scene datablocks
     // Scene must always be named "Scene" for Blender to recognize it as the primary scene
-    let scene_data = build_scene("Scene", view_layer_ptr, root_collection_ptr);
-    let view_layer_data = build_view_layer(&entity_name, base_ptr, layer_collection_ptr);
+    let scene_data = build_scene("Scene", view_layer_ptr, root_collection_ptr, tool_settings_ptr);
+    let tool_settings_data = build_tool_settings();
+    let view_layer_data = build_view_layer("ViewLayer", base_ptr, layer_collection_ptr);
     let base_data = build_base(root_object_ptr);
     
     // Build collection hierarchy: Scene > [Meshes, Lights, Empties, Decals]
@@ -794,18 +1859,14 @@ pub fn create_scene_blend(
     let light_head_ptr = if !light_coll_obj_ptrs.is_empty() { light_coll_obj_ptrs[0].0 } else { 0 };
     let light_tail_ptr = if !light_coll_obj_ptrs.is_empty() { light_coll_obj_ptrs[light_coll_obj_ptrs.len() - 1].0 } else { 0 };
     
-    // Root collection: contains Root object + child collections
-    let mut root_collection_data = build_collection(
-        "Scene",
-        scene_ptr,
+    // Root (master) collection: embedded DATA block; contains Root object directly
+    // and Meshes/Lights/Empties/Decals sub-collections as children.
+    let root_collection_data = build_master_collection(
         root_collection_object_ptr,
-        root_collection_object_ptr,  // Both head and tail point to single member (Root object)
+        root_collection_object_ptr,  // gobject: single Root empty object (head=tail)
+        meshes_coll_child_ptr,       // children.first = CollectionChild(Meshes)
+        decals_coll_child_ptr,       // children.last  = CollectionChild(Decals)
     );
-    // Add child collections via CollectionChild linked list: Meshes -> Lights -> Empties -> Decals
-    // Collection.children ListBase.first at offset 432, .last at offset 440
-    // These point to CollectionChild structs, not directly to Collections
-    write_ptr(&mut root_collection_data, 432, meshes_coll_child_ptr);  // children.first = CollectionChild(Meshes)
-    write_ptr(&mut root_collection_data, 440, decals_coll_child_ptr);  // children.last = CollectionChild(Decals)
     let root_collection_object_data = build_collection_object(root_object_ptr);
     
     // Build mesh collection object linked list
@@ -819,9 +1880,10 @@ pub fn create_scene_blend(
     // Sub-collection: Meshes (child of root collection)
     let meshes_collection_data = build_collection(
         "Meshes",
-        scene_ptr,  // Owner is the Scene, not the root collection
         mesh_head_ptr,
         mesh_tail_ptr,
+        0,
+        0,
     );
     
     // Build light collection object linked list
@@ -835,25 +1897,28 @@ pub fn create_scene_blend(
     // Sub-collection: Lights (child of root collection)
     let lights_collection_data = build_collection(
         "Lights",
-        scene_ptr,  // Owner is the Scene, not the root collection
         light_head_ptr,
         light_tail_ptr,
+        0,
+        0,
     );
     
     // Sub-collection: Empties (placeholder for Phase 5C, child of root)
     let empties_collection_data = build_collection(
         "Empties",
-        scene_ptr,  // Owner is the Scene
-        0,  // No empties yet
-        0,  // tail = head when empty
+        0,
+        0,
+        0,
+        0,
     );
     
     // Sub-collection: Decals (placeholder for Phase 4, child of root)
     let decals_collection_data = build_collection(
         "Decals",
-        scene_ptr,  // Owner is the Scene
-        0,  // No decals yet
-        0,  // tail = head when empty
+        0,
+        0,
+        0,
+        0,
     );
     
     // Build CollectionChild linked list for root collection's children
@@ -933,7 +1998,7 @@ pub fn create_scene_blend(
         [0.0, 0.0, 0.0],  // position
         [1.0, 0.0, 0.0, 0.0],  // quaternion
         [1.0, 1.0, 1.0],  // scale
-        root_collection_ptr,  // parent collection
+        0,
     );
     let root_mat_array = build_mat_ptr_array(0);
     let root_matbits = build_matbits(0);
@@ -942,48 +2007,20 @@ pub fn create_scene_blend(
     let scene_name_bytes = format!("{}\0", entity_name);
     let scene_name_ptr = ptrs.alloc();
     
-    // Allocate pointers for mesh stubs (one per mesh) - these will be actual Mesh datablocks
-    let mut mesh_stub_ptrs = Vec::new();
-    for _idx in 0..children_count {
-        mesh_stub_ptrs.push(ptrs.alloc());
-    }
-    
-    // Build mesh instance objects with library links
-    let mut mesh_instance_data = Vec::new();
+    // Build linked object ID stubs and their library blocks.
+    let mut linked_mesh_id_data = Vec::new();
     let mut mesh_library_data = Vec::new();
-    let mut mesh_stub_data = Vec::new();
-    let mut mesh_object_mat_arrays = Vec::new();
-    let mut mesh_object_matbits = Vec::new();
     
-    for idx in 0..children_count {
-        // Build mesh reference name
-        let mesh_ref_name = format!("mesh_{}", idx);
-        let blend_filename = format!("{}.blend", mesh_ref_name);
-        let blend_path = format!("{}/{}", mesh_output_dir, blend_filename);
-        
-        // Build library block for this mesh file
-        let lib_data = build_library_block(&format!("LI_{}", idx), &blend_path);
-        mesh_library_data.push((idx, lib_data));
-        
-        // Build empty mesh stub that points to the external library mesh
-        // The actual geometry comes from the linked .blend file, this is just a placeholder
-        let stub_mesh_data = build_mesh_stub(&mesh_ref_name);
-        mesh_stub_data.push((idx, stub_mesh_data));
-        
-        // Build object for linked mesh instance (using mesh stub pointer instead of ID stub)
-        let mesh_object = build_linked_instance_object(
-            &mesh_ref_name,
-            mesh_stub_ptrs[idx],  // Point to mesh stub
-            [0.0, 0.0, 0.0],  // position at origin
-            [1.0, 0.0, 0.0, 0.0],  // quaternion identity
-            [1.0, 1.0, 1.0],  // scale
-            meshes_collection_ptr,  // parent collection
-        );
-        mesh_instance_data.push(mesh_object);
-        
-        // Build material arrays (empty for now)
-        mesh_object_mat_arrays.push(build_mat_ptr_array(0));
-        mesh_object_matbits.push(build_matbits(0));
+    for (blend_path, library_ptr) in &library_ptrs {
+        let lib_name = blend_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(blend_path.as_str());
+        let lib_data = build_library_block(lib_name, blend_path);
+        mesh_library_data.push((*library_ptr, lib_data));
+    }
+    for (object_id_ptr, library_ptr, idx) in &linked_mesh_ids {
+        linked_mesh_id_data.push((*object_id_ptr, build_id_stub("OB", &mesh_instances_input[*idx].name, *library_ptr)));
     }
     
     // Build light objects for lights collection
@@ -1016,7 +2053,7 @@ pub fn create_scene_blend(
             light.position_blend,
             light.rotation_blend,
             [1.0, 1.0, 1.0],  // Standard scale
-            lights_collection_ptr,  // Parent to lights collection
+            0,
         );
         light_object_data.push(object_bytes);
         
@@ -1029,63 +2066,50 @@ pub fn create_scene_blend(
     let mut out: Vec<u8> = Vec::with_capacity(1024 * 1024);
     out.extend_from_slice(BLEND_MAGIC);
     
-    let file_global = build_file_global(scene_ptr, view_layer_ptr);
+    let file_global = build_file_global(STARTUP_UI_SCREEN_PTR, scene_ptr, view_layer_ptr);
     write_block(&mut out, b"GLOB", SDNA_IDX_FILE_GLOBAL, 0x10, 1, &file_global);
+    out.extend_from_slice(&startup_ui_prefix_bytes());
     
     // Write scene structure
-    write_block(&mut out, b"SCE\0", SDNA_IDX_SCENE, scene_ptr, 1, &scene_data);
-    write_block(&mut out, b"SR\0\0", SDNA_IDX_VIEW_LAYER, view_layer_ptr, 1, &view_layer_data);
+    // CRITICAL: All DATA blocks for Scene must be consecutive immediately after SC\0\0.
+    // Blender reads them all into fd->datamap, then clears it after processing each ID block.
+    // Any non-DATA block between SC and its data will truncate the datamap.
+    write_block(&mut out, b"SC\0\0", SDNA_IDX_SCENE, scene_ptr, 1, &scene_data);
+    // SC DATA sequence — ToolSettings, ViewLayer, all LayerCollections, master_collection, CollectionChildren, Base:
+    write_block(&mut out, b"DATA", SDNA_IDX_TOOL_SETTINGS, tool_settings_ptr, 1, &tool_settings_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_VIEW_LAYER, view_layer_ptr, 1, &view_layer_data);
     write_block(&mut out, b"DATA", SDNA_IDX_BASE, base_ptr, 1, &base_data);
-    
-    // Write collection hierarchy
-    write_block(&mut out, b"GRP\0", SDNA_IDX_COLLECTION, root_collection_ptr, 1, &root_collection_data);
-    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, root_collection_object_ptr, 1, &root_collection_object_data);
-    
-    // Write CollectionChild linked list for root collection's children
-    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, meshes_coll_child_ptr, 1, &meshes_coll_child_data);
-    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, lights_coll_child_ptr, 1, &lights_coll_child_data);
-    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, empties_coll_child_ptr, 1, &empties_coll_child_data);
-    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, decals_coll_child_ptr, 1, &decals_coll_child_data);
-    
     write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, layer_collection_ptr, 1, &root_layer_collection_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, meshes_layer_coll_ptr, 1, &meshes_layer_coll_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, lights_layer_coll_ptr, 1, &lights_layer_coll_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, empties_layer_coll_ptr, 1, &empties_layer_coll_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, decals_layer_coll_ptr, 1, &decals_layer_coll_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION, root_collection_ptr, 1, &root_collection_data);  // embedded master_collection
+    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_CHILD, meshes_coll_child_ptr, 1, &meshes_coll_child_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_CHILD, lights_coll_child_ptr, 1, &lights_coll_child_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_CHILD, empties_coll_child_ptr, 1, &empties_coll_child_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_CHILD, decals_coll_child_ptr, 1, &decals_coll_child_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, root_collection_object_ptr, 1, &root_collection_object_data);
+    // End of SC DATA sequence — sub-collection GR blocks follow with their own DATA sub-blocks:
     
-    // Sub-collections
-    write_block(&mut out, b"GRP\0", SDNA_IDX_COLLECTION, meshes_collection_ptr, 1, &meshes_collection_data);
-    // Write mesh collection objects (linked list)
+    // Write sub-collections (GR blocks) each followed by their own DATA sub-blocks
+    write_block(&mut out, b"GR\0\0", SDNA_IDX_COLLECTION, meshes_collection_ptr, 1, &meshes_collection_data);
     for (coll_obj_ptr, coll_obj_data) in &meshes_coll_obj_data_list {
         write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, *coll_obj_ptr, 1, coll_obj_data);
     }
-    write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, meshes_layer_coll_ptr, 1, &meshes_layer_coll_data);
     
-    write_block(&mut out, b"GRP\0", SDNA_IDX_COLLECTION, lights_collection_ptr, 1, &lights_collection_data);
-    // Write light collection objects (linked list)
+    write_block(&mut out, b"GR\0\0", SDNA_IDX_COLLECTION, lights_collection_ptr, 1, &lights_collection_data);
     for (coll_obj_ptr, coll_obj_data) in &lights_coll_obj_data_list {
         write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, *coll_obj_ptr, 1, coll_obj_data);
     }
-    write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, lights_layer_coll_ptr, 1, &lights_layer_coll_data);
     
-    write_block(&mut out, b"GRP\0", SDNA_IDX_COLLECTION, empties_collection_ptr, 1, &empties_collection_data);
-    write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, empties_layer_coll_ptr, 1, &empties_layer_coll_data);
-    
-    write_block(&mut out, b"GRP\0", SDNA_IDX_COLLECTION, decals_collection_ptr, 1, &decals_collection_data);
-    write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, decals_layer_coll_ptr, 1, &decals_layer_coll_data);
+    write_block(&mut out, b"GR\0\0", SDNA_IDX_COLLECTION, empties_collection_ptr, 1, &empties_collection_data);
+    write_block(&mut out, b"GR\0\0", SDNA_IDX_COLLECTION, decals_collection_ptr, 1, &decals_collection_data);
     
     // Write root empty object + materials
     write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, root_object_ptr, 1, &root_empty_data);
     write_block(&mut out, b"DATA", 0, root_object_mat_ptr, 1, &root_mat_array);
     write_block(&mut out, b"DATA", 0, root_object_matbits_ptr, 1, &root_matbits);
-    
-    // Write linked mesh instances + materials
-    eprintln!("[DEBUG] Writing {} mesh instances", mesh_instances.len());
-    for (idx, (object_ptr, mat_ptr, matbits_ptr, _lib_ptr, _)) in mesh_instances.iter().enumerate() {
-        write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, *object_ptr, 1, &mesh_instance_data[idx]);
-        write_block(&mut out, b"DATA", 0, *mat_ptr, 1, &mesh_object_mat_arrays[idx]);
-        write_block(&mut out, b"DATA", 0, *matbits_ptr, 1, &mesh_object_matbits[idx]);
-        if idx == 0 || idx % 10 == 0 {
-            eprintln!("[DEBUG] Wrote mesh instance {} OB block", idx);
-        }
-    }
-    eprintln!("[DEBUG] Done writing mesh instances");
     
     // Write light blocks (Phase 5B)
     for (idx, (lamp_ptr, object_ptr, mat_ptr, matbits_ptr, _)) in light_instances.iter().enumerate() {
@@ -1099,21 +2123,17 @@ pub fn create_scene_blend(
         write_block(&mut out, b"DATA", 0, *matbits_ptr, 1, &light_object_matbits[idx]);
     }
     
-    // Write mesh stub blocks (empty Mesh datablocks that Objects point to)
-    // These satisfy Blender's requirement that Objects have valid data pointers
-    // The actual geometry comes from the linked external .blend files
-    eprintln!("[DEBUG] Writing {} mesh stubs", mesh_stub_data.len());
-    for (idx, stub_mesh) in mesh_stub_data.iter() {
-        write_block(&mut out, b"ME\0\0", SDNA_IDX_MESH, mesh_stub_ptrs[*idx], 1, stub_mesh);
+    // Write linked mesh libraries and object ID stubs after local IDs. This
+    // matches Blender-authored linked-object scenes and avoids making following
+    // local object-data IDs inherit the active library during read.
+    for (library_ptr, library_data) in &mesh_library_data {
+        write_block(&mut out, b"LI\0\0", SDNA_IDX_LIBRARY, *library_ptr, 1, library_data);
+        for (idx, (object_id_ptr, object_library_ptr, _)) in linked_mesh_ids.iter().enumerate() {
+            if object_library_ptr == library_ptr {
+                write_block(&mut out, b"ID\0\0", SDNA_IDX_ID, *object_id_ptr, 1, &linked_mesh_id_data[idx].1);
+            }
+        }
     }
-    eprintln!("[DEBUG] Done writing mesh stubs");
-    
-    // Write library blocks for linked meshes
-    eprintln!("[DEBUG] Writing {} library blocks", mesh_library_data.len());
-    for (idx, lib_data) in mesh_library_data.iter() {
-        write_block(&mut out, b"LI\0\0", SDNA_IDX_LIBRARY, library_ptrs[*idx], 1, lib_data);
-    }
-    eprintln!("[DEBUG] Done writing library blocks");
     
     // Write scene name
     write_block(&mut out, b"DATA", 0, scene_name_ptr, 1, scene_name_bytes.as_bytes());
@@ -1130,8 +2150,316 @@ pub fn create_scene_blend(
 mod tests_5a_scene_blend {
     use super::*;
     use crate::decomposed::DecomposedInput;
-    use crate::types::Mesh;
+    use crate::types::{Mesh, SubMesh};
     use crate::pipeline::LoadedInteriors;
+
+    #[derive(Debug)]
+    struct BlendBlock<'a> {
+        code: &'a [u8],
+        sdna: u32,
+        old_ptr: u64,
+        data: &'a [u8],
+    }
+
+    fn parse_blend_blocks(bytes: &[u8]) -> Vec<BlendBlock<'_>> {
+        let mut blocks = Vec::new();
+        let mut offset = BLEND_MAGIC.len();
+        while offset + 32 <= bytes.len() {
+            let code = &bytes[offset..offset + 4];
+            let sdna = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap());
+            let old_ptr = u64::from_le_bytes(bytes[offset + 8..offset + 16].try_into().unwrap());
+            let len = u64::from_le_bytes(bytes[offset + 16..offset + 24].try_into().unwrap()) as usize;
+            let data_start = offset + 32;
+            let data_end = data_start + len;
+            blocks.push(BlendBlock {
+                code,
+                sdna,
+                old_ptr,
+                data: &bytes[data_start..data_end],
+            });
+            offset = data_end;
+            if code == b"ENDB" {
+                break;
+            }
+        }
+        blocks
+    }
+
+    fn test_mesh_with_submeshes(submeshes: Vec<SubMesh>) -> Mesh {
+        Mesh {
+            positions: vec![[0.0, 0.0, 0.0]; 3],
+            indices: vec![0, 1, 2],
+            uvs: None,
+            secondary_uvs: None,
+            normals: None,
+            tangents: None,
+            colors: None,
+            submeshes,
+            model_min: [0.0, 0.0, 0.0],
+            model_max: [1.0, 1.0, 1.0],
+            scaling_min: [0.0, 0.0, 0.0],
+            scaling_max: [1.0, 1.0, 1.0],
+        }
+    }
+
+    fn test_submesh(material_id: u32, material_name: &str, first_index: u32) -> SubMesh {
+        SubMesh {
+            material_name: Some(material_name.to_string()),
+            material_id,
+            source_material_id: None,
+            first_index,
+            num_indices: 3,
+            first_vertex: 0,
+            num_vertices: 3,
+            node_parent_index: 0,
+        }
+    }
+
+    #[test]
+    fn test_blend_material_slots_use_glb_style_names_and_deduplicate_ids() {
+        let mesh = test_mesh_with_submeshes(vec![
+            test_submesh(3, "Decal_POM", 0),
+            test_submesh(3, "Decal_POM", 3),
+            test_submesh(7, "Painted_Metal", 6),
+        ]);
+
+        let (names, submesh_slots) = blend_material_slots("fallback", &mesh, &None);
+
+        assert_eq!(
+            names,
+            vec![
+                "fallback_mtl_Decal_POM_03".to_string(),
+                "fallback_mtl_Painted_Metal_07".to_string(),
+            ]
+        );
+        assert_eq!(submesh_slots, vec![0, 0, 1]);
+    }
+
+    #[test]
+    fn test_mesh_blend_with_nmc_writes_hierarchy_objects() {
+        let mesh = Mesh {
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [3.0, 0.0, 0.0],
+                [2.0, 1.0, 0.0],
+            ],
+            indices: vec![0, 1, 2, 3, 4, 5],
+            uvs: Some(vec![[0.0, 0.0]; 6]),
+            secondary_uvs: None,
+            normals: None,
+            tangents: None,
+            colors: Some(vec![[255, 255, 255, 255]; 6]),
+            submeshes: vec![
+                SubMesh {
+                    material_name: Some("Hull".to_string()),
+                    material_id: 0,
+                    source_material_id: None,
+                    first_index: 0,
+                    num_indices: 3,
+                    first_vertex: 0,
+                    num_vertices: 3,
+                    node_parent_index: 1,
+                },
+                SubMesh {
+                    material_name: Some("Decal".to_string()),
+                    material_id: 1,
+                    source_material_id: None,
+                    first_index: 3,
+                    num_indices: 3,
+                    first_vertex: 3,
+                    num_vertices: 3,
+                    node_parent_index: 2,
+                },
+            ],
+            model_min: [0.0, 0.0, 0.0],
+            model_max: [3.0, 1.0, 0.0],
+            scaling_min: [0.0, 0.0, 0.0],
+            scaling_max: [3.0, 1.0, 0.0],
+        };
+        let identity = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ];
+        let nmc = NodeMeshCombo {
+            nodes: vec![
+                crate::nmc::NmcNode {
+                    name: "asset_root".to_string(),
+                    parent_index: None,
+                    world_to_bone: identity,
+                    bone_to_world: identity,
+                    scale: [1.0; 3],
+                    geometry_type: 3,
+                    properties: HashMap::new(),
+                },
+                crate::nmc::NmcNode {
+                    name: "geo_left".to_string(),
+                    parent_index: Some(0),
+                    world_to_bone: identity,
+                    bone_to_world: identity,
+                    scale: [1.0; 3],
+                    geometry_type: 0,
+                    properties: HashMap::new(),
+                },
+                crate::nmc::NmcNode {
+                    name: "geo_right".to_string(),
+                    parent_index: Some(0),
+                    world_to_bone: identity,
+                    bone_to_world: identity,
+                    scale: [1.0; 3],
+                    geometry_type: 0,
+                    properties: HashMap::new(),
+                },
+            ],
+            material_indices: vec![],
+        };
+
+        let blend_bytes = mesh_to_blend("asset_LOD0", &mesh, &None, Some(&nmc), None);
+        let blocks = parse_blend_blocks(&blend_bytes);
+        let object_names = blocks
+            .iter()
+            .filter(|block| block.code == b"OB\0\0")
+            .map(|block| {
+                let raw = &block.data[42..300];
+                let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+                String::from_utf8_lossy(&raw[..end]).to_string()
+            })
+            .collect::<Vec<_>>();
+
+        assert!(object_names.contains(&"CryEngine_Z_up".to_string()));
+        assert!(object_names.contains(&"asset".to_string()));
+        assert!(object_names.contains(&"asset_root".to_string()));
+        assert!(object_names.contains(&"geo_left".to_string()));
+        assert!(object_names.contains(&"geo_right".to_string()));
+        assert!(!object_names.contains(&"asset_LOD0".to_string()));
+        assert_eq!(
+            blocks
+                .iter()
+                .filter(|block| block.code == b"ME\0\0")
+                .count(),
+            2,
+            "each geometry-bearing NMC node should get its own mesh"
+        );
+        assert!(
+            object_names.len() > 1,
+            "NMC export must not be a single flat mesh object"
+        );
+    }
+
+    #[test]
+    fn linked_scene_object_names_use_geometry_nodes_for_nmc_assets() {
+        let mesh = Mesh {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            indices: vec![0, 1, 2],
+            uvs: None,
+            secondary_uvs: None,
+            normals: None,
+            tangents: None,
+            colors: None,
+            submeshes: vec![
+                SubMesh {
+                    material_name: Some("Left".to_string()),
+                    material_id: 0,
+                    source_material_id: None,
+                    first_index: 0,
+                    num_indices: 3,
+                    first_vertex: 0,
+                    num_vertices: 3,
+                    node_parent_index: 1,
+                },
+                SubMesh {
+                    material_name: Some("Right".to_string()),
+                    material_id: 1,
+                    source_material_id: None,
+                    first_index: 0,
+                    num_indices: 3,
+                    first_vertex: 0,
+                    num_vertices: 3,
+                    node_parent_index: 2,
+                },
+            ],
+            model_min: [0.0; 3],
+            model_max: [1.0; 3],
+            scaling_min: [0.0; 3],
+            scaling_max: [1.0; 3],
+        };
+        let identity = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ];
+        let nmc = NodeMeshCombo {
+            nodes: vec![
+                crate::nmc::NmcNode {
+                    name: "asset".to_string(),
+                    parent_index: None,
+                    world_to_bone: identity,
+                    bone_to_world: identity,
+                    scale: [1.0; 3],
+                    geometry_type: 0,
+                    properties: HashMap::new(),
+                },
+                crate::nmc::NmcNode {
+                    name: "geo_left".to_string(),
+                    parent_index: Some(0),
+                    world_to_bone: identity,
+                    bone_to_world: identity,
+                    scale: [1.0; 3],
+                    geometry_type: 0,
+                    properties: HashMap::new(),
+                },
+                crate::nmc::NmcNode {
+                    name: "geo_right".to_string(),
+                    parent_index: Some(0),
+                    world_to_bone: identity,
+                    bone_to_world: identity,
+                    scale: [1.0; 3],
+                    geometry_type: 0,
+                    properties: HashMap::new(),
+                },
+            ],
+            material_indices: vec![],
+        };
+
+        assert_eq!(
+            linked_scene_object_names("asset_LOD0", &mesh, Some(&nmc)),
+            vec!["geo_left".to_string(), "geo_right".to_string()]
+        );
+        assert_eq!(
+            linked_scene_object_names("asset_LOD0", &mesh, None),
+            vec!["asset_LOD0".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_create_scene_blend_links_object_ids_instead_of_empty_mesh_stubs() {
+        let instance = LinkedMeshInstance {
+            name: "rsi_aurora_mk2_airlock_door_LOD0".to_string(),
+            blend_path: "//../../Data/Objects/Ships/rsi_aurora_mk2_airlock_door_LOD0.blend".to_string(),
+            position: [0.0, 0.0, 0.0],
+            rotation: [1.0, 0.0, 0.0, 0.0],
+        };
+        let blend_bytes = create_scene_blend_with_instances("SceneLinkTest", &[instance], &[]).unwrap();
+        let blocks = parse_blend_blocks(&blend_bytes);
+
+        let linked_object_stub = blocks.iter().find(|block| {
+            block.code == b"ID\0\0"
+                && block.sdna == SDNA_IDX_ID
+                && block.data[40..]
+                    .starts_with(b"OBrsi_aurora_mk2_airlock_door_LOD0")
+        });
+        assert!(linked_object_stub.is_some(), "scene.blend should link object IDs from mesh .blend files");
+
+        let local_empty_mesh_stub = blocks.iter().find(|block| {
+            block.code == b"ME\0\0"
+                && block.data[40..]
+                    .starts_with(b"MErsi_aurora_mk2_airlock_door_LOD0")
+        });
+        assert!(local_empty_mesh_stub.is_none(), "scene.blend must not replace linked objects with empty local mesh stubs");
+    }
 
     /// Helper to create a minimal DecomposedInput for testing
     fn create_test_input(
@@ -1270,6 +2598,84 @@ mod tests_5a_scene_blend {
         // Find DNA1 (DNA structure)
         let dna1_marker = b"DNA1";
         assert!(blend_bytes.windows(4).any(|w| w == dna1_marker), "Should contain DNA1 block");
+    }
+
+    #[test]
+    fn test_create_scene_blend_uses_startup_ui_prefix() {
+        let blend_bytes = create_scene_blend("WithUi", 1, "Data/Objects", &[]).unwrap();
+        let blocks = parse_blend_blocks(&blend_bytes);
+        let glob = blocks.iter().find(|block| block.code == b"GLOB").unwrap();
+
+        assert_eq!(
+            u64::from_le_bytes(glob.data[16..24].try_into().unwrap()),
+            STARTUP_UI_SCREEN_PTR
+        );
+        assert!(blocks.iter().any(|block| block.code == b"SN\0\0"));
+        assert!(!blocks.iter().any(|block| block.code == b"SR\0\0"));
+        assert!(blocks.iter().any(|block| block.code == b"WM\0\0"));
+        assert!(blocks.iter().any(|block| block.code == b"WS\0\0"));
+    }
+
+    #[test]
+    fn test_create_scene_blend_scene_data_is_consecutive() {
+        let blend_bytes = create_scene_blend("SceneData", 2, "Data/Objects", &[]).unwrap();
+        let blocks = parse_blend_blocks(&blend_bytes);
+        let scene_idx = blocks.iter().position(|block| block.code == b"SC\0\0").unwrap();
+        let scene_block = &blocks[scene_idx];
+        let mut data_sdnas = Vec::new();
+
+        for block in blocks.iter().skip(scene_idx + 1) {
+            if block.code != b"DATA" {
+                break;
+            }
+            data_sdnas.push(block.sdna);
+        }
+
+        let tool_settings_ptr = u64::from_le_bytes(scene_block.data[568..576].try_into().unwrap());
+        assert_ne!(tool_settings_ptr, 0);
+        assert!(blocks.iter().any(|block|
+            block.code == b"DATA"
+                && block.sdna == SDNA_IDX_TOOL_SETTINGS
+                && block.old_ptr == tool_settings_ptr
+        ));
+        assert!(data_sdnas.contains(&SDNA_IDX_TOOL_SETTINGS));
+        assert!(data_sdnas.contains(&SDNA_IDX_VIEW_LAYER));
+        assert!(data_sdnas.contains(&SDNA_IDX_BASE));
+        assert!(data_sdnas.contains(&SDNA_IDX_LAYER_COLLECTION));
+        assert!(data_sdnas.contains(&SDNA_IDX_COLLECTION));
+        assert!(data_sdnas.contains(&SDNA_IDX_COLLECTION_CHILD));
+        assert!(data_sdnas.contains(&SDNA_IDX_COLLECTION_OBJECT));
+    }
+
+    #[test]
+    fn test_create_scene_blend_objects_do_not_parent_to_collections() {
+        let light = ExtractedLight {
+            name: "ParentCheckLight".to_string(),
+            position_blend: [0.0, 0.0, 0.0],
+            rotation_blend: [1.0, 0.0, 0.0, 0.0],
+            color: [1.0, 1.0, 1.0],
+            lamp_type: 0,
+            energy_watts: 100.0,
+            radius: 10.0,
+            spot_size: 0.0,
+            spot_blend: 0.0,
+            intensity_candela: 5.0,
+            temperature_k: 3000.0,
+            use_temperature: false,
+            gobo_path: None,
+            active_state: "default".to_string(),
+        };
+        let blend_bytes = create_scene_blend("ParentCheck", 2, "Data/Objects", &[light]).unwrap();
+        let blocks = parse_blend_blocks(&blend_bytes);
+
+        for block in blocks.iter().filter(|block| block.code == b"OB\0\0") {
+            assert_eq!(
+                u64::from_le_bytes(block.data[496..504].try_into().unwrap()),
+                0,
+                "object block 0x{:x} must not use a Collection pointer as Object.parent",
+                block.old_ptr
+            );
+        }
     }
 
     #[test]
@@ -4603,4 +6009,3 @@ mod tests_4c {
         }
     }
 }
-

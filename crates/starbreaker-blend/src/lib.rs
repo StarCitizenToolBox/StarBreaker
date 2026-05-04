@@ -8,9 +8,13 @@
 //! from a live Blender 5.1.1 instance and cross-checked against the bundled DNA1
 //! block (`dna1_blender501.bin`).
 
+use std::collections::HashMap;
 use std::io::Write;
 
 use zstd::Encoder;
+
+mod ui_prefix;
+pub use ui_prefix::{startup_ui_prefix_bytes, STARTUP_UI_SCREEN_PTR};
 
 pub const DNA1_BYTES: &[u8] = include_bytes!("dna1_blender501.bin");
 
@@ -22,14 +26,17 @@ pub const BLEND_MAGIC: &[u8] = b"BLENDER17-01v0501";
 pub const SDNA_IDX_ATTRIBUTE: u32 = 75;
 pub const SDNA_IDX_ATTRIBUTE_ARRAY: u32 = 73;
 pub const SDNA_IDX_COLLECTION_OBJECT: u32 = 104;
+pub const SDNA_IDX_COLLECTION_CHILD: u32 = 105;
 pub const SDNA_IDX_COLLECTION: u32 = 107;
 pub const SDNA_IDX_FILE_GLOBAL: u32 = 171;
 pub const SDNA_IDX_LAYER_COLLECTION: u32 = 247;
 pub const SDNA_IDX_BASE: u32 = 246;
 pub const SDNA_IDX_VIEW_LAYER: u32 = 252;
+pub const SDNA_IDX_MATERIAL: u32 = 321;
 pub const SDNA_IDX_MESH: u32 = 322;
 pub const SDNA_IDX_OBJECT: u32 = 692;
 pub const SDNA_IDX_SCENE: u32 = 757;
+pub const SDNA_IDX_TOOL_SETTINGS: u32 = 747;
 pub const SDNA_IDX_LAMP: u32 = 253;
 pub const SDNA_IDX_BDEFORMGROUP: u32 = 686;
 pub const SDNA_IDX_MDEFORMVERT: u32 = 331;
@@ -39,18 +46,24 @@ pub const SDNA_IDX_IDPROPERTY: u32 = 9;
 pub const SDNA_IDX_LIBRARY: u32 = 15;
 pub const SDNA_IDX_ID: u32 = 14;
 pub const SDNA_IDX_DNA1: u32 = 0;
+pub const SDNA_IDX_SCREEN: u32 = 758;  // bScreen struct
+pub const SDNA_IDX_WINDOWMANAGER: u32 = 960;  // wmWindowManager struct
 
 // ── Struct sizes (bytes) ──────────────────────────────────────────────────────
 pub const FILE_GLOBAL_SIZE: usize = 1216;
 pub const SCENE_SIZE: usize = 6920;
+pub const TOOL_SETTINGS_SIZE: usize = 1256;
 pub const VIEW_LAYER_SIZE: usize = 328;
+pub const SCREEN_SIZE: usize = 544;  // bScreen struct (idx=758, verified from dna1_blender501.bin)
+pub const WINDOWMANAGER_SIZE: usize = 1480;  // wmWindowManager struct
 pub const BASE_SIZE: usize = 48;
-pub const COLLECTION_SIZE: usize = 544;
+pub const COLLECTION_SIZE: usize = 520;
 pub const COLLECTION_OBJECT_SIZE: usize = 32;
 pub const LAYER_COLLECTION_SIZE: usize = 64;
 pub const OBJECT_SIZE: usize = 1288;
 pub const MESH_SIZE: usize = 1960;
 pub const LAMP_SIZE: usize = 568;
+pub const MATERIAL_SIZE: usize = 584;
 pub const ATTRIBUTE_SIZE: usize = 24;
 pub const ATTRIBUTE_ARRAY_SIZE: usize = 32;
 pub const BDEFORMGROUP_SIZE: usize = 88;
@@ -68,6 +81,7 @@ pub const ATTR_DOMAIN_FACE: u8 = 2;
 pub const ATTR_DOMAIN_CORNER: u8 = 3;
 pub const ATTR_TYPE_INT16_2D: i16 = 2;
 pub const ATTR_TYPE_INT: i16 = 3;
+pub const ATTR_TYPE_INT32_2D: i16 = 4;
 pub const ATTR_TYPE_FLOAT2: i16 = 6;
 pub const ATTR_TYPE_FLOAT3: i16 = 7;
 pub const ATTR_TYPE_BYTE_COLOR: i16 = 9;
@@ -239,6 +253,43 @@ pub fn ints_data(values: &[i32]) -> Vec<u8> {
     out
 }
 
+pub fn ints2_data(values: &[[i32; 2]]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(values.len() * 8);
+    for v in values {
+        out.extend_from_slice(&v[0].to_le_bytes());
+        out.extend_from_slice(&v[1].to_le_bytes());
+    }
+    out
+}
+
+/// Build Blender 5.x generic edge topology from triangle corner vertices.
+///
+/// Blender's generic mesh topology requires `.edge_verts` on the EDGE domain
+/// and `.corner_edge` alongside `.corner_vert` on the CORNER domain.
+pub fn triangle_edge_topology(indices: &[u32]) -> (Vec<[i32; 2]>, Vec<i32>) {
+    let mut edge_map: HashMap<(u32, u32), i32> = HashMap::new();
+    let mut edge_verts = Vec::new();
+    let mut corner_edges = Vec::with_capacity(indices.len());
+
+    for tri in indices.chunks_exact(3) {
+        for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+            let key = if a <= b { (a, b) } else { (b, a) };
+            let edge_index = match edge_map.get(&key) {
+                Some(&index) => index,
+                None => {
+                    let index = edge_verts.len() as i32;
+                    edge_verts.push([key.0 as i32, key.1 as i32]);
+                    edge_map.insert(key, index);
+                    index
+                }
+            };
+            corner_edges.push(edge_index);
+        }
+    }
+
+    (edge_verts, corner_edges)
+}
+
 pub fn bytes4_data(values: &[[u8; 4]]) -> Vec<u8> {
     let mut out = Vec::with_capacity(values.len() * 4);
     for v in values {
@@ -249,23 +300,188 @@ pub fn bytes4_data(values: &[[u8; 4]]) -> Vec<u8> {
 
 // ── Datablock builders ────────────────────────────────────────────────────────
 
-pub fn build_file_global(scene_ptr: u64, view_layer_ptr: u64) -> Vec<u8> {
+pub fn build_file_global(screen_ptr: u64, scene_ptr: u64, view_layer_ptr: u64) -> Vec<u8> {
     let mut data = vec![0u8; FILE_GLOBAL_SIZE];
     data[0..4].copy_from_slice(b"5.01");
     write_u16(&mut data, 4, 1);
     write_u16(&mut data, 6, 500);
-    write_ptr(&mut data, 24, scene_ptr);
-    write_ptr(&mut data, 32, view_layer_ptr);
+    write_ptr(&mut data, 16, screen_ptr);  // curscreen @ offset 16
+    write_ptr(&mut data, 24, scene_ptr);   // curscene @ offset 24
+    write_ptr(&mut data, 32, view_layer_ptr);  // cur_view_layer @ offset 32
     data
 }
 
-pub fn build_scene(scene_name: &str, view_layer_ptr: u64, master_collection_ptr: u64) -> Vec<u8> {
+pub fn build_screen(screen_name: &str) -> Vec<u8> {
+    let mut data = vec![0u8; SCREEN_SIZE];
+    // bScreen starts with ID struct (408 bytes)
+    write_id_name(&mut data, "SR", screen_name);
+    // ListBases for vertbase, edgebase, areabase, regionbase are all NULL (0x0000...)
+    // Scene *scene pointer (offset 440) = NULL
+    // All flags and state vars default to 0
+    data
+}
+
+pub fn build_windowmanager(wm_name: &str) -> Vec<u8> {
+    let mut data = vec![0u8; WINDOWMANAGER_SIZE];
+    // wmWindowManager starts with ID struct (408 bytes)
+    write_id_name(&mut data, "WM", wm_name);
+    // All other fields default to NULL/0 (windows, layouts, operators, notifier queues, etc.)
+    data
+}
+
+pub fn build_scene(
+    scene_name: &str,
+    view_layer_ptr: u64,
+    master_collection_ptr: u64,
+    tool_settings_ptr: u64,
+) -> Vec<u8> {
     let mut data = vec![0u8; SCENE_SIZE];
     write_id_name(&mut data, "SC", scene_name);
+    // Minimal Blender 5.1 Scene defaults mirrored from DNA_scene_types.h / scene_init_data().
+    // Leaving RenderData fully zeroed makes Blender's post-load code hit invalid time/render
+    // state before Python can inspect the file.
+    write_i32(&mut data, 1032, 1); // r.cfra
+    write_i32(&mut data, 1036, 1); // r.sfra
+    write_i32(&mut data, 1040, 250); // r.efra
+    write_i32(&mut data, 1056, 100); // r.images
+    write_i32(&mut data, 1060, 100); // r.framapto
+    write_u16(&mut data, 1066, 1); // r.threads
+    write_f32(&mut data, 1068, 1.0); // r.framelen
+    write_i32(&mut data, 1072, 1); // r.frame_step
+    write_u16(&mut data, 1078, 100); // r.size
+    write_i32(&mut data, 1080, 1920); // r.xsch
+    write_i32(&mut data, 1084, 1080); // r.ysch
+    write_i32(&mut data, 1108, 0x0001 | 0x0004 | 0x0010); // r.scemode = R_DOCOMP | R_DOSEQ | R_EXTENSION
+    write_u16(&mut data, 1116, 24); // r.frs_sec
+    write_f32(&mut data, 1124, 0.0); // r.border.xmin
+    write_f32(&mut data, 1128, 1.0); // r.border.xmax
+    write_f32(&mut data, 1132, 0.0); // r.border.ymin
+    write_f32(&mut data, 1136, 1.0); // r.border.ymax
+    write_f32(&mut data, 1156, 1.0); // r.xasp
+    write_f32(&mut data, 1160, 1.0); // r.yasp
+    write_f32(&mut data, 1164, 72.0); // r.ppm_factor
+    write_f32(&mut data, 1168, 0.0254); // r.ppm_base
+    write_f32(&mut data, 1172, 1.0); // r.frs_sec_base
+    write_f32(&mut data, 1176, 1.5); // r.gauss
+    write_i32(&mut data, 1180, 1); // r.color_mgt_flag = R_COLOR_MANAGEMENT
+    write_f32(&mut data, 1184, 1.0); // r.dither_intensity
+    write_cstr_fixed(&mut data, 1196, 1024, "//"); // r.pic
+    write_i32(&mut data, 2224, 0x00ff); // r.stamp defaults
+    write_u16(&mut data, 2228, 12); // r.stamp_font_id
+    for i in 0..4 {
+        write_f32(&mut data, 3000 + i * 4, [0.8, 0.8, 0.8, 1.0][i]); // r.fg_stamp
+        write_f32(&mut data, 3016 + i * 4, [0.0, 0.0, 0.0, 0.25][i]); // r.bg_stamp
+    }
+    write_f32(&mut data, 3040, 1.0); // r.simplify_particles
+    write_f32(&mut data, 3048, 1.0); // r.simplify_volumes
+    write_i32(&mut data, 3052, 0); // r.line_thickness_mode
+    write_f32(&mut data, 3056, 1.0); // r.unit_line_thickness
+    write_cstr_fixed(&mut data, 3060, 32, "BLENDER_WORKBENCH"); // r.engine
+    write_f32(&mut data, 4544, 0.5); // r.motion_blur_shutter
+    write_f32(&mut data, 4996, 1.0); // r.time_jump_delta
+    write_i32(&mut data, 5000, 1); // r.time_jump_unit
+    write_i32(&mut data, 5008, 48000); // audio.mixrate
+    write_f32(&mut data, 5012, 1.0); // audio.main
+    write_f32(&mut data, 5016, 343.3); // audio.speed_of_sound
+    write_f32(&mut data, 5020, 1.0); // audio.doppler_factor
+    write_i32(&mut data, 5024, 2); // audio.distance_model
+    write_u16(&mut data, 5028, 1); // audio.flag = AUDIO_SYNC
+    write_f32(&mut data, 5032, 1.0); // audio.volume
+    write_i32(&mut data, 5072, 1); // orientation_slots[0].type
+    write_i32(&mut data, 5076, -1); // orientation_slots[0].index_custom
+    for off in [5092, 5108, 5124] {
+        write_i32(&mut data, off, -1); // orientation_slots[1..].index_custom
+    }
+    write_f32(&mut data, 5176, 1.0); // unit.scale_length
+    data[5180] = 1; // unit.system = USER_UNIT_METRIC
+    data[5184] = 1; // unit.length_unit
+    data[5185] = 1; // unit.mass_unit
+    data[5186] = 1; // unit.time_unit
+    data[5187] = 1; // unit.temperature_unit
+    write_i32(&mut data, 5304, 1); // physics_settings.flag = PHYS_GLOBAL_GRAVITY
+    write_f32(&mut data, 5672, 0.57735026); // display.light_direction[0]
+    write_f32(&mut data, 5676, 0.57735026); // display.light_direction[1]
+    write_f32(&mut data, 5680, 0.57735026); // display.light_direction[2]
+    write_f32(&mut data, 5684, 0.1); // display.shadow_shift
+    write_f32(&mut data, 5692, 0.2); // display.matcap_ssao_distance
+    write_f32(&mut data, 5696, 1.0); // display.matcap_ssao_attenuation
+    write_i32(&mut data, 5700, 16); // display.matcap_ssao_samples
+    data[5704] = 1; // display.viewport_aa = FXAA
+    data[5705] = 8; // display.render_aa = 8 samples
+    data[5712] = 3; // display.shading.type = OB_SOLID
+    data[5713] = 3; // display.shading.prev_type = OB_SOLID
+    write_u16(&mut data, 5716, (1 << 1) | (1 << 2) | (1 << 12) | (1 << 13)); // View3DShading.flag defaults
+    data[5718] = 1; // display.shading.light = V3D_LIGHTING_STUDIO
+    data[5720] = 1; // display.shading.cavity_type = V3D_SHADING_CAVITY_CURVATURE
+    data[5721] = 2; // display.shading.wire_color_type = V3D_SHADING_SINGLE_COLOR
+    write_f32(&mut data, 5970, 0.5); // display.shading.shadow_intensity
+    for i in 0..3 {
+        write_f32(&mut data, 5974 + i * 4, 0.8); // display.shading.single_color
+        write_f32(&mut data, 5986 + i * 4, 0.0); // display.shading.object_outline_color
+        write_f32(&mut data, 6014 + i * 4, 0.05); // display.shading.background_color
+    }
+    write_f32(&mut data, 5998, 0.5); // display.shading.xray_alpha
+    write_f32(&mut data, 6002, 0.5); // display.shading.xray_alpha_wire
+    write_f32(&mut data, 6006, 1.0); // display.shading.cavity_valley_factor
+    write_f32(&mut data, 6010, 1.0); // display.shading.cavity_ridge_factor
+    write_f32(&mut data, 6026, 1.0); // display.shading.curvature_ridge_factor
+    write_f32(&mut data, 6030, 1.0); // display.shading.curvature_valley_factor
+    write_i32(&mut data, 6034, 1); // display.shading.render_pass = SCE_PASS_COMBINED
+    write_i32(&mut data, 6656, (1 << 11) | (1 << 24)); // eevee.flag
+    write_i32(&mut data, 6660, 3); // eevee.gi_diffuse_bounces
+    write_i32(&mut data, 6664, 512); // eevee.gi_cubemap_resolution
+    write_i32(&mut data, 6668, 32); // eevee.gi_visibility_resolution
+    write_i32(&mut data, 6676, 16); // eevee.gi_irradiance_pool_size
+    write_i32(&mut data, 6684, 16); // eevee.taa_samples
+    write_i32(&mut data, 6688, 64); // eevee.taa_render_samples
+    write_f32(&mut data, 6692, 0.1); // eevee.volumetric_start
+    write_f32(&mut data, 6696, 100.0); // eevee.volumetric_end
+    write_i32(&mut data, 6700, 8); // eevee.volumetric_tile_size
+    write_i32(&mut data, 6704, 64); // eevee.volumetric_samples
+    write_f32(&mut data, 6708, 0.8); // eevee.volumetric_sample_distribution
+    write_i32(&mut data, 6716, 16); // eevee.volumetric_shadow_samples
+    write_i32(&mut data, 6720, 16); // eevee.volumetric_ray_depth
+    write_f32(&mut data, 6732, 0.05); // eevee.fast_gi_bias
+    write_i32(&mut data, 6736, 2); // eevee.fast_gi_resolution
+    write_i32(&mut data, 6740, 8); // eevee.fast_gi_step_count
+    write_i32(&mut data, 6744, 2); // eevee.fast_gi_ray_count
+    write_f32(&mut data, 6748, 0.25); // eevee.fast_gi_quality
+    write_f32(&mut data, 6756, 0.25); // eevee.fast_gi_thickness_near
+    write_f32(&mut data, 6760, std::f32::consts::FRAC_PI_4); // eevee.fast_gi_thickness_far
+    write_f32(&mut data, 6768, 5.0); // eevee.bokeh_overblur
+    write_f32(&mut data, 6772, 100.0); // eevee.bokeh_max_size
+    write_f32(&mut data, 6776, 1.0); // eevee.bokeh_threshold
+    write_f32(&mut data, 6780, 10.0); // eevee.bokeh_neighbor_max
+    write_i32(&mut data, 6788, 32); // eevee.motion_blur_max
+    write_i32(&mut data, 6792, 1); // eevee.motion_blur_steps
+    write_f32(&mut data, 6804, 100.0); // eevee.motion_blur_depth_scale
+    write_i32(&mut data, 6812, 512); // eevee.shadow_pool_size
+    write_i32(&mut data, 6816, 1); // eevee.shadow_ray_count
+    write_i32(&mut data, 6820, 6); // eevee.shadow_step_count
+    write_f32(&mut data, 6824, 1.0); // eevee.shadow_resolution_scale
+    write_f32(&mut data, 6836, 10.0); // eevee.clamp_surface_indirect
+    write_f32(&mut data, 6844, 1.0); // eevee.direct_light_intensity
+    write_f32(&mut data, 6848, 1.0); // eevee.indirect_light_intensity
+    write_i32(&mut data, 6852, 1); // eevee.ray_tracing_method
+    write_f32(&mut data, 6856, 0.25); // eevee.ray_tracing_options.screen_trace_quality
+    write_f32(&mut data, 6860, 0.2); // eevee.ray_tracing_options.screen_trace_thickness
+    write_f32(&mut data, 6864, 0.5); // eevee.ray_tracing_options.trace_max_roughness
+    write_i32(&mut data, 6868, 2); // eevee.ray_tracing_options.resolution_scale
+    write_i32(&mut data, 6872, 1); // eevee.ray_tracing_options.flag
+    write_i32(&mut data, 6876, 1 | 2 | 4); // eevee.ray_tracing_options.denoise_stages
+    write_f32(&mut data, 6880, 3.0); // eevee.overscan
+    write_f32(&mut data, 6884, 0.01); // eevee.light_threshold
     write_ptr(&mut data, 5632, view_layer_ptr);
     write_ptr(&mut data, 5640, view_layer_ptr);
     write_ptr(&mut data, 5648, master_collection_ptr);
+    write_ptr(&mut data, 568, tool_settings_ptr);
+    write_i32(&mut data, 5664, 1);
+    write_i32(&mut data, 5668, 250);
     data
+}
+
+pub fn build_tool_settings() -> Vec<u8> {
+    vec![0u8; TOOL_SETTINGS_SIZE]
 }
 
 pub fn build_view_layer(
@@ -274,12 +490,19 @@ pub fn build_view_layer(
     layer_collection_ptr: u64,
 ) -> Vec<u8> {
     let mut data = vec![0u8; VIEW_LAYER_SIZE];
-    write_cstr_fixed(&mut data, 16, 64, view_layer_name);
+    // ViewLayer struct starts with: next (8) + prev (8) + name[64] (64)
+    // NO ID header - ViewLayer is not an ID type!
+    let name_bytes = view_layer_name.as_bytes();
+    let copy_len = name_bytes.len().min(63);
+    data[16..16 + copy_len].copy_from_slice(&name_bytes[..copy_len]);
+    data[16 + copy_len] = 0; // null terminator
+
     write_u16(&mut data, 80, 5);
     write_ptr(&mut data, 88, base_ptr);
     write_ptr(&mut data, 96, base_ptr);
     write_ptr(&mut data, 120, layer_collection_ptr);
     write_ptr(&mut data, 128, layer_collection_ptr);
+    write_ptr(&mut data, 136, layer_collection_ptr);
     data
 }
 
@@ -293,16 +516,14 @@ pub fn build_base(object_ptr: u64) -> Vec<u8> {
 
 pub fn build_collection(
     collection_name: &str,
-    owner_scene_ptr: u64,
     collection_object_head_ptr: u64,
     collection_object_tail_ptr: u64,
+    children_head_ptr: u64,
+    children_tail_ptr: u64,
 ) -> Vec<u8> {
     let mut data = vec![0u8; COLLECTION_SIZE];
     write_id_name(&mut data, "GR", collection_name);
-    write_i16(&mut data, 298, 1024);
-    
-    // Offset 408-415: Collection.owner_id (8-byte pointer to owning Scene ID)
-    write_ptr(&mut data, 408, owner_scene_ptr);
+    // id.flag = 0, owner_id at offset 408 = 0 (overwritten at runtime by Blender)
     
     // Offset 416-423: Collection.gobject ListBase.first (CollectionObject* head)
     write_ptr(&mut data, 416, collection_object_head_ptr);
@@ -310,12 +531,44 @@ pub fn build_collection(
     // Offset 424-431: Collection.gobject ListBase.last (CollectionObject* tail)
     write_ptr(&mut data, 424, collection_object_tail_ptr);
     
-    // Offset 432-439: Collection.children ListBase.first (nested Collections)
-    write_ptr(&mut data, 432, 0);  // No nested collections for now
+    // Offset 432-439: Collection.children ListBase.first (CollectionChild* head)
+    write_ptr(&mut data, 432, children_head_ptr);
     
-    // Offset 440-447: Collection.children ListBase.last
-    write_ptr(&mut data, 440, 0);
+    // Offset 440-447: Collection.children ListBase.last (CollectionChild* tail)
+    write_ptr(&mut data, 440, children_tail_ptr);
     
+    data
+}
+
+/// Build an embedded master Collection (Scene Collection) DATA block.
+///
+/// The master_collection is NOT a top-level GR block — it is an embedded DATA block
+/// immediately following the SC block. Blender reads it via `BLO_read_struct` (datamap),
+/// not `newlibadr` (libmap). Required flags:
+/// - `ID_FLAG_EMBEDDED_DATA` (0x0400) at id.flag (offset 298)
+/// - `COLLECTION_IS_MASTER` (0x20) at collection.flag (offset 496)
+pub fn build_master_collection(
+    gobject_head_ptr: u64,
+    gobject_tail_ptr: u64,
+    children_head_ptr: u64,
+    children_tail_ptr: u64,
+) -> Vec<u8> {
+    let mut data = vec![0u8; COLLECTION_SIZE];
+    write_id_name(&mut data, "GR", "Scene Collection");
+    // id.flag |= ID_FLAG_EMBEDDED_DATA (0x0400) at offset 298 — Blender asserts this
+    write_i16(&mut data, 298, 0x0400);
+    // collection.flag |= COLLECTION_IS_MASTER (0x20) at offset 496 — Blender asserts this
+    data[496] = 0x20;
+    // owner_id at offset 408 = 0 (overwritten at runtime: BKE_collection_blend_read_data sets it)
+
+    // gobject: direct objects in the master collection
+    write_ptr(&mut data, 416, gobject_head_ptr);
+    write_ptr(&mut data, 424, gobject_tail_ptr);
+
+    // children: CollectionChild linked list pointing to sub-collections
+    write_ptr(&mut data, 432, children_head_ptr);
+    write_ptr(&mut data, 440, children_tail_ptr);
+
     data
 }
 
@@ -327,38 +580,32 @@ pub fn build_collection_object(object_ptr: u64) -> Vec<u8> {
 
 /// Build a CollectionObject with doubly-linked list pointers.
 /// 
-/// CollectionObject is a 32-byte node:
-/// - Offset +0: prev pointer (u64)
-/// - Offset +8: next pointer (u64)
-/// - Offset +16: object pointer (u64)
+/// CollectionObject (DNA idx=104, size=32):
+/// - Offset  0: next pointer (u64) — Blender's BLO_read_struct_list follows this
+/// - Offset  8: prev pointer (u64) — overwritten by Blender during list traversal
+/// - Offset 16: object pointer (u64)
 pub fn build_collection_object_linked(
     object_ptr: u64,
     prev_ptr: u64,
     next_ptr: u64,
 ) -> Vec<u8> {
     let mut data = vec![0u8; COLLECTION_OBJECT_SIZE];
-    write_ptr(&mut data, 0, prev_ptr);
-    write_ptr(&mut data, 8, next_ptr);
+    write_ptr(&mut data, 0, next_ptr);   // next at offset 0 (DNA: CollectionObject.next)
+    write_ptr(&mut data, 8, prev_ptr);   // prev at offset 8 (DNA: CollectionObject.prev)
     write_ptr(&mut data, 16, object_ptr);
     data
 }
 
 /// Build a LayerCollection with proper doubly-linked list support.
 ///
-/// LayerCollection struct (DNA_layer_types.h:189):
-/// - Offset 0-7: prev pointer (LinkNode)
-/// - Offset 8-15: next pointer (LinkNode)  
-/// - Offset 16-23: collection pointer (Collection*)
-/// - Offset 24-39: flag/pad
-/// - Offset 40-55: layer_collections ListBase (for nested children)
-/// - Offset 56-63: padding/other fields
-///
-/// Parameters:
-/// - collection_ptr: Pointer to Collection that this LayerCollection represents
-/// - prev_ptr: Previous LayerCollection (0 for first/root)
-/// - next_ptr: Next LayerCollection (0 for last/only)
-/// - child_layer_collections_head: Head of nested LayerCollections (0 if none)
-/// - child_layer_collections_tail: Tail of nested LayerCollections (0 if none)
+/// LayerCollection struct (DNA idx=247, size=64):
+/// - Offset  0: next pointer (LayerCollection*) — Blender's BLO_read_struct_list follows this
+/// - Offset  8: prev pointer (LayerCollection*) — overwritten during list traversal
+/// - Offset 16: collection pointer (Collection*)
+/// - Offset 24: _pad1 (8 bytes)
+/// - Offset 32: flag (2), runtime_flag (2), _pad (4)
+/// - Offset 40: layer_collections ListBase (16 bytes) — nested child LayerCollections
+/// - Offset 56: local_collections_bits (2), _pad2[3] (6)
 pub fn build_layer_collection_linked(
     collection_ptr: u64,
     prev_ptr: u64,
@@ -368,13 +615,13 @@ pub fn build_layer_collection_linked(
 ) -> Vec<u8> {
     let mut data = vec![0u8; LAYER_COLLECTION_SIZE];
     
-    // Offset 0-7: prev pointer (doubly-linked list)
-    write_ptr(&mut data, 0, prev_ptr);
+    // Offset 0: next pointer — BLO_read_struct_list follows this for traversal
+    write_ptr(&mut data, 0, next_ptr);
     
-    // Offset 8-15: next pointer (doubly-linked list)
-    write_ptr(&mut data, 8, next_ptr);
+    // Offset 8: prev pointer — overwritten by Blender during traversal, but set for correctness
+    write_ptr(&mut data, 8, prev_ptr);
     
-    // Offset 16-23: collection pointer
+    // Offset 16: collection pointer
     write_ptr(&mut data, 16, collection_ptr);
     
     // Offset 40-47: layer_collections ListBase.first (nested children head)
@@ -383,7 +630,7 @@ pub fn build_layer_collection_linked(
     // Offset 48-55: layer_collections ListBase.last (nested children tail)
     write_ptr(&mut data, 48, child_layer_collections_tail);
     
-    // Offset 32: flag (0x0001 = LAYER_COLLECTION_VISIBLE)
+    // Offset 32: flag (LAYER_COLLECTION_VISIBLE = 0x0001)
     write_u16(&mut data, 32, 0x0001);
     
     data
@@ -415,12 +662,23 @@ pub fn build_object(
     write_ptr(&mut data, 720, matbits_ptr);
     write_i32(&mut data, 728, material_slots);
     write_i16(&mut data, 732, if material_slots > 0 { 1 } else { 0 }); // actcol
-    // Default transform: zero translation, unit scale, identity quaternion
+    // Default transform: zero translation, unit scale, identity quaternion.
     for i in 0..3 { write_f32(&mut data, 736 + i * 4, 0.0); }  // loc
     for i in 0..3 { write_f32(&mut data, 760 + i * 4, 1.0); }  // scale
-    // Identity quaternion: [x=0, y=0, z=0, w=1] stored at offset 820 (XYZW order)
-    write_f32(&mut data, 832, 1.0); // quat.w at offset 820 + 3*4
-    write_i16(&mut data, 1040, 0);  // ROT_MODE_QUAT
+    for i in 0..3 { write_f32(&mut data, 784 + i * 4, 1.0); }  // dscale
+    write_f32(&mut data, 820, 1.0); // quat[0] = w
+    write_f32(&mut data, 836, 1.0); // dquat[0] = w
+    write_f32(&mut data, 856, 1.0); // rotAxis.y
+    write_f32(&mut data, 868, 1.0); // drotAxis.y
+    write_identity_matrix4x4(&mut data, 884); // parentinv
+    write_identity_matrix4x4(&mut data, 948); // constinv
+    write_i16(&mut data, 1040, 1);  // ROT_MODE_EUL
+    write_i16(&mut data, 1042, -1); // protectflag = OB_LOCK_ROT4D
+    data[1046] = 5; // Object.dt = OB_TEXTURE
+    data[1047] = 2; // empty_drawtype = OB_PLAINAXES
+    write_f32(&mut data, 1048, 1.0); // empty_drawsize
+    write_f32(&mut data, 1052, 1.0); // instance_faces_scale
+    for i in 0..4 { write_f32(&mut data, 1064 + i * 4, 1.0); } // Object.color
     data
 }
 
@@ -438,11 +696,20 @@ pub fn build_empty_object(
     write_ptr(&mut data, 496, parent_ptr);
     for i in 0..3 { write_f32(&mut data, 736 + i * 4, loc[i]); }
     for i in 0..3 { write_f32(&mut data, 760 + i * 4, scale[i]); }
+    for i in 0..3 { write_f32(&mut data, 784 + i * 4, 1.0); }
     for i in 0..4 { write_f32(&mut data, 820 + i * 4, quat[i]); }
+    write_f32(&mut data, 836, 1.0);
+    write_f32(&mut data, 856, 1.0);
+    write_f32(&mut data, 868, 1.0);
+    write_identity_matrix4x4(&mut data, 884);
+    write_identity_matrix4x4(&mut data, 948);
     write_i16(&mut data, 1040, 0);
-    if parent_ptr != 0 {
-        write_identity_matrix4x4(&mut data, 884);
-    }
+    write_i16(&mut data, 1042, -1);
+    data[1046] = 5;
+    data[1047] = 2;
+    write_f32(&mut data, 1048, 1.0);
+    write_f32(&mut data, 1052, 1.0);
+    for i in 0..4 { write_f32(&mut data, 1064 + i * 4, 1.0); }
     data
 }
 
@@ -462,11 +729,20 @@ pub fn build_lamp_object(
     write_ptr(&mut data, 552, lamp_ptr);
     for i in 0..3 { write_f32(&mut data, 736 + i * 4, loc[i]); }
     for i in 0..3 { write_f32(&mut data, 760 + i * 4, scale[i]); }
+    for i in 0..3 { write_f32(&mut data, 784 + i * 4, 1.0); }
     for i in 0..4 { write_f32(&mut data, 820 + i * 4, quat[i]); }
+    write_f32(&mut data, 836, 1.0);
+    write_f32(&mut data, 856, 1.0);
+    write_f32(&mut data, 868, 1.0);
+    write_identity_matrix4x4(&mut data, 884);
+    write_identity_matrix4x4(&mut data, 948);
     write_i16(&mut data, 1040, 0);
-    if parent_ptr != 0 {
-        write_identity_matrix4x4(&mut data, 884);
-    }
+    write_i16(&mut data, 1042, -1);
+    data[1046] = 5;
+    data[1047] = 2;
+    write_f32(&mut data, 1048, 1.0);
+    write_f32(&mut data, 1052, 1.0);
+    for i in 0..4 { write_f32(&mut data, 1064 + i * 4, 1.0); }
     data
 }
 
@@ -493,11 +769,20 @@ pub fn build_linked_instance_object(
     write_i16(&mut data, 732, 0); // actcol = 0
     for i in 0..3 { write_f32(&mut data, 736 + i * 4, loc[i]); }
     for i in 0..3 { write_f32(&mut data, 760 + i * 4, scale[i]); }
+    for i in 0..3 { write_f32(&mut data, 784 + i * 4, 1.0); }
     for i in 0..4 { write_f32(&mut data, 820 + i * 4, quat[i]); }
-    write_i16(&mut data, 1040, 0);
-    if parent_ptr != 0 {
-        write_identity_matrix4x4(&mut data, 884);
-    }
+    write_f32(&mut data, 836, 1.0);
+    write_f32(&mut data, 856, 1.0);
+    write_f32(&mut data, 868, 1.0);
+    write_identity_matrix4x4(&mut data, 884);
+    write_identity_matrix4x4(&mut data, 948);
+    write_i16(&mut data, 1040, 0); // ROT_MODE_QUAT
+    write_i16(&mut data, 1042, -1); // protectflag = OB_LOCK_ROT4D
+    data[1046] = 5; // Object.dt = OB_TEXTURE
+    data[1047] = 2; // empty_drawtype = OB_PLAINAXES
+    write_f32(&mut data, 1048, 1.0); // empty_drawsize
+    write_f32(&mut data, 1052, 1.0); // instance_faces_scale
+    for i in 0..4 { write_f32(&mut data, 1064 + i * 4, 1.0); } // Object.color
     data
 }
 
@@ -536,6 +821,7 @@ pub fn build_lamp(
 pub fn build_mesh(
     mesh_name: &str,
     totvert: usize,
+    totedge: usize,
     totpoly: usize,
     totloop: usize,
     poly_offset_indices_ptr: u64,
@@ -554,6 +840,7 @@ pub fn build_mesh(
     let mut data = vec![0u8; MESH_SIZE];
     write_id_name(&mut data, "ME", mesh_name);
     write_u32(&mut data, 432, totvert as u32);
+    write_u32(&mut data, 436, totedge as u32);
     write_u32(&mut data, 440, totpoly as u32);
     write_u32(&mut data, 444, totloop as u32);
     write_ptr(&mut data, 424, mesh_mat_ptr);
@@ -755,9 +1042,17 @@ pub fn build_idprop_tree(
     (root, children, string_data)
 }
 
-/// Build an `Object.mat**` (Material pointer array) block — all null pointers.
+/// Build an `Object.mat**` / `Mesh.mat**` pointer array block — all null pointers.
 pub fn build_mat_ptr_array(n: usize) -> Vec<u8> {
     vec![0u8; n * 8]
+}
+
+pub fn build_mat_ptr_array_from_ptrs(ptrs: &[u64]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(ptrs.len() * 8);
+    for ptr in ptrs {
+        out.extend_from_slice(&ptr.to_le_bytes());
+    }
+    out
 }
 
 /// Build an `Object.matbits` block — one byte per slot, 0 = mesh-linked.
@@ -765,24 +1060,41 @@ pub fn build_matbits(n: usize) -> Vec<u8> {
     vec![0u8; n]
 }
 
+/// Build a minimal named `Material` datablock.
+///
+/// Phase 2 only needs empty material slots with stable names; node trees and
+/// shader reconstruction remain addon/material-template scope.
+pub fn build_material(material_name: &str) -> Vec<u8> {
+    let mut data = vec![0u8; MATERIAL_SIZE];
+    write_id_name(&mut data, "MA", material_name);
+    write_f32(&mut data, 420, 0.8); // r
+    write_f32(&mut data, 424, 0.8); // g
+    write_f32(&mut data, 428, 0.8); // b
+    write_f32(&mut data, 432, 1.0); // a
+    write_f32(&mut data, 436, 1.0); // specr
+    write_f32(&mut data, 440, 1.0); // specg
+    write_f32(&mut data, 444, 1.0); // specb
+    write_f32(&mut data, 456, 0.5); // spec
+    write_f32(&mut data, 464, 0.4); // roughness
+    data[472] = 1; // use_nodes, deprecated but written by Blender 5.1 defaults
+    data[473] = 1; // pr_type = MA_SPHERE
+    write_f32(&mut data, 524, 0.5); // alpha_threshold
+    data[533] = 1; // blend_shadow = MA_BS_SOLID
+    data[534] = 1 << 6; // blend_flag = MA_BL_TRANSPARENT_SHADOW
+    data
+}
+
 /// Compress Blender .blend file using Zstd (Blender 5.x native format).
 ///
 /// Scene.blend files must be Zstd-compressed; mesh .blend files are uncompressed.
 pub fn compress_blend_bytes_zstd(raw_blend: &[u8]) -> Vec<u8> {
-    use zstd::Encoder;
-    
-    let mut compressed = Vec::new();
-    // Use compression level 19 (maximum, matches Blender's default save)
-    let mut encoder = match Encoder::new(&mut compressed, 19) {
-        Ok(enc) => enc,
-        Err(_) => return raw_blend.to_vec(), // Fallback: return uncompressed
-    };
-    
-    if encoder.write_all(raw_blend).is_err() || encoder.finish().is_err() {
-        return raw_blend.to_vec(); // Fallback: return uncompressed
-    }
-    
-    compressed
+    // Blender 5.1 requires special "seekable frames" format for zstd, not standard single-frame compression.
+    // For now, return uncompressed (Blender auto-detects and handles uncompressed files).
+    // TODO: Implement proper seekable frames format:
+    //   1. Split into 1MB chunks
+    //   2. Compress each with ZSTD_COMPRESSION_LEVEL = 3
+    //   3. Append seek table (magic 0x184D2A5E + frame table + footer magic 0x8F92EAB1)
+    raw_blend.to_vec()
 }
 
 /// Build a Library block (LI) for linking to an external .blend file.
@@ -1299,4 +1611,3 @@ mod tests {
         }
     }
 }
-

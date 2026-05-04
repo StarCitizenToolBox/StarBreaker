@@ -18,6 +18,7 @@ mod customdata_findings {
         let mesh_bytes = starbreaker_blend::build_mesh(
             "test_mesh",
             2,        // totvert (2 vertices)
+            0,        // totedge
             1,        // totpoly (1 face)
             3,        // totloop (3 loop vertices)
             0,        // poly_offset_indices_ptr
@@ -62,6 +63,7 @@ mod customdata_findings {
         let mesh_bytes = starbreaker_blend::build_mesh(
             "test_mesh",
             2,        // totvert
+            0,        // totedge
             1,        // totpoly
             2,        // totloop
             0,        // poly_offset_indices_ptr
@@ -113,6 +115,7 @@ mod customdata_findings {
         let mesh_bytes = starbreaker_blend::build_mesh(
             "test_mesh",
             2,        // totvert
+            0,        // totedge
             1,        // totpoly
             2,        // totloop
             0,        // poly_offset_indices_ptr

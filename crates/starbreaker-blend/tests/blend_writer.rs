@@ -43,6 +43,17 @@ fn write_block_appends_data_after_header() {
     assert_eq!(&out[32..], b"ABCD");
 }
 
+#[test]
+fn screen_blocks_use_forward_compatible_sn_filecode() {
+    let screen = build_screen("TopScreen");
+    let mut out = Vec::new();
+    write_block(&mut out, b"SN\0\0", SDNA_IDX_SCREEN, 0x1000, 1, &screen);
+
+    assert_eq!(&out[0..4], b"SN\0\0");
+    assert_eq!(u32::from_le_bytes(out[4..8].try_into().unwrap()), SDNA_IDX_SCREEN);
+    assert_eq!(&out[32 + 40..32 + 42], b"SR");
+}
+
 // ── PtrAlloc ──────────────────────────────────────────────────────────────────
 
 #[test]
@@ -64,7 +75,7 @@ fn object_size_is_1288() {
 
 #[test]
 fn mesh_size_is_1960() {
-    let me = build_mesh("TestMesh", 4, 1, 4, 0, 0, 0, 0, 0, 0, 0, 0, 5);
+    let me = build_mesh("TestMesh", 4, 0, 1, 4, 0, 0, 0, 0, 0, 0, 0, 0, 5);
     assert_eq!(me.len(), MESH_SIZE);
     assert_eq!(MESH_SIZE, 1960);
 }
@@ -77,9 +88,84 @@ fn lamp_size_is_568() {
 }
 
 #[test]
+fn material_size_is_584() {
+    let ma = build_material("TestMaterial");
+    assert_eq!(ma.len(), MATERIAL_SIZE);
+    assert_eq!(MATERIAL_SIZE, 584);
+}
+
+#[test]
 fn empty_object_size_is_1288() {
     let ob = build_empty_object("Empty", [0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 0);
     assert_eq!(ob.len(), OBJECT_SIZE);
+}
+
+#[test]
+fn view_layer_sets_active_collection_pointer() {
+    let view_layer = build_view_layer("ViewLayer", 0x2000, 0x3000);
+
+    assert_eq!(u64::from_le_bytes(view_layer[88..96].try_into().unwrap()), 0x2000);
+    assert_eq!(u64::from_le_bytes(view_layer[120..128].try_into().unwrap()), 0x3000);
+    assert_eq!(u64::from_le_bytes(view_layer[136..144].try_into().unwrap()), 0x3000);
+}
+
+#[test]
+fn scene_has_nonzero_blender_runtime_safe_defaults() {
+    let scene = build_scene("Scene", 0x2000, 0x3000, 0x4000);
+
+    assert_eq!(i32::from_le_bytes(scene[1032..1036].try_into().unwrap()), 1);
+    assert_eq!(i32::from_le_bytes(scene[1036..1040].try_into().unwrap()), 1);
+    assert_eq!(i32::from_le_bytes(scene[1040..1044].try_into().unwrap()), 250);
+    assert_eq!(f32::from_le_bytes(scene[1068..1072].try_into().unwrap()), 1.0);
+    assert_eq!(i32::from_le_bytes(scene[1072..1076].try_into().unwrap()), 1);
+    assert_eq!(u16::from_le_bytes(scene[1116..1118].try_into().unwrap()), 24);
+    assert_eq!(f32::from_le_bytes(scene[1172..1176].try_into().unwrap()), 1.0);
+    assert_eq!(&scene[3060..3077], b"BLENDER_WORKBENCH");
+    assert_eq!(i32::from_le_bytes(scene[5008..5012].try_into().unwrap()), 48000);
+    assert_eq!(i32::from_le_bytes(scene[5072..5076].try_into().unwrap()), 1);
+    assert_eq!(i32::from_le_bytes(scene[5076..5080].try_into().unwrap()), -1);
+    assert_eq!(f32::from_le_bytes(scene[5176..5180].try_into().unwrap()), 1.0);
+    assert_eq!(scene[5180], 1);
+    assert_eq!(u64::from_le_bytes(scene[568..576].try_into().unwrap()), 0x4000);
+    assert_eq!(i32::from_le_bytes(scene[5664..5668].try_into().unwrap()), 1);
+    assert_eq!(i32::from_le_bytes(scene[5668..5672].try_into().unwrap()), 250);
+}
+
+#[test]
+fn scene_display_shading_uses_valid_solid_enum() {
+    let scene = build_scene("Scene", 0x2000, 0x3000, 0x4000);
+
+    // Scene.display.shading.type and prev_type are View3DShading.type bytes.
+    // Blender 5.1 valid object draw mode values are 2, 3, 4, and 6; zero is invalid.
+    assert_eq!(scene[5712], 3);
+    assert_eq!(scene[5713], 3);
+}
+
+#[test]
+fn scene_defaults_do_not_corrupt_listbase_pointers() {
+    let scene = build_scene("Scene", 0x2000, 0x3000, 0x4000);
+
+    assert_eq!(u64::from_le_bytes(scene[5040..5048].try_into().unwrap()), 0);
+    assert_eq!(u64::from_le_bytes(scene[5048..5056].try_into().unwrap()), 0);
+    assert_eq!(u64::from_le_bytes(scene[5160..5168].try_into().unwrap()), 0);
+    assert_eq!(u64::from_le_bytes(scene[5168..5176].try_into().unwrap()), 0);
+}
+
+#[test]
+fn scene_links_view_layer_and_master_collection() {
+    let scene = build_scene("Scene", 0x2000, 0x3000, 0x4000);
+
+    assert_eq!(u64::from_le_bytes(scene[5632..5640].try_into().unwrap()), 0x2000);
+    assert_eq!(u64::from_le_bytes(scene[5640..5648].try_into().unwrap()), 0x2000);
+    assert_eq!(u64::from_le_bytes(scene[5648..5656].try_into().unwrap()), 0x3000);
+}
+
+#[test]
+fn tool_settings_block_has_blender_51_size() {
+    let tool_settings = build_tool_settings();
+
+    assert_eq!(tool_settings.len(), TOOL_SETTINGS_SIZE);
+    assert_eq!(TOOL_SETTINGS_SIZE, 1256);
 }
 
 #[test]
@@ -119,6 +205,69 @@ fn object_mat_ptr_at_712() {
 }
 
 #[test]
+fn material_name_uses_ma_id_prefix() {
+    let ma = build_material("Hull");
+    let name = ma[40..80].split(|&c| c == 0).next().unwrap();
+    assert_eq!(name, b"MAHull");
+}
+
+#[test]
+fn material_uses_visible_opaque_defaults() {
+    let ma = build_material("Hull");
+
+    assert_eq!(f32::from_le_bytes(ma[420..424].try_into().unwrap()), 0.8);
+    assert_eq!(f32::from_le_bytes(ma[424..428].try_into().unwrap()), 0.8);
+    assert_eq!(f32::from_le_bytes(ma[428..432].try_into().unwrap()), 0.8);
+    assert_eq!(f32::from_le_bytes(ma[432..436].try_into().unwrap()), 1.0);
+    assert_eq!(f32::from_le_bytes(ma[464..468].try_into().unwrap()), 0.4);
+    assert_eq!(ma[472], 1);
+    assert_eq!(ma[473], 1);
+    assert_eq!(f32::from_le_bytes(ma[524..528].try_into().unwrap()), 0.5);
+    assert_eq!(ma[532], 0); // blend_method = MA_BM_SOLID
+    assert_eq!(ma[533], 1); // blend_shadow = MA_BS_SOLID
+    assert_eq!(ma[534], 1 << 6); // blend_flag = MA_BL_TRANSPARENT_SHADOW
+}
+
+#[test]
+fn material_pointer_array_serializes_old_pointers() {
+    let array = build_mat_ptr_array_from_ptrs(&[0x1111, 0x2222]);
+    assert_eq!(array.len(), 16);
+    assert_eq!(u64::from_le_bytes(array[0..8].try_into().unwrap()), 0x1111);
+    assert_eq!(u64::from_le_bytes(array[8..16].try_into().unwrap()), 0x2222);
+}
+
+#[test]
+fn object_transform_defaults_are_visible_identity() {
+    let ob = build_object("TestOb", 0x2000, 0, 0, 0, 0);
+
+    assert_eq!(f32::from_le_bytes(ob[760..764].try_into().unwrap()), 1.0);
+    assert_eq!(f32::from_le_bytes(ob[764..768].try_into().unwrap()), 1.0);
+    assert_eq!(f32::from_le_bytes(ob[768..772].try_into().unwrap()), 1.0);
+    assert_eq!(f32::from_le_bytes(ob[820..824].try_into().unwrap()), 1.0);
+    assert_eq!(i16::from_le_bytes(ob[1040..1042].try_into().unwrap()), 1);
+    assert_eq!(i16::from_le_bytes(ob[1042..1044].try_into().unwrap()), -1);
+    assert_eq!(ob[1046], 5);
+    assert_eq!(f32::from_le_bytes(ob[1048..1052].try_into().unwrap()), 1.0);
+    assert_eq!(f32::from_le_bytes(ob[1064..1068].try_into().unwrap()), 1.0);
+    assert_eq!(f32::from_le_bytes(ob[1068..1072].try_into().unwrap()), 1.0);
+    assert_eq!(f32::from_le_bytes(ob[1072..1076].try_into().unwrap()), 1.0);
+    assert_eq!(f32::from_le_bytes(ob[1076..1080].try_into().unwrap()), 1.0);
+}
+
+fn assert_identity_matrix(bytes: &[u8], offset: usize, label: &str) {
+    let expected: [f32; 16] = [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    for (i, &v) in expected.iter().enumerate() {
+        let got = f32::from_le_bytes(bytes[offset + i * 4..offset + i * 4 + 4].try_into().unwrap());
+        assert_eq!(got, v, "{label}[{i}] mismatch");
+    }
+}
+
+#[test]
 fn object_parent_ptr_at_496() {
     let ob = build_empty_object("Child", [0.0; 3], [1.0, 0.0, 0.0, 0.0], [1.0; 3], 0xcafe_u64);
     assert_eq!(u64::from_le_bytes(ob[496..504].try_into().unwrap()), 0xcafe_u64);
@@ -127,19 +276,34 @@ fn object_parent_ptr_at_496() {
 #[test]
 fn empty_object_parentinv_is_identity_when_parented() {
     let ob = build_empty_object("Child", [0.0; 3], [1.0, 0.0, 0.0, 0.0], [1.0; 3], 0x1000_u64);
-    // parentinv @884: 4×4 f32 identity matrix
-    let expected: [f32; 16] = [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0];
-    for (i, &v) in expected.iter().enumerate() {
-        let got = f32::from_le_bytes(ob[884 + i*4..884 + i*4 + 4].try_into().unwrap());
-        assert_eq!(got, v, "parentinv[{i}] mismatch");
-    }
+    assert_identity_matrix(&ob, 884, "parentinv");
 }
 
 #[test]
-fn empty_object_parentinv_is_zero_when_unparented() {
+fn empty_object_inverse_matrices_are_identity_when_unparented() {
     let ob = build_empty_object("Root", [0.0; 3], [1.0, 0.0, 0.0, 0.0], [1.0; 3], 0);
-    // parentinv should be all zeros when parent_ptr == 0
-    assert!(ob[884..948].iter().all(|&b| b == 0));
+    assert_identity_matrix(&ob, 884, "parentinv");
+    assert_identity_matrix(&ob, 948, "constinv");
+}
+
+#[test]
+fn linked_instance_transform_defaults_preserve_nonzero_matrix() {
+    let ob = build_linked_instance_object(
+        "Linked",
+        0x2000,
+        [0.0; 3],
+        [1.0, 0.0, 0.0, 0.0],
+        [1.0; 3],
+        0,
+    );
+
+    assert_eq!(f32::from_le_bytes(ob[760..764].try_into().unwrap()), 1.0);
+    assert_eq!(f32::from_le_bytes(ob[784..788].try_into().unwrap()), 1.0);
+    assert_eq!(f32::from_le_bytes(ob[820..824].try_into().unwrap()), 1.0);
+    assert_eq!(f32::from_le_bytes(ob[836..840].try_into().unwrap()), 1.0);
+    assert_eq!(i16::from_le_bytes(ob[1040..1042].try_into().unwrap()), 0);
+    assert_eq!(ob[1046], 5);
+    assert_eq!(f32::from_le_bytes(ob[1076..1080].try_into().unwrap()), 1.0);
 }
 
 #[test]
@@ -152,14 +316,32 @@ fn lamp_object_type_at_416() {
 
 #[test]
 fn mesh_totvert_at_432() {
-    let me = build_mesh("M", 7, 2, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    let me = build_mesh("M", 7, 5, 2, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     assert_eq!(u32::from_le_bytes(me[432..436].try_into().unwrap()), 7);
+    assert_eq!(u32::from_le_bytes(me[436..440].try_into().unwrap()), 5);
 }
 
 #[test]
 fn mesh_attributes_ptr_at_456() {
-    let me = build_mesh("M", 4, 1, 4, 0, 0xcccc_u64, 0, 0, 0, 0, 0, 0, 2);
+    let me = build_mesh("M", 4, 0, 1, 4, 0, 0xcccc_u64, 0, 0, 0, 0, 0, 0, 2);
     assert_eq!(u64::from_le_bytes(me[456..464].try_into().unwrap()), 0xcccc_u64);
+}
+
+#[test]
+fn triangle_edge_topology_builds_edge_and_corner_edge_layers() {
+    let (edges, corner_edges) = triangle_edge_topology(&[0, 1, 2, 2, 1, 3]);
+
+    assert_eq!(edges, vec![[0, 1], [1, 2], [0, 2], [1, 3], [2, 3]]);
+    assert_eq!(corner_edges, vec![0, 1, 2, 1, 3, 4]);
+    assert_eq!(ints2_data(&edges).len(), edges.len() * 8);
+}
+
+#[test]
+fn triangle_edge_topology_ignores_incomplete_trailing_indices() {
+    let (edges, corner_edges) = triangle_edge_topology(&[0, 1, 2, 99]);
+
+    assert_eq!(edges, vec![[0, 1], [1, 2], [0, 2]]);
+    assert_eq!(corner_edges, vec![0, 1, 2]);
 }
 
 // ── Lamp field layout ─────────────────────────────────────────────────────────
@@ -402,12 +584,14 @@ fn collection_object_layout_no_links() {
 
 #[test]
 fn collection_object_linked_builds_doubly_linked_node() {
+    // DNA: CollectionObject.next at offset 0, CollectionObject.prev at offset 8.
+    // BLO_read_struct_list follows offset 0 (next) to traverse the chain.
     let co = build_collection_object_linked(0xaaaabbbb, 0x1234, 0x5678);
     assert_eq!(co.len(), COLLECTION_OBJECT_SIZE);
-    // Offset 0-8: prev pointer
-    assert_eq!(u64::from_le_bytes(co[0..8].try_into().unwrap()), 0x1234);
-    // Offset 8-16: next pointer
-    assert_eq!(u64::from_le_bytes(co[8..16].try_into().unwrap()), 0x5678);
+    // Offset 0-8: next pointer (Blender traverses via offset 0)
+    assert_eq!(u64::from_le_bytes(co[0..8].try_into().unwrap()), 0x5678);
+    // Offset 8-16: prev pointer
+    assert_eq!(u64::from_le_bytes(co[8..16].try_into().unwrap()), 0x1234);
     // Offset 16-24: object pointer
     assert_eq!(u64::from_le_bytes(co[16..24].try_into().unwrap()), 0xaaaabbbb);
 }
@@ -415,9 +599,9 @@ fn collection_object_linked_builds_doubly_linked_node() {
 #[test]
 fn collection_object_linked_single_element_chain() {
     let co = build_collection_object_linked(0x1000, 0, 0);  // No prev, no next
-    // Prev should be null
+    // Next should be null (offset 0)
     assert_eq!(u64::from_le_bytes(co[0..8].try_into().unwrap()), 0);
-    // Next should be null
+    // Prev should be null (offset 8)
     assert_eq!(u64::from_le_bytes(co[8..16].try_into().unwrap()), 0);
     // Object pointer should be set
     assert_eq!(u64::from_le_bytes(co[16..24].try_into().unwrap()), 0x1000);
@@ -425,26 +609,27 @@ fn collection_object_linked_single_element_chain() {
 
 #[test]
 fn collection_object_linked_multiple_elements() {
+    // DNA: next at offset 0, prev at offset 8
     let co1 = build_collection_object_linked(0x1111, 0, 0x2000);  // First element, no prev, next is second
     let co2 = build_collection_object_linked(0x2222, 0x1000, 0x3000);  // Middle element
     let co3 = build_collection_object_linked(0x3333, 0x2000, 0);  // Last element, next is null
 
-    // Verify chain: co1 -> co2 -> co3
-    assert_eq!(u64::from_le_bytes(co1[0..8].try_into().unwrap()), 0);  // co1 prev
-    assert_eq!(u64::from_le_bytes(co1[8..16].try_into().unwrap()), 0x2000);  // co1 next
+    // Verify chain: co1 -> co2 -> co3 via offset 0 (next)
+    assert_eq!(u64::from_le_bytes(co1[0..8].try_into().unwrap()), 0x2000);  // co1 next
+    assert_eq!(u64::from_le_bytes(co1[8..16].try_into().unwrap()), 0);      // co1 prev
     
-    assert_eq!(u64::from_le_bytes(co2[0..8].try_into().unwrap()), 0x1000);  // co2 prev
-    assert_eq!(u64::from_le_bytes(co2[8..16].try_into().unwrap()), 0x3000);  // co2 next
+    assert_eq!(u64::from_le_bytes(co2[0..8].try_into().unwrap()), 0x3000);  // co2 next
+    assert_eq!(u64::from_le_bytes(co2[8..16].try_into().unwrap()), 0x1000); // co2 prev
     
-    assert_eq!(u64::from_le_bytes(co3[0..8].try_into().unwrap()), 0x2000);  // co3 prev
-    assert_eq!(u64::from_le_bytes(co3[8..16].try_into().unwrap()), 0);  // co3 next
+    assert_eq!(u64::from_le_bytes(co3[0..8].try_into().unwrap()), 0);       // co3 next (null)
+    assert_eq!(u64::from_le_bytes(co3[8..16].try_into().unwrap()), 0x2000); // co3 prev
 }
 
 #[test]
-fn collection_size_is_544_bytes() {
-    let c = build_collection("TestColl", 0, 0, 0);
+fn collection_size_is_520_bytes() {
+    let c = build_collection("TestColl", 0, 0, 0, 0);
     assert_eq!(c.len(), COLLECTION_SIZE);
-    assert_eq!(COLLECTION_SIZE, 544);
+    assert_eq!(COLLECTION_SIZE, 520);
 }
 
 #[test]
@@ -454,7 +639,7 @@ fn collection_gobject_offsets_416_424() {
     // Offset 424-431: ListBase.last (tail of linked list)
     let head_ptr = 0xdeadbeef_u64;
     let tail_ptr = 0xcafebabe_u64;
-    let c = build_collection("TestColl", 0x1000, head_ptr, tail_ptr);
+    let c = build_collection("TestColl", head_ptr, tail_ptr, 0, 0);
     
     // Verify head pointer at offset 416
     assert_eq!(u64::from_le_bytes(c[416..424].try_into().unwrap()), head_ptr);
