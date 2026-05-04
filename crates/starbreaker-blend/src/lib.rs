@@ -111,14 +111,16 @@ pub fn write_block_header(
     code: &[u8; 4],
     sdna_idx: u32,
     old_ptr: u64,
-    data_len: i64,
-    count: i64,
+    data_len: u32,
+    count: u32,
 ) {
     out.extend_from_slice(code);
     out.extend_from_slice(&sdna_idx.to_le_bytes());
     out.extend_from_slice(&old_ptr.to_le_bytes());
     out.extend_from_slice(&data_len.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
     out.extend_from_slice(&count.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
 }
 
 /// Write a complete block (header + data).
@@ -127,10 +129,10 @@ pub fn write_block(
     code: &[u8; 4],
     sdna_idx: u32,
     old_ptr: u64,
-    count: i64,
+    count: u32,
     data: &[u8],
 ) {
-    write_block_header(out, code, sdna_idx, old_ptr, data.len() as i64, count);
+    write_block_header(out, code, sdna_idx, old_ptr, data.len() as u32, count);
     out.extend_from_slice(data);
 }
 

@@ -531,7 +531,7 @@ fn mesh_to_blend(
     write_block(&mut out, b"DATA", 0, mesh_mat_ptr, 1, &mesh_mat_array);
 
     // Attribute descriptor block (all Attribute structs concatenated)
-    write_block(&mut out, b"DATA", SDNA_IDX_ATTRIBUTE, attrs_ptr, num_attrs as i64, &attr_blob);
+    write_block(&mut out, b"DATA", SDNA_IDX_ATTRIBUTE, attrs_ptr, num_attrs as u32, &attr_blob);
 
     // Attribute name strings
     write_block(&mut out, b"DATA", 0, name_pos_ptr, 1, b"position\0");
@@ -632,7 +632,7 @@ fn mesh_to_blend(
                 
                 // Write MDeformVert data array itself
                 let mdv_raw_data = build_mdeformvert_array(&mdeformvert_data);
-                write_block(&mut out, b"DATA", SDNA_IDX_MDEFORMVERT, mdv_data_ptr, totvert as i64, &mdv_raw_data);
+                write_block(&mut out, b"DATA", SDNA_IDX_MDEFORMVERT, mdv_data_ptr, totvert as u32, &mdv_raw_data);
             }
             
             // Write CustomDataLayer
