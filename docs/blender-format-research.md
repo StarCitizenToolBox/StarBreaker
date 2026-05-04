@@ -790,8 +790,10 @@ Exact byte-by-byte serialization format for Library blocks in .blend files.
 
 Library blocks are written with exact field ordering by `library_blend_write_data()`:
 
-1. **ID struct** (370 bytes)
+1. **ID struct** (408 bytes)
    - name[2], type, tag, index, us, icon_id, recalc_*, session_uid, properties, owner_library, asset_data, override_library
+   - CORRECTED: Was incorrectly listed as 370 bytes; actual size per DNA_id_types.h is 408 bytes
+
 2. **filepath[1024]** (1024 bytes)
    - Relative path to external .blend file, zero-padded
 3. **flag** (2 bytes, uint16_t)
@@ -809,7 +811,8 @@ Library blocks are written with exact field ordering by `library_blend_write_dat
 9. **_pad2** (8 bytes)
    - Final padding
 
-**Total**: 1456 bytes contiguous
+**Total**: 1472 bytes contiguous
+   - CORRECTED: Was incorrectly listed as 1456 bytes; actual total is 408 + 1024 + 2 + 2 + 4 + 8 + 8 + 8 + 8 = 1472 bytes
 
 ### Filepath Encoding Details
 
@@ -1211,32 +1214,38 @@ with all pointers converted to stable file addresses for remapping during load.
 
 **Serialization Order**:
 
-1. **ID struct** (120 bytes)
-   - Standard ID header (name, lib pointer, flags, etc.)
+1. **ID struct** (408 bytes)
+   - Standard ID header (name, lib pointer, flags, etc.) — full 408-byte structure per DNA_id_types.h
 
-2. **PreviewImage pointer** (8 bytes, remapped during lib_link)
+2. **owner_id pointer** (8 bytes)
+   - Pointer to owning Scene ID (remapped during lib_link)
 
-3. **gobject linked list** (32 bytes per CollectionObject)
+3. **PreviewImage pointer** (8 bytes, remapped during lib_link)
+
+4. **gobject linked list** (32 bytes per CollectionObject)
    - Each member: next, prev, Object* (file address), CollectionLightLinking
    - Number of members varies; all serialized sequentially
 
-4. **children linked list** (32 bytes per CollectionChild)
+5. **children linked list** (32 bytes per CollectionChild)
    - Each child: next, prev, Collection* (file address)
    - Number of children varies; all serialized sequentially
 
-5. **Exporters/Importers metadata lists**
+6. **Exporters/Importers metadata lists**
    - Additional linked lists for exporter data
 
-6. **Runtime-only fields** (NOT serialized)
+7. **Runtime-only fields** (NOT serialized)
    - `CollectionRuntime *runtime` — set to nullptr before write
 
-**Critical Field Offsets**:
+**Critical Field Offsets** (Corrected per DNA_collection_types.h):
 ```
 Offset    Field                           Type
-0-119     ID id                           (120 bytes)
-128-143   ListBase gobject                (next, prev pointers)
-144-159   ListBase children               (next, prev pointers)
-500-507   CollectionRuntime *runtime      (NOT serialized; nullptr)
+0-407     ID id                           (408 bytes) — CORRECTED: was 120
+408-415   ID *owner_id                    (8 bytes)
+416-423   ListBase gobject (first)        (8 bytes)
+424-431   ListBase gobject (last)         (8 bytes)
+432-439   ListBase children (first)       (8 bytes)
+440-447   ListBase children (last)        (8 bytes)
+500+      CollectionRuntime *runtime      (NOT serialized; nullptr)
 ```
 
 **Pointer Remapping Strategy**:
