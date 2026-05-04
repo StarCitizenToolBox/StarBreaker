@@ -144,6 +144,14 @@ fn scene_instance_properties(entity_name: &str, instance: &LinkedMeshInstance) -
     ]
 }
 
+fn scene_anchor_name(instance_name: &str) -> String {
+    format!("{instance_name}_anchor")
+}
+
+fn scene_source_empty_name(instance_name: &str, ancestor_index: usize, ancestor_name: &str) -> String {
+    format!("{instance_name}_{ancestor_index}_{ancestor_name}")
+}
+
 fn light_object_properties(entity_name: &str, light_name: &str) -> Vec<(String, IdPropValue)> {
     vec![
         ("starbreaker_scene_path".to_string(), IdPropValue::String("scene.json".to_string())),
@@ -388,13 +396,25 @@ pub fn write_decomposed_export_blend(
                 mesh_entry.nmc.as_ref(),
                 vgroups.as_ref(),
             );
-            let mut linked_object_names = mesh_object_names_from_blend_bytes(&blend_bytes);
-            if linked_object_names.is_empty() {
-                linked_object_names.push(mesh_name.clone());
+            let mut linked_mesh_refs = mesh_object_refs_from_blend_bytes(&blend_bytes);
+            if linked_mesh_refs.is_empty() {
+                linked_mesh_refs.push(LinkedMeshRef {
+                    object_name: mesh_name.clone(),
+                    mesh_name: mesh_name.clone(),
+                    object_loc: [0.0, 0.0, 0.0],
+                    object_quat: [1.0, 0.0, 0.0, 0.0],
+                    object_scale: [1.0, 1.0, 1.0],
+                    ancestors: Vec::new(),
+                });
             }
-            for linked_object_name in linked_object_names {
+            for linked_mesh_ref in linked_mesh_refs {
                 scene_mesh_instances.push(LinkedMeshInstance {
-                    name: linked_object_name,
+                    name: linked_mesh_ref.object_name,
+                    mesh_name: linked_mesh_ref.mesh_name,
+                    source_ancestors: linked_mesh_ref.ancestors,
+                    source_loc: linked_mesh_ref.object_loc,
+                    source_quat: linked_mesh_ref.object_quat,
+                    source_scale: linked_mesh_ref.object_scale,
                     blend_path: format!("//../../{blend_path}"),
                     mesh_asset: blend_path.clone(),
                     position: [0.0, 0.0, 0.0],
@@ -437,10 +457,15 @@ pub fn write_decomposed_export_blend(
 
     scene_mesh_instances.clear();
     for file in &blend_files {
-        let linked_object_names = mesh_object_names_from_blend_bytes(&file.bytes);
-        for linked_object_name in linked_object_names {
+        let linked_mesh_refs = mesh_object_refs_from_blend_bytes(&file.bytes);
+        for linked_mesh_ref in linked_mesh_refs {
             scene_mesh_instances.push(LinkedMeshInstance {
-                name: linked_object_name,
+                name: linked_mesh_ref.object_name,
+                mesh_name: linked_mesh_ref.mesh_name,
+                source_ancestors: linked_mesh_ref.ancestors,
+                source_loc: linked_mesh_ref.object_loc,
+                source_quat: linked_mesh_ref.object_quat,
+                source_scale: linked_mesh_ref.object_scale,
                 blend_path: format!("//../../{}", file.relative_path),
                 mesh_asset: file.relative_path.clone(),
                 position: [0.0, 0.0, 0.0],
@@ -1090,23 +1115,89 @@ fn linked_scene_object_names(
     }
 }
 
-fn mesh_object_names_from_blend_bytes(blend_bytes: &[u8]) -> Vec<String> {
-    let mut names = Vec::new();
+#[derive(Debug, Clone, PartialEq)]
+struct LinkedMeshRef {
+    object_name: String,
+    mesh_name: String,
+    object_loc: [f32; 3],
+    object_quat: [f32; 4],
+    object_scale: [f32; 3],
+    ancestors: Vec<LinkedSourceAncestor>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkedSourceAncestor {
+    pub name: String,
+    pub loc: [f32; 3],
+    pub quat: [f32; 4],
+    pub scale: [f32; 3],
+}
+
+fn mesh_object_refs_from_blend_bytes(blend_bytes: &[u8]) -> Vec<LinkedMeshRef> {
+    #[derive(Debug, Clone)]
+    struct ObjectInfo {
+        name: String,
+        object_type: i16,
+        parent_ptr: u64,
+        mesh_ptr: u64,
+        loc: [f32; 3],
+        quat: [f32; 4],
+        scale: [f32; 3],
+    }
+
+    let mut object_order = Vec::new();
+    let mut objects_by_ptr = HashMap::new();
+    let mut mesh_names_by_ptr = HashMap::new();
     let mut offset = BLEND_MAGIC.len();
     while offset + 32 <= blend_bytes.len() {
         let code = &blend_bytes[offset..offset + 4];
+        let old_ptr = u64::from_le_bytes(blend_bytes[offset + 8..offset + 16].try_into().unwrap());
         let size = u32::from_le_bytes(blend_bytes[offset + 16..offset + 20].try_into().unwrap()) as usize;
         let data_start = offset + 32;
         let data_end = data_start.saturating_add(size);
         if data_end > blend_bytes.len() {
             break;
         }
-        if code == b"OB\0\0" {
+        if code == b"ME\0\0" {
             let data = &blend_bytes[data_start..data_end];
-            if data.len() >= OBJECT_SIZE && i16::from_le_bytes(data[416..418].try_into().unwrap()) == 1 {
+            if data.len() >= 300 {
                 let raw = &data[42..300];
                 let end = raw.iter().position(|&byte| byte == 0).unwrap_or(raw.len());
-                names.push(String::from_utf8_lossy(&raw[..end]).to_string());
+                mesh_names_by_ptr.insert(old_ptr, String::from_utf8_lossy(&raw[..end]).to_string());
+            }
+        } else if code == b"OB\0\0" {
+            let data = &blend_bytes[data_start..data_end];
+            if data.len() >= OBJECT_SIZE {
+                let raw = &data[42..300];
+                let end = raw.iter().position(|&byte| byte == 0).unwrap_or(raw.len());
+                let name = String::from_utf8_lossy(&raw[..end]).to_string();
+                let object_type = i16::from_le_bytes(data[416..418].try_into().unwrap());
+                object_order.push(old_ptr);
+                objects_by_ptr.insert(
+                    old_ptr,
+                    ObjectInfo {
+                        name,
+                        object_type,
+                        parent_ptr: u64::from_le_bytes(data[496..504].try_into().unwrap()),
+                        mesh_ptr: u64::from_le_bytes(data[552..560].try_into().unwrap()),
+                        loc: [
+                            f32::from_le_bytes(data[736..740].try_into().unwrap()),
+                            f32::from_le_bytes(data[740..744].try_into().unwrap()),
+                            f32::from_le_bytes(data[744..748].try_into().unwrap()),
+                        ],
+                        scale: [
+                            f32::from_le_bytes(data[760..764].try_into().unwrap()),
+                            f32::from_le_bytes(data[764..768].try_into().unwrap()),
+                            f32::from_le_bytes(data[768..772].try_into().unwrap()),
+                        ],
+                        quat: [
+                            f32::from_le_bytes(data[820..824].try_into().unwrap()),
+                            f32::from_le_bytes(data[824..828].try_into().unwrap()),
+                            f32::from_le_bytes(data[828..832].try_into().unwrap()),
+                            f32::from_le_bytes(data[832..836].try_into().unwrap()),
+                        ],
+                    },
+                );
             }
         }
         if code == b"ENDB" {
@@ -1114,7 +1205,43 @@ fn mesh_object_names_from_blend_bytes(blend_bytes: &[u8]) -> Vec<String> {
         }
         offset = data_end;
     }
-    names
+
+    object_order
+        .into_iter()
+        .filter_map(|object_ptr| {
+            let object = objects_by_ptr.get(&object_ptr)?;
+            if object.object_type != 1 {
+                return None;
+            }
+            let mesh_name = mesh_names_by_ptr
+                .get(&object.mesh_ptr)
+                .cloned()
+                .unwrap_or_else(|| object.name.clone());
+            let mut ancestors = Vec::new();
+            let mut parent_ptr = object.parent_ptr;
+            while parent_ptr != 0 {
+                let Some(parent) = objects_by_ptr.get(&parent_ptr) else {
+                    break;
+                };
+                ancestors.push(LinkedSourceAncestor {
+                    name: parent.name.clone(),
+                    loc: parent.loc,
+                    quat: parent.quat,
+                    scale: parent.scale,
+                });
+                parent_ptr = parent.parent_ptr;
+            }
+            ancestors.reverse();
+            Some(LinkedMeshRef {
+                object_name: object.name.clone(),
+                mesh_name,
+                object_loc: object.loc,
+                object_quat: object.quat,
+                object_scale: object.scale,
+                ancestors,
+            })
+        })
+        .collect()
 }
 
 fn nmc_export_object_names(mesh_name: &str, nmc: &NodeMeshCombo) -> Vec<String> {
@@ -1915,6 +2042,14 @@ fn mesh_to_blend_hierarchy(
 pub struct LinkedMeshInstance {
     /// Instance name (typically "mesh_0", "mesh_1", etc.)
     pub name: String,
+    /// Mesh datablock name inside the linked decomposed asset file.
+    pub mesh_name: String,
+    /// Source asset empty ancestors, ordered root-to-parent.
+    pub source_ancestors: Vec<LinkedSourceAncestor>,
+    /// Source object local transform inside its decomposed asset file.
+    pub source_loc: [f32; 3],
+    pub source_quat: [f32; 4],
+    pub source_scale: [f32; 3],
     /// Relative path to the linked .blend file (e.g., "Data/Objects/mesh_0.blend")
     pub blend_path: String,
     /// Package-relative mesh asset path before any scene.blend-relative library prefix.
@@ -1976,6 +2111,11 @@ pub fn create_scene_blend(
             LinkedMeshInstance {
                 blend_path: format!("{mesh_output_dir}/{name}.blend"),
                 mesh_asset: format!("{mesh_output_dir}/{name}.blend"),
+                mesh_name: name.clone(),
+                source_ancestors: Vec::new(),
+                source_loc: [0.0, 0.0, 0.0],
+                source_quat: [1.0, 0.0, 0.0, 0.0],
+                source_scale: [1.0, 1.0, 1.0],
                 name,
                 position: [0.0, 0.0, 0.0],
                 rotation: [1.0, 0.0, 0.0, 0.0],
@@ -2034,16 +2174,20 @@ pub fn create_scene_blend_with_instances(
     let package_root_idprops = allocate_idprop_blocks(&mut ptrs, package_root_properties(entity_name));
     let entity_root_idprops = allocate_idprop_blocks(&mut ptrs, entity_wrapper_properties(entity_name));
     
-    // Allocate pointers for linked mesh object ID stubs.
+    // Allocate pointers for local, parentable mesh objects whose data points at
+    // linked Mesh ID stubs. Directly parenting linked Object IDs does not
+    // persist across Blender reloads because the library owns their parent chain.
     let mut linked_mesh_ids = Vec::new();
     let mut library_ptr_by_path = HashMap::new();
     let mut library_ptrs = Vec::new();
     let mut mesh_coll_obj_ptrs = Vec::new();
+    let mut local_mesh_object_entries = Vec::new();
     let mut instance_anchor_entries = Vec::new();
-    let mut anchor_coll_obj_ptrs = Vec::new();
+    let mut empty_coll_obj_ptrs = Vec::new();
+    let mut source_empty_entries = Vec::new();
     
     for (idx, instance) in mesh_instances_input.iter().enumerate() {
-        let object_id_ptr = ptrs.alloc();
+        let mesh_id_ptr = ptrs.alloc();
         let library_ptr = if let Some(&ptr) = library_ptr_by_path.get(&instance.blend_path) {
             ptr
         } else {
@@ -2053,14 +2197,36 @@ pub fn create_scene_blend_with_instances(
             ptr
         };
         let coll_obj_ptr = ptrs.alloc();  // Collection object for this mesh instance
+        let local_object_ptr = ptrs.alloc();
+        let local_object_mat_ptr = ptrs.alloc();
+        let local_object_matbits_ptr = ptrs.alloc();
+        let local_object_idprops = allocate_idprop_blocks(&mut ptrs, scene_instance_properties(entity_name, instance));
         let anchor_ptr = ptrs.alloc();
         let anchor_coll_obj_ptr = ptrs.alloc();
         let anchor_idprops = allocate_idprop_blocks(&mut ptrs, scene_instance_properties(entity_name, instance));
+        let mut ancestor_ptrs = Vec::new();
+        for ancestor_index in 0..instance.source_ancestors.len() {
+            let empty_ptr = ptrs.alloc();
+            let empty_coll_obj_ptr = ptrs.alloc();
+            let parent_ptr = ancestor_ptrs.last().copied().unwrap_or(anchor_ptr);
+            source_empty_entries.push((empty_ptr, idx, ancestor_index, parent_ptr));
+            empty_coll_obj_ptrs.push((empty_coll_obj_ptr, empty_ptr));
+            ancestor_ptrs.push(empty_ptr);
+        }
+        let mesh_parent_ptr = ancestor_ptrs.last().copied().unwrap_or(anchor_ptr);
         
-        linked_mesh_ids.push((object_id_ptr, library_ptr, idx));
-        mesh_coll_obj_ptrs.push((coll_obj_ptr, object_id_ptr));
+        linked_mesh_ids.push((mesh_id_ptr, library_ptr, idx));
+        mesh_coll_obj_ptrs.push((coll_obj_ptr, local_object_ptr));
+        local_mesh_object_entries.push((
+            local_object_ptr,
+            local_object_mat_ptr,
+            local_object_matbits_ptr,
+            idx,
+            local_object_idprops,
+            mesh_parent_ptr,
+        ));
         instance_anchor_entries.push((anchor_ptr, idx, anchor_idprops));
-        anchor_coll_obj_ptrs.push((anchor_coll_obj_ptr, anchor_ptr));
+        empty_coll_obj_ptrs.push((anchor_coll_obj_ptr, anchor_ptr));
     }
     
     // Allocate pointers for light instances
@@ -2148,24 +2314,24 @@ pub fn create_scene_blend_with_instances(
         0,
     );
     
-    let anchor_head_ptr = if !anchor_coll_obj_ptrs.is_empty() { anchor_coll_obj_ptrs[0].0 } else { 0 };
-    let anchor_tail_ptr = if !anchor_coll_obj_ptrs.is_empty() {
-        anchor_coll_obj_ptrs[anchor_coll_obj_ptrs.len() - 1].0
+    let empty_head_ptr = if !empty_coll_obj_ptrs.is_empty() { empty_coll_obj_ptrs[0].0 } else { 0 };
+    let empty_tail_ptr = if !empty_coll_obj_ptrs.is_empty() {
+        empty_coll_obj_ptrs[empty_coll_obj_ptrs.len() - 1].0
     } else {
         0
     };
-    let mut anchor_coll_obj_data_list = Vec::new();
-    for (idx, &(coll_obj_ptr, obj_ptr)) in anchor_coll_obj_ptrs.iter().enumerate() {
-        let prev_ptr = if idx > 0 { anchor_coll_obj_ptrs[idx - 1].0 } else { 0 };
-        let next_ptr = if idx < anchor_coll_obj_ptrs.len() - 1 { anchor_coll_obj_ptrs[idx + 1].0 } else { 0 };
-        anchor_coll_obj_data_list.push((coll_obj_ptr, build_collection_object_linked(obj_ptr, prev_ptr, next_ptr)));
+    let mut empty_coll_obj_data_list = Vec::new();
+    for (idx, &(coll_obj_ptr, obj_ptr)) in empty_coll_obj_ptrs.iter().enumerate() {
+        let prev_ptr = if idx > 0 { empty_coll_obj_ptrs[idx - 1].0 } else { 0 };
+        let next_ptr = if idx < empty_coll_obj_ptrs.len() - 1 { empty_coll_obj_ptrs[idx + 1].0 } else { 0 };
+        empty_coll_obj_data_list.push((coll_obj_ptr, build_collection_object_linked(obj_ptr, prev_ptr, next_ptr)));
     }
 
     // Sub-collection: Empties contains local addon-style instance anchors.
     let empties_collection_data = build_collection(
         "Empties",
-        anchor_head_ptr,
-        anchor_tail_ptr,
+        empty_head_ptr,
+        empty_tail_ptr,
         0,
         0,
     );
@@ -2276,7 +2442,7 @@ pub fn create_scene_blend_with_instances(
     for (anchor_ptr, idx, anchor_idprops) in &instance_anchor_entries {
         let instance = &mesh_instances_input[*idx];
         let object_data = build_empty_object_with_properties(
-            &instance.name,
+            &scene_anchor_name(&instance.name),
             instance.position,
             instance.rotation,
             [1.0, 1.0, 1.0],
@@ -2284,6 +2450,47 @@ pub fn create_scene_blend_with_instances(
             anchor_idprops.as_ref().map(|props| props.root_ptr).unwrap_or(0),
         );
         instance_anchor_data.push((*anchor_ptr, object_data));
+    }
+
+    let mut source_empty_data = Vec::new();
+    for (empty_ptr, idx, ancestor_index, parent_ptr) in &source_empty_entries {
+        let instance = &mesh_instances_input[*idx];
+        let ancestor = &instance.source_ancestors[*ancestor_index];
+        let object_data = build_empty_object(
+            &scene_source_empty_name(&instance.name, *ancestor_index, &ancestor.name),
+            ancestor.loc,
+            ancestor.quat,
+            ancestor.scale,
+            *parent_ptr,
+        );
+        source_empty_data.push((*empty_ptr, object_data));
+    }
+
+    let mut local_mesh_object_data = Vec::new();
+    for (object_ptr, mat_ptr, matbits_ptr, idx, object_idprops, parent_anchor_ptr) in &local_mesh_object_entries {
+        let instance = &mesh_instances_input[*idx];
+        let (mesh_id_ptr, _, _) = linked_mesh_ids[*idx];
+        let mut object_data = build_object(
+            &instance.name,
+            mesh_id_ptr,
+            *mat_ptr,
+            *matbits_ptr,
+            0,
+            object_idprops.as_ref().map(|props| props.root_ptr).unwrap_or(0),
+        );
+        patch_object_parent_transform(
+            &mut object_data,
+            *parent_anchor_ptr,
+            instance.source_loc,
+            instance.source_quat,
+            instance.source_scale,
+        );
+        local_mesh_object_data.push((
+            *object_ptr,
+            object_data,
+            build_mat_ptr_array(0),
+            build_matbits(0),
+        ));
     }
     
     // Allocate string data for library filenames (uses entity name, not scene name)
@@ -2302,8 +2509,8 @@ pub fn create_scene_blend_with_instances(
         let lib_data = build_library_block(lib_name, blend_path);
         mesh_library_data.push((*library_ptr, lib_data));
     }
-    for (object_id_ptr, library_ptr, idx) in &linked_mesh_ids {
-        linked_mesh_id_data.push((*object_id_ptr, build_id_stub("OB", &mesh_instances_input[*idx].name, *library_ptr)));
+    for (mesh_id_ptr, library_ptr, idx) in &linked_mesh_ids {
+        linked_mesh_id_data.push((*mesh_id_ptr, build_id_stub("ME", &mesh_instances_input[*idx].mesh_name, *library_ptr)));
     }
     
     // Build light objects for lights collection
@@ -2393,7 +2600,7 @@ pub fn create_scene_blend_with_instances(
     }
     
     write_block(&mut out, b"GR\0\0", SDNA_IDX_COLLECTION, empties_collection_ptr, 1, &empties_collection_data);
-    for (coll_obj_ptr, coll_obj_data) in &anchor_coll_obj_data_list {
+    for (coll_obj_ptr, coll_obj_data) in &empty_coll_obj_data_list {
         write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, *coll_obj_ptr, 1, coll_obj_data);
     }
     write_block(&mut out, b"GR\0\0", SDNA_IDX_COLLECTION, decals_collection_ptr, 1, &decals_collection_data);
@@ -2417,6 +2624,19 @@ pub fn create_scene_blend_with_instances(
         if let Some(props) = &instance_anchor_entries[idx].2 {
             write_idprop_blocks(&mut out, props);
         }
+    }
+
+    for (empty_ptr, empty_data) in &source_empty_data {
+        write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, *empty_ptr, 1, empty_data);
+    }
+
+    for (idx, (object_ptr, object_data, mat_array, matbits)) in local_mesh_object_data.iter().enumerate() {
+        write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, *object_ptr, 1, object_data);
+        if let Some(props) = &local_mesh_object_entries[idx].4 {
+            write_idprop_blocks(&mut out, props);
+        }
+        write_block(&mut out, b"DATA", 0, local_mesh_object_entries[idx].1, 1, mat_array);
+        write_block(&mut out, b"DATA", 0, local_mesh_object_entries[idx].2, 1, matbits);
     }
     
     // Write light blocks (Phase 5B)
@@ -2497,12 +2717,15 @@ mod tests_5a_scene_blend {
     }
 
     fn object_block_by_name<'a>(blocks: &'a [BlendBlock<'a>], name: &str) -> &'a BlendBlock<'a> {
-        let prefixed = format!("OB{name}");
         blocks
             .iter()
             .find(|block| {
-                block.code == b"OB\0\0"
-                    && block.data[40..].starts_with(prefixed.as_bytes())
+                if block.code != b"OB\0\0" {
+                    return false;
+                }
+                let raw = &block.data[42..300];
+                let end = raw.iter().position(|&byte| byte == 0).unwrap_or(raw.len());
+                &raw[..end] == name.as_bytes()
             })
             .unwrap_or_else(|| panic!("missing Object block named {name}"))
     }
@@ -2793,6 +3016,11 @@ mod tests_5a_scene_blend {
     fn test_create_scene_blend_links_object_ids_instead_of_empty_mesh_stubs() {
         let instance = LinkedMeshInstance {
             name: "rsi_aurora_mk2_airlock_door_LOD0".to_string(),
+            mesh_name: "rsi_aurora_mk2_airlock_door_LOD0_mesh".to_string(),
+            source_ancestors: Vec::new(),
+            source_loc: [0.0, 0.0, 0.0],
+            source_quat: [1.0, 0.0, 0.0, 0.0],
+            source_scale: [1.0, 1.0, 1.0],
             blend_path: "//../../Data/Objects/Ships/rsi_aurora_mk2_airlock_door_LOD0.blend".to_string(),
             mesh_asset: "Data/Objects/Ships/rsi_aurora_mk2_airlock_door_LOD0.blend".to_string(),
             position: [0.0, 0.0, 0.0],
@@ -2801,13 +3029,20 @@ mod tests_5a_scene_blend {
         let blend_bytes = create_scene_blend_with_instances("SceneLinkTest", &[instance], &[]).unwrap();
         let blocks = parse_blend_blocks(&blend_bytes);
 
-        let linked_object_stub = blocks.iter().find(|block| {
+        let linked_mesh_stub = blocks.iter().find(|block| {
             block.code == b"ID\0\0"
                 && block.sdna == SDNA_IDX_ID
                 && block.data[40..]
-                    .starts_with(b"OBrsi_aurora_mk2_airlock_door_LOD0")
+                    .starts_with(b"MErsi_aurora_mk2_airlock_door_LOD0_mesh")
         });
-        assert!(linked_object_stub.is_some(), "scene.blend should link object IDs from mesh .blend files");
+        let linked_mesh_stub = linked_mesh_stub.expect("scene.blend should link mesh data IDs from mesh .blend files");
+
+        let local_object = object_block_by_name(&blocks, "rsi_aurora_mk2_airlock_door_LOD0");
+        assert_eq!(
+            u64::from_le_bytes(local_object.data[552..560].try_into().unwrap()),
+            linked_mesh_stub.old_ptr,
+            "local scene Object.data should point at the linked Mesh ID stub"
+        );
 
         let local_empty_mesh_stub = blocks.iter().find(|block| {
             block.code == b"ME\0\0"
@@ -2821,6 +3056,24 @@ mod tests_5a_scene_blend {
     fn test_create_scene_blend_writes_addon_style_scene_anchors() {
         let instance = LinkedMeshInstance {
             name: "anchor_mesh".to_string(),
+            mesh_name: "anchor_mesh_data".to_string(),
+            source_ancestors: vec![
+                LinkedSourceAncestor {
+                    name: "StarBreaker_Y_up".to_string(),
+                    loc: [0.0, 0.0, 0.0],
+                    quat: [std::f32::consts::FRAC_1_SQRT_2, std::f32::consts::FRAC_1_SQRT_2, 0.0, 0.0],
+                    scale: [1.0, 1.0, 1.0],
+                },
+                LinkedSourceAncestor {
+                    name: "CryEngine_Z_up".to_string(),
+                    loc: [0.0, 1.0, 0.0],
+                    quat: [1.0, 0.0, 0.0, 0.0],
+                    scale: [1.0, 1.0, 1.0],
+                },
+            ],
+            source_loc: [4.0, 5.0, 6.0],
+            source_quat: [1.0, 0.0, 0.0, 0.0],
+            source_scale: [1.0, 1.0, 1.0],
             blend_path: "//../../Data/Objects/Ships/anchor_mesh.blend".to_string(),
             mesh_asset: "Data/Objects/Ships/anchor_mesh.blend".to_string(),
             position: [1.0, 2.0, 3.0],
@@ -2831,7 +3084,10 @@ mod tests_5a_scene_blend {
 
         let package_root = object_block_by_name(&blocks, "StarBreaker AnchorEntity");
         let entity_root = object_block_by_name(&blocks, "AnchorEntity");
-        let anchor = object_block_by_name(&blocks, "anchor_mesh");
+        let anchor = object_block_by_name(&blocks, "anchor_mesh_anchor");
+        let y_up = object_block_by_name(&blocks, "anchor_mesh_0_StarBreaker_Y_up");
+        let cryengine_root = object_block_by_name(&blocks, "anchor_mesh_1_CryEngine_Z_up");
+        let local_mesh = object_block_by_name(&blocks, "anchor_mesh");
 
         assert_eq!(u64::from_le_bytes(package_root.data[496..504].try_into().unwrap()), 0);
         assert_eq!(
@@ -2844,9 +3100,28 @@ mod tests_5a_scene_blend {
             entity_root.old_ptr,
             "scene instance anchor should be parented to entity wrapper"
         );
+        assert_eq!(
+            u64::from_le_bytes(y_up.data[496..504].try_into().unwrap()),
+            anchor.old_ptr,
+            "source hierarchy root should be parented to its scene instance anchor"
+        );
+        assert_eq!(
+            u64::from_le_bytes(cryengine_root.data[496..504].try_into().unwrap()),
+            y_up.old_ptr,
+            "source child empty should preserve its source parent chain"
+        );
+        assert_eq!(
+            u64::from_le_bytes(local_mesh.data[496..504].try_into().unwrap()),
+            cryengine_root.old_ptr,
+            "local mesh object should be parented to the cloned source hierarchy"
+        );
+        assert_eq!(f32::from_le_bytes(local_mesh.data[736..740].try_into().unwrap()), 4.0);
+        assert_eq!(f32::from_le_bytes(local_mesh.data[740..744].try_into().unwrap()), 5.0);
+        assert_eq!(f32::from_le_bytes(local_mesh.data[744..748].try_into().unwrap()), 6.0);
         assert_ne!(u64::from_le_bytes(package_root.data[344..352].try_into().unwrap()), 0);
         assert_ne!(u64::from_le_bytes(entity_root.data[344..352].try_into().unwrap()), 0);
         assert_ne!(u64::from_le_bytes(anchor.data[344..352].try_into().unwrap()), 0);
+        assert_ne!(u64::from_le_bytes(local_mesh.data[344..352].try_into().unwrap()), 0);
         assert!(blend_bytes.windows(b"starbreaker_package_root".len()).any(|w| w == b"starbreaker_package_root"));
         assert!(blend_bytes.windows(b"starbreaker_mesh_asset".len()).any(|w| w == b"starbreaker_mesh_asset"));
         assert!(blend_bytes.windows(b"Data/Objects/Ships/anchor_mesh.blend".len()).any(|w| w == b"Data/Objects/Ships/anchor_mesh.blend"));
@@ -3332,12 +3607,9 @@ fn quaternion_multiply(q1: [f32; 4], q2: [f32; 4]) -> [f32; 4] {
 /// **Coordinate system transformation** (Z-up to Y-up):
 /// Apply same transformation as position: swap y/z, negate z
 ///
-/// **Basis correction for spotlights** (if is_spotlight=true):
-/// - CryEngine spotlight cone forward: +X axis
-/// - Blender spotlight cone forward: -Z axis
-/// - Correction: 90° rotation around Y axis to align +X → -Z
-///   Quaternion: [cos(45°), 0, -sin(45°), 0] ≈ [0.7071, 0, -0.7071, 0]
-fn convert_quaternion_sc_to_blender(quat_sc: [f64; 4], is_spotlight: bool) -> [f32; 4] {
+/// Blender's glTF light convention needs the same basis correction the addon
+/// applies in `_scene_light_quaternion_to_blender`, not only for spot lights.
+fn convert_quaternion_sc_to_blender(quat_sc: [f64; 4], _is_spotlight: bool) -> [f32; 4] {
     let w = quat_sc[0] as f32;
     let x = quat_sc[1] as f32;
     let y = quat_sc[2] as f32;
@@ -3346,14 +3618,19 @@ fn convert_quaternion_sc_to_blender(quat_sc: [f64; 4], is_spotlight: bool) -> [f
     // Step 1: Coordinate system transformation (Z-up to Y-up)
     let mut result = [w, x, -z, y];
     
-    // Step 2: Basis correction for spotlights (CryEngine +X → Blender -Z)
-    if is_spotlight {
-        // 90° rotation around Y axis to align +X to -Z
-        let basis_correction = [0.7071, 0.0, -0.7071, 0.0];
-        result = quaternion_multiply(result, basis_correction);
+    let basis_correction = [
+        std::f32::consts::FRAC_1_SQRT_2,
+        0.0,
+        -std::f32::consts::FRAC_1_SQRT_2,
+        0.0,
+    ];
+    result = quaternion_multiply(result, basis_correction);
+    let len = (result[0] * result[0] + result[1] * result[1] + result[2] * result[2] + result[3] * result[3]).sqrt();
+    if len > 0.0 {
+        [result[0] / len, result[1] / len, result[2] / len, result[3] / len]
+    } else {
+        [1.0, 0.0, 0.0, 0.0]
     }
-    
-    result
 }
 
 /// Extract all lights from loaded interiors.
@@ -3458,16 +3735,22 @@ mod tests {
     
     #[test]
     fn test_convert_quaternion_sc_to_blender() {
-        // [w, x, y, z] → [w, x, -z, y] (point light, no basis correction)
+        // Addon-compatible light conversion applies scene-axis conversion plus
+        // the glTF light basis correction for all light kinds.
         let result = convert_quaternion_sc_to_blender([1.0, 0.0, 0.0, 0.0], false);
-        assert_eq!(result, [1.0, 0.0, 0.0, 0.0]);
+        assert!((result[0] - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.0001);
+        assert!((result[1] - 0.0).abs() < 0.0001);
+        assert!((result[2] + std::f32::consts::FRAC_1_SQRT_2).abs() < 0.0001);
+        assert!((result[3] - 0.0).abs() < 0.0001);
     }
     
     #[test]
     fn test_convert_quaternion_with_values() {
-        // Point light (no basis correction)
         let result = convert_quaternion_sc_to_blender([0.707, 0.5, 0.5, 0.0], false);
-        assert_eq!(result, [0.707, 0.5, 0.0, 0.5]);
+        assert!((result[0] - 0.5).abs() < 0.001);
+        assert!((result[1] - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.001);
+        assert!((result[2] + 0.5).abs() < 0.001);
+        assert!(result[3].abs() < 0.001);
     }
     
     #[test]
@@ -3491,8 +3774,8 @@ mod tests {
         let result_spotlight = convert_quaternion_sc_to_blender_test_helper(identity, true);
         let result_point = convert_quaternion_sc_to_blender_test_helper(identity, false);
         
-        // Point light: no correction, should be [1.0, 0.0, 0.0, 0.0]
-        assert_eq!(result_point, [1.0, 0.0, 0.0, 0.0]);
+        // All light kinds get the glTF light basis correction to match the addon.
+        assert_eq!(result_point, result_spotlight);
         
         // Spotlight: basis correction applied, should be rotated
         // Identity * basis_correction = [0.7071, 0, -0.7071, 0]
@@ -3521,19 +3804,13 @@ mod tests {
     }
     
     #[test]
-    fn test_point_light_no_basis_correction() {
-        // Point lights (omni) should NOT get basis correction
+    fn test_point_light_uses_gltf_basis_correction() {
         let quat = [0.7071, 0.3, 0.5, 0.1];
         let result_point = convert_quaternion_sc_to_blender(quat, false);
-        
-        // Should only apply coord xform, no basis correction
-        let w = quat[0] as f32;
-        let x = quat[1] as f32;
-        let y = quat[2] as f32;
-        let z = quat[3] as f32;
-        let expected = [w, x, -z, y];
-        
-        assert_eq!(result_point, expected);
+        let magnitude_sq = result_point[0]*result_point[0] + result_point[1]*result_point[1] +
+                           result_point[2]*result_point[2] + result_point[3]*result_point[3];
+        assert!((magnitude_sq - 1.0).abs() < 0.01, "quaternion should be normalized");
+        assert_ne!(result_point, [quat[0] as f32, quat[1] as f32, -(quat[3] as f32), quat[2] as f32]);
     }
     
     // Helper function for testing (internal use only)
