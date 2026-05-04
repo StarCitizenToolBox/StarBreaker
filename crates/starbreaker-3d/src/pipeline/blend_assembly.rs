@@ -250,8 +250,9 @@ pub fn write_decomposed_export_blend(
                 bytes: updated.into_bytes(),
                 kind: file.kind,
             });
-        } else {
+        } else if !file.relative_path.ends_with("scene.blend") {
             // Keep other files as-is (palettes, textures, etc.)
+            // EXCLUDE scene.blend from base_export - we'll create our own detailed version
             other_files.push(file);
         }
     }
@@ -262,17 +263,17 @@ pub fn write_decomposed_export_blend(
     // Create scene.blend with properly linked mesh instances and lights
     let scene_blend_bytes = create_scene_blend(&scene_entity_name, children_for_scene.len(), "Data/Objects", &extracted_lights)?;
     
-    // Add scene.blend to the export
-    blend_files.push(ExportedFile {
+    // Combine blend mesh files with other files (NOT including base_export.scene.blend)
+    let mut all_files = blend_files;
+    all_files.extend(manifest_files);
+    all_files.extend(other_files);
+    
+    // Add our detailed scene.blend LAST so it takes priority over any base_export version
+    all_files.push(ExportedFile {
         relative_path: "scene.blend".to_string(),
         bytes: scene_blend_bytes,
         kind: ExportedFileKind::MeshAsset,
     });
-
-    // Combine blend mesh files with other files
-    let mut all_files = blend_files;
-    all_files.extend(manifest_files);
-    all_files.extend(other_files);
 
     report_progress(progress, 1.0, "Export complete");
 
