@@ -19,7 +19,8 @@ use starbreaker_blend::{
     bytes4_data, build_attribute, build_attribute_array, build_base, build_collection,
     build_master_collection, build_collection_object, build_collection_object_linked,
     build_file_global, build_layer_collection, build_layer_collection_linked, build_mat_ptr_array,
-    build_empty_shader_node_tree, build_mat_ptr_array_from_ptrs, build_material_with_node_tree,
+    build_empty_shader_node_tree, build_idprop_tree, build_mat_ptr_array_from_ptrs,
+    build_material_with_node_tree_and_properties,
     build_matbits, build_mesh, build_object, build_scene, build_tool_settings,
     build_view_layer,
     floats2_data, floats3_data, ints_data, startup_ui_prefix_bytes, write_block, write_block_header, PtrAlloc,
@@ -27,14 +28,14 @@ use starbreaker_blend::{
     ATTR_TYPE_FLOAT2, ATTR_TYPE_FLOAT3, ATTR_TYPE_INT, BLEND_MAGIC, DNA1_BYTES,
     SDNA_IDX_ATTRIBUTE, SDNA_IDX_ATTRIBUTE_ARRAY, SDNA_IDX_BASE, SDNA_IDX_COLLECTION, SDNA_IDX_COLLECTION_CHILD,
     SDNA_IDX_COLLECTION_OBJECT, SDNA_IDX_DNA1, SDNA_IDX_FILE_GLOBAL, SDNA_IDX_LAYER_COLLECTION,
-    SDNA_IDX_BNODE_TREE, SDNA_IDX_MATERIAL, SDNA_IDX_MESH, SDNA_IDX_OBJECT, SDNA_IDX_SCENE, SDNA_IDX_TOOL_SETTINGS,
+    SDNA_IDX_BNODE_TREE, SDNA_IDX_IDPROPERTY, SDNA_IDX_MATERIAL, SDNA_IDX_MESH, SDNA_IDX_OBJECT, SDNA_IDX_SCENE, SDNA_IDX_TOOL_SETTINGS,
     SDNA_IDX_VIEW_LAYER, SDNA_IDX_LIBRARY, SDNA_IDX_ID,
     build_lamp, build_lamp_object, build_empty_object,
     build_library_block, build_id_stub, LAMP_SIZE, OBJECT_SIZE,
     build_bdeformgroup, build_mdeformvert_array, build_mdeformweight_array, 
     build_custom_data_layer_mdeformvert, SDNA_IDX_BDEFORMGROUP, SDNA_IDX_MDEFORMVERT, SDNA_IDX_LAMP,
     ints2_data, triangle_edge_topology, write_f32, write_i16, write_identity_matrix4x4, write_ptr,
-    ATTR_TYPE_INT32_2D, STARTUP_UI_SCREEN_PTR,
+    ATTR_TYPE_INT32_2D, IdPropValue, STARTUP_UI_SCREEN_PTR,
 };
 
 use crate::error::Error;
@@ -50,6 +51,59 @@ struct MeshDataEntry {
     mesh: Mesh,
     materials: Option<MtlFile>,
     nmc: Option<NodeMeshCombo>,
+}
+
+struct IdPropBlocks {
+    root_ptr: u64,
+    root: Vec<u8>,
+    children: Vec<(u64, Vec<u8>)>,
+    strings: Vec<(u64, Vec<u8>)>,
+}
+
+fn allocate_idprop_blocks(ptrs: &mut PtrAlloc, props: Vec<(String, IdPropValue)>) -> Option<IdPropBlocks> {
+    if props.is_empty() {
+        return None;
+    }
+    let root_ptr = ptrs.alloc();
+    let child_ptrs = (0..props.len()).map(|_| ptrs.alloc()).collect::<Vec<_>>();
+    let string_ptrs = props
+        .iter()
+        .filter(|(_, value)| matches!(value, IdPropValue::String(_)))
+        .map(|_| ptrs.alloc())
+        .collect::<Vec<_>>();
+    let (root, children, strings) = build_idprop_tree(root_ptr, &child_ptrs, &string_ptrs, &props);
+    Some(IdPropBlocks {
+        root_ptr,
+        root,
+        children,
+        strings,
+    })
+}
+
+fn write_idprop_blocks(out: &mut Vec<u8>, props: &IdPropBlocks) {
+    write_block(out, b"DATA", SDNA_IDX_IDPROPERTY, props.root_ptr, 1, &props.root);
+    for (child_ptr, child_data) in &props.children {
+        write_block(out, b"DATA", SDNA_IDX_IDPROPERTY, *child_ptr, 1, child_data);
+        if let Some((string_ptr, string_data)) = props.strings.iter().find(|(ptr, _)| {
+            u64::from_le_bytes(child_data[88..96].try_into().unwrap()) == *ptr
+        }) {
+            write_block(out, b"DATA", 0, *string_ptr, 1, string_data);
+        }
+    }
+}
+
+fn material_custom_properties(material_name: &str, materials: &Option<MtlFile>) -> Vec<(String, IdPropValue)> {
+    let mut props = vec![(
+        "starbreaker_material_identity".to_string(),
+        IdPropValue::String(material_name.to_string()),
+    )];
+    if let Some(source_path) = materials.as_ref().and_then(|mtl| mtl.source_path.clone()) {
+        props.push((
+            "starbreaker_material_sidecar".to_string(),
+            IdPropValue::String(source_path),
+        ));
+    }
+    props
 }
 
 fn insert_stem_suffix(path: &str, suffix: &str) -> String {
@@ -481,6 +535,9 @@ fn mesh_to_blend_flat(
 
     let _screen_ptr    = ptrs.alloc();
     let _wm_ptr        = ptrs.alloc();
+    let orientation_root_ptr = ptrs.alloc();
+    let orientation_root_mat_ptr = ptrs.alloc();
+    let orientation_root_matbits_ptr = ptrs.alloc();
     let object_ptr     = ptrs.alloc();
     let mesh_ptr       = ptrs.alloc();
     let mesh_mat_ptr   = ptrs.alloc();
@@ -488,11 +545,16 @@ fn mesh_to_blend_flat(
     let obj_matbits_ptr = ptrs.alloc();
     let material_ptrs: Vec<u64> = (0..material_names.len()).map(|_| ptrs.alloc()).collect();
     let material_node_tree_ptrs: Vec<u64> = (0..material_names.len()).map(|_| ptrs.alloc()).collect();
+    let material_idprops = material_names
+        .iter()
+        .map(|material_name| allocate_idprop_blocks(&mut ptrs, material_custom_properties(material_name, materials)))
+        .collect::<Vec<_>>();
     let scene_ptr      = ptrs.alloc();
     let view_layer_ptr = ptrs.alloc();
     let tool_settings_ptr = ptrs.alloc();
     let base_ptr       = ptrs.alloc();
     let collection_ptr = ptrs.alloc();
+    let orientation_collection_object_ptr = ptrs.alloc();
     let collection_object_ptr = ptrs.alloc();
     let layer_collection_ptr = ptrs.alloc();
     let poly_offs_ptr  = ptrs.alloc();
@@ -642,15 +704,34 @@ fn mesh_to_blend_flat(
 
     // ── Datablocks ────────────────────────────────────────────────────────────
 
-    let object_data = build_object(
+    let orientation_root_data = build_empty_object(
+        BLENDER_Y_UP_ROOT_NAME,
+        [0.0, 0.0, 0.0],
+        BLENDER_Y_UP_ROOT_QUAT,
+        [1.0, 1.0, 1.0],
+        0,
+    );
+    let orientation_root_mat_array = build_mat_ptr_array(0);
+    let orientation_root_matbits = build_matbits(0);
+    let mut object_data = build_object(
         name, mesh_ptr, obj_mat_ptr, obj_matbits_ptr, mat_slots as i32, 0,
+    );
+    patch_object_parent_transform(
+        &mut object_data,
+        orientation_root_ptr,
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+        [1.0, 1.0, 1.0],
     );
     let scene_data = build_scene(name, view_layer_ptr, collection_ptr, tool_settings_ptr);
     let tool_settings_data = build_tool_settings();
     let view_layer_data = build_view_layer("ViewLayer", base_ptr, layer_collection_ptr);
-    let base_data = build_base(object_ptr);
-    let collection_data = build_master_collection(collection_object_ptr, collection_object_ptr, 0, 0);
-    let collection_object_data = build_collection_object(object_ptr);
+    let base_data = build_base(orientation_root_ptr);
+    let collection_data = build_master_collection(orientation_collection_object_ptr, collection_object_ptr, 0, 0);
+    let orientation_collection_object_data =
+        build_collection_object_linked(orientation_root_ptr, 0, collection_object_ptr);
+    let collection_object_data =
+        build_collection_object_linked(object_ptr, orientation_collection_object_ptr, 0);
     let layer_collection_data = build_layer_collection(collection_ptr);
     let mesh_data = build_mesh(
         name, totvert, totedge, totpoly, totloop,
@@ -688,6 +769,10 @@ fn mesh_to_blend_flat(
     write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION, collection_ptr, 1, &collection_data);  // embedded master_collection
     write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, collection_object_ptr, 1, &collection_object_data);
     write_block(&mut out, b"DATA", SDNA_IDX_BASE, base_ptr, 1, &base_data);
+
+    write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, orientation_root_ptr, 1, &orientation_root_data);
+    write_block(&mut out, b"DATA", 0, orientation_root_mat_ptr, 1, &orientation_root_mat_array);
+    write_block(&mut out, b"DATA", 0, orientation_root_matbits_ptr, 1, &orientation_root_matbits);
 
     // OB block + DATA blocks (gap=1 rule: mat** and matbits must immediately follow OB)
     write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, object_ptr, 1, &object_data);
@@ -818,13 +903,21 @@ fn mesh_to_blend_flat(
         }
     }
 
-    for ((material_ptr, node_tree_ptr), material_name) in material_ptrs
+    for (((material_ptr, node_tree_ptr), material_props), material_name) in material_ptrs
         .iter()
         .zip(material_node_tree_ptrs.iter())
+        .zip(material_idprops.iter())
         .zip(material_names.iter())
     {
-        let material_data = build_material_with_node_tree(material_name, *node_tree_ptr);
+        let material_data = build_material_with_node_tree_and_properties(
+            material_name,
+            *node_tree_ptr,
+            material_props.as_ref().map(|props| props.root_ptr).unwrap_or(0),
+        );
         write_block(&mut out, b"MA\0\0", SDNA_IDX_MATERIAL, *material_ptr, 1, &material_data);
+        if let Some(props) = material_props {
+            write_idprop_blocks(&mut out, props);
+        }
         let node_tree_data = build_empty_shader_node_tree(*material_ptr);
         write_block(&mut out, b"DATA", SDNA_IDX_BNODE_TREE, *node_tree_ptr, 1, &node_tree_data);
     }
@@ -1529,6 +1622,9 @@ fn mesh_to_blend_hierarchy(
     let mut ptrs = PtrAlloc::new(0x1000);
     let _screen_ptr = ptrs.alloc();
     let _wm_ptr = ptrs.alloc();
+    let orientation_root_ptr = ptrs.alloc();
+    let orientation_root_mat_ptr = ptrs.alloc();
+    let orientation_root_matbits_ptr = ptrs.alloc();
     let coord_root_ptr = ptrs.alloc();
     let coord_root_mat_ptr = ptrs.alloc();
     let coord_root_matbits_ptr = ptrs.alloc();
@@ -1564,19 +1660,23 @@ fn mesh_to_blend_hierarchy(
         .collect::<Vec<_>>();
     let material_ptrs = (0..material_names.len()).map(|_| ptrs.alloc()).collect::<Vec<_>>();
     let material_node_tree_ptrs = (0..material_names.len()).map(|_| ptrs.alloc()).collect::<Vec<_>>();
+    let material_idprops = material_names
+        .iter()
+        .map(|material_name| allocate_idprop_blocks(&mut ptrs, material_custom_properties(material_name, materials)))
+        .collect::<Vec<_>>();
     let scene_ptr = ptrs.alloc();
     let view_layer_ptr = ptrs.alloc();
     let tool_settings_ptr = ptrs.alloc();
     let base_ptr = ptrs.alloc();
     let collection_ptr = ptrs.alloc();
     let layer_collection_ptr = ptrs.alloc();
-    let object_count = 2 + nmc.nodes.len() - usize::from(collapsed_wrapper_node.is_some());
+    let object_count = 3 + nmc.nodes.len() - usize::from(collapsed_wrapper_node.is_some());
     let collection_object_ptrs = (0..object_count).map(|_| ptrs.alloc()).collect::<Vec<_>>();
 
     let scene_data = build_scene(name, view_layer_ptr, collection_ptr, tool_settings_ptr);
     let tool_settings_data = build_tool_settings();
     let view_layer_data = build_view_layer("ViewLayer", base_ptr, layer_collection_ptr);
-    let base_data = build_base(coord_root_ptr);
+    let base_data = build_base(orientation_root_ptr);
     let collection_data = build_master_collection(
         collection_object_ptrs.first().copied().unwrap_or(0),
         collection_object_ptrs.last().copied().unwrap_or(0),
@@ -1584,7 +1684,8 @@ fn mesh_to_blend_hierarchy(
         0,
     );
     let layer_collection_data = build_layer_collection(collection_ptr);
-    let object_ptr_sequence = std::iter::once(coord_root_ptr)
+    let object_ptr_sequence = std::iter::once(orientation_root_ptr)
+        .chain(std::iter::once(coord_root_ptr))
         .chain(std::iter::once(wrapper_ptr))
         .chain(
             nmc_object_ptrs
@@ -1625,7 +1726,18 @@ fn mesh_to_blend_hierarchy(
         0.0, 0.0, 0.0, 1.0,
     ];
     let (coord_loc, coord_quat, coord_scale) = matrix_to_transform(coord_matrix);
-    let coord_root_data = build_empty_object("CryEngine_Z_up", coord_loc, coord_quat, coord_scale, 0);
+    let orientation_root_data = build_empty_object(
+        BLENDER_Y_UP_ROOT_NAME,
+        [0.0, 0.0, 0.0],
+        BLENDER_Y_UP_ROOT_QUAT,
+        [1.0, 1.0, 1.0],
+        0,
+    );
+    write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, orientation_root_ptr, 1, &orientation_root_data);
+    write_block(&mut out, b"DATA", 0, orientation_root_mat_ptr, 1, &build_mat_ptr_array(0));
+    write_block(&mut out, b"DATA", 0, orientation_root_matbits_ptr, 1, &build_matbits(0));
+
+    let coord_root_data = build_empty_object("CryEngine_Z_up", coord_loc, coord_quat, coord_scale, orientation_root_ptr);
     write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, coord_root_ptr, 1, &coord_root_data);
     write_block(&mut out, b"DATA", 0, coord_root_mat_ptr, 1, &build_mat_ptr_array(0));
     write_block(&mut out, b"DATA", 0, coord_root_matbits_ptr, 1, &build_matbits(0));
@@ -1721,13 +1833,21 @@ fn mesh_to_blend_hierarchy(
         }
     }
 
-    for ((material_ptr, node_tree_ptr), material_name) in material_ptrs
+    for (((material_ptr, node_tree_ptr), material_props), material_name) in material_ptrs
         .iter()
         .zip(material_node_tree_ptrs.iter())
+        .zip(material_idprops.iter())
         .zip(material_names.iter())
     {
-        let material_data = build_material_with_node_tree(material_name, *node_tree_ptr);
+        let material_data = build_material_with_node_tree_and_properties(
+            material_name,
+            *node_tree_ptr,
+            material_props.as_ref().map(|props| props.root_ptr).unwrap_or(0),
+        );
         write_block(&mut out, b"MA\0\0", SDNA_IDX_MATERIAL, *material_ptr, 1, &material_data);
+        if let Some(props) = material_props {
+            write_idprop_blocks(&mut out, props);
+        }
         let node_tree_data = build_empty_shader_node_tree(*material_ptr);
         write_block(&mut out, b"DATA", SDNA_IDX_BNODE_TREE, *node_tree_ptr, 1, &node_tree_data);
     }
@@ -1753,6 +1873,14 @@ pub struct LinkedMeshInstance {
     /// Blender coordinates rotation as quaternion [w, x, y, z]
     pub rotation: [f32; 4],
 }
+
+const BLENDER_Y_UP_ROOT_NAME: &str = "StarBreaker_Y_up";
+const BLENDER_Y_UP_ROOT_QUAT: [f32; 4] = [
+    std::f32::consts::FRAC_1_SQRT_2,
+    std::f32::consts::FRAC_1_SQRT_2,
+    0.0,
+    0.0,
+];
 
 /// Create a scene.blend file that links together all individual mesh .blend files.
 ///
@@ -2378,6 +2506,7 @@ mod tests_5a_scene_blend {
             .collect::<Vec<_>>();
 
         assert!(object_names.contains(&"CryEngine_Z_up".to_string()));
+        assert!(object_names.contains(&BLENDER_Y_UP_ROOT_NAME.to_string()));
         assert!(object_names.contains(&"asset".to_string()));
         assert!(object_names.contains(&"asset_root".to_string()));
         assert!(object_names.contains(&"geo_left".to_string()));
@@ -2413,6 +2542,20 @@ mod tests_5a_scene_blend {
             object_names.len() > 1,
             "NMC export must not be a single flat mesh object"
         );
+        let object_blocks = blocks
+            .iter()
+            .filter(|block| block.code == b"OB\0\0")
+            .map(|block| {
+                let raw = &block.data[42..300];
+                let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+                (String::from_utf8_lossy(&raw[..end]).to_string(), block)
+            })
+            .collect::<HashMap<_, _>>();
+        let orientation = object_blocks[BLENDER_Y_UP_ROOT_NAME];
+        let cry_root = object_blocks["CryEngine_Z_up"];
+        assert_eq!(u64::from_le_bytes(cry_root.data[496..504].try_into().unwrap()), orientation.old_ptr);
+        assert!((f32::from_le_bytes(orientation.data[820..824].try_into().unwrap()) - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.0001);
+        assert!((f32::from_le_bytes(orientation.data[824..828].try_into().unwrap()) - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.0001);
     }
 
     #[test]

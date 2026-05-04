@@ -244,6 +244,14 @@ fn material_with_node_tree_sets_nodetree_pointer() {
 }
 
 #[test]
+fn material_with_node_tree_sets_id_properties_pointer() {
+    let ma = build_material_with_node_tree_and_properties("Hull", 0xfeed_cafe_u64, 0x1234_5678_u64);
+
+    assert_eq!(u64::from_le_bytes(ma[344..352].try_into().unwrap()), 0x1234_5678_u64);
+    assert_eq!(u64::from_le_bytes(ma[480..488].try_into().unwrap()), 0xfeed_cafe_u64);
+}
+
+#[test]
 fn empty_shader_node_tree_has_embedded_shader_identity() {
     let ntree = build_empty_shader_node_tree(0xaaaa_bbbb_u64);
 

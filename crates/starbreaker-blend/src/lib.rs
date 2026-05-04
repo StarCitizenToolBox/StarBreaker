@@ -1073,8 +1073,18 @@ pub fn build_material(material_name: &str) -> Vec<u8> {
 /// byte; `Material.nodetree` must point at an embedded `bNodeTree` for the node
 /// editor to have an editable shader tree.
 pub fn build_material_with_node_tree(material_name: &str, node_tree_ptr: u64) -> Vec<u8> {
+    build_material_with_node_tree_and_properties(material_name, node_tree_ptr, 0)
+}
+
+/// Build a minimal named `Material` datablock with optional embedded node tree and custom properties.
+pub fn build_material_with_node_tree_and_properties(
+    material_name: &str,
+    node_tree_ptr: u64,
+    properties_ptr: u64,
+) -> Vec<u8> {
     let mut data = vec![0u8; MATERIAL_SIZE];
     write_id_name(&mut data, "MA", material_name);
+    write_ptr(&mut data, 344, properties_ptr);
     write_f32(&mut data, 420, 0.8); // r
     write_f32(&mut data, 424, 0.8); // g
     write_f32(&mut data, 428, 0.8); // b
