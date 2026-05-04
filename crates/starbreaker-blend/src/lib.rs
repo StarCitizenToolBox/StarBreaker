@@ -304,6 +304,24 @@ pub fn build_collection_object(object_ptr: u64) -> Vec<u8> {
     data
 }
 
+/// Build a CollectionObject with doubly-linked list pointers.
+/// 
+/// CollectionObject is a 32-byte node:
+/// - Offset +0: prev pointer (u64)
+/// - Offset +8: next pointer (u64)
+/// - Offset +16: object pointer (u64)
+pub fn build_collection_object_linked(
+    object_ptr: u64,
+    prev_ptr: u64,
+    next_ptr: u64,
+) -> Vec<u8> {
+    let mut data = vec![0u8; COLLECTION_OBJECT_SIZE];
+    write_ptr(&mut data, 0, prev_ptr);
+    write_ptr(&mut data, 8, next_ptr);
+    write_ptr(&mut data, 16, object_ptr);
+    data
+}
+
 pub fn build_layer_collection(collection_ptr: u64) -> Vec<u8> {
     let mut data = vec![0u8; LAYER_COLLECTION_SIZE];
     write_ptr(&mut data, 16, collection_ptr);
@@ -423,6 +441,8 @@ pub fn build_lamp(
     radius: f32,
     spot_size: f32,
     spot_blend: f32,
+    temperature_k: f32,
+    use_temperature: bool,
 ) -> Vec<u8> {
     let mut data = vec![0u8; LAMP_SIZE];
     write_id_name(&mut data, "LA", lamp_name);
@@ -434,6 +454,10 @@ pub fn build_lamp(
     write_f32(&mut data, 448, radius);
     write_f32(&mut data, 452, spot_size);
     write_f32(&mut data, 456, spot_blend);
+    // Write temperature fields (Blender 5.1 Lamp struct)
+    // temperature at offset 460 (f32), use_temperature at offset 464 (bool)
+    write_f32(&mut data, 460, temperature_k);
+    data[464] = if use_temperature { 1 } else { 0 };
     data
 }
 
@@ -731,4 +755,126 @@ mod tests {
         assert!(!compressed.is_empty(), "Compression produced empty result");
         // Note: actual decompression requires zstd::Decoder, which we don't use in Rust export
     }
+    
+    #[test]
+    fn test_build_lamp_accepts_temperature_parameters() {
+        // Test 4: build_lamp accepts temperature_k and use_temperature parameters
+        let lamp_bytes = build_lamp(
+            "TestLight",
+            0,  // POINT
+            [1.0, 1.0, 1.0],
+            100.0,
+            5.0,
+            0.0,
+            0.0,
+            5000.0,  // temperature_k
+            true,    // use_temperature
+        );
+        
+        // Verify output size
+        assert_eq!(lamp_bytes.len(), LAMP_SIZE, "Lamp block size mismatch");
+    }
+    
+    #[test]
+    fn test_build_lamp_temperature_written_correctly() {
+        // Test 5: Temperature value written to correct offset (460)
+        let temp_value = 6500.0;
+        let lamp_bytes = build_lamp(
+            "TestLight",
+            0,
+            [1.0, 1.0, 1.0],
+            100.0,
+            5.0,
+            0.0,
+            0.0,
+            temp_value,
+            false,
+        );
+        
+        // Read f32 from offset 460
+        let mut temp_bytes = [0u8; 4];
+        temp_bytes.copy_from_slice(&lamp_bytes[460..464]);
+        let read_temp = f32::from_le_bytes(temp_bytes);
+        
+        assert!((read_temp - temp_value).abs() < 0.01, 
+            "Temperature not written correctly: expected {}, got {}", temp_value, read_temp);
+    }
+    
+    #[test]
+    fn test_build_lamp_use_temperature_true() {
+        // Test 5a: use_temperature flag set to 1 when true
+        let lamp_bytes = build_lamp(
+            "TestLight",
+            0,
+            [1.0, 1.0, 1.0],
+            100.0,
+            5.0,
+            0.0,
+            0.0,
+            5000.0,
+            true,  // use_temperature = true
+        );
+        
+        // Check byte at offset 464
+        assert_eq!(lamp_bytes[464], 1, "use_temperature flag not set to 1 when true");
+    }
+    
+    #[test]
+    fn test_build_lamp_use_temperature_false() {
+        // Test 5b: use_temperature flag set to 0 when false
+        let lamp_bytes = build_lamp(
+            "TestLight",
+            0,
+            [1.0, 1.0, 1.0],
+            100.0,
+            5.0,
+            0.0,
+            0.0,
+            5000.0,
+            false,  // use_temperature = false
+        );
+        
+        // Check byte at offset 464
+        assert_eq!(lamp_bytes[464], 0, "use_temperature flag not set to 0 when false");
+    }
+    
+    #[test]
+    fn test_build_lamp_temperature_multiple_values() {
+        // Test 6: Multiple temperature values written correctly
+        let test_values = vec![
+            (2700.0, true),
+            (3000.0, false),
+            (5000.0, true),
+            (9000.0, false),
+            (12000.0, true),
+        ];
+        
+        for (temp, use_temp) in test_values {
+            let lamp_bytes = build_lamp(
+                &format!("Light_{}", temp as i32),
+                0,
+                [1.0, 1.0, 1.0],
+                100.0,
+                5.0,
+                0.0,
+                0.0,
+                temp,
+                use_temp,
+            );
+            
+            // Read temperature
+            let mut temp_bytes = [0u8; 4];
+            temp_bytes.copy_from_slice(&lamp_bytes[460..464]);
+            let read_temp = f32::from_le_bytes(temp_bytes);
+            
+            assert!((read_temp - temp).abs() < 0.01, 
+                "Temperature mismatch for {}: expected {}, got {}", temp, temp, read_temp);
+            
+            // Read use_temperature
+            let read_use_temp = lamp_bytes[464] != 0;
+            assert_eq!(read_use_temp, use_temp, 
+                "use_temperature flag mismatch for {}: expected {}, got {}", temp, use_temp, read_use_temp);
+        }
+    }
 }
+

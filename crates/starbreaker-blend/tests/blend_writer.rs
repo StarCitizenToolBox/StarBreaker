@@ -71,7 +71,7 @@ fn mesh_size_is_1960() {
 
 #[test]
 fn lamp_size_is_568() {
-    let la = build_lamp("TestLamp", 0, [1.0, 1.0, 1.0], 10.0, 0.1, 0.5, 0.1);
+    let la = build_lamp("TestLamp", 0, [1.0, 1.0, 1.0], 10.0, 0.1, 0.5, 0.1, 6500.0, false);
     assert_eq!(la.len(), LAMP_SIZE);
     assert_eq!(LAMP_SIZE, 568);
 }
@@ -166,19 +166,19 @@ fn mesh_attributes_ptr_at_456() {
 
 #[test]
 fn lamp_type_point_at_416() {
-    let la = build_lamp("L", 0, [1.0, 0.5, 0.0], 100.0, 0.25, 0.0, 0.0);
+    let la = build_lamp("L", 0, [1.0, 0.5, 0.0], 100.0, 0.25, 0.0, 0.0, 6500.0, false);
     assert_eq!(i16::from_le_bytes(la[416..418].try_into().unwrap()), 0);
 }
 
 #[test]
 fn lamp_energy_at_440() {
-    let la = build_lamp("L", 0, [1.0, 1.0, 1.0], 77.5, 0.0, 0.0, 0.0);
+    let la = build_lamp("L", 0, [1.0, 1.0, 1.0], 77.5, 0.0, 0.0, 0.0, 6500.0, false);
     assert_eq!(f32::from_le_bytes(la[440..444].try_into().unwrap()), 77.5_f32);
 }
 
 #[test]
 fn lamp_color_fields() {
-    let la = build_lamp("L", 0, [0.1, 0.2, 0.3], 1.0, 0.0, 0.0, 0.0);
+    let la = build_lamp("L", 0, [0.1, 0.2, 0.3], 1.0, 0.0, 0.0, 0.0, 6500.0, false);
     assert!((f32::from_le_bytes(la[424..428].try_into().unwrap()) - 0.1_f32).abs() < 1e-6);
     assert!((f32::from_le_bytes(la[428..432].try_into().unwrap()) - 0.2_f32).abs() < 1e-6);
     assert!((f32::from_le_bytes(la[432..436].try_into().unwrap()) - 0.3_f32).abs() < 1e-6);
@@ -378,4 +378,81 @@ fn bytes4_data_correct() {
 #[test]
 fn dna1_starts_with_sdna() {
     assert_eq!(&DNA1_BYTES[0..4], b"SDNA");
+}
+
+// ── Collection Object Linking (Phase 5A) ─────────────────────────────────────
+
+#[test]
+fn collection_object_size_is_32_bytes() {
+    let co = build_collection_object(0x1000);
+    assert_eq!(co.len(), COLLECTION_OBJECT_SIZE);
+    assert_eq!(COLLECTION_OBJECT_SIZE, 32);
+}
+
+#[test]
+fn collection_object_layout_no_links() {
+    let co = build_collection_object(0xdeadbeef);
+    // Offset 16: object pointer
+    assert_eq!(u64::from_le_bytes(co[16..24].try_into().unwrap()), 0xdeadbeef);
+    // Offset 0-8: prev pointer should be zero (not set)
+    assert_eq!(u64::from_le_bytes(co[0..8].try_into().unwrap()), 0);
+    // Offset 8-16: next pointer should be zero (not set)
+    assert_eq!(u64::from_le_bytes(co[8..16].try_into().unwrap()), 0);
+}
+
+#[test]
+fn collection_object_linked_builds_doubly_linked_node() {
+    let co = build_collection_object_linked(0xaaaabbbb, 0x1234, 0x5678);
+    assert_eq!(co.len(), COLLECTION_OBJECT_SIZE);
+    // Offset 0-8: prev pointer
+    assert_eq!(u64::from_le_bytes(co[0..8].try_into().unwrap()), 0x1234);
+    // Offset 8-16: next pointer
+    assert_eq!(u64::from_le_bytes(co[8..16].try_into().unwrap()), 0x5678);
+    // Offset 16-24: object pointer
+    assert_eq!(u64::from_le_bytes(co[16..24].try_into().unwrap()), 0xaaaabbbb);
+}
+
+#[test]
+fn collection_object_linked_single_element_chain() {
+    let co = build_collection_object_linked(0x1000, 0, 0);  // No prev, no next
+    // Prev should be null
+    assert_eq!(u64::from_le_bytes(co[0..8].try_into().unwrap()), 0);
+    // Next should be null
+    assert_eq!(u64::from_le_bytes(co[8..16].try_into().unwrap()), 0);
+    // Object pointer should be set
+    assert_eq!(u64::from_le_bytes(co[16..24].try_into().unwrap()), 0x1000);
+}
+
+#[test]
+fn collection_object_linked_multiple_elements() {
+    let co1 = build_collection_object_linked(0x1111, 0, 0x2000);  // First element, no prev, next is second
+    let co2 = build_collection_object_linked(0x2222, 0x1000, 0x3000);  // Middle element
+    let co3 = build_collection_object_linked(0x3333, 0x2000, 0);  // Last element, next is null
+
+    // Verify chain: co1 -> co2 -> co3
+    assert_eq!(u64::from_le_bytes(co1[0..8].try_into().unwrap()), 0);  // co1 prev
+    assert_eq!(u64::from_le_bytes(co1[8..16].try_into().unwrap()), 0x2000);  // co1 next
+    
+    assert_eq!(u64::from_le_bytes(co2[0..8].try_into().unwrap()), 0x1000);  // co2 prev
+    assert_eq!(u64::from_le_bytes(co2[8..16].try_into().unwrap()), 0x3000);  // co2 next
+    
+    assert_eq!(u64::from_le_bytes(co3[0..8].try_into().unwrap()), 0x2000);  // co3 prev
+    assert_eq!(u64::from_le_bytes(co3[8..16].try_into().unwrap()), 0);  // co3 next
+}
+
+#[test]
+fn collection_size_is_520_bytes() {
+    let c = build_collection("TestColl", 0, 0);
+    assert_eq!(c.len(), COLLECTION_SIZE);
+    assert_eq!(COLLECTION_SIZE, 520);
+}
+
+#[test]
+fn collection_gobject_offset_at_416() {
+    // Collection writes object pointer at offset 416 (head of linked list)
+    let coll_obj_ptr = 0xdeadbeef_u64;
+    let c = build_collection("TestColl", 0x1000, coll_obj_ptr);
+    assert_eq!(u64::from_le_bytes(c[416..424].try_into().unwrap()), coll_obj_ptr);
+    // Offset 424 should also have the same pointer (tail == head for single element)
+    assert_eq!(u64::from_le_bytes(c[424..432].try_into().unwrap()), coll_obj_ptr);
 }

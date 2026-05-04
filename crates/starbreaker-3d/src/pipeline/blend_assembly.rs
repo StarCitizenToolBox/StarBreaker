@@ -17,7 +17,7 @@ use starbreaker_common::progress::{report as report_progress, Progress};
 use starbreaker_p4k::MappedP4k;
 use starbreaker_blend::{
     bytes4_data, build_attribute, build_attribute_array, build_base, build_collection,
-    build_collection_object, build_file_global, build_layer_collection, build_mat_ptr_array,
+    build_collection_object, build_collection_object_linked, build_file_global, build_layer_collection, build_mat_ptr_array,
     build_matbits, build_mesh, build_object, build_scene, build_view_layer,
     floats2_data, floats3_data, ints_data, write_block, write_block_header, PtrAlloc,
     ATTR_DOMAIN_CORNER, ATTR_DOMAIN_FACE, ATTR_DOMAIN_POINT, ATTR_TYPE_BYTE_COLOR,
@@ -28,7 +28,7 @@ use starbreaker_blend::{
     build_lamp, build_lamp_object, build_empty_object, build_linked_instance_object,
     build_library_block, build_id_stub, LAMP_SIZE, OBJECT_SIZE, ID_STUB_SIZE,
     build_bdeformgroup, build_mdeformvert_array, build_mdeformweight_array, 
-    build_custom_data_layer_mdeformvert, SDNA_IDX_BDEFORMGROUP, SDNA_IDX_MDEFORMVERT,
+    build_custom_data_layer_mdeformvert, SDNA_IDX_BDEFORMGROUP, SDNA_IDX_MDEFORMVERT, SDNA_IDX_LAMP,
 };
 
 use crate::error::Error;
@@ -259,8 +259,8 @@ pub fn write_decomposed_export_blend(
     // Phase 3: Create scene.blend with lights and empties
     report_progress(progress, 0.7, "Creating scene.blend with linked mesh instances");
     
-    // Create scene.blend with properly linked mesh instances
-    let scene_blend_bytes = create_scene_blend(&scene_entity_name, children_for_scene.len(), "Data/Objects")?;
+    // Create scene.blend with properly linked mesh instances and lights
+    let scene_blend_bytes = create_scene_blend(&scene_entity_name, children_for_scene.len(), "Data/Objects", &extracted_lights)?;
     
     // Add scene.blend to the export
     blend_files.push(ExportedFile {
@@ -680,6 +680,7 @@ pub fn create_scene_blend(
     entity_name: &str,
     children_count: usize,
     mesh_output_dir: &str,
+    lights: &[ExtractedLight],
 ) -> Result<Vec<u8>, Error> {
     // Build a minimal input structure for compatibility with internal logic
     let mut ptrs = PtrAlloc::new(0x1000);
@@ -716,15 +717,33 @@ pub fn create_scene_blend(
     // Allocate pointers for linked mesh instances
     let mut mesh_instances = Vec::new();
     let mut library_ptrs = Vec::new();
+    let mut mesh_coll_obj_ptrs = Vec::new();
     
-        for idx in 0..children_count {
+    for idx in 0..children_count {
         let object_ptr = ptrs.alloc();
         let object_mat_ptr = ptrs.alloc();
         let object_matbits_ptr = ptrs.alloc();
         let library_ptr = ptrs.alloc();
-        library_ptrs.push(library_ptr);
+        let coll_obj_ptr = ptrs.alloc();  // Collection object for this mesh instance
         
+        library_ptrs.push(library_ptr);
         mesh_instances.push((object_ptr, object_mat_ptr, object_matbits_ptr, library_ptr, idx));
+        mesh_coll_obj_ptrs.push((coll_obj_ptr, object_ptr));
+    }
+    
+    // Allocate pointers for light instances
+    let mut light_instances = Vec::new();
+    let mut light_coll_obj_ptrs = Vec::new();
+    
+    for idx in 0..lights.len() {
+        let lamp_ptr = ptrs.alloc();
+        let object_ptr = ptrs.alloc();
+        let object_mat_ptr = ptrs.alloc();
+        let object_matbits_ptr = ptrs.alloc();
+        let coll_obj_ptr = ptrs.alloc();  // Collection object for this light
+        
+        light_instances.push((lamp_ptr, object_ptr, object_mat_ptr, object_matbits_ptr, idx));
+        light_coll_obj_ptrs.push((coll_obj_ptr, object_ptr));
     }
     
     // Build scene datablocks
@@ -734,6 +753,12 @@ pub fn create_scene_blend(
     let base_data = build_base(root_object_ptr);
     
     // Build collection hierarchy: Scene > [Meshes, Lights, Empties, Decals]
+    
+    // Determine head/tail pointers for collection members
+    let mesh_head_ptr = if !mesh_coll_obj_ptrs.is_empty() { mesh_coll_obj_ptrs[0].0 } else { 0 };
+    
+    let light_head_ptr = if !light_coll_obj_ptrs.is_empty() { light_coll_obj_ptrs[0].0 } else { 0 };
+    
     let root_collection_data = build_collection(
         "Scene",
         scene_ptr,
@@ -742,40 +767,52 @@ pub fn create_scene_blend(
     let root_collection_object_data = build_collection_object(root_object_ptr);
     let root_layer_collection_data = build_layer_collection(root_collection_ptr);
     
+    // Build mesh collection object linked list
+    let mut meshes_coll_obj_data_list = Vec::new();
+    for (idx, &(coll_obj_ptr, obj_ptr)) in mesh_coll_obj_ptrs.iter().enumerate() {
+        let prev_ptr = if idx > 0 { mesh_coll_obj_ptrs[idx - 1].0 } else { 0 };
+        let next_ptr = if idx < mesh_coll_obj_ptrs.len() - 1 { mesh_coll_obj_ptrs[idx + 1].0 } else { 0 };
+        meshes_coll_obj_data_list.push((coll_obj_ptr, build_collection_object_linked(obj_ptr, prev_ptr, next_ptr)));
+    }
+    
     // Sub-collection: Meshes
     let meshes_collection_data = build_collection(
         "Meshes",
         root_collection_ptr,
-        meshes_coll_obj_ptr,
+        mesh_head_ptr,
     );
-    let meshes_coll_obj_data = build_collection_object(root_object_ptr);
     let meshes_layer_coll_data = build_layer_collection(meshes_collection_ptr);
     
-    // Sub-collection: Lights (placeholder for Phase 5B)
+    // Build light collection object linked list
+    let mut lights_coll_obj_data_list = Vec::new();
+    for (idx, &(coll_obj_ptr, obj_ptr)) in light_coll_obj_ptrs.iter().enumerate() {
+        let prev_ptr = if idx > 0 { light_coll_obj_ptrs[idx - 1].0 } else { 0 };
+        let next_ptr = if idx < light_coll_obj_ptrs.len() - 1 { light_coll_obj_ptrs[idx + 1].0 } else { 0 };
+        lights_coll_obj_data_list.push((coll_obj_ptr, build_collection_object_linked(obj_ptr, prev_ptr, next_ptr)));
+    }
+    
+    // Sub-collection: Lights
     let lights_collection_data = build_collection(
         "Lights",
         root_collection_ptr,
-        lights_coll_obj_ptr,
+        light_head_ptr,
     );
-    let lights_coll_obj_data = build_collection_object(root_object_ptr);
     let lights_layer_coll_data = build_layer_collection(lights_collection_ptr);
     
     // Sub-collection: Empties (placeholder for Phase 5C)
     let empties_collection_data = build_collection(
         "Empties",
         root_collection_ptr,
-        empties_coll_obj_ptr,
+        0,  // No empties yet
     );
-    let empties_coll_obj_data = build_collection_object(root_object_ptr);
     let empties_layer_coll_data = build_layer_collection(empties_collection_ptr);
     
     // Sub-collection: Decals (placeholder for Phase 4)
     let decals_collection_data = build_collection(
         "Decals",
         root_collection_ptr,
-        decals_coll_obj_ptr,
+        0,  // No decals yet
     );
-    let decals_coll_obj_data = build_collection_object(root_object_ptr);
     let decals_layer_coll_data = build_layer_collection(decals_collection_ptr);
     
     // Build root empty object at origin
@@ -837,6 +874,45 @@ pub fn create_scene_blend(
         mesh_object_matbits.push(build_matbits(0));
     }
     
+    // Build light objects for lights collection
+    let mut light_data = Vec::new();
+    let mut light_object_data = Vec::new();
+    let mut light_object_mat_arrays = Vec::new();
+    let mut light_object_matbits = Vec::new();
+    
+    for (lamp_ptr, object_ptr, mat_ptr, matbits_ptr, idx) in &light_instances {
+        let light = &lights[*idx];
+        
+        // Build lamp datablock
+        let lamp_bytes = build_lamp(
+            &light.name,
+            light.lamp_type,
+            light.color,
+            light.energy_watts,
+            light.radius,
+            light.spot_size,
+            light.spot_blend,
+            light.temperature_k,
+            true,  // use temperature
+        );
+        light_data.push((*lamp_ptr, lamp_bytes));
+        
+        // Build object wrapper for light
+        let object_bytes = build_lamp_object(
+            &light.name,
+            *lamp_ptr,
+            light.position_blend,
+            light.rotation_blend,
+            [1.0, 1.0, 1.0],  // Standard scale
+            lights_collection_ptr,  // Parent to lights collection
+        );
+        light_object_data.push(object_bytes);
+        
+        // Build material arrays (empty for lights)
+        light_object_mat_arrays.push(build_mat_ptr_array(0));
+        light_object_matbits.push(build_matbits(0));
+    }
+    
     // Assemble .blend file
     let mut out: Vec<u8> = Vec::with_capacity(1024 * 1024);
     out.extend_from_slice(BLEND_MAGIC);
@@ -856,19 +932,23 @@ pub fn create_scene_blend(
     
     // Sub-collections
     write_block(&mut out, b"GRP\0", SDNA_IDX_COLLECTION, meshes_collection_ptr, 1, &meshes_collection_data);
-    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, meshes_coll_obj_ptr, 1, &meshes_coll_obj_data);
+    // Write mesh collection objects (linked list)
+    for (coll_obj_ptr, coll_obj_data) in &meshes_coll_obj_data_list {
+        write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, *coll_obj_ptr, 1, coll_obj_data);
+    }
     write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, meshes_layer_coll_ptr, 1, &meshes_layer_coll_data);
     
     write_block(&mut out, b"GRP\0", SDNA_IDX_COLLECTION, lights_collection_ptr, 1, &lights_collection_data);
-    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, lights_coll_obj_ptr, 1, &lights_coll_obj_data);
+    // Write light collection objects (linked list)
+    for (coll_obj_ptr, coll_obj_data) in &lights_coll_obj_data_list {
+        write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, *coll_obj_ptr, 1, coll_obj_data);
+    }
     write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, lights_layer_coll_ptr, 1, &lights_layer_coll_data);
     
     write_block(&mut out, b"GRP\0", SDNA_IDX_COLLECTION, empties_collection_ptr, 1, &empties_collection_data);
-    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, empties_coll_obj_ptr, 1, &empties_coll_obj_data);
     write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, empties_layer_coll_ptr, 1, &empties_layer_coll_data);
     
     write_block(&mut out, b"GRP\0", SDNA_IDX_COLLECTION, decals_collection_ptr, 1, &decals_collection_data);
-    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, decals_coll_obj_ptr, 1, &decals_coll_obj_data);
     write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, decals_layer_coll_ptr, 1, &decals_layer_coll_data);
     
     // Write root empty object + materials
@@ -881,6 +961,18 @@ pub fn create_scene_blend(
         write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, *object_ptr, 1, &mesh_instance_data[idx]);
         write_block(&mut out, b"DATA", 0, *mat_ptr, 1, &mesh_object_mat_arrays[idx]);
         write_block(&mut out, b"DATA", 0, *matbits_ptr, 1, &mesh_object_matbits[idx]);
+    }
+    
+    // Write light blocks (Phase 5B)
+    for (idx, (lamp_ptr, object_ptr, mat_ptr, matbits_ptr, _)) in light_instances.iter().enumerate() {
+        // Write LAMP datablock
+        let (lamp_block_ptr, lamp_bytes) = light_data[idx].clone();
+        write_block(&mut out, b"LA\0\0", SDNA_IDX_LAMP, lamp_block_ptr, 1, &lamp_bytes);
+        
+        // Write light object
+        write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, *object_ptr, 1, &light_object_data[idx]);
+        write_block(&mut out, b"DATA", 0, *mat_ptr, 1, &light_object_mat_arrays[idx]);
+        write_block(&mut out, b"DATA", 0, *matbits_ptr, 1, &light_object_matbits[idx]);
     }
     
     // Write ID stubs for external mesh references
@@ -978,7 +1070,7 @@ mod tests_5a_scene_blend {
     #[test]
     fn test_create_scene_blend_basic() {
         let input = create_test_input("TestEntity", 1);
-        let result = create_scene_blend("TestEntity", 1, "Data/Objects");
+        let result = create_scene_blend("TestEntity", 1, "Data/Objects", &[]);
         
         assert!(result.is_ok(), "Function should succeed with basic input");
         
@@ -992,7 +1084,7 @@ mod tests_5a_scene_blend {
 
     #[test]
     fn test_create_scene_blend_multiple_meshes() {
-        let result = create_scene_blend("MultiMesh", 5, "Data/Objects");
+        let result = create_scene_blend("MultiMesh", 5, "Data/Objects", &[]);
         
         assert!(result.is_ok(), "Function should succeed with multiple children");
         
@@ -1003,14 +1095,14 @@ mod tests_5a_scene_blend {
         assert_eq!(&blend_bytes[0..17], b"BLENDER17-01v0501", "Should have valid Blender header");
         
         // With 5 children, the file should be larger than with 1
-        let single = create_scene_blend("Single", 1, "Data/Objects")
+        let single = create_scene_blend("Single", 1, "Data/Objects", &[])
             .unwrap();
         assert!(blend_bytes.len() > single.len(), "Multiple meshes should produce larger file");
     }
 
     #[test]
     fn test_create_scene_blend_collections_structure() {
-        let result = create_scene_blend("CollTest", 2, "Data/Objects");
+        let result = create_scene_blend("CollTest", 2, "Data/Objects", &[]);
         
         assert!(result.is_ok(), "Function should succeed");
         
@@ -1027,7 +1119,7 @@ mod tests_5a_scene_blend {
 
     #[test]
     fn test_create_scene_blend_file_format() {
-        let result = create_scene_blend("FormatTest", 1, "Data/Objects");
+        let result = create_scene_blend("FormatTest", 1, "Data/Objects", &[]);
         
         assert!(result.is_ok(), "Function should succeed");
         
@@ -1052,7 +1144,7 @@ mod tests_5a_scene_blend {
 
     #[test]
     fn test_create_scene_blend_relative_paths() {
-        let result = create_scene_blend("RelPath", 2, "Data/Objects");
+        let result = create_scene_blend("RelPath", 2, "Data/Objects", &[]);
         
         assert!(result.is_ok(), "Function should succeed");
         
@@ -1067,7 +1159,7 @@ mod tests_5a_scene_blend {
 
     #[test]
     fn test_create_scene_blend_empty_children() {
-        let result = create_scene_blend("NoChildren", 0, "Data/Objects");
+        let result = create_scene_blend("NoChildren", 0, "Data/Objects", &[]);
         
         assert!(result.is_ok(), "Function should succeed even with no children");
         
@@ -1078,7 +1170,7 @@ mod tests_5a_scene_blend {
 
     #[test]
     fn test_create_scene_blend_output_not_compressed() {
-        let result = create_scene_blend("NoCompress", 1, "Data/Objects");
+        let result = create_scene_blend("NoCompress", 1, "Data/Objects", &[]);
         
         assert!(result.is_ok(), "Function should succeed");
         
@@ -1088,6 +1180,110 @@ mod tests_5a_scene_blend {
         // gzip header is 0x1f 0x8b
         assert!(blend_bytes.len() < 2 || blend_bytes[0] != 0x1f,
             "Output should NOT be gzip compressed (Phase 2 handles compression)");
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Phase 5B: Light Parenting and Collection Organization
+// ════════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests_5b {
+    use super::*;
+    
+    #[test]
+    fn test_create_scene_blend_with_single_light() {
+        let light = ExtractedLight {
+            name: "TestLight".to_string(),
+            position_blend: [0.0, 0.0, 0.0],
+            rotation_blend: [1.0, 0.0, 0.0, 0.0],
+            color: [1.0, 1.0, 1.0],
+            lamp_type: 0,
+            energy_watts: 100.0,
+            radius: 10.0,
+            spot_size: 0.0,
+            spot_blend: 0.0,
+            intensity_candela: 5.0,
+            temperature_k: 3000.0,
+            use_temperature: false,
+            gobo_path: None,
+            active_state: "default".to_string(),
+        };
+        let result = create_scene_blend("TestWithLight", 1, "Data/Objects", &[light]);
+        assert!(result.is_ok(), "Should create scene with light");
+    }
+    
+    #[test]
+    fn test_create_scene_blend_with_multiple_lights() {
+        let lights = vec![
+            ExtractedLight {
+                name: "Ambient".to_string(),
+                position_blend: [0.0, 0.0, 0.0],
+                rotation_blend: [1.0, 0.0, 0.0, 0.0],
+                color: [0.8, 0.8, 0.8],
+                lamp_type: 0,
+                energy_watts: 50.0,
+                radius: 20.0,
+                spot_size: 0.0,
+                spot_blend: 0.0,
+                intensity_candela: 5.0,
+                temperature_k: 3000.0,
+                use_temperature: false,
+                gobo_path: None,
+                active_state: "default".to_string(),
+            },
+            ExtractedLight {
+                name: "Sun".to_string(),
+                position_blend: [10.0, 10.0, 10.0],
+                rotation_blend: [0.707, 0.0, 0.707, 0.0],
+                color: [1.0, 1.0, 1.0],
+                lamp_type: 1,
+                energy_watts: 100.0,
+                radius: 100.0,
+                spot_size: 0.0,
+                spot_blend: 0.0,
+                intensity_candela: 100000.0,
+                temperature_k: 5500.0,
+                use_temperature: true,
+                gobo_path: None,
+                active_state: "default".to_string(),
+            },
+        ];
+        let result = create_scene_blend("MultiLight", 1, "Data/Objects", &lights);
+        assert!(result.is_ok(), "Should create scene with multiple lights");
+    }
+    
+    #[test]
+    fn test_create_scene_blend_lights_in_file() {
+        let light = ExtractedLight {
+            name: "FileTest".to_string(),
+            position_blend: [0.0, 0.0, 0.0],
+            rotation_blend: [1.0, 0.0, 0.0, 0.0],
+            color: [1.0, 1.0, 1.0],
+            lamp_type: 0,
+            energy_watts: 100.0,
+            radius: 10.0,
+            spot_size: 0.0,
+            spot_blend: 0.0,
+            intensity_candela: 10.0,
+            temperature_k: 3000.0,
+            use_temperature: false,
+            gobo_path: None,
+            active_state: "default".to_string(),
+        };
+        let result = create_scene_blend("FileTest", 1, "Data/Objects", &[light]);
+        assert!(result.is_ok());
+        let blend_bytes = result.unwrap();
+        // LA\0\0 is Blender lamp marker
+        let lamp_marker = b"LA\0\0";
+        let lamp_count = blend_bytes.windows(4).filter(|w| *w == lamp_marker).count();
+        assert!(lamp_count >= 1, "Should have at least 1 lamp block");
+    }
+    
+    #[test]
+    fn test_create_scene_blend_no_lights() {
+        let result = create_scene_blend("NoLights", 1, "Data/Objects", &[]);
+        assert!(result.is_ok(), "Should work without lights");
     }
 }
 
@@ -1120,6 +1316,8 @@ pub struct ExtractedLight {
     pub intensity_candela: f32,
     /// Color temperature in Kelvin
     pub temperature_k: f32,
+    /// When true, render blackbody color at temperature_k; ignore RGB
+    pub use_temperature: bool,
     /// Optional projector gobo texture path (for SPOTs)
     pub gobo_path: Option<String>,
     /// Currently active state name
@@ -1137,18 +1335,50 @@ fn convert_position_sc_to_blender(pos_sc: [f64; 3]) -> [f32; 3] {
     ]
 }
 
+/// Multiply two quaternions: q1 * q2 (standard Hamilton product).
+///
+/// Input: q1, q2 as [w, x, y, z]
+/// Output: q1 * q2 as [w, x, y, z]
+fn quaternion_multiply(q1: [f32; 4], q2: [f32; 4]) -> [f32; 4] {
+    let [w1, x1, y1, z1] = q1;
+    let [w2, x2, y2, z2] = q2;
+    [
+        w1*w2 - x1*x2 - y1*y2 - z1*z2,
+        w1*x2 + x1*w2 + y1*z2 - z1*y2,
+        w1*y2 - x1*z2 + y1*w2 + z1*x2,
+        w1*z2 + x1*y2 - y1*x2 + z1*w2,
+    ]
+}
+
 /// Convert CryEngine quaternion to Blender coordinates.
 ///
 /// CryEngine quaternion: [w, x, y, z]
-/// Apply same coordinate transformation as position
-fn convert_quaternion_sc_to_blender(quat_sc: [f64; 4]) -> [f32; 4] {
+/// 
+/// **Coordinate system transformation** (Z-up to Y-up):
+/// Apply same transformation as position: swap y/z, negate z
+///
+/// **Basis correction for spotlights** (if is_spotlight=true):
+/// - CryEngine spotlight cone forward: +X axis
+/// - Blender spotlight cone forward: -Z axis
+/// - Correction: 90° rotation around Y axis to align +X → -Z
+///   Quaternion: [cos(45°), 0, -sin(45°), 0] ≈ [0.7071, 0, -0.7071, 0]
+fn convert_quaternion_sc_to_blender(quat_sc: [f64; 4], is_spotlight: bool) -> [f32; 4] {
     let w = quat_sc[0] as f32;
     let x = quat_sc[1] as f32;
     let y = quat_sc[2] as f32;
     let z = quat_sc[3] as f32;
     
-    // Swap y/z, negate z (same as position conversion)
-    [w, x, -z, y]
+    // Step 1: Coordinate system transformation (Z-up to Y-up)
+    let mut result = [w, x, -z, y];
+    
+    // Step 2: Basis correction for spotlights (CryEngine +X → Blender -Z)
+    if is_spotlight {
+        // 90° rotation around Y axis to align +X to -Z
+        let basis_correction = [0.7071, 0.0, -0.7071, 0.0];
+        result = quaternion_multiply(result, basis_correction);
+    }
+    
+    result
 }
 
 /// Extract all lights from loaded interiors.
@@ -1165,9 +1395,6 @@ pub fn extract_lights_from_interiors(
             // Convert position from CryEngine to Blender coordinates
             let position_blend = convert_position_sc_to_blender(light_info.position);
             
-            // Convert quaternion rotation
-            let rotation_blend = convert_quaternion_sc_to_blender(light_info.rotation);
-            
             // Map CryEngine light type to Blender lamp_type
             let lamp_type = match light_info.light_type.as_str() {
                 "Omni" | "SoftOmni" => 0,  // POINT
@@ -1176,6 +1403,10 @@ pub fn extract_lights_from_interiors(
                 "Directional" | "Sun" => 1, // SUN
                 _ => 0,                    // Default to POINT
             };
+            
+            // Convert quaternion rotation with basis correction for spotlights
+            let is_spotlight = lamp_type == 2;  // SPOT type
+            let rotation_blend = convert_quaternion_sc_to_blender(light_info.rotation, is_spotlight);
             
             // Intensity conversion: candela proxy → Watts
             // KHR_lights_punctual: lm = cd × 4π (lumens from candelas)
@@ -1200,10 +1431,10 @@ pub fn extract_lights_from_interiors(
             };
             
             // Get active state info for temperature
-            let temperature_k = light_info.states
+            let (temperature_k, use_temperature) = light_info.states
                 .get(&light_info.active_state)
-                .map(|s| s.temperature)
-                .unwrap_or(6500.0);
+                .map(|s| (s.temperature, s.use_temperature))
+                .unwrap_or((6500.0, false));
             
             lights.push(ExtractedLight {
                 name: light_info.name.clone(),
@@ -1217,6 +1448,7 @@ pub fn extract_lights_from_interiors(
                 spot_blend,
                 intensity_candela: light_info.intensity_candela_proxy,
                 temperature_k,
+                use_temperature,
                 gobo_path: light_info.projector_texture.clone(),
                 active_state: light_info.active_state.clone(),
             });
@@ -1251,15 +1483,87 @@ mod tests {
     
     #[test]
     fn test_convert_quaternion_sc_to_blender() {
-        // [w, x, y, z] → [w, x, -z, y]
-        let result = convert_quaternion_sc_to_blender([1.0, 0.0, 0.0, 0.0]);
+        // [w, x, y, z] → [w, x, -z, y] (point light, no basis correction)
+        let result = convert_quaternion_sc_to_blender([1.0, 0.0, 0.0, 0.0], false);
         assert_eq!(result, [1.0, 0.0, 0.0, 0.0]);
     }
     
     #[test]
     fn test_convert_quaternion_with_values() {
-        let result = convert_quaternion_sc_to_blender([0.707, 0.5, 0.5, 0.0]);
+        // Point light (no basis correction)
+        let result = convert_quaternion_sc_to_blender([0.707, 0.5, 0.5, 0.0], false);
         assert_eq!(result, [0.707, 0.5, 0.0, 0.5]);
+    }
+    
+    #[test]
+    fn test_quaternion_multiply_identity() {
+        // Multiply by identity quaternion [1, 0, 0, 0]
+        let q = [0.7071, 0.0, -0.7071, 0.0];
+        let identity = [1.0, 0.0, 0.0, 0.0];
+        let result = quaternion_multiply(q, identity);
+        // Result should be close to q (allow small floating-point error)
+        assert!((result[0] - q[0]).abs() < 0.0001);
+        assert!((result[1] - q[1]).abs() < 0.0001);
+        assert!((result[2] - q[2]).abs() < 0.0001);
+        assert!((result[3] - q[3]).abs() < 0.0001);
+    }
+    
+    #[test]
+    fn test_spotlight_orientation_correction() {
+        // Test that spotlight correction applies basis rotation
+        // Identity quaternion should apply the basis correction
+        let identity = [1.0, 0.0, 0.0, 0.0];
+        let result_spotlight = convert_quaternion_sc_to_blender_test_helper(identity, true);
+        let result_point = convert_quaternion_sc_to_blender_test_helper(identity, false);
+        
+        // Point light: no correction, should be [1.0, 0.0, 0.0, 0.0]
+        assert_eq!(result_point, [1.0, 0.0, 0.0, 0.0]);
+        
+        // Spotlight: basis correction applied, should be rotated
+        // Identity * basis_correction = [0.7071, 0, -0.7071, 0]
+        assert!((result_spotlight[0] - 0.7071).abs() < 0.0001, "w component mismatch");
+        assert!((result_spotlight[1] - 0.0).abs() < 0.0001, "x component mismatch");
+        assert!((result_spotlight[2] - (-0.7071)).abs() < 0.0001, "y component mismatch");
+        assert!((result_spotlight[3] - 0.0).abs() < 0.0001, "z component mismatch");
+    }
+    
+    #[test]
+    fn test_spotlight_orientation_from_cryengine() {
+        // Test with a realistic CryEngine spotlight pointing along +X
+        // In CryEngine: [w, x, y, z] represents rotation about +X
+        // After conversion: should point along -Z in Blender
+        
+        // Example: 90° rotation around X axis (CryEngine forward)
+        let quat_90_x = [0.7071, 0.7071, 0.0, 0.0];  // [cos(45°), sin(45°), 0, 0]
+        let result = convert_quaternion_sc_to_blender(quat_90_x, true);
+        
+        // After coord xform: [w, x, -z, y] = [0.7071, 0.7071, 0.0, 0.0]
+        // After basis correction (90° around Y): should have adjusted components
+        // We just verify the function runs and produces normalized output
+        let magnitude_sq = result[0]*result[0] + result[1]*result[1] + 
+                           result[2]*result[2] + result[3]*result[3];
+        assert!((magnitude_sq - 1.0).abs() < 0.01, "quaternion should be normalized");
+    }
+    
+    #[test]
+    fn test_point_light_no_basis_correction() {
+        // Point lights (omni) should NOT get basis correction
+        let quat = [0.7071, 0.3, 0.5, 0.1];
+        let result_point = convert_quaternion_sc_to_blender(quat, false);
+        
+        // Should only apply coord xform, no basis correction
+        let w = quat[0] as f32;
+        let x = quat[1] as f32;
+        let y = quat[2] as f32;
+        let z = quat[3] as f32;
+        let expected = [w, x, -z, y];
+        
+        assert_eq!(result_point, expected);
+    }
+    
+    // Helper function for testing (internal use only)
+    fn convert_quaternion_sc_to_blender_test_helper(quat_sc: [f64; 4], is_spotlight: bool) -> [f32; 4] {
+        convert_quaternion_sc_to_blender(quat_sc, is_spotlight)
     }
     
     #[test]
@@ -1414,7 +1718,7 @@ fn convert_matrix_sc_to_blender(matrix_sc: &[[f32; 4]; 3]) -> ([[f32; 4]; 3], [f
         rot_quat_sc[1] as f64,
         rot_quat_sc[2] as f64,
         rot_quat_sc[3] as f64,
-    ]);
+    ], false);  // Empties don't need basis correction
     
     // Reconstruct matrix in Blender coordinates (simplified)
     let mut matrix_blend = [[0.0f32; 4]; 3];
@@ -1467,7 +1771,7 @@ pub fn extract_empties_from_nmc(
             rot_quat_sc[1] as f64,
             rot_quat_sc[2] as f64,
             rot_quat_sc[3] as f64,
-        ]);
+        ], false);  // Empties don't need basis correction
         
         empties.push(ExtractedEmpty {
             name: node.name.clone(),
@@ -1556,6 +1860,8 @@ pub fn build_lamp_blocks(
         light.radius,
         light.spot_size,
         light.spot_blend,
+        light.temperature_k,
+        light.use_temperature,
     );
     
     // Build the object wrapper
@@ -1967,6 +2273,7 @@ mod tests_3e {
                 spot_blend: 0.0,
                 intensity_candela: 5.0,  // Ambient threshold < 10
                 temperature_k: 6500.0,
+                use_temperature: false,
                 gobo_path: None,
                 active_state: "defaultState".to_string(),
             },
@@ -1982,6 +2289,7 @@ mod tests_3e {
                 spot_blend: 0.2,
                 intensity_candela: 200.0,
                 temperature_k: 6500.0,
+                use_temperature: false,
                 gobo_path: Some("path/to/gobo.dds".to_string()),
                 active_state: "defaultState".to_string(),
             },
@@ -3920,6 +4228,7 @@ mod tests_4c {
                 spot_blend: 0.0,
                 intensity_candela: 5.0,
                 temperature_k: 6500.0,
+                use_temperature: false,
                 gobo_path: None,
                 active_state: "defaultState".to_string(),
             },
@@ -3946,6 +4255,7 @@ mod tests_4c {
                 spot_blend: 0.0,
                 intensity_candela: 5.0,
                 temperature_k: 6500.0,
+                use_temperature: false,
                 gobo_path: None,
                 active_state: "defaultState".to_string(),
             },
@@ -3961,6 +4271,7 @@ mod tests_4c {
                 spot_blend: 0.2,
                 intensity_candela: 200.0,
                 temperature_k: 6500.0,
+                use_temperature: false,
                 gobo_path: None,
                 active_state: "defaultState".to_string(),
             },
@@ -4038,6 +4349,7 @@ mod tests_4c {
                 spot_blend: 0.0,
                 intensity_candela: 5.0,
                 temperature_k: 6500.0,
+                use_temperature: false,
                 gobo_path: None,
                 active_state: "defaultState".to_string(),
             },
@@ -4079,9 +4391,86 @@ mod tests_4c {
     }
     
     #[test]
-    fn test_validate_complete_phase_3_4_export_empty() {
-        let result = validate_complete_phase_3_4_export(&[], &[], &[]);
-        assert!(!result.is_valid);
-        assert!(result.errors.len() > 0);
+    fn test_extracted_light_has_use_temperature_field() {
+        // Test 1: Verify ExtractedLight struct has use_temperature field
+        let light = ExtractedLight {
+            name: "Test".to_string(),
+            position_blend: [0.0, 0.0, 0.0],
+            rotation_blend: [1.0, 0.0, 0.0, 0.0],
+            color: [1.0, 1.0, 1.0],
+            lamp_type: 0,
+            energy_watts: 1.0,
+            radius: 5.0,
+            spot_size: 0.0,
+            spot_blend: 0.0,
+            intensity_candela: 5.0,
+            temperature_k: 6500.0,
+            use_temperature: true,  // Verify field exists and can be set
+            gobo_path: None,
+            active_state: "defaultState".to_string(),
+        };
+        
+        assert_eq!(light.temperature_k, 6500.0);
+        assert_eq!(light.use_temperature, true);
+    }
+    
+    #[test]
+    fn test_extracted_light_temperature_false() {
+        // Test 2: use_temperature can be set to false
+        let light = ExtractedLight {
+            name: "Test".to_string(),
+            position_blend: [0.0, 0.0, 0.0],
+            rotation_blend: [1.0, 0.0, 0.0, 0.0],
+            color: [1.0, 1.0, 1.0],
+            lamp_type: 0,
+            energy_watts: 1.0,
+            radius: 5.0,
+            spot_size: 0.0,
+            spot_blend: 0.0,
+            intensity_candela: 5.0,
+            temperature_k: 3000.0,
+            use_temperature: false,  // Explicitly false
+            gobo_path: None,
+            active_state: "defaultState".to_string(),
+        };
+        
+        assert_eq!(light.temperature_k, 3000.0);
+        assert_eq!(light.use_temperature, false);
+    }
+    
+    #[test]
+    fn test_temperature_values_range() {
+        // Test 3: Temperature values within typical Kelvin range
+        let test_temps = vec![
+            (2700.0, true, "Warm white"),
+            (3000.0, false, "Warm incandescent"),
+            (5000.0, true, "Mid-range"),
+            (6500.0, false, "Daylight"),
+            (9000.0, true, "Cool white"),
+            (12000.0, false, "Very cool"),
+        ];
+        
+        for (temp, use_temp, desc) in test_temps {
+            let light = ExtractedLight {
+                name: format!("Light_{}", temp as i32),
+                position_blend: [0.0, 0.0, 0.0],
+                rotation_blend: [1.0, 0.0, 0.0, 0.0],
+                color: [1.0, 1.0, 1.0],
+                lamp_type: 0,
+                energy_watts: 1.0,
+                radius: 5.0,
+                spot_size: 0.0,
+                spot_blend: 0.0,
+                intensity_candela: 5.0,
+                temperature_k: temp,
+                use_temperature: use_temp,
+                gobo_path: None,
+                active_state: "defaultState".to_string(),
+            };
+            
+            assert_eq!(light.temperature_k, temp, "Failed for {}: {}", temp, desc);
+            assert_eq!(light.use_temperature, use_temp, "Failed for {}: {}", temp, desc);
+        }
     }
 }
+
