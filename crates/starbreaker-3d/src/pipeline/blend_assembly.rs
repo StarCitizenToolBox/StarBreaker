@@ -474,7 +474,7 @@ fn mesh_to_blend(
     let scene_data = build_scene(name, view_layer_ptr, collection_ptr);
     let view_layer_data = build_view_layer(name, base_ptr, layer_collection_ptr);
     let base_data = build_base(object_ptr);
-    let collection_data = build_collection(name, scene_ptr, collection_object_ptr);
+    let collection_data = build_collection(name, scene_ptr, collection_object_ptr, collection_object_ptr);  // Single member: head = tail
     let collection_object_data = build_collection_object(object_ptr);
     let layer_collection_data = build_layer_collection(collection_ptr);
     let mesh_data = build_mesh(
@@ -780,13 +780,17 @@ pub fn create_scene_blend(
     
     // Determine head/tail pointers for collection members
     let mesh_head_ptr = if !mesh_coll_obj_ptrs.is_empty() { mesh_coll_obj_ptrs[0].0 } else { 0 };
+    let mesh_tail_ptr = if !mesh_coll_obj_ptrs.is_empty() { mesh_coll_obj_ptrs[mesh_coll_obj_ptrs.len() - 1].0 } else { 0 };
     
     let light_head_ptr = if !light_coll_obj_ptrs.is_empty() { light_coll_obj_ptrs[0].0 } else { 0 };
+    let light_tail_ptr = if !light_coll_obj_ptrs.is_empty() { light_coll_obj_ptrs[light_coll_obj_ptrs.len() - 1].0 } else { 0 };
     
+    // Root collection: single member (Scene root object)
     let root_collection_data = build_collection(
         "Scene",
         scene_ptr,
         root_collection_object_ptr,
+        root_collection_object_ptr,  // Both head and tail point to single member
     );
     let root_collection_object_data = build_collection_object(root_object_ptr);
     let root_layer_collection_data = build_layer_collection(root_collection_ptr);
@@ -804,6 +808,7 @@ pub fn create_scene_blend(
         "Meshes",
         root_collection_ptr,
         mesh_head_ptr,
+        mesh_tail_ptr,
     );
     let meshes_layer_coll_data = build_layer_collection(meshes_collection_ptr);
     
@@ -820,6 +825,7 @@ pub fn create_scene_blend(
         "Lights",
         root_collection_ptr,
         light_head_ptr,
+        light_tail_ptr,
     );
     let lights_layer_coll_data = build_layer_collection(lights_collection_ptr);
     
@@ -828,6 +834,7 @@ pub fn create_scene_blend(
         "Empties",
         root_collection_ptr,
         0,  // No empties yet
+        0,  // tail = head when empty
     );
     let empties_layer_coll_data = build_layer_collection(empties_collection_ptr);
     
@@ -836,6 +843,7 @@ pub fn create_scene_blend(
         "Decals",
         root_collection_ptr,
         0,  // No decals yet
+        0,  // tail = head when empty
     );
     let decals_layer_coll_data = build_layer_collection(decals_collection_ptr);
     

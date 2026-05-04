@@ -59,7 +59,7 @@ pub const MDEFORMVERT_SIZE: usize = 16;
 pub const MDEFORMWEIGHT_SIZE: usize = 8;
 pub const CUSTOM_DATA_LAYER_SIZE: usize = 112;
 pub const IDPROPERTY_SIZE: usize = 144;
-pub const LIBRARY_SIZE: usize = 1472;
+pub const LIBRARY_SIZE: usize = 1426;  // ID (370) + filepath[1024] + flag (2) + undo_runtime_tag (2) + padding (4) + pointers (24)
 pub const ID_STUB_SIZE: usize = 408;
 
 // ── Attribute enums ───────────────────────────────────────────────────────────
@@ -286,14 +286,28 @@ pub fn build_base(object_ptr: u64) -> Vec<u8> {
 pub fn build_collection(
     collection_name: &str,
     owner_scene_ptr: u64,
-    collection_object_ptr: u64,
+    collection_object_head_ptr: u64,
+    collection_object_tail_ptr: u64,
 ) -> Vec<u8> {
     let mut data = vec![0u8; COLLECTION_SIZE];
     write_id_name(&mut data, "GR", collection_name);
     write_i16(&mut data, 298, 1024);
-    write_ptr(&mut data, 408, owner_scene_ptr);
-    write_ptr(&mut data, 416, collection_object_ptr);
-    write_ptr(&mut data, 424, collection_object_ptr);
+    
+    // Offset 128-135: ListBase.first (CollectionObject* head)
+    write_ptr(&mut data, 128, collection_object_head_ptr);
+    
+    // Offset 136-143: ListBase.last (CollectionObject* tail)
+    write_ptr(&mut data, 136, collection_object_tail_ptr);
+    
+    // Offset 144-151: children ListBase.first (nested Collections)
+    write_ptr(&mut data, 144, 0);  // No nested collections for now
+    
+    // Offset 152-159: children ListBase.last
+    write_ptr(&mut data, 152, 0);
+    
+    // Offset 168-175: scene owner pointer
+    write_ptr(&mut data, 168, owner_scene_ptr);
+    
     data
 }
 
@@ -703,27 +717,50 @@ pub fn compress_blend_bytes_zstd(raw_blend: &[u8]) -> Vec<u8> {
 
 /// Build a Library block (LI) for linking to an external .blend file.
 ///
-/// The library block contains the filepath to the external asset file.
+/// Binary layout (1426 bytes total):
+/// - ID struct: 0-370 (370 bytes)
+/// - filepath[1024]: 370-1394 (1024 bytes, UTF-8, null-terminated, zero-padded)
+/// - flag: 1394-1396 (2 bytes, uint16)
+/// - undo_runtime_tag: 1396-1398 (2 bytes, uint16)
+/// - _pad: 1398-1402 (4 bytes alignment)
+/// - archive_parent_library: 1402-1410 (8 bytes pointer, nullptr)
+/// - packedfile: 1410-1418 (8 bytes pointer, nullptr)
+/// - runtime: 1418-1426 (8 bytes pointer, always nullptr)
+///
+/// Filepath stored as relative path when possible, UTF-8 encoded.
 pub fn build_library_block(lib_name: &str, filepath: &str) -> Vec<u8> {
     let mut buf = vec![0u8; LIBRARY_SIZE];
     
-    // Offset 0: ID structure (common to all datablocks)
-    // ID.name at offset 0: 66 bytes (ID prefix + 64-char name)
+    // Offset 0-66: ID.name (common to all datablocks)
+    // Format: "LI" + null padding + 64-char name
     write_id_name(&mut buf[0..66], "LI", lib_name);
     
-    // Offset 192: filepath pointer and data
-    // In .blend format, the filepath is stored as a fixed-length string block
-    // For now, store it at a known offset; actual pointer setup happens in write_block
-    // The filepath goes in a separate DATA block with key 0; the pointer is at offset 268
+    // Offset 370-1394: filepath[1024] UTF-8, null-terminated, zero-padded
     let filepath_bytes = filepath.as_bytes();
-    let filepath_len = filepath_bytes.len().min(1023); // CryEngine path limit
+    let filepath_len = filepath_bytes.len().min(1023); // Max 1023 chars + null terminator
     
-    // Store filepath starting at offset 296 (after ID + padding)
-    // and write pointer to it at offset 268
     if filepath_len > 0 {
-        buf[296..(296 + filepath_len)].copy_from_slice(&filepath_bytes[0..filepath_len]);
-        write_ptr(&mut buf, 268, 0x1000 + 296); // Pointer to filepath data
+        buf[370..(370 + filepath_len)].copy_from_slice(&filepath_bytes[0..filepath_len]);
     }
+    // Null-terminate and zero-pad (already initialized to zeros)
+    buf[370 + filepath_len] = 0;
+    
+    // Offset 1394-1396: flag (uint16, 0 = no special flags)
+    write_u16(&mut buf, 1394, 0);
+    
+    // Offset 1396-1398: undo_runtime_tag (uint16, 0)
+    write_u16(&mut buf, 1396, 0);
+    
+    // Offset 1398-1402: _pad (4 bytes, already zero)
+    
+    // Offset 1402-1410: archive_parent_library (8 bytes pointer, nullptr)
+    write_ptr(&mut buf, 1402, 0);
+    
+    // Offset 1410-1418: packedfile (8 bytes pointer, nullptr)
+    write_ptr(&mut buf, 1410, 0);
+    
+    // Offset 1418-1426: runtime (8 bytes pointer, always nullptr)
+    write_ptr(&mut buf, 1418, 0);
     
     buf
 }
