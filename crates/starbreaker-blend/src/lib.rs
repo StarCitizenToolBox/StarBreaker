@@ -10,8 +10,7 @@
 
 use std::io::Write;
 
-use flate2::Compression;
-use flate2::write::GzEncoder;
+use zstd::Encoder;
 
 pub const DNA1_BYTES: &[u8] = include_bytes!("dna1_blender501.bin");
 
@@ -136,17 +135,24 @@ pub fn write_block(
     out.extend_from_slice(data);
 }
 
-/// Compress raw `.blend` bytes to Blender's optional gzip-wrapped format.
+/// Compress raw `.blend` bytes using Blender 5.x Zstandard (Zstd) format.
 ///
-/// If compression fails, returns the original input bytes so callers still get
-/// a valid uncompressed `.blend` payload.
+/// Blender 5.x requires Zstd compression (not gzip). If compression fails,
+/// returns the original input bytes so callers still get a valid uncompressed
+/// `.blend` payload.
+///
+/// Magic bytes: 0x28 0xB5 0x2F 0xFD (Zstd frame header)
 pub fn compress_blend_bytes(raw_blend: &[u8]) -> Vec<u8> {
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    if encoder.write_all(raw_blend).is_err() {
-        return raw_blend.to_vec();
-    }
-    match encoder.finish() {
-        Ok(compressed) => compressed,
+    match Encoder::new(Vec::new(), 19) {
+        Ok(mut encoder) => {
+            if encoder.write_all(raw_blend).is_err() {
+                return raw_blend.to_vec();
+            }
+            match encoder.finish() {
+                Ok(compressed) => compressed,
+                Err(_) => raw_blend.to_vec(),
+            }
+        }
         Err(_) => raw_blend.to_vec(),
     }
 }
