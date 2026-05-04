@@ -108,6 +108,55 @@ fn empty_object_size_is_1288() {
 }
 
 #[test]
+fn empty_object_sets_id_properties_pointer() {
+    let ob = build_empty_object_with_properties(
+        "Empty",
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+        [1.0, 1.0, 1.0],
+        0,
+        0x1234_5678_u64,
+    );
+    assert_eq!(u64::from_le_bytes(ob[344..352].try_into().unwrap()), 0x1234_5678_u64);
+}
+
+#[test]
+fn lamp_object_sets_id_properties_pointer() {
+    let ob = build_lamp_object_with_properties(
+        "Light",
+        0x2000,
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+        [1.0, 1.0, 1.0],
+        0,
+        0x1234_5678_u64,
+    );
+    assert_eq!(u64::from_le_bytes(ob[344..352].try_into().unwrap()), 0x1234_5678_u64);
+}
+
+#[test]
+fn idproperty_group_records_child_count_and_subtypes() {
+    let (root, children, _) = build_idprop_tree(
+        0x1000,
+        &[0x2000, 0x3000],
+        &[],
+        &[
+            ("flag".to_string(), IdPropValue::Int(1)),
+            ("ratio".to_string(), IdPropValue::Double(2.0)),
+        ],
+    );
+
+    assert_eq!(root[16], 6);
+    assert_eq!(root[17], 6);
+    assert_eq!(i32::from_le_bytes(root[128..132].try_into().unwrap()), 2);
+    assert_eq!(i32::from_le_bytes(root[132..136].try_into().unwrap()), 2);
+    assert_eq!(children[0].1[16], 1);
+    assert_eq!(children[0].1[17], 1);
+    assert_eq!(children[1].1[16], 8);
+    assert_eq!(children[1].1[17], 8);
+}
+
+#[test]
 fn view_layer_sets_active_collection_pointer() {
     let view_layer = build_view_layer("ViewLayer", 0x2000, 0x3000);
 

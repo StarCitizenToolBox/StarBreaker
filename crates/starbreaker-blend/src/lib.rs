@@ -692,9 +692,22 @@ pub fn build_empty_object(
     scale: [f32; 3],
     parent_ptr: u64,
 ) -> Vec<u8> {
+    build_empty_object_with_properties(object_name, loc, quat, scale, parent_ptr, 0)
+}
+
+/// Build an `OB_EMPTY` Object with optional custom properties.
+pub fn build_empty_object_with_properties(
+    object_name: &str,
+    loc: [f32; 3],
+    quat: [f32; 4],
+    scale: [f32; 3],
+    parent_ptr: u64,
+    properties_ptr: u64,
+) -> Vec<u8> {
     let mut data = vec![0u8; OBJECT_SIZE];
     write_id_name(&mut data, "OB", object_name);
     write_i16(&mut data, 416, 0); // OB_EMPTY
+    write_ptr(&mut data, 344, properties_ptr);
     write_ptr(&mut data, 496, parent_ptr);
     for i in 0..3 { write_f32(&mut data, 736 + i * 4, loc[i]); }
     for i in 0..3 { write_f32(&mut data, 760 + i * 4, scale[i]); }
@@ -724,9 +737,23 @@ pub fn build_lamp_object(
     scale: [f32; 3],
     parent_ptr: u64,
 ) -> Vec<u8> {
+    build_lamp_object_with_properties(object_name, lamp_ptr, loc, quat, scale, parent_ptr, 0)
+}
+
+/// Build an `OB_LAMP` Object with optional custom properties.
+pub fn build_lamp_object_with_properties(
+    object_name: &str,
+    lamp_ptr: u64,
+    loc: [f32; 3],
+    quat: [f32; 4],
+    scale: [f32; 3],
+    parent_ptr: u64,
+    properties_ptr: u64,
+) -> Vec<u8> {
     let mut data = vec![0u8; OBJECT_SIZE];
     write_id_name(&mut data, "OB", object_name);
     write_i16(&mut data, 416, 10); // OB_LAMP
+    write_ptr(&mut data, 344, properties_ptr);
     write_ptr(&mut data, 496, parent_ptr);
     write_ptr(&mut data, 552, lamp_ptr);
     for i in 0..3 { write_f32(&mut data, 736 + i * 4, loc[i]); }
@@ -966,6 +993,9 @@ pub fn build_idproperty(
     write_ptr(&mut b, 0, next_ptr);
     write_ptr(&mut b, 8, prev_ptr);
     b[16] = itype;
+    if itype != IDP_STRING {
+        b[17] = itype;
+    }
     let name_bytes = name.as_bytes();
     let copy_len = name_bytes.len().min(63);
     b[20..20 + copy_len].copy_from_slice(&name_bytes[..copy_len]);
@@ -1038,7 +1068,7 @@ pub fn build_idprop_tree(
     let group_last = if n > 0 { child_ptrs[n - 1] } else { 0 };
     let root = build_idproperty(
         IDP_GROUP, "user_properties", 0, 0, 0,
-        group_first, group_last, 0, 0.0, 0, 0,
+        group_first, group_last, 0, 0.0, n as i32, n as i32,
     );
 
     (root, children, string_data)

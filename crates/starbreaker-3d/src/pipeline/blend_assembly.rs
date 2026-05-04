@@ -17,7 +17,7 @@ use starbreaker_common::progress::{report as report_progress, Progress};
 use starbreaker_p4k::MappedP4k;
 use starbreaker_blend::{
     bytes4_data, build_attribute, build_attribute_array, build_base, build_collection,
-    build_master_collection, build_collection_object, build_collection_object_linked,
+    build_master_collection, build_collection_object_linked,
     build_file_global, build_layer_collection, build_layer_collection_linked, build_mat_ptr_array,
     build_empty_shader_node_tree, build_idprop_tree, build_mat_ptr_array_from_ptrs,
     build_material_with_node_tree_and_properties,
@@ -30,7 +30,7 @@ use starbreaker_blend::{
     SDNA_IDX_COLLECTION_OBJECT, SDNA_IDX_DNA1, SDNA_IDX_FILE_GLOBAL, SDNA_IDX_LAYER_COLLECTION,
     SDNA_IDX_BNODE_TREE, SDNA_IDX_IDPROPERTY, SDNA_IDX_MATERIAL, SDNA_IDX_MESH, SDNA_IDX_OBJECT, SDNA_IDX_SCENE, SDNA_IDX_TOOL_SETTINGS,
     SDNA_IDX_VIEW_LAYER, SDNA_IDX_LIBRARY, SDNA_IDX_ID,
-    build_lamp, build_lamp_object, build_empty_object,
+    build_lamp, build_lamp_object, build_lamp_object_with_properties, build_empty_object, build_empty_object_with_properties,
     build_library_block, build_id_stub, LAMP_SIZE, OBJECT_SIZE,
     build_bdeformgroup, build_mdeformvert_array, build_mdeformweight_array, 
     build_custom_data_layer_mdeformvert, SDNA_IDX_BDEFORMGROUP, SDNA_IDX_MDEFORMVERT, SDNA_IDX_LAMP,
@@ -104,6 +104,53 @@ fn material_custom_properties(material_name: &str, materials: &Option<MtlFile>) 
         ));
     }
     props
+}
+
+fn package_root_properties(entity_name: &str) -> Vec<(String, IdPropValue)> {
+    vec![
+        ("starbreaker_package_root".to_string(), IdPropValue::Int(1)),
+        ("starbreaker_scene_path".to_string(), IdPropValue::String("scene.json".to_string())),
+        ("starbreaker_export_root".to_string(), IdPropValue::String(String::new())),
+        ("starbreaker_package_name".to_string(), IdPropValue::String(entity_name.to_string())),
+        ("starbreaker_entity_name".to_string(), IdPropValue::String(entity_name.to_string())),
+        ("starbreaker_palette_id".to_string(), IdPropValue::String(String::new())),
+    ]
+}
+
+fn entity_wrapper_properties(entity_name: &str) -> Vec<(String, IdPropValue)> {
+    vec![
+        ("starbreaker_scene_path".to_string(), IdPropValue::String("scene.json".to_string())),
+        ("starbreaker_export_root".to_string(), IdPropValue::String(String::new())),
+        ("starbreaker_package_name".to_string(), IdPropValue::String(entity_name.to_string())),
+        ("starbreaker_entity_name".to_string(), IdPropValue::String(entity_name.to_string())),
+    ]
+}
+
+fn scene_instance_properties(entity_name: &str, instance: &LinkedMeshInstance) -> Vec<(String, IdPropValue)> {
+    let instance_json = serde_json::json!({
+        "entity_name": instance.name,
+        "mesh_asset": instance.mesh_asset,
+        "material_sidecar": null,
+        "palette_id": null,
+    })
+    .to_string();
+    vec![
+        ("starbreaker_scene_path".to_string(), IdPropValue::String("scene.json".to_string())),
+        ("starbreaker_export_root".to_string(), IdPropValue::String(String::new())),
+        ("starbreaker_package_name".to_string(), IdPropValue::String(entity_name.to_string())),
+        ("starbreaker_entity_name".to_string(), IdPropValue::String(instance.name.clone())),
+        ("starbreaker_mesh_asset".to_string(), IdPropValue::String(instance.mesh_asset.clone())),
+        ("starbreaker_instance_json".to_string(), IdPropValue::String(instance_json)),
+    ]
+}
+
+fn light_object_properties(entity_name: &str, light_name: &str) -> Vec<(String, IdPropValue)> {
+    vec![
+        ("starbreaker_scene_path".to_string(), IdPropValue::String("scene.json".to_string())),
+        ("starbreaker_package_name".to_string(), IdPropValue::String(entity_name.to_string())),
+        ("starbreaker_entity_name".to_string(), IdPropValue::String(entity_name.to_string())),
+        ("starbreaker_source_node_name".to_string(), IdPropValue::String(light_name.to_string())),
+    ]
 }
 
 fn insert_stem_suffix(path: &str, suffix: &str) -> String {
@@ -349,6 +396,7 @@ pub fn write_decomposed_export_blend(
                 scene_mesh_instances.push(LinkedMeshInstance {
                     name: linked_object_name,
                     blend_path: format!("//../../{blend_path}"),
+                    mesh_asset: blend_path.clone(),
                     position: [0.0, 0.0, 0.0],
                     rotation: [1.0, 0.0, 0.0, 0.0],
                 });
@@ -394,6 +442,7 @@ pub fn write_decomposed_export_blend(
             scene_mesh_instances.push(LinkedMeshInstance {
                 name: linked_object_name,
                 blend_path: format!("//../../{}", file.relative_path),
+                mesh_asset: file.relative_path.clone(),
                 position: [0.0, 0.0, 0.0],
                 rotation: [1.0, 0.0, 0.0, 0.0],
             });
@@ -1868,6 +1917,8 @@ pub struct LinkedMeshInstance {
     pub name: String,
     /// Relative path to the linked .blend file (e.g., "Data/Objects/mesh_0.blend")
     pub blend_path: String,
+    /// Package-relative mesh asset path before any scene.blend-relative library prefix.
+    pub mesh_asset: String,
     /// Blender coordinates position [x, y, z]
     pub position: [f32; 3],
     /// Blender coordinates rotation as quaternion [w, x, y, z]
@@ -1924,6 +1975,7 @@ pub fn create_scene_blend(
             let name = format!("mesh_{idx}");
             LinkedMeshInstance {
                 blend_path: format!("{mesh_output_dir}/{name}.blend"),
+                mesh_asset: format!("{mesh_output_dir}/{name}.blend"),
                 name,
                 position: [0.0, 0.0, 0.0],
                 rotation: [1.0, 0.0, 0.0, 0.0],
@@ -1970,16 +2022,25 @@ pub fn create_scene_blend_with_instances(
     let decals_coll_obj_ptr = ptrs.alloc();
     let decals_layer_coll_ptr = ptrs.alloc();
     
-    // Root empty object (placeholder for root scene object)
-    let root_object_ptr = ptrs.alloc();
-    let root_object_mat_ptr = ptrs.alloc();
-    let root_object_matbits_ptr = ptrs.alloc();
+    // Addon-style local scene anchors. Linked library object parent chains are
+    // owned by their asset files, but local lights and scene metadata live here.
+    let package_root_ptr = ptrs.alloc();
+    let package_root_mat_ptr = ptrs.alloc();
+    let package_root_matbits_ptr = ptrs.alloc();
+    let entity_root_ptr = ptrs.alloc();
+    let entity_root_mat_ptr = ptrs.alloc();
+    let entity_root_matbits_ptr = ptrs.alloc();
+    let entity_root_collection_object_ptr = ptrs.alloc();
+    let package_root_idprops = allocate_idprop_blocks(&mut ptrs, package_root_properties(entity_name));
+    let entity_root_idprops = allocate_idprop_blocks(&mut ptrs, entity_wrapper_properties(entity_name));
     
     // Allocate pointers for linked mesh object ID stubs.
     let mut linked_mesh_ids = Vec::new();
     let mut library_ptr_by_path = HashMap::new();
     let mut library_ptrs = Vec::new();
     let mut mesh_coll_obj_ptrs = Vec::new();
+    let mut instance_anchor_entries = Vec::new();
+    let mut anchor_coll_obj_ptrs = Vec::new();
     
     for (idx, instance) in mesh_instances_input.iter().enumerate() {
         let object_id_ptr = ptrs.alloc();
@@ -1992,9 +2053,14 @@ pub fn create_scene_blend_with_instances(
             ptr
         };
         let coll_obj_ptr = ptrs.alloc();  // Collection object for this mesh instance
+        let anchor_ptr = ptrs.alloc();
+        let anchor_coll_obj_ptr = ptrs.alloc();
+        let anchor_idprops = allocate_idprop_blocks(&mut ptrs, scene_instance_properties(entity_name, instance));
         
         linked_mesh_ids.push((object_id_ptr, library_ptr, idx));
         mesh_coll_obj_ptrs.push((coll_obj_ptr, object_id_ptr));
+        instance_anchor_entries.push((anchor_ptr, idx, anchor_idprops));
+        anchor_coll_obj_ptrs.push((anchor_coll_obj_ptr, anchor_ptr));
     }
     
     // Allocate pointers for light instances
@@ -2024,7 +2090,7 @@ pub fn create_scene_blend_with_instances(
     let scene_data = build_scene("Scene", view_layer_ptr, root_collection_ptr, tool_settings_ptr);
     let tool_settings_data = build_tool_settings();
     let view_layer_data = build_view_layer("ViewLayer", base_ptr, layer_collection_ptr);
-    let base_data = build_base(root_object_ptr);
+    let base_data = build_base(package_root_ptr);
     
     // Build collection hierarchy: Scene > [Meshes, Lights, Empties, Decals]
     
@@ -2035,15 +2101,18 @@ pub fn create_scene_blend_with_instances(
     let light_head_ptr = if !light_coll_obj_ptrs.is_empty() { light_coll_obj_ptrs[0].0 } else { 0 };
     let light_tail_ptr = if !light_coll_obj_ptrs.is_empty() { light_coll_obj_ptrs[light_coll_obj_ptrs.len() - 1].0 } else { 0 };
     
-    // Root (master) collection: embedded DATA block; contains Root object directly
+    // Root (master) collection: embedded DATA block; contains local scene anchors directly
     // and Meshes/Lights/Empties/Decals sub-collections as children.
     let root_collection_data = build_master_collection(
         root_collection_object_ptr,
-        root_collection_object_ptr,  // gobject: single Root empty object (head=tail)
+        entity_root_collection_object_ptr,
         meshes_coll_child_ptr,       // children.first = CollectionChild(Meshes)
         decals_coll_child_ptr,       // children.last  = CollectionChild(Decals)
     );
-    let root_collection_object_data = build_collection_object(root_object_ptr);
+    let root_collection_object_data =
+        build_collection_object_linked(package_root_ptr, 0, entity_root_collection_object_ptr);
+    let entity_root_collection_object_data =
+        build_collection_object_linked(entity_root_ptr, root_collection_object_ptr, 0);
     
     // Build mesh collection object linked list
     let mut meshes_coll_obj_data_list = Vec::new();
@@ -2079,11 +2148,24 @@ pub fn create_scene_blend_with_instances(
         0,
     );
     
-    // Sub-collection: Empties (placeholder for Phase 5C, child of root)
+    let anchor_head_ptr = if !anchor_coll_obj_ptrs.is_empty() { anchor_coll_obj_ptrs[0].0 } else { 0 };
+    let anchor_tail_ptr = if !anchor_coll_obj_ptrs.is_empty() {
+        anchor_coll_obj_ptrs[anchor_coll_obj_ptrs.len() - 1].0
+    } else {
+        0
+    };
+    let mut anchor_coll_obj_data_list = Vec::new();
+    for (idx, &(coll_obj_ptr, obj_ptr)) in anchor_coll_obj_ptrs.iter().enumerate() {
+        let prev_ptr = if idx > 0 { anchor_coll_obj_ptrs[idx - 1].0 } else { 0 };
+        let next_ptr = if idx < anchor_coll_obj_ptrs.len() - 1 { anchor_coll_obj_ptrs[idx + 1].0 } else { 0 };
+        anchor_coll_obj_data_list.push((coll_obj_ptr, build_collection_object_linked(obj_ptr, prev_ptr, next_ptr)));
+    }
+
+    // Sub-collection: Empties contains local addon-style instance anchors.
     let empties_collection_data = build_collection(
         "Empties",
-        0,
-        0,
+        anchor_head_ptr,
+        anchor_tail_ptr,
         0,
         0,
     );
@@ -2168,16 +2250,41 @@ pub fn create_scene_blend_with_instances(
         0,
     );
     
-    // Build root empty object at origin
-    let root_empty_data = build_empty_object(
-        "Root",
+    // Build addon-style package and entity root empties at origin.
+    let package_root_data = build_empty_object_with_properties(
+        &format!("StarBreaker {entity_name}"),
         [0.0, 0.0, 0.0],  // position
         [1.0, 0.0, 0.0, 0.0],  // quaternion
         [1.0, 1.0, 1.0],  // scale
         0,
+        package_root_idprops.as_ref().map(|props| props.root_ptr).unwrap_or(0),
     );
-    let root_mat_array = build_mat_ptr_array(0);
-    let root_matbits = build_matbits(0);
+    let entity_root_data = build_empty_object_with_properties(
+        entity_name,
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+        [1.0, 1.0, 1.0],
+        package_root_ptr,
+        entity_root_idprops.as_ref().map(|props| props.root_ptr).unwrap_or(0),
+    );
+    let package_root_mat_array = build_mat_ptr_array(0);
+    let package_root_matbits = build_matbits(0);
+    let entity_root_mat_array = build_mat_ptr_array(0);
+    let entity_root_matbits = build_matbits(0);
+
+    let mut instance_anchor_data = Vec::new();
+    for (anchor_ptr, idx, anchor_idprops) in &instance_anchor_entries {
+        let instance = &mesh_instances_input[*idx];
+        let object_data = build_empty_object_with_properties(
+            &instance.name,
+            instance.position,
+            instance.rotation,
+            [1.0, 1.0, 1.0],
+            entity_root_ptr,
+            anchor_idprops.as_ref().map(|props| props.root_ptr).unwrap_or(0),
+        );
+        instance_anchor_data.push((*anchor_ptr, object_data));
+    }
     
     // Allocate string data for library filenames (uses entity name, not scene name)
     let scene_name_bytes = format!("{}\0", entity_name);
@@ -2202,6 +2309,7 @@ pub fn create_scene_blend_with_instances(
     // Build light objects for lights collection
     let mut light_data = Vec::new();
     let mut light_object_data = Vec::new();
+    let mut light_object_idprops = Vec::new();
     let mut light_object_mat_arrays = Vec::new();
     let mut light_object_matbits = Vec::new();
     
@@ -2221,17 +2329,21 @@ pub fn create_scene_blend_with_instances(
             true,  // use temperature
         );
         light_data.push((*lamp_ptr, lamp_bytes));
+        let light_props = allocate_idprop_blocks(&mut ptrs, light_object_properties(entity_name, &light.name));
+        let light_props_ptr = light_props.as_ref().map(|props| props.root_ptr).unwrap_or(0);
         
         // Build object wrapper for light
-        let object_bytes = build_lamp_object(
+        let object_bytes = build_lamp_object_with_properties(
             &light.name,
             *lamp_ptr,
             light.position_blend,
             light.rotation_blend,
             [1.0, 1.0, 1.0],  // Standard scale
-            0,
+            entity_root_ptr,
+            light_props_ptr,
         );
         light_object_data.push(object_bytes);
+        light_object_idprops.push(light_props);
         
         // Build material arrays (empty for lights)
         light_object_mat_arrays.push(build_mat_ptr_array(0));
@@ -2266,6 +2378,7 @@ pub fn create_scene_blend_with_instances(
     write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_CHILD, empties_coll_child_ptr, 1, &empties_coll_child_data);
     write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_CHILD, decals_coll_child_ptr, 1, &decals_coll_child_data);
     write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, root_collection_object_ptr, 1, &root_collection_object_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, entity_root_collection_object_ptr, 1, &entity_root_collection_object_data);
     // End of SC DATA sequence — sub-collection GR blocks follow with their own DATA sub-blocks:
     
     // Write sub-collections (GR blocks) each followed by their own DATA sub-blocks
@@ -2280,12 +2393,31 @@ pub fn create_scene_blend_with_instances(
     }
     
     write_block(&mut out, b"GR\0\0", SDNA_IDX_COLLECTION, empties_collection_ptr, 1, &empties_collection_data);
+    for (coll_obj_ptr, coll_obj_data) in &anchor_coll_obj_data_list {
+        write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, *coll_obj_ptr, 1, coll_obj_data);
+    }
     write_block(&mut out, b"GR\0\0", SDNA_IDX_COLLECTION, decals_collection_ptr, 1, &decals_collection_data);
     
-    // Write root empty object + materials
-    write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, root_object_ptr, 1, &root_empty_data);
-    write_block(&mut out, b"DATA", 0, root_object_mat_ptr, 1, &root_mat_array);
-    write_block(&mut out, b"DATA", 0, root_object_matbits_ptr, 1, &root_matbits);
+    // Write package/entity root empty objects + properties/material arrays.
+    write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, package_root_ptr, 1, &package_root_data);
+    if let Some(props) = &package_root_idprops {
+        write_idprop_blocks(&mut out, props);
+    }
+    write_block(&mut out, b"DATA", 0, package_root_mat_ptr, 1, &package_root_mat_array);
+    write_block(&mut out, b"DATA", 0, package_root_matbits_ptr, 1, &package_root_matbits);
+    write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, entity_root_ptr, 1, &entity_root_data);
+    if let Some(props) = &entity_root_idprops {
+        write_idprop_blocks(&mut out, props);
+    }
+    write_block(&mut out, b"DATA", 0, entity_root_mat_ptr, 1, &entity_root_mat_array);
+    write_block(&mut out, b"DATA", 0, entity_root_matbits_ptr, 1, &entity_root_matbits);
+
+    for (idx, (anchor_ptr, anchor_data)) in instance_anchor_data.iter().enumerate() {
+        write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, *anchor_ptr, 1, anchor_data);
+        if let Some(props) = &instance_anchor_entries[idx].2 {
+            write_idprop_blocks(&mut out, props);
+        }
+    }
     
     // Write light blocks (Phase 5B)
     for (idx, (lamp_ptr, object_ptr, mat_ptr, matbits_ptr, _)) in light_instances.iter().enumerate() {
@@ -2295,6 +2427,9 @@ pub fn create_scene_blend_with_instances(
         
         // Write light object
         write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, *object_ptr, 1, &light_object_data[idx]);
+        if let Some(props) = &light_object_idprops[idx] {
+            write_idprop_blocks(&mut out, props);
+        }
         write_block(&mut out, b"DATA", 0, *mat_ptr, 1, &light_object_mat_arrays[idx]);
         write_block(&mut out, b"DATA", 0, *matbits_ptr, 1, &light_object_matbits[idx]);
     }
@@ -2359,6 +2494,17 @@ mod tests_5a_scene_blend {
             }
         }
         blocks
+    }
+
+    fn object_block_by_name<'a>(blocks: &'a [BlendBlock<'a>], name: &str) -> &'a BlendBlock<'a> {
+        let prefixed = format!("OB{name}");
+        blocks
+            .iter()
+            .find(|block| {
+                block.code == b"OB\0\0"
+                    && block.data[40..].starts_with(prefixed.as_bytes())
+            })
+            .unwrap_or_else(|| panic!("missing Object block named {name}"))
     }
 
     fn test_mesh_with_submeshes(submeshes: Vec<SubMesh>) -> Mesh {
@@ -2648,6 +2794,7 @@ mod tests_5a_scene_blend {
         let instance = LinkedMeshInstance {
             name: "rsi_aurora_mk2_airlock_door_LOD0".to_string(),
             blend_path: "//../../Data/Objects/Ships/rsi_aurora_mk2_airlock_door_LOD0.blend".to_string(),
+            mesh_asset: "Data/Objects/Ships/rsi_aurora_mk2_airlock_door_LOD0.blend".to_string(),
             position: [0.0, 0.0, 0.0],
             rotation: [1.0, 0.0, 0.0, 0.0],
         };
@@ -2668,6 +2815,73 @@ mod tests_5a_scene_blend {
                     .starts_with(b"MErsi_aurora_mk2_airlock_door_LOD0")
         });
         assert!(local_empty_mesh_stub.is_none(), "scene.blend must not replace linked objects with empty local mesh stubs");
+    }
+
+    #[test]
+    fn test_create_scene_blend_writes_addon_style_scene_anchors() {
+        let instance = LinkedMeshInstance {
+            name: "anchor_mesh".to_string(),
+            blend_path: "//../../Data/Objects/Ships/anchor_mesh.blend".to_string(),
+            mesh_asset: "Data/Objects/Ships/anchor_mesh.blend".to_string(),
+            position: [1.0, 2.0, 3.0],
+            rotation: [1.0, 0.0, 0.0, 0.0],
+        };
+        let blend_bytes = create_scene_blend_with_instances("AnchorEntity", &[instance], &[]).unwrap();
+        let blocks = parse_blend_blocks(&blend_bytes);
+
+        let package_root = object_block_by_name(&blocks, "StarBreaker AnchorEntity");
+        let entity_root = object_block_by_name(&blocks, "AnchorEntity");
+        let anchor = object_block_by_name(&blocks, "anchor_mesh");
+
+        assert_eq!(u64::from_le_bytes(package_root.data[496..504].try_into().unwrap()), 0);
+        assert_eq!(
+            u64::from_le_bytes(entity_root.data[496..504].try_into().unwrap()),
+            package_root.old_ptr,
+            "entity wrapper should be parented to package root"
+        );
+        assert_eq!(
+            u64::from_le_bytes(anchor.data[496..504].try_into().unwrap()),
+            entity_root.old_ptr,
+            "scene instance anchor should be parented to entity wrapper"
+        );
+        assert_ne!(u64::from_le_bytes(package_root.data[344..352].try_into().unwrap()), 0);
+        assert_ne!(u64::from_le_bytes(entity_root.data[344..352].try_into().unwrap()), 0);
+        assert_ne!(u64::from_le_bytes(anchor.data[344..352].try_into().unwrap()), 0);
+        assert!(blend_bytes.windows(b"starbreaker_package_root".len()).any(|w| w == b"starbreaker_package_root"));
+        assert!(blend_bytes.windows(b"starbreaker_mesh_asset".len()).any(|w| w == b"starbreaker_mesh_asset"));
+        assert!(blend_bytes.windows(b"Data/Objects/Ships/anchor_mesh.blend".len()).any(|w| w == b"Data/Objects/Ships/anchor_mesh.blend"));
+    }
+
+    #[test]
+    fn test_create_scene_blend_parents_lights_to_entity_wrapper_with_properties() {
+        let light = ExtractedLight {
+            name: "SceneLight".to_string(),
+            position_blend: [0.0, 0.0, 0.0],
+            rotation_blend: [1.0, 0.0, 0.0, 0.0],
+            color: [1.0, 1.0, 1.0],
+            lamp_type: 0,
+            energy_watts: 100.0,
+            radius: 10.0,
+            spot_size: 0.0,
+            spot_blend: 0.0,
+            intensity_candela: 5.0,
+            temperature_k: 3000.0,
+            use_temperature: false,
+            gobo_path: None,
+            active_state: "default".to_string(),
+        };
+        let blend_bytes = create_scene_blend("LightEntity", 0, "Data/Objects", &[light]).unwrap();
+        let blocks = parse_blend_blocks(&blend_bytes);
+
+        let entity_root = object_block_by_name(&blocks, "LightEntity");
+        let light_object = object_block_by_name(&blocks, "SceneLight");
+
+        assert_eq!(
+            u64::from_le_bytes(light_object.data[496..504].try_into().unwrap()),
+            entity_root.old_ptr
+        );
+        assert_ne!(u64::from_le_bytes(light_object.data[344..352].try_into().unwrap()), 0);
+        assert!(blend_bytes.windows(b"starbreaker_source_node_name".len()).any(|w| w == b"starbreaker_source_node_name"));
     }
 
     /// Helper to create a minimal DecomposedInput for testing
@@ -2877,10 +3091,26 @@ mod tests_5a_scene_blend {
         let blend_bytes = create_scene_blend("ParentCheck", 2, "Data/Objects", &[light]).unwrap();
         let blocks = parse_blend_blocks(&blend_bytes);
 
+        let object_ptrs = blocks
+            .iter()
+            .filter(|block| block.code == b"OB\0\0")
+            .map(|block| block.old_ptr)
+            .collect::<HashSet<_>>();
+        let collection_ptrs = blocks
+            .iter()
+            .filter(|block| block.code == b"GR\0\0")
+            .map(|block| block.old_ptr)
+            .collect::<HashSet<_>>();
+
         for block in blocks.iter().filter(|block| block.code == b"OB\0\0") {
-            assert_eq!(
-                u64::from_le_bytes(block.data[496..504].try_into().unwrap()),
-                0,
+            let parent_ptr = u64::from_le_bytes(block.data[496..504].try_into().unwrap());
+            assert!(
+                parent_ptr == 0 || object_ptrs.contains(&parent_ptr),
+                "object block 0x{:x} must parent only to another Object or null",
+                block.old_ptr
+            );
+            assert!(
+                !collection_ptrs.contains(&parent_ptr),
                 "object block 0x{:x} must not use a Collection pointer as Object.parent",
                 block.old_ptr
             );
