@@ -772,6 +772,13 @@ pub fn create_scene_blend(
         light_coll_obj_ptrs.push((coll_obj_ptr, object_ptr));
     }
     
+    // Allocate pointers for CollectionChild structs (linking sub-collections to root)
+    // These wrap the sub-collections (Meshes, Lights, Empties, Decals) in the children linked list
+    let meshes_coll_child_ptr = ptrs.alloc();
+    let lights_coll_child_ptr = ptrs.alloc();
+    let empties_coll_child_ptr = ptrs.alloc();
+    let decals_coll_child_ptr = ptrs.alloc();
+    
     // Build scene datablocks
     // Scene must always be named "Scene" for Blender to recognize it as the primary scene
     let scene_data = build_scene("Scene", view_layer_ptr, root_collection_ptr);
@@ -794,10 +801,11 @@ pub fn create_scene_blend(
         root_collection_object_ptr,
         root_collection_object_ptr,  // Both head and tail point to single member (Root object)
     );
-    // Add child collections: Meshes -> Lights -> Empties -> Decals
+    // Add child collections via CollectionChild linked list: Meshes -> Lights -> Empties -> Decals
     // Collection.children ListBase.first at offset 432, .last at offset 440
-    write_ptr(&mut root_collection_data, 432, meshes_collection_ptr);  // children.first = Meshes
-    write_ptr(&mut root_collection_data, 440, decals_collection_ptr);  // children.last = Decals
+    // These point to CollectionChild structs, not directly to Collections
+    write_ptr(&mut root_collection_data, 432, meshes_coll_child_ptr);  // children.first = CollectionChild(Meshes)
+    write_ptr(&mut root_collection_data, 440, decals_coll_child_ptr);  // children.last = CollectionChild(Decals)
     let root_collection_object_data = build_collection_object(root_object_ptr);
     
     // Build mesh collection object linked list
@@ -846,6 +854,29 @@ pub fn create_scene_blend(
         scene_ptr,  // Owner is the Scene
         0,  // No decals yet
         0,  // tail = head when empty
+    );
+    
+    // Build CollectionChild linked list for root collection's children
+    // Each CollectionChild wraps a sub-collection (Meshes -> Lights -> Empties -> Decals)
+    let meshes_coll_child_data = build_collection_object_linked(
+        meshes_collection_ptr,  // Collection pointer (in CollectionChild, this is at offset 16)
+        0,                      // prev = NULL (Meshes is first child)
+        lights_coll_child_ptr,  // next = Lights
+    );
+    let lights_coll_child_data = build_collection_object_linked(
+        lights_collection_ptr,  // Collection pointer
+        meshes_coll_child_ptr,  // prev = Meshes
+        empties_coll_child_ptr, // next = Empties
+    );
+    let empties_coll_child_data = build_collection_object_linked(
+        empties_collection_ptr,  // Collection pointer
+        lights_coll_child_ptr,   // prev = Lights
+        decals_coll_child_ptr,   // next = Decals
+    );
+    let decals_coll_child_data = build_collection_object_linked(
+        decals_collection_ptr,  // Collection pointer
+        empties_coll_child_ptr, // prev = Empties
+        0,                      // next = NULL (Decals is last child)
     );
     
     // Build LayerCollection hierarchy: root contains [Meshes, Lights, Empties, Decals] as siblings
@@ -1009,6 +1040,13 @@ pub fn create_scene_blend(
     // Write collection hierarchy
     write_block(&mut out, b"GRP\0", SDNA_IDX_COLLECTION, root_collection_ptr, 1, &root_collection_data);
     write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, root_collection_object_ptr, 1, &root_collection_object_data);
+    
+    // Write CollectionChild linked list for root collection's children
+    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, meshes_coll_child_ptr, 1, &meshes_coll_child_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, lights_coll_child_ptr, 1, &lights_coll_child_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, empties_coll_child_ptr, 1, &empties_coll_child_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, decals_coll_child_ptr, 1, &decals_coll_child_data);
+    
     write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, layer_collection_ptr, 1, &root_layer_collection_data);
     
     // Sub-collections
