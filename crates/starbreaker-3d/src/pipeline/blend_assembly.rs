@@ -263,16 +263,37 @@ pub fn write_decomposed_export_blend(
     // Create scene.blend with properly linked mesh instances and lights
     let scene_blend_bytes = create_scene_blend(&scene_entity_name, children_for_scene.len(), "Data/Objects", &extracted_lights)?;
     
+    // Compress scene.blend with Zstd (Blender 5.1 native format)
+    let compressed_scene = starbreaker_blend::compress_blend_bytes_zstd(&scene_blend_bytes);
+    
     // Combine blend mesh files with other files (NOT including base_export.scene.blend)
     let mut all_files = blend_files;
     all_files.extend(manifest_files);
     all_files.extend(other_files);
     
-    // Add our detailed scene.blend LAST so it takes priority over any base_export version
+    // Determine package_name from first mesh if available
+    let package_name = if let Some(first_file) = all_files.iter().find(|f| f.relative_path.contains("Packages/")) {
+        // Extract "Packages/PackageName" from relative paths like "Packages/PackageName/mesh_0.blend"
+        if let Some(pkg_start) = first_file.relative_path.find("Packages/") {
+            let after_packages = &first_file.relative_path[pkg_start + 9..]; // Skip "Packages/"
+            if let Some(slash_pos) = after_packages.find('/') {
+                format!("Packages/{}", &after_packages[..slash_pos])
+            } else {
+                "Packages/Default".to_string()
+            }
+        } else {
+            "Packages/Default".to_string()
+        }
+    } else {
+        "Packages/Default".to_string()
+    };
+    
+    // Add our detailed scene.blend with proper relative path and kind
     all_files.push(ExportedFile {
-        relative_path: "scene.blend".to_string(),
-        bytes: scene_blend_bytes,
-        kind: ExportedFileKind::MeshAsset,
+        relative_path: format!("{}/scene.blend", package_name),
+        bytes: compressed_scene,
+        // PackageManifest kind ensures scene.blend is always written (not skipped by skip_existing_assets)
+        kind: ExportedFileKind::PackageManifest,
     });
 
     report_progress(progress, 1.0, "Export complete");
@@ -508,7 +529,7 @@ fn mesh_to_blend(
     write_block(&mut out, b"DATA", 0, mesh_mat_ptr, 1, &mesh_mat_array);
 
     // Attribute descriptor block (all Attribute structs concatenated)
-    write_block(&mut out, b"DATA", SDNA_IDX_ATTRIBUTE, attrs_ptr, num_attrs, &attr_blob);
+    write_block(&mut out, b"DATA", SDNA_IDX_ATTRIBUTE, attrs_ptr, num_attrs as i64, &attr_blob);
 
     // Attribute name strings
     write_block(&mut out, b"DATA", 0, name_pos_ptr, 1, b"position\0");
@@ -609,7 +630,7 @@ fn mesh_to_blend(
                 
                 // Write MDeformVert data array itself
                 let mdv_raw_data = build_mdeformvert_array(&mdeformvert_data);
-                write_block(&mut out, b"DATA", SDNA_IDX_MDEFORMVERT, mdv_data_ptr, totvert as u32, &mdv_raw_data);
+                write_block(&mut out, b"DATA", SDNA_IDX_MDEFORMVERT, mdv_data_ptr, totvert as i64, &mdv_raw_data);
             }
             
             // Write CustomDataLayer

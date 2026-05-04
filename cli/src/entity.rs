@@ -374,8 +374,7 @@ fn export_blend(
         let tree = resolve_loadout_indexed(&idx, record);
         let mut export_opts = starbreaker_3d::ExportOptions::from(&opts);
         export_opts.kind = starbreaker_3d::ExportKind::Decomposed;
-        // For decomposed exports, always use Blend format to generate scene.blend with linked mesh instances (Phase 5A)
-        export_opts.format = starbreaker_3d::ExportFormat::Blend;
+        // Don't force format - respect user's choice (glb or blend)
 
         let output_dir = output.unwrap_or_else(|| PathBuf::from(&name));
         let package_name = format!(
@@ -424,15 +423,19 @@ fn export_blend(
             )));
         }
 
-        let master_path = output_dir.join("Packages").join(&package_name).join("scene.blend");
-        assemble_master_blend_from_scene_json(
-            &output_dir,
-            &scene_json_path,
-            &master_path,
-            &export_name,
-        )?;
+        // Skip Blender subprocess for Blend format - Rust code already generated scene.blend
+        // For GLB format only: optionally assemble scene.blend via subprocess (not currently used)
+        if false {  // Disabled for now - use only Rust-generated files
+            let master_path = output_dir.join("Packages").join(&package_name).join("scene.blend");
+            assemble_master_blend_from_scene_json(
+                &output_dir,
+                &scene_json_path,
+                &master_path,
+                &export_name,
+            )?;
+        }
 
-        eprintln!("Written to {}", master_path.display());
+        eprintln!("Written to {}", output_dir.display());
         return Ok(());
     }
 

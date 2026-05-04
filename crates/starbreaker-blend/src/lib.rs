@@ -16,6 +16,7 @@ use flate2::write::GzEncoder;
 pub const DNA1_BYTES: &[u8] = include_bytes!("dna1_blender501.bin");
 
 /// Blender 5.1.x file magic (17 bytes).
+/// Format: BLENDER (7) + 17 (2) + - (1) + 01 (2) + v (1) + 0501 (4) = 17 bytes
 pub const BLEND_MAGIC: &[u8] = b"BLENDER17-01v0501";
 
 // ── SDNA indices (verified against Blender 5.1.1 DNA1 block) ─────────────────
@@ -110,16 +111,14 @@ pub fn write_block_header(
     code: &[u8; 4],
     sdna_idx: u32,
     old_ptr: u64,
-    data_len: u32,
-    count: u32,
+    data_len: i64,
+    count: i64,
 ) {
     out.extend_from_slice(code);
     out.extend_from_slice(&sdna_idx.to_le_bytes());
     out.extend_from_slice(&old_ptr.to_le_bytes());
     out.extend_from_slice(&data_len.to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes());
     out.extend_from_slice(&count.to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes());
 }
 
 /// Write a complete block (header + data).
@@ -128,10 +127,10 @@ pub fn write_block(
     code: &[u8; 4],
     sdna_idx: u32,
     old_ptr: u64,
-    count: u32,
+    count: i64,
     data: &[u8],
 ) {
-    write_block_header(out, code, sdna_idx, old_ptr, data.len() as u32, count);
+    write_block_header(out, code, sdna_idx, old_ptr, data.len() as i64, count);
     out.extend_from_slice(data);
 }
 
@@ -417,9 +416,13 @@ pub fn build_linked_instance_object(
 ) -> Vec<u8> {
     let mut data = vec![0u8; OBJECT_SIZE];
     write_id_name(&mut data, "OB", object_name);
-    write_i16(&mut data, 416, 0); // OB_EMPTY
+    write_i16(&mut data, 416, 1); // OB_MESH - linked instances must be MESH type to load external mesh data
     write_ptr(&mut data, 496, parent_ptr);
     write_ptr(&mut data, 552, id_stub_ptr); // Point to the ID stub instead of leaving blank
+    write_ptr(&mut data, 712, 0); // No local material array (using linked mesh materials)
+    write_ptr(&mut data, 720, 0); // No local material bits
+    write_i32(&mut data, 728, 0); // No local material slots
+    write_i16(&mut data, 732, 0); // actcol = 0
     for i in 0..3 { write_f32(&mut data, 736 + i * 4, loc[i]); }
     for i in 0..3 { write_f32(&mut data, 760 + i * 4, scale[i]); }
     for i in 0..4 { write_f32(&mut data, 820 + i * 4, quat[i]); }

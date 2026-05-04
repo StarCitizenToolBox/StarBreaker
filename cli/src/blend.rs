@@ -211,7 +211,7 @@ pub(crate) fn mesh_to_blend(name: &str, mesh: &Mesh) -> Vec<u8> {
     write_block(&mut out, b"DATA", 0, mesh_mat_ptr, 1, &mesh_mat_array);
 
     // Attribute descriptor block (all Attribute structs concatenated)
-    write_block(&mut out, b"DATA", SDNA_IDX_ATTRIBUTE, attrs_ptr, num_attrs, &attr_blob);
+    write_block(&mut out, b"DATA", SDNA_IDX_ATTRIBUTE, attrs_ptr, num_attrs as i64, &attr_blob);
 
     // Attribute name strings
     write_block(&mut out, b"DATA", 0, name_pos_ptr, 1, b"position\0");
