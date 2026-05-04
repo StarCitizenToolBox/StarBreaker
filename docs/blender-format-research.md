@@ -160,7 +160,7 @@ _Extracted from SDNA in Blender 5.1 source using official struct definitions._
 | Struct           | SDNA size (bytes) | SDNA struct_idx | SDNA type_idx |
 |------------------|-------------------|-----------------|---------------|
 | `ID`             | 408               | —               | 26            |
-| `Object`         | 1288              | —               | 51            |
+| `Object`         | 1280              | —               | 51            |
 | `Mesh`           | 1960              | —               | 248           |
 | `Lamp`           | 568               | 253             | 343           |
 | `Scene`          | 6920              | —               | 242           |
@@ -179,7 +179,7 @@ _Extracted from SDNA in Blender 5.1 source using official struct definitions._
 | `Link`           | 16                | —               | 397           |
 | `Base`           | 48                | —               | 334           |
 
-### 11.2 Object struct (size=1288)
+### 11.2 Object struct (size=1280)
 
 Confirmed from Blender 5.1 SDNA:
 
@@ -604,14 +604,13 @@ Library blocks represent references to external .blend files. This is essential 
 
 **Location**: `DNA_ID.h:210 - struct Library`
 
-**Total Serialized Size**: **1464 bytes** (400 ID + 1024 filepath + others)
+**Total Serialized Size**: **1456 bytes** (408 ID + 1024 filepath + others)
 
 | Field | Offset | Size | Type | Description |
 |-------|--------|------|------|-------------|
-| `id` | 0 | 400 | `ID` | Base ID struct (name, flags, tags, etc.) |
-| `filepath` | 400 | 1024 | `char[1024]` | Path to external .blend file (UTF-8, null-terminated) |
-| `flag` | 1424 | 4 | `int32` | Library flags (mostly unused in 5.1) |
-| (padding/other) | 1398+ | - | - | Reserved fields |
+| `id` | 0 | 408 | `ID` | Base ID struct (name, flags, tags, etc.) |
+| `filepath` | 408 | 1024 | `char[1024]` | Path to external .blend file (UTF-8, null-terminated) |
+| `flag` | 1432 | 4 | `int32` | Library flags (mostly unused in 5.1) |
 
 ### Filepath Encoding
 
@@ -627,7 +626,7 @@ Library blocks represent references to external .blend files. This is essential 
 |-------|-------|
 | `code` | `ID_LI` |
 | `sdna_idx` | Points to Library struct SDNA index |
-| `len` | 1464 (serialized Library struct size) |
+| `len` | 1456 (serialized Library struct size) |
 | `count` | 1 (one struct per block) |
 
 ### Multiple Library Blocks
@@ -640,7 +639,7 @@ Library blocks represent references to external .blend files. This is essential 
 
 1. Create `BHead` with:
    - `code = ID_LI`
-   - `len = 1426`
+   - `len = 1456`
    - `sdna_idx = <SDNA index of Library struct>`
 2. Serialize Library struct:
    - Set `id.name` to unique identifier
@@ -769,7 +768,7 @@ Exact byte-by-byte serialization format for Library blocks in .blend files.
 | **code** | `ID_LI` = `MAKE_ID2('L', 'I')` | Identifies Library block |
 | **code (hex)** | `0x494C` (little-endian) | Binary value in file |
 | **sdna_idx** | Runtime-assigned | Dynamically computed per build |
-| **len** | 1426 | Exact sizeof(Library) |
+| **len** | 1456 | Exact sizeof(Library) |
 | **count (nr)** | 1 | Single struct per block |
 | **old_ptr** | Stable address ID | Used for pointer remapping |
 
@@ -796,7 +795,7 @@ Library blocks are written with exact field ordering by `library_blend_write_dat
 9. **_pad2** (8 bytes)
    - Final padding
 
-**Total**: 1426 bytes contiguous
+**Total**: 1456 bytes contiguous
 
 ### Filepath Encoding Details
 
