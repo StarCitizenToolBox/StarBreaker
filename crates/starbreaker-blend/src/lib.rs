@@ -373,7 +373,8 @@ pub fn build_object(
     // Default transform: zero translation, unit scale, identity quaternion
     for i in 0..3 { write_f32(&mut data, 736 + i * 4, 0.0); }  // loc
     for i in 0..3 { write_f32(&mut data, 760 + i * 4, 1.0); }  // scale
-    write_f32(&mut data, 820, 1.0); // quat.w
+    // Identity quaternion: [x=0, y=0, z=0, w=1] stored at offset 820 (XYZW order)
+    write_f32(&mut data, 832, 1.0); // quat.w at offset 820 + 3*4
     write_i16(&mut data, 1040, 0);  // ROT_MODE_QUAT
     data
 }
@@ -922,6 +923,318 @@ mod tests {
             let read_use_temp = lamp_bytes[464] != 0;
             assert_eq!(read_use_temp, use_temp, 
                 "use_temperature flag mismatch for {}: expected {}, got {}", temp, use_temp, read_use_temp);
+        }
+    }
+
+    // ── Block Header Compliance Tests (Blender 5.x 32-byte format) ───────────
+
+    #[test]
+    fn test_block_header_size_is_exactly_32_bytes() {
+        let mut buf = Vec::new();
+        let code = *b"DNA1";
+        write_block_header(&mut buf, &code, 0, 0x0100, 0, 0);
+        
+        assert_eq!(
+            buf.len(),
+            32,
+            "Block header MUST be exactly 32 bytes (Blender 5.x format), got {}",
+            buf.len()
+        );
+    }
+
+    #[test]
+    fn test_block_header_code_is_4_bytes() {
+        let mut buf = Vec::new();
+        let code = *b"OB00";
+        write_block_header(&mut buf, &code, 0, 0, 0, 0);
+        
+        // Verify bytes 0-3 match code
+        assert_eq!(&buf[0..4], b"OB00", "Block code must be exactly 4 ASCII bytes at offset 0-3");
+    }
+
+    #[test]
+    fn test_block_header_sdna_index_u32_little_endian() {
+        let mut buf = Vec::new();
+        let code = *b"SC00";
+        let sdna_idx = 0x12345678u32;
+        write_block_header(&mut buf, &code, sdna_idx, 0, 0, 0);
+        
+        // Verify bytes 4-7 contain u32 in little-endian
+        let read_sdna = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+        assert_eq!(
+            read_sdna, sdna_idx,
+            "SDNA index at bytes 4-7 must be u32 little-endian: expected 0x{:08x}, got 0x{:08x}",
+            sdna_idx, read_sdna
+        );
+    }
+
+    #[test]
+    fn test_block_header_old_ptr_u64_little_endian() {
+        let mut buf = Vec::new();
+        let code = *b"ME00";
+        let old_ptr = 0x0102030405060708u64;
+        write_block_header(&mut buf, &code, 0, old_ptr, 0, 0);
+        
+        // Verify bytes 8-15 contain u64 in little-endian
+        let mut ptr_bytes = [0u8; 8];
+        ptr_bytes.copy_from_slice(&buf[8..16]);
+        let read_ptr = u64::from_le_bytes(ptr_bytes);
+        assert_eq!(
+            read_ptr, old_ptr,
+            "Old pointer at bytes 8-15 must be u64 little-endian: expected 0x{:016x}, got 0x{:016x}",
+            old_ptr, read_ptr
+        );
+    }
+
+    #[test]
+    fn test_block_header_data_length_u32_little_endian() {
+        let mut buf = Vec::new();
+        let code = *b"DATA";
+        let data_len = 0xdeadbeefu32;
+        write_block_header(&mut buf, &code, 0, 0, data_len, 0);
+        
+        // Verify bytes 16-19 contain u32 in little-endian
+        let read_len = u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]);
+        assert_eq!(
+            read_len, data_len,
+            "Data length at bytes 16-19 must be u32 little-endian: expected 0x{:08x}, got 0x{:08x}",
+            data_len, read_len
+        );
+    }
+
+    #[test]
+    fn test_block_header_padding1_is_zero() {
+        let mut buf = Vec::new();
+        let code = *b"LA00";
+        write_block_header(&mut buf, &code, 0xffffffff, 0xffffffffffffffff, 0xffffffff, 0xffffffff);
+        
+        // Verify bytes 20-23 are EXACTLY zero (not garbage or uninitialized)
+        assert_eq!(&buf[20..24], &[0, 0, 0, 0], 
+            "Padding field 1 at bytes 20-23 MUST be exactly zero (not uninitialized)");
+    }
+
+    #[test]
+    fn test_block_header_count_u32_little_endian() {
+        let mut buf = Vec::new();
+        let code = *b"GR00";
+        let count = 0xabcdef01u32;
+        write_block_header(&mut buf, &code, 0, 0, 0, count);
+        
+        // Verify bytes 24-27 contain u32 in little-endian
+        let read_count = u32::from_le_bytes([buf[24], buf[25], buf[26], buf[27]]);
+        assert_eq!(
+            read_count, count,
+            "Count field at bytes 24-27 must be u32 little-endian: expected 0x{:08x}, got 0x{:08x}",
+            count, read_count
+        );
+    }
+
+    #[test]
+    fn test_block_header_padding2_is_zero() {
+        let mut buf = Vec::new();
+        let code = *b"ENDB";
+        write_block_header(&mut buf, &code, 0xffffffff, 0xffffffffffffffff, 0xffffffff, 0xffffffff);
+        
+        // Verify bytes 28-31 are EXACTLY zero (not garbage or uninitialized)
+        assert_eq!(&buf[28..32], &[0, 0, 0, 0], 
+            "Padding field 2 at bytes 28-31 MUST be exactly zero (not uninitialized)");
+    }
+
+    #[test]
+    fn test_block_header_dna1_block_normal() {
+        // Normal DNA1 block: code="DNA1", typical indices and counts
+        let mut buf = Vec::new();
+        let code = *b"DNA1";
+        let sdna_idx = SDNA_IDX_DNA1;
+        let old_ptr = 0x0100;
+        let data_len = 2048; // typical DNA1 size
+        let count = 1;
+        
+        write_block_header(&mut buf, &code, sdna_idx, old_ptr, data_len, count);
+        
+        // Verify full header layout
+        assert_eq!(&buf[0..4], b"DNA1");
+        assert_eq!(u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]), sdna_idx);
+        assert_eq!(u64::from_le_bytes([buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15]]), old_ptr);
+        assert_eq!(u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]), data_len);
+        assert_eq!(&buf[20..24], &[0, 0, 0, 0]);
+        assert_eq!(u32::from_le_bytes([buf[24], buf[25], buf[26], buf[27]]), count);
+        assert_eq!(&buf[28..32], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn test_block_header_object_block_zero_count() {
+        // Zero-count block: count=0 (e.g., empty collection or DATA block)
+        let mut buf = Vec::new();
+        let code = *b"OB00";
+        let sdna_idx = SDNA_IDX_OBJECT;
+        let old_ptr = 0x0200;
+        let data_len = 0;
+        let count = 0;
+        
+        write_block_header(&mut buf, &code, sdna_idx, old_ptr, data_len, count);
+        
+        assert_eq!(&buf[0..4], b"OB00");
+        assert_eq!(u32::from_le_bytes([buf[24], buf[25], buf[26], buf[27]]), 0, "Count must be 0");
+        assert_eq!(u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]), 0, "Data length must be 0");
+    }
+
+    #[test]
+    fn test_block_header_large_data_length() {
+        // Large data length block: max u32 value
+        let mut buf = Vec::new();
+        let code = *b"DATA";
+        let sdna_idx = 160; // CUSTOM_DATA_LAYER
+        let old_ptr = 0x0300;
+        let data_len = 0xffffffffu32; // max u32
+        let count = 1000000;
+        
+        write_block_header(&mut buf, &code, sdna_idx, old_ptr, data_len, count);
+        
+        assert_eq!(u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]), data_len, 
+            "Data length must support max u32 value");
+    }
+
+    #[test]
+    fn test_block_header_max_count() {
+        // Max count block: count=0xffffffff
+        let mut buf = Vec::new();
+        let code = *b"SC00";
+        let sdna_idx = SDNA_IDX_SCENE;
+        let old_ptr = 0x0400;
+        let data_len = 65536;
+        let count = 0xffffffffu32;
+        
+        write_block_header(&mut buf, &code, sdna_idx, old_ptr, data_len, count);
+        
+        assert_eq!(u32::from_le_bytes([buf[24], buf[25], buf[26], buf[27]]), count, 
+            "Count field must support max u32 value");
+    }
+
+    #[test]
+    fn test_block_header_all_real_block_codes() {
+        // Test all documented block codes from spec
+        let block_specs = vec![
+            (*b"GLOB", SDNA_IDX_FILE_GLOBAL, 0x0100, 1216, 1),
+            (*b"SC\0\0", SDNA_IDX_SCENE, 0x0200, 6920, 1),
+            (*b"OB\0\0", SDNA_IDX_OBJECT, 0x0300, 800, 1),
+            (*b"ME\0\0", SDNA_IDX_MESH, 0x0400, 4096, 1),
+            (*b"LA\0\0", SDNA_IDX_LAMP, 0x0500, 1200, 1),
+            (*b"GR\0\0", SDNA_IDX_COLLECTION, 0x0600, 520, 1),
+            (*b"DATA", 160, 0x0700, 2048, 1),
+            (*b"DNA1", SDNA_IDX_DNA1, 0x0800, 2048, 1),
+            (*b"ENDB", 0, 0x0900, 0, 0),
+        ];
+        
+        for (code, sdna_idx, old_ptr, data_len, count) in block_specs {
+            let mut buf = Vec::new();
+            write_block_header(&mut buf, &code, sdna_idx, old_ptr, data_len, count);
+            
+            assert_eq!(buf.len(), 32, "Block code {:?} header must be 32 bytes", 
+                String::from_utf8_lossy(&code));
+            assert_eq!(&buf[0..4], &code, "Block code mismatch");
+            assert_eq!(&buf[20..24], &[0, 0, 0, 0], "Padding 1 must be zero for {:?}", 
+                String::from_utf8_lossy(&code));
+            assert_eq!(&buf[28..32], &[0, 0, 0, 0], "Padding 2 must be zero for {:?}", 
+                String::from_utf8_lossy(&code));
+        }
+    }
+
+    #[test]
+    fn test_block_header_byte_layout_complete() {
+        // Complete byte-by-byte layout verification
+        let mut buf = Vec::new();
+        let code = *b"TEST";
+        let sdna_idx = 0x11223344u32;
+        let old_ptr = 0x1122334455667788u64;
+        let data_len = 0x99aabbccu32;
+        let count = 0xddeeff00u32;
+        
+        write_block_header(&mut buf, &code, sdna_idx, old_ptr, data_len, count);
+        
+        // Verify complete layout:
+        // bytes 0-3: code
+        assert_eq!(&buf[0..4], b"TEST");
+        
+        // bytes 4-7: sdna_idx (u32 LE)
+        assert_eq!(&buf[4..8], &[0x44, 0x33, 0x22, 0x11]);
+        
+        // bytes 8-15: old_ptr (u64 LE)
+        assert_eq!(&buf[8..16], &[0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11]);
+        
+        // bytes 16-19: data_len (u32 LE)
+        assert_eq!(&buf[16..20], &[0xcc, 0xbb, 0xaa, 0x99]);
+        
+        // bytes 20-23: padding (ZERO)
+        assert_eq!(&buf[20..24], &[0x00, 0x00, 0x00, 0x00]);
+        
+        // bytes 24-27: count (u32 LE)
+        assert_eq!(&buf[24..28], &[0x00, 0xff, 0xee, 0xdd]);
+        
+        // bytes 28-31: padding (ZERO)
+        assert_eq!(&buf[28..32], &[0x00, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_write_block_with_data() {
+        // Test write_block function that wraps write_block_header
+        let mut buf = Vec::new();
+        let code = *b"DATA";
+        let sdna_idx = 160;
+        let old_ptr = 0x1000;
+        let count = 2;
+        let data = b"Hello, Blender!";
+        
+        write_block(&mut buf, &code, sdna_idx, old_ptr, count, data);
+        
+        // Should be header (32 bytes) + data
+        assert_eq!(buf.len(), 32 + data.len(), "Block size should be header + data");
+        
+        // Verify header portion
+        assert_eq!(&buf[0..4], b"DATA");
+        assert_eq!(u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]), data.len() as u32,
+            "Data length in header must match actual data size");
+        assert_eq!(u32::from_le_bytes([buf[24], buf[25], buf[26], buf[27]]), count,
+            "Count field must match provided count");
+        
+        // Verify data portion
+        assert_eq!(&buf[32..32 + data.len()], data);
+    }
+
+    #[test]
+    fn test_block_header_boundary_values() {
+        // Test boundary values for u32 fields (SDNA index is critical fix)
+        let boundary_cases = vec![
+            (0u32, "zero"),
+            (1u32, "one"),
+            (0x7fffffffu32, "max signed i32"),
+            (0x80000000u32, "min signed i32 as u32 (critical fix)"),
+            (0xffffffffu32, "max u32"),
+        ];
+        
+        for (value, description) in boundary_cases {
+            let mut buf = Vec::new();
+            let code = *b"TEST";
+            
+            // Test SDNA index field
+            write_block_header(&mut buf, &code, value, 0, 0, 0);
+            let read_value = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+            assert_eq!(read_value, value, "SDNA index boundary case failed for {}: expected 0x{:08x}, got 0x{:08x}", 
+                description, value, read_value);
+            
+            // Test data length field
+            buf.clear();
+            write_block_header(&mut buf, &code, 0, 0, value, 0);
+            let read_value = u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]);
+            assert_eq!(read_value, value, "Data length boundary case failed for {}: expected 0x{:08x}, got 0x{:08x}", 
+                description, value, read_value);
+            
+            // Test count field
+            buf.clear();
+            write_block_header(&mut buf, &code, 0, 0, 0, value);
+            let read_value = u32::from_le_bytes([buf[24], buf[25], buf[26], buf[27]]);
+            assert_eq!(read_value, value, "Count boundary case failed for {}: expected 0x{:08x}, got 0x{:08x}", 
+                description, value, read_value);
         }
     }
 }
