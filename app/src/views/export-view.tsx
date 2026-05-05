@@ -54,6 +54,7 @@ export function ExportView() {
   const setMip = useExportStore((s) => s.setMip);
   const setExportKind = useExportStore((s) => s.setExportKind);
   const setMaterialMode = useExportStore((s) => s.setMaterialMode);
+  const setFormat = useExportStore((s) => s.setFormat);
   const setIncludeAttachments = useExportStore((s) => s.setIncludeAttachments);
   const setIncludeInterior = useExportStore((s) => s.setIncludeInterior);
   const setIncludeLights = useExportStore((s) => s.setIncludeLights);
@@ -582,7 +583,10 @@ export function ExportView() {
                     name="exportKind"
                     value={opt.value}
                     checked={exportKind === opt.value}
-                    onChange={() => setExportKind(opt.value)}
+                    onChange={() => {
+                      setExportKind(opt.value);
+                      if (opt.value === "bundled") setFormat("glb");
+                    }}
                     className="accent-accent w-3 h-3"
                   />
                   <span className="text-xs text-text-sub group-hover:text-text transition-colors">
@@ -595,6 +599,34 @@ export function ExportView() {
 
           {exportKind === "decomposed" && (
             <div className="flex flex-col gap-3">
+              <div className="flex flex-col gap-1.5">
+                <span className="text-xs text-text-sub">Output format</span>
+                <div className="flex flex-col gap-1">
+                  {([
+                    { value: "glb", label: ".glb assets", tip: "Structured package with GLB mesh assets." },
+                    { value: "blend", label: ".blend assets", tip: "Structured package with native Blender mesh assets and scene.blend." },
+                  ] as const).map((opt) => (
+                    <label
+                      key={opt.value}
+                      className="flex items-center gap-2 cursor-pointer group"
+                      title={opt.tip}
+                    >
+                      <input
+                        type="radio"
+                        name="format"
+                        value={opt.value}
+                        checked={format === opt.value}
+                        onChange={() => setFormat(opt.value)}
+                        className="accent-accent w-3 h-3"
+                      />
+                      <span className="text-xs text-text-sub group-hover:text-text transition-colors">
+                        {opt.label}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
               <label className="flex items-center gap-2.5 cursor-pointer group">
                 <input
                   type="checkbox"
