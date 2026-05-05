@@ -49,6 +49,14 @@ pub const SDNA_IDX_ID: u32 = 14;
 pub const SDNA_IDX_DNA1: u32 = 0;
 pub const SDNA_IDX_SCREEN: u32 = 758;  // bScreen struct
 pub const SDNA_IDX_WINDOWMANAGER: u32 = 960;  // wmWindowManager struct
+pub const SDNA_IDX_WORLD: u32 = 974;
+pub const SDNA_IDX_BNODE: u32 = 468;
+pub const SDNA_IDX_BNODE_SOCKET: u32 = 466;
+pub const SDNA_IDX_BNODE_LINK: u32 = 470;
+pub const SDNA_IDX_NODE_TEX_SKY: u32 = 530;
+pub const SDNA_IDX_BNSV_RGBA: u32 = 479;
+pub const SDNA_IDX_BNSV_FLOAT: u32 = 475;
+pub const SDNA_IDX_BNSV_VECTOR: u32 = 477;
 
 // ── Struct sizes (bytes) ──────────────────────────────────────────────────────
 pub const FILE_GLOBAL_SIZE: usize = 1216;
@@ -57,6 +65,7 @@ pub const TOOL_SETTINGS_SIZE: usize = 1256;
 pub const VIEW_LAYER_SIZE: usize = 328;
 pub const SCREEN_SIZE: usize = 544;  // bScreen struct (idx=758, verified from dna1_blender501.bin)
 pub const WINDOWMANAGER_SIZE: usize = 1480;  // wmWindowManager struct
+pub const WORLD_SIZE: usize = 560;
 pub const BASE_SIZE: usize = 48;
 pub const COLLECTION_SIZE: usize = 520;
 pub const COLLECTION_OBJECT_SIZE: usize = 32;
@@ -66,6 +75,13 @@ pub const MESH_SIZE: usize = 1960;
 pub const LAMP_SIZE: usize = 568;
 pub const MATERIAL_SIZE: usize = 584;
 pub const BNODE_TREE_SIZE: usize = 736;
+pub const BNODE_SIZE: usize = 384;
+pub const BNODE_SOCKET_SIZE: usize = 464;
+pub const BNODE_LINK_SIZE: usize = 56;
+pub const NODE_TEX_SKY_SIZE: usize = 1024;
+pub const BNSV_RGBA_SIZE: usize = 16;
+pub const BNSV_FLOAT_SIZE: usize = 16;
+pub const BNSV_VECTOR_SIZE: usize = 32;
 pub const ATTRIBUTE_SIZE: usize = 24;
 pub const ATTRIBUTE_ARRAY_SIZE: usize = 32;
 pub const CURVE_MAP_POINT_SIZE: usize = 12;
@@ -355,6 +371,7 @@ pub fn build_scene_with_motion_blur_curve(
         tool_settings_ptr,
         motion_blur_curve_points_ptr,
         0,
+        0,
         "BLENDER_WORKBENCH",
     )
 }
@@ -366,6 +383,7 @@ pub fn build_scene_with_motion_blur_curve_and_properties(
     tool_settings_ptr: u64,
     motion_blur_curve_points_ptr: u64,
     system_properties_ptr: u64,
+    world_ptr: u64,
     render_engine: &str,
 ) -> Vec<u8> {
     let mut data = vec![0u8; SCENE_SIZE];
@@ -392,10 +410,10 @@ pub fn build_scene_with_motion_blur_curve_and_properties(
     write_i32(&mut data, 1084, 1080); // r.ysch
     write_i32(&mut data, 1108, 0x0001 | 0x0004 | 0x0010); // r.scemode = R_DOCOMP | R_DOSEQ | R_EXTENSION
     write_u16(&mut data, 1116, 24); // r.frs_sec
-    write_f32(&mut data, 1124, 0.0); // r.border.xmin
-    write_f32(&mut data, 1128, 1.0); // r.border.xmax
-    write_f32(&mut data, 1132, 0.0); // r.border.ymin
-    write_f32(&mut data, 1136, 1.0); // r.border.ymax
+    write_f32(&mut data, 1120, 0.0); // r.border.xmin
+    write_f32(&mut data, 1124, 1.0); // r.border.xmax
+    write_f32(&mut data, 1128, 0.0); // r.border.ymin
+    write_f32(&mut data, 1132, 1.0); // r.border.ymax
     write_f32(&mut data, 1156, 1.0); // r.xasp
     write_f32(&mut data, 1160, 1.0); // r.yasp
     write_f32(&mut data, 1164, 72.0); // r.ppm_factor
@@ -538,8 +556,34 @@ pub fn build_scene_with_motion_blur_curve_and_properties(
     write_ptr(&mut data, 5648, master_collection_ptr);
     write_ptr(&mut data, 568, tool_settings_ptr);
     write_ptr(&mut data, 352, system_properties_ptr);
+    write_ptr(&mut data, 424, world_ptr);
     write_i32(&mut data, 5664, 1);
     write_i32(&mut data, 5668, 250);
+    data
+}
+
+pub fn build_world(world_name: &str) -> Vec<u8> {
+    build_world_with_node_tree(world_name, 0)
+}
+
+pub fn build_world_with_node_tree(world_name: &str, node_tree_ptr: u64) -> Vec<u8> {
+    let mut data = vec![0u8; WORLD_SIZE];
+    write_id_name(&mut data, "WO", world_name);
+    write_f32(&mut data, 424, 1.0); // horr
+    write_f32(&mut data, 428, 1.0); // horg
+    write_f32(&mut data, 432, 1.0); // horb
+    write_i16(&mut data, 450, 1 << 4); // flag = WO_USE_SUN_SHADOW
+    write_f32(&mut data, 456, 5.0); // miststa
+    write_f32(&mut data, 460, 25.0); // mistdist
+    write_f32(&mut data, 468, 10.0); // aodist
+    write_f32(&mut data, 472, 1.0); // aoenergy
+    write_i32(&mut data, 476, 10); // probe_resolution = LIGHT_PROBE_RESOLUTION_1024
+    write_f32(&mut data, 480, 10.0); // sun_threshold
+    write_f32(&mut data, 484, 0.009180225); // sun_angle = radians(0.526)
+    write_f32(&mut data, 488, 0.001); // sun_shadow_maximum_resolution
+    write_f32(&mut data, 492, 10.0); // sun_shadow_jitter_overblur
+    write_f32(&mut data, 496, 1.0); // sun_shadow_filter_radius
+    write_ptr(&mut data, 512, node_tree_ptr); // nodetree
     data
 }
 
@@ -1240,7 +1284,7 @@ pub fn build_material_with_node_tree_and_properties(
     write_f32(&mut data, 444, 1.0); // specb
     write_f32(&mut data, 456, 0.5); // spec
     write_f32(&mut data, 464, 0.4); // roughness
-    data[472] = 1; // use_nodes, deprecated but written by Blender 5.1 defaults
+    data[472] = u8::from(node_tree_ptr != 0); // use_nodes
     data[473] = 1; // pr_type = MA_SPHERE
     write_ptr(&mut data, 480, node_tree_ptr); // nodetree
     write_f32(&mut data, 524, 0.5); // alpha_threshold
@@ -1268,7 +1312,260 @@ pub fn build_empty_shader_node_tree_named(owner_material_ptr: u64, tree_name: &s
     data
 }
 
-/// Compress Blender .blend file using Zstd (Blender 5.x native format).
+/// Write all blocks for a World with a Sky Texture → Background → World Output
+/// shader node tree, producing a non-black sky in both Cycles and EEVEE.
+///
+/// Emits directly into `out`:
+///   WO block, then 20 DATA blocks: bNodeTree, bNode×3, bNodeSocket×8,
+///   default-value structs×5, NodeTexSky, bNodeLink×2.
+///
+/// `world_ptr` and `world_node_tree_ptr` must already be allocated by the caller
+/// (they are referenced by the Scene block). All additional block pointers are
+/// allocated here via `ptrs`.
+pub fn write_world_with_sky_shader(
+    out: &mut Vec<u8>,
+    world_name: &str,
+    world_ptr: u64,
+    world_node_tree_ptr: u64,
+    ptrs: &mut PtrAlloc,
+) {
+    let world_output_ptr    = ptrs.alloc();
+    let background_ptr      = ptrs.alloc();
+    let sky_tex_ptr         = ptrs.alloc();
+
+    let wo_surface_ptr      = ptrs.alloc();
+    let wo_volume_ptr       = ptrs.alloc();
+
+    let bg_color_ptr        = ptrs.alloc();
+    let bg_strength_ptr     = ptrs.alloc();
+    let bg_weight_ptr       = ptrs.alloc();
+    let bg_out_ptr          = ptrs.alloc();
+
+    let bg_color_def_ptr    = ptrs.alloc();
+    let bg_strength_def_ptr = ptrs.alloc();
+    let bg_weight_def_ptr   = ptrs.alloc();
+
+    let sky_vector_ptr      = ptrs.alloc();
+    let sky_color_out_ptr   = ptrs.alloc();
+
+    let sky_vector_def_ptr  = ptrs.alloc();
+    let sky_color_def_ptr   = ptrs.alloc();
+
+    let sky_storage_ptr     = ptrs.alloc();
+
+    let link1_ptr = ptrs.alloc(); // Background.out → WorldOutput.Surface
+    let link2_ptr = ptrs.alloc(); // SkyTexture.Color → Background.Color
+
+    // ── WO block ─────────────────────────────────────────────────────────────
+    write_block(out, b"WO\0\0", SDNA_IDX_WORLD, world_ptr, 1,
+        &build_world_with_node_tree(world_name, world_node_tree_ptr));
+
+    // ── bNodeTree (embedded DATA, owner = WO) ────────────────────────────────
+    {
+        let mut d = vec![0u8; BNODE_TREE_SIZE];
+        write_id_name(&mut d, "NT", "World Nodetree");
+        write_i16(&mut d, 298, 0x0400);                        // ID_FLAG_EMBEDDED_DATA
+        write_ptr(&mut d, 416, world_ptr);                     // owner_id
+        write_cstr_fixed(&mut d, 432, 64, "ShaderNodeTree");   // idname
+        write_ptr(&mut d, 520, world_output_ptr);              // nodes.first
+        write_ptr(&mut d, 528, sky_tex_ptr);                   // nodes.last
+        write_ptr(&mut d, 536, link1_ptr);                     // links.first
+        write_ptr(&mut d, 544, link2_ptr);                     // links.last
+        write_i32(&mut d, 552, 0);                             // type = NTREE_SHADER
+        write_block(out, b"DATA", SDNA_IDX_BNODE_TREE, world_node_tree_ptr, 1, &d);
+    }
+
+    // ── bNode: WorldOutput ───────────────────────────────────────────────────
+    {
+        let mut d = vec![0u8; BNODE_SIZE];
+        write_ptr(&mut d, 0x000, background_ptr);              // next
+        write_ptr(&mut d, 0x010, wo_surface_ptr);              // inputs.first
+        write_ptr(&mut d, 0x018, wo_volume_ptr);               // inputs.last
+        write_i32(&mut d, 0x074, 0x00010042i32);               // flag
+        write_cstr_fixed(&mut d, 0x078, 64, "ShaderNodeOutputWorld");
+        write_i16(&mut d, 0x0c0, 125);                         // type = SH_NODE_OUTPUT_WORLD
+        write_f32(&mut d, 0x100, 120.0); write_f32(&mut d, 0x104, 100.0);
+        write_f32(&mut d, 0x108, 140.0); write_f32(&mut d, 0x10c, 100.0);
+        write_block(out, b"DATA", SDNA_IDX_BNODE, world_output_ptr, 1, &d);
+    }
+    // WorldOutput.Surface (SHADER in, connected via link1)
+    write_block(out, b"DATA", SDNA_IDX_BNODE_SOCKET, wo_surface_ptr, 1,
+        &build_bnode_socket(wo_volume_ptr, 0, "Surface", "Surface",
+            3, 0x0044, 1, 1, "NodeSocketShader", 0, link1_ptr));
+    // WorldOutput.Volume (SHADER in)
+    write_block(out, b"DATA", SDNA_IDX_BNODE_SOCKET, wo_volume_ptr, 1,
+        &build_bnode_socket(0, wo_surface_ptr, "Volume", "Volume",
+            3, 0x0040, 1, 1, "NodeSocketShader", 0, 0));
+
+    // ── bNode: Background ────────────────────────────────────────────────────
+    {
+        let mut d = vec![0u8; BNODE_SIZE];
+        write_ptr(&mut d, 0x000, sky_tex_ptr);                 // next
+        write_ptr(&mut d, 0x008, world_output_ptr);            // prev
+        write_ptr(&mut d, 0x010, bg_color_ptr);                // inputs.first
+        write_ptr(&mut d, 0x018, bg_weight_ptr);               // inputs.last
+        write_ptr(&mut d, 0x020, bg_out_ptr);                  // outputs.first
+        write_ptr(&mut d, 0x028, bg_out_ptr);                  // outputs.last
+        write_i32(&mut d, 0x074, 0x00010002i32);               // flag
+        write_cstr_fixed(&mut d, 0x078, 64, "ShaderNodeBackground");
+        write_i16(&mut d, 0x0c0, 130);                         // type = SH_NODE_BACKGROUND
+        write_i16(&mut d, 0x0c2, 1);                           // ui_order
+        write_f32(&mut d, 0x100, -80.0); write_f32(&mut d, 0x104, 100.0);
+        write_f32(&mut d, 0x108, 140.0); write_f32(&mut d, 0x10c, 100.0);
+        write_block(out, b"DATA", SDNA_IDX_BNODE, background_ptr, 1, &d);
+    }
+    // Background.Color (RGBA in, connected via link2)
+    write_block(out, b"DATA", SDNA_IDX_BNODE_SOCKET, bg_color_ptr, 1,
+        &build_bnode_socket(bg_strength_ptr, 0, "Color", "Color",
+            2, 0x0044, 1, 1, "NodeSocketColor", bg_color_def_ptr, link2_ptr));
+    {
+        let mut d = vec![0u8; BNSV_RGBA_SIZE];
+        write_f32(&mut d, 0, 0.793); write_f32(&mut d, 4, 0.793);
+        write_f32(&mut d, 8, 0.793); write_f32(&mut d, 12, 1.0);
+        write_block(out, b"DATA", SDNA_IDX_BNSV_RGBA, bg_color_def_ptr, 1, &d);
+    }
+    // Background.Strength (FLOAT in)
+    write_block(out, b"DATA", SDNA_IDX_BNODE_SOCKET, bg_strength_ptr, 1,
+        &build_bnode_socket(bg_weight_ptr, bg_color_ptr, "Strength", "Strength",
+            0, 0x0040, 1, 1, "NodeSocketFloat", bg_strength_def_ptr, 0));
+    {
+        let mut d = vec![0u8; BNSV_FLOAT_SIZE];
+        // subtype=0, value=1.0, min=0.0, max=1_000_000.0
+        write_f32(&mut d, 4, 1.0);
+        write_f32(&mut d, 12, 1_000_000.0_f32);
+        write_block(out, b"DATA", SDNA_IDX_BNSV_FLOAT, bg_strength_def_ptr, 1, &d);
+    }
+    // Background.Weight (FLOAT in)
+    write_block(out, b"DATA", SDNA_IDX_BNODE_SOCKET, bg_weight_ptr, 1,
+        &build_bnode_socket(0, bg_strength_ptr, "Weight", "Weight",
+            0, 0x0048, 1, 1, "NodeSocketFloat", bg_weight_def_ptr, 0));
+    {
+        let mut d = vec![0u8; BNSV_FLOAT_SIZE];
+        // subtype=0, value=0.0, min=-FLT_MAX, max=+FLT_MAX
+        write_f32(&mut d, 8, f32::from_bits(0xff7fffff));
+        write_f32(&mut d, 12, f32::from_bits(0x7f7fffff));
+        write_block(out, b"DATA", SDNA_IDX_BNSV_FLOAT, bg_weight_def_ptr, 1, &d);
+    }
+    // Background.Background (SHADER out)
+    write_block(out, b"DATA", SDNA_IDX_BNODE_SOCKET, bg_out_ptr, 1,
+        &build_bnode_socket(0, 0, "Background", "Background",
+            3, 0x0044, 4095, 2, "NodeSocketShader", 0, 0));
+
+    // ── bNode: SkyTexture ────────────────────────────────────────────────────
+    {
+        let mut d = vec![0u8; BNODE_SIZE];
+        write_ptr(&mut d, 0x008, background_ptr);              // prev
+        write_ptr(&mut d, 0x010, sky_vector_ptr);              // inputs.first
+        write_ptr(&mut d, 0x018, sky_vector_ptr);              // inputs.last
+        write_ptr(&mut d, 0x020, sky_color_out_ptr);           // outputs.first
+        write_ptr(&mut d, 0x028, sky_color_out_ptr);           // outputs.last
+        write_i32(&mut d, 0x074, 0x00014012u32 as i32);        // flag
+        write_cstr_fixed(&mut d, 0x078, 64, "ShaderNodeTexSky");
+        write_i16(&mut d, 0x0c0, 145);                         // type = SH_NODE_TEX_SKY
+        write_i16(&mut d, 0x0c2, 2);                           // ui_order
+        write_ptr(&mut d, 0x0e0, sky_storage_ptr);             // storage
+        write_f32(&mut d, 0x100, -300.0); write_f32(&mut d, 0x104, 100.0);
+        write_f32(&mut d, 0x108, 140.0); write_f32(&mut d, 0x10c, 100.0);
+        write_block(out, b"DATA", SDNA_IDX_BNODE, sky_tex_ptr, 1, &d);
+    }
+    // SkyTexture.Vector (VECTOR in)
+    write_block(out, b"DATA", SDNA_IDX_BNODE_SOCKET, sky_vector_ptr, 1,
+        &build_bnode_socket(0, 0, "Vector", "Vector",
+            1, 0x00c8u16 as i16, 1, 1, "NodeSocketVector", sky_vector_def_ptr, 0));
+    {
+        let mut d = vec![0u8; BNSV_VECTOR_SIZE];
+        // subtype=0, value={0,0,0}, min=-FLT_MAX, max=+FLT_MAX, dims=3
+        write_f32(&mut d, 16, f32::from_bits(0xff7fffff));
+        write_f32(&mut d, 20, f32::from_bits(0x7f7fffff));
+        write_i32(&mut d, 24, 3);
+        write_block(out, b"DATA", SDNA_IDX_BNSV_VECTOR, sky_vector_def_ptr, 1, &d);
+    }
+    // SkyTexture.Color (RGBA out)
+    write_block(out, b"DATA", SDNA_IDX_BNODE_SOCKET, sky_color_out_ptr, 1,
+        &build_bnode_socket(0, 0, "Color", "Color",
+            2, 0x0044, 4095, 2, "NodeSocketColor", sky_color_def_ptr, 0));
+    {
+        let mut d = vec![0u8; BNSV_RGBA_SIZE];
+        write_f32(&mut d, 0, 0.8); write_f32(&mut d, 4, 0.8);
+        write_f32(&mut d, 8, 0.8); write_f32(&mut d, 12, 1.0);
+        write_block(out, b"DATA", SDNA_IDX_BNSV_RGBA, sky_color_def_ptr, 1, &d);
+    }
+
+    // ── NodeTexSky storage ───────────────────────────────────────────────────
+    {
+        let mut d = vec![0u8; NODE_TEX_SKY_SIZE]; // bytes 0–959: NodeTexBase = zeros
+        write_i32(&mut d, 960, 2);          // sky_model = 2 (NISHITA)
+        write_f32(&mut d, 964, 0.0);        // sun_direction.x
+        write_f32(&mut d, 968, 0.0);        // sun_direction.y
+        write_f32(&mut d, 972, 1.0);        // sun_direction.z (pointing up)
+        write_f32(&mut d, 976, 2.2);        // turbidity
+        write_f32(&mut d, 980, 0.3);        // ground_albedo
+        write_f32(&mut d, 984, 0.009512);   // sun_size
+        write_f32(&mut d, 988, 1.0);        // sun_intensity
+        write_f32(&mut d, 992, 0.2618);     // sun_elevation (≈15°)
+        write_f32(&mut d, 996, 0.0);        // sun_rotation
+        write_f32(&mut d, 1000, 0.0);       // altitude
+        write_f32(&mut d, 1004, 1.0);       // air_density
+        write_f32(&mut d, 1008, 1.0);       // dust_density
+        write_f32(&mut d, 1012, 1.0);       // ozone_density
+        d[1016] = 1;                        // sun_disc = true
+        write_block(out, b"DATA", SDNA_IDX_NODE_TEX_SKY, sky_storage_ptr, 1, &d);
+    }
+
+    // ── bNodeLink × 2 ────────────────────────────────────────────────────────
+    // link1: Background.Background_out → WorldOutput.Surface
+    {
+        let mut d = vec![0u8; BNODE_LINK_SIZE];
+        write_ptr(&mut d, 0, link2_ptr);           // next
+        write_ptr(&mut d, 16, background_ptr);     // fromnode
+        write_ptr(&mut d, 24, world_output_ptr);   // tonode
+        write_ptr(&mut d, 32, bg_out_ptr);         // fromsock
+        write_ptr(&mut d, 40, wo_surface_ptr);     // tosock
+        write_i32(&mut d, 48, 2);                  // flag
+        write_block(out, b"DATA", SDNA_IDX_BNODE_LINK, link1_ptr, 1, &d);
+    }
+    // link2: SkyTexture.Color_out → Background.Color
+    {
+        let mut d = vec![0u8; BNODE_LINK_SIZE];
+        write_ptr(&mut d, 8, link1_ptr);           // prev
+        write_ptr(&mut d, 16, sky_tex_ptr);        // fromnode
+        write_ptr(&mut d, 24, background_ptr);     // tonode
+        write_ptr(&mut d, 32, sky_color_out_ptr);  // fromsock
+        write_ptr(&mut d, 40, bg_color_ptr);       // tosock
+        write_i32(&mut d, 48, 2);                  // flag
+        write_block(out, b"DATA", SDNA_IDX_BNODE_LINK, link2_ptr, 1, &d);
+    }
+}
+
+fn build_bnode_socket(
+    next_ptr: u64,
+    prev_ptr: u64,
+    identifier: &str,
+    name: &str,
+    sock_type: i16,
+    flag: i16,
+    limit: i16,
+    in_out: i16,
+    idname: &str,
+    default_value_ptr: u64,
+    link_ptr: u64,
+) -> Vec<u8> {
+    let mut d = vec![0u8; BNODE_SOCKET_SIZE];
+    write_ptr(&mut d, 0x000, next_ptr);
+    write_ptr(&mut d, 0x008, prev_ptr);
+    write_cstr_fixed(&mut d, 0x018, 64, identifier);
+    write_cstr_fixed(&mut d, 0x058, 64, name);
+    write_i16(&mut d, 0x0a0, sock_type);
+    write_i16(&mut d, 0x0a2, flag);
+    write_i16(&mut d, 0x0a4, limit);
+    write_i16(&mut d, 0x0a6, in_out);
+    write_cstr_fixed(&mut d, 0x0b0, 64, idname);
+    write_ptr(&mut d, 0x0f0, default_value_ptr);
+    write_ptr(&mut d, 0x190, link_ptr);
+    d
+}
+
+
 ///
 /// Scene.blend files must be Zstd-compressed; mesh .blend files are uncompressed.
 pub fn compress_blend_bytes_zstd(raw_blend: &[u8]) -> Vec<u8> {

@@ -19,18 +19,18 @@ use starbreaker_blend::{
     bytes4_data, build_attribute, build_attribute_array, build_base, build_collection,
     build_master_collection, build_collection_object_linked,
     build_file_global, build_layer_collection, build_layer_collection_linked, build_mat_ptr_array,
-    build_empty_shader_node_tree, build_idprop_tree, build_mat_ptr_array_from_ptrs,
+    build_idprop_tree, build_mat_ptr_array_from_ptrs,
     build_material_with_node_tree_and_properties,
     build_matbits, build_mesh, build_motion_blur_shutter_curve_points, build_object,
     build_cycles_render_settings_system_properties, build_scene_with_motion_blur_curve_and_properties,
-    build_tool_settings, build_empty_shader_node_tree_named,
+    build_tool_settings, write_world_with_sky_shader,
     build_view_layer,
     floats2_data, floats3_data, ints_data, startup_ui_prefix_bytes, write_block, write_block_header, PtrAlloc,
     ATTR_DOMAIN_CORNER, ATTR_DOMAIN_EDGE, ATTR_DOMAIN_FACE, ATTR_DOMAIN_POINT, ATTR_TYPE_BYTE_COLOR,
     ATTR_TYPE_FLOAT2, ATTR_TYPE_FLOAT3, ATTR_TYPE_INT, BLEND_MAGIC, DNA1_BYTES,
     SDNA_IDX_ATTRIBUTE, SDNA_IDX_ATTRIBUTE_ARRAY, SDNA_IDX_BASE, SDNA_IDX_COLLECTION, SDNA_IDX_COLLECTION_CHILD,
     SDNA_IDX_COLLECTION_OBJECT, SDNA_IDX_DNA1, SDNA_IDX_FILE_GLOBAL, SDNA_IDX_LAYER_COLLECTION,
-    SDNA_IDX_BNODE_TREE, SDNA_IDX_IDPROPERTY, SDNA_IDX_MATERIAL, SDNA_IDX_MESH, SDNA_IDX_OBJECT, SDNA_IDX_SCENE, SDNA_IDX_TOOL_SETTINGS,
+    SDNA_IDX_IDPROPERTY, SDNA_IDX_MATERIAL, SDNA_IDX_MESH, SDNA_IDX_OBJECT, SDNA_IDX_SCENE, SDNA_IDX_TOOL_SETTINGS,
     SDNA_IDX_VIEW_LAYER, SDNA_IDX_LIBRARY, SDNA_IDX_ID,
     build_lamp, build_lamp_object, build_lamp_object_with_properties, build_empty_object, build_empty_object_with_properties,
     build_library_block, build_id_stub, LAMP_SIZE, OBJECT_SIZE,
@@ -852,7 +852,6 @@ fn mesh_to_blend_flat(
     let obj_mat_ptr    = ptrs.alloc();
     let obj_matbits_ptr = ptrs.alloc();
     let material_ptrs: Vec<u64> = (0..material_names.len()).map(|_| ptrs.alloc()).collect();
-    let material_node_tree_ptrs: Vec<u64> = (0..material_names.len()).map(|_| ptrs.alloc()).collect();
     let material_idprops = material_names
         .iter()
         .map(|material_name| allocate_idprop_blocks(&mut ptrs, material_custom_properties(material_name, materials)))
@@ -862,6 +861,8 @@ fn mesh_to_blend_flat(
     let tool_settings_ptr = ptrs.alloc();
     let motion_blur_curve_points_ptr = ptrs.alloc();
     let cycles_scene_props = allocate_cycles_scene_props(&mut ptrs);
+    let world_ptr = ptrs.alloc();
+    let world_node_tree_ptr = ptrs.alloc();
     let base_ptr       = ptrs.alloc();
     let collection_ptr = ptrs.alloc();
     let orientation_collection_object_ptr = ptrs.alloc();
@@ -1040,6 +1041,7 @@ fn mesh_to_blend_flat(
         tool_settings_ptr,
         motion_blur_curve_points_ptr,
         cycles_scene_props.root_ptr,
+        world_ptr,
         "CYCLES",
     );
     let motion_blur_curve_points_data = build_motion_blur_shutter_curve_points();
@@ -1090,6 +1092,7 @@ fn mesh_to_blend_flat(
     write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION, collection_ptr, 1, &collection_data);  // embedded master_collection
     write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, collection_object_ptr, 1, &collection_object_data);
     write_block(&mut out, b"DATA", SDNA_IDX_BASE, base_ptr, 1, &base_data);
+    write_world_with_sky_shader(&mut out, "World", world_ptr, world_node_tree_ptr, &mut ptrs);
 
     write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, orientation_root_ptr, 1, &orientation_root_data);
     write_block(&mut out, b"DATA", 0, orientation_root_mat_ptr, 1, &orientation_root_mat_array);
@@ -1224,23 +1227,20 @@ fn mesh_to_blend_flat(
         }
     }
 
-    for (((material_ptr, node_tree_ptr), material_props), material_name) in material_ptrs
+    for ((material_ptr, material_props), material_name) in material_ptrs
         .iter()
-        .zip(material_node_tree_ptrs.iter())
         .zip(material_idprops.iter())
         .zip(material_names.iter())
     {
         let material_data = build_material_with_node_tree_and_properties(
             material_name,
-            *node_tree_ptr,
+            0,
             material_props.as_ref().map(|props| props.root_ptr).unwrap_or(0),
         );
         write_block(&mut out, b"MA\0\0", SDNA_IDX_MATERIAL, *material_ptr, 1, &material_data);
         if let Some(props) = material_props {
             write_idprop_blocks(&mut out, props);
         }
-        let node_tree_data = build_empty_shader_node_tree(*material_ptr);
-        write_block(&mut out, b"DATA", SDNA_IDX_BNODE_TREE, *node_tree_ptr, 1, &node_tree_data);
     }
 
     write_block(&mut out, b"DNA1", SDNA_IDX_DNA1, 0x01, 1, DNA1_BYTES);
@@ -2215,7 +2215,6 @@ fn mesh_to_blend_hierarchy(
         })
         .collect::<Vec<_>>();
     let material_ptrs = (0..material_names.len()).map(|_| ptrs.alloc()).collect::<Vec<_>>();
-    let material_node_tree_ptrs = (0..material_names.len()).map(|_| ptrs.alloc()).collect::<Vec<_>>();
     let material_idprops = material_names
         .iter()
         .map(|material_name| allocate_idprop_blocks(&mut ptrs, material_custom_properties(material_name, materials)))
@@ -2225,6 +2224,8 @@ fn mesh_to_blend_hierarchy(
     let tool_settings_ptr = ptrs.alloc();
     let motion_blur_curve_points_ptr = ptrs.alloc();
     let cycles_scene_props = allocate_cycles_scene_props(&mut ptrs);
+    let world_ptr = ptrs.alloc();
+    let world_node_tree_ptr = ptrs.alloc();
     let base_ptr = ptrs.alloc();
     let collection_ptr = ptrs.alloc();
     let layer_collection_ptr = ptrs.alloc();
@@ -2238,6 +2239,7 @@ fn mesh_to_blend_hierarchy(
         tool_settings_ptr,
         motion_blur_curve_points_ptr,
         cycles_scene_props.root_ptr,
+        world_ptr,
         "CYCLES",
     );
     let motion_blur_curve_points_data = build_motion_blur_shutter_curve_points();
@@ -2287,6 +2289,9 @@ fn mesh_to_blend_hierarchy(
         write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, *coll_ptr, 1, data);
     }
     write_block(&mut out, b"DATA", SDNA_IDX_BASE, base_ptr, 1, &base_data);
+    write_world_with_sky_shader(&mut out, "World", world_ptr, world_node_tree_ptr, &mut ptrs);
+
+
 
     let coord_matrix = [
         1.0, 0.0, 0.0, 0.0,
@@ -2402,23 +2407,20 @@ fn mesh_to_blend_hierarchy(
         }
     }
 
-    for (((material_ptr, node_tree_ptr), material_props), material_name) in material_ptrs
+    for ((material_ptr, material_props), material_name) in material_ptrs
         .iter()
-        .zip(material_node_tree_ptrs.iter())
         .zip(material_idprops.iter())
         .zip(material_names.iter())
     {
         let material_data = build_material_with_node_tree_and_properties(
             material_name,
-            *node_tree_ptr,
+            0,
             material_props.as_ref().map(|props| props.root_ptr).unwrap_or(0),
         );
         write_block(&mut out, b"MA\0\0", SDNA_IDX_MATERIAL, *material_ptr, 1, &material_data);
         if let Some(props) = material_props {
             write_idprop_blocks(&mut out, props);
         }
-        let node_tree_data = build_empty_shader_node_tree(*material_ptr);
-        write_block(&mut out, b"DATA", SDNA_IDX_BNODE_TREE, *node_tree_ptr, 1, &node_tree_data);
     }
 
     write_block(&mut out, b"DNA1", SDNA_IDX_DNA1, 0x01, 1, DNA1_BYTES);
@@ -2549,6 +2551,8 @@ pub fn create_scene_blend_with_instances(
     let tool_settings_ptr = ptrs.alloc();
     let motion_blur_curve_points_ptr = ptrs.alloc();
     let cycles_scene_props = allocate_cycles_scene_props(&mut ptrs);
+    let world_ptr = ptrs.alloc();
+    let world_node_tree_ptr = ptrs.alloc();
     let mut scene_material_ptrs: HashMap<String, u64> = HashMap::new();
     let mut scene_material_blocks = Vec::new();
     for material_name in mesh_instances_input
@@ -2559,13 +2563,10 @@ pub fn create_scene_blend_with_instances(
             continue;
         }
         let material_ptr = ptrs.alloc();
-        let node_tree_ptr = ptrs.alloc();
         scene_material_ptrs.insert(material_name.clone(), material_ptr);
         scene_material_blocks.push((
             material_ptr,
-            build_material_with_node_tree_and_properties(material_name, node_tree_ptr, 0),
-            node_tree_ptr,
-            build_empty_shader_node_tree_named(material_ptr, &format!("{material_name} Nodetree")),
+            build_material_with_node_tree_and_properties(material_name, 0, 0),
         ));
     }
     let base_ptr = ptrs.alloc();
@@ -2615,8 +2616,19 @@ pub fn create_scene_blend_with_instances(
     let mut scene_source_node_entries = Vec::new();
     let mut source_empty_entries = Vec::new();
     let mut source_node_ptr_by_name = HashMap::new();
+    let mut local_source_node_ptrs_by_instance = Vec::new();
+    let preallocated_local_object_ptrs = (0..children_count).map(|_| ptrs.alloc()).collect::<Vec<_>>();
+    let mut source_object_ptr_by_name = HashMap::new();
+    for (idx, instance) in mesh_instances_input.iter().enumerate() {
+        source_object_ptr_by_name
+            .entry(instance.name.clone())
+            .or_insert(preallocated_local_object_ptrs[idx]);
+    }
     
     for (idx, instance) in mesh_instances_input.iter().enumerate() {
+        let anchor_ptr = ptrs.alloc();
+        let anchor_coll_obj_ptr = ptrs.alloc();
+        let anchor_idprops = allocate_idprop_blocks(&mut ptrs, scene_instance_properties(entity_name, instance));
         let mut local_source_node_ptrs = HashMap::new();
         let mut local_source_node_entries = Vec::new();
         for source_node in &instance.source_nodes {
@@ -2634,11 +2646,16 @@ pub fn create_scene_blend_with_instances(
             let parent_ptr = source_node
                 .parent_name
                 .as_ref()
-                .and_then(|name| local_source_node_ptrs.get(name))
+                .and_then(|name| {
+                    local_source_node_ptrs
+                        .get(name)
+                        .or_else(|| source_object_ptr_by_name.get(name))
+                })
                 .copied()
-                .unwrap_or(entity_root_ptr);
+                .unwrap_or(anchor_ptr);
             scene_source_node_entries.push((*empty_ptr, idx, node_index, parent_ptr));
         }
+        local_source_node_ptrs_by_instance.push(local_source_node_ptrs);
         let mesh_id_ptr = ptrs.alloc();
         let library_ptr = if let Some(&ptr) = library_ptr_by_path.get(&instance.blend_path) {
             ptr
@@ -2649,23 +2666,29 @@ pub fn create_scene_blend_with_instances(
             ptr
         };
         let coll_obj_ptr = ptrs.alloc();  // Collection object for this mesh instance
-        let local_object_ptr = ptrs.alloc();
+        let local_object_ptr = preallocated_local_object_ptrs[idx];
         let local_object_mat_ptr = ptrs.alloc();
         let local_object_matbits_ptr = ptrs.alloc();
         let local_object_idprops = allocate_idprop_blocks(&mut ptrs, scene_instance_properties(entity_name, instance));
-        let anchor_ptr = ptrs.alloc();
-        let anchor_coll_obj_ptr = ptrs.alloc();
-        let anchor_idprops = allocate_idprop_blocks(&mut ptrs, scene_instance_properties(entity_name, instance));
         let anchor_parent_ptr = instance
             .parent_node_name
             .as_ref()
-            .and_then(|name| source_node_ptr_by_name.get(name))
+            .and_then(|name| {
+                source_node_ptr_by_name
+                    .get(name)
+                    .or_else(|| source_object_ptr_by_name.get(name))
+            })
             .copied()
             .unwrap_or(entity_root_ptr);
         let mesh_parent_ptr = instance
             .source_parent_name
             .as_ref()
-            .and_then(|name| source_node_ptr_by_name.get(name))
+            .and_then(|name| {
+                local_source_node_ptrs_by_instance[idx]
+                    .get(name)
+                    .or_else(|| source_node_ptr_by_name.get(name))
+                    .or_else(|| source_object_ptr_by_name.get(name))
+            })
             .copied()
             .unwrap_or_else(|| {
                 let mut ancestor_ptrs = Vec::new();
@@ -2733,6 +2756,7 @@ pub fn create_scene_blend_with_instances(
         tool_settings_ptr,
         motion_blur_curve_points_ptr,
         cycles_scene_props.root_ptr,
+        world_ptr,
         "CYCLES",
     );
     let motion_blur_curve_points_data = build_motion_blur_shutter_curve_points();
@@ -2960,6 +2984,9 @@ pub fn create_scene_blend_with_instances(
     write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION, root_collection_ptr, 1, &root_collection_data);  // embedded master_collection
     write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_CHILD, meshes_coll_child_ptr, 1, &package_coll_child_data);
     // End of SC DATA sequence — sub-collection GR blocks follow with their own DATA sub-blocks:
+    write_world_with_sky_shader(&mut out, "World", world_ptr, world_node_tree_ptr, &mut ptrs);
+
+
     
     // Single visible package collection containing every local object.
     write_block(&mut out, b"GR\0\0", SDNA_IDX_COLLECTION, meshes_collection_ptr, 1, &package_collection_data);
@@ -3001,9 +3028,8 @@ pub fn create_scene_blend_with_instances(
         write_block(&mut out, b"DATA", 0, local_mesh_object_entries[idx].2, 1, matbits);
     }
 
-    for (material_ptr, material_data, node_tree_ptr, node_tree_data) in &scene_material_blocks {
+    for (material_ptr, material_data) in &scene_material_blocks {
         write_block(&mut out, b"MA\0\0", SDNA_IDX_MATERIAL, *material_ptr, 1, material_data);
-        write_block(&mut out, b"DATA", SDNA_IDX_BNODE_TREE, *node_tree_ptr, 1, node_tree_data);
     }
     
     // Write light blocks (Phase 5B)
@@ -3560,6 +3586,7 @@ mod tests_5a_scene_blend {
 
         let hardpoint = object_block_by_name(&blocks, "root_mesh_0_hardpoint_child");
         let root_empty = object_block_by_name(&blocks, "root_mesh_1_Root");
+        let root_anchor = object_block_by_name(&blocks, "root_mesh_anchor");
         let child_anchor = object_block_by_name(&blocks, "child_mesh_anchor");
         let root_mesh = object_block_by_name(&blocks, "root_mesh");
 
@@ -3567,6 +3594,11 @@ mod tests_5a_scene_blend {
             u64::from_le_bytes(hardpoint.data[496..504].try_into().unwrap()),
             root_empty.old_ptr,
             "source-empty parent resolution must be independent of source node block order"
+        );
+        assert_eq!(
+            u64::from_le_bytes(root_empty.data[496..504].try_into().unwrap()),
+            root_anchor.old_ptr,
+            "source-empty hierarchy roots should attach to the scene instance anchor"
         );
         assert_eq!(
             u64::from_le_bytes(child_anchor.data[496..504].try_into().unwrap()),
@@ -3577,6 +3609,110 @@ mod tests_5a_scene_blend {
             u64::from_le_bytes(root_mesh.data[496..504].try_into().unwrap()),
             hardpoint.old_ptr,
             "mesh objects should reuse the full source empty tree instead of duplicating ancestor empties"
+        );
+    }
+
+    #[test]
+    fn test_create_scene_blend_parents_source_empty_to_local_mesh_object() {
+        let instance = LinkedMeshInstance {
+            name: "parent_mesh".to_string(),
+            mesh_name: "parent_mesh_data".to_string(),
+            material_names: Vec::new(),
+            source_nodes: vec![LinkedSourceNode {
+                name: "child_empty".to_string(),
+                parent_name: Some("parent_mesh".to_string()),
+                loc: [1.0, 2.0, 3.0],
+                quat: [1.0, 0.0, 0.0, 0.0],
+                scale: [1.0, 1.0, 1.0],
+            }],
+            source_ancestors: Vec::new(),
+            source_loc: [0.0, 0.0, 0.0],
+            source_quat: [1.0, 0.0, 0.0, 0.0],
+            source_scale: [1.0, 1.0, 1.0],
+            source_parent_name: None,
+            parent_node_name: None,
+            blend_path: "//../../Data/Objects/Ships/parent.blend".to_string(),
+            mesh_asset: "Data/Objects/Ships/parent.blend".to_string(),
+            position: [0.0, 0.0, 0.0],
+            rotation: [1.0, 0.0, 0.0, 0.0],
+            scale: [1.0, 1.0, 1.0],
+        };
+        let blend_bytes = create_scene_blend_with_instances("MeshParentEntity", &[instance], &[]).unwrap();
+        let blocks = parse_blend_blocks(&blend_bytes);
+        let parent_mesh = object_block_by_name(&blocks, "parent_mesh");
+        let child_empty = object_block_by_name(&blocks, "parent_mesh_0_child_empty");
+
+        assert_eq!(
+            u64::from_le_bytes(child_empty.data[496..504].try_into().unwrap()),
+            parent_mesh.old_ptr,
+            "source empties whose source parent is a mesh object should not fall back to the entity root"
+        );
+    }
+
+    #[test]
+    fn test_create_scene_blend_uses_instance_local_source_parent_before_global_name() {
+        let first = LinkedMeshInstance {
+            name: "first_instance_mesh".to_string(),
+            mesh_name: "first_instance_mesh_data".to_string(),
+            material_names: Vec::new(),
+            source_nodes: vec![LinkedSourceNode {
+                name: "shared_source_parent".to_string(),
+                parent_name: None,
+                loc: [0.0, 0.0, 0.0],
+                quat: [1.0, 0.0, 0.0, 0.0],
+                scale: [1.0, 1.0, 1.0],
+            }],
+            source_ancestors: Vec::new(),
+            source_loc: [0.0, 0.0, 0.0],
+            source_quat: [1.0, 0.0, 0.0, 0.0],
+            source_scale: [1.0, 1.0, 1.0],
+            source_parent_name: Some("shared_source_parent".to_string()),
+            parent_node_name: None,
+            blend_path: "//../../Data/Objects/Ships/shared.blend".to_string(),
+            mesh_asset: "Data/Objects/Ships/shared.blend".to_string(),
+            position: [0.0, 0.0, 0.0],
+            rotation: [1.0, 0.0, 0.0, 0.0],
+            scale: [1.0, 1.0, 1.0],
+        };
+        let second = LinkedMeshInstance {
+            name: "second_instance_mesh".to_string(),
+            mesh_name: "second_instance_mesh_data".to_string(),
+            material_names: Vec::new(),
+            source_nodes: vec![LinkedSourceNode {
+                name: "shared_source_parent".to_string(),
+                parent_name: None,
+                loc: [0.0, 0.0, 0.0],
+                quat: [1.0, 0.0, 0.0, 0.0],
+                scale: [1.0, 1.0, 1.0],
+            }],
+            source_ancestors: Vec::new(),
+            source_loc: [0.0, 0.0, 0.0],
+            source_quat: [1.0, 0.0, 0.0, 0.0],
+            source_scale: [1.0, 1.0, 1.0],
+            source_parent_name: Some("shared_source_parent".to_string()),
+            parent_node_name: None,
+            blend_path: "//../../Data/Objects/Ships/shared.blend".to_string(),
+            mesh_asset: "Data/Objects/Ships/shared.blend".to_string(),
+            position: [0.0, 0.0, 0.0],
+            rotation: [1.0, 0.0, 0.0, 0.0],
+            scale: [1.0, 1.0, 1.0],
+        };
+        let blend_bytes = create_scene_blend_with_instances("LocalSourceParentEntity", &[first, second], &[]).unwrap();
+        let blocks = parse_blend_blocks(&blend_bytes);
+        let first_parent = object_block_by_name(&blocks, "first_instance_mesh_0_shared_source_parent");
+        let second_parent = object_block_by_name(&blocks, "second_instance_mesh_0_shared_source_parent");
+        let first_mesh = object_block_by_name(&blocks, "first_instance_mesh");
+        let second_mesh = object_block_by_name(&blocks, "second_instance_mesh");
+
+        assert_eq!(
+            u64::from_le_bytes(first_mesh.data[496..504].try_into().unwrap()),
+            first_parent.old_ptr,
+            "first instance should use its local source parent clone"
+        );
+        assert_eq!(
+            u64::from_le_bytes(second_mesh.data[496..504].try_into().unwrap()),
+            second_parent.old_ptr,
+            "second instance should not attach to the first instance's source parent clone"
         );
     }
 
