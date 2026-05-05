@@ -8,9 +8,9 @@
 //! from a live Blender 5.1.1 instance and cross-checked against the bundled DNA1
 //! block (`dna1_blender501.bin`).
 
-use std::collections::HashMap;
 use std::io::Write;
 
+use rustc_hash::FxHashMap;
 use zstd::Encoder;
 
 mod ui_prefix;
@@ -305,7 +305,10 @@ pub fn ints2_data(values: &[[i32; 2]]) -> Vec<u8> {
 /// Blender's generic mesh topology requires `.edge_verts` on the EDGE domain
 /// and `.corner_edge` alongside `.corner_vert` on the CORNER domain.
 pub fn triangle_edge_topology(indices: &[u32]) -> (Vec<[i32; 2]>, Vec<i32>) {
-    let mut edge_map: HashMap<(u32, u32), i32> = HashMap::with_capacity(indices.len() / 2);
+    let mut edge_map: FxHashMap<(u32, u32), i32> = FxHashMap::with_capacity_and_hasher(
+        indices.len() / 2,
+        Default::default(),
+    );
     let mut edge_verts = Vec::with_capacity(indices.len() / 2);
     let mut corner_edges = Vec::with_capacity(indices.len());
 

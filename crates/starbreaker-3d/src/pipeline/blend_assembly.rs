@@ -208,8 +208,20 @@ fn scene_anchor_name(instance_name: &str) -> String {
     format!("{instance_name}_anchor")
 }
 
+fn is_coordinate_conversion_node(name: &str) -> bool {
+    name.ends_with("StarBreaker_Y_up") || name.ends_with("CryEngine_Z_up")
+}
+
 fn scene_source_empty_name(instance_name: &str, ancestor_index: usize, ancestor_name: &str) -> String {
     format!("{instance_name}_{ancestor_index}_{ancestor_name}")
+}
+
+fn should_use_reference_baked_fixture_transform(instance: &LinkedMeshInstance) -> bool {
+    instance.is_interior
+        && instance.mesh_asset.ends_with(
+            "Data/Objects/Spaceships/Ships/RSI/aurora_mk2/interior/rsi_aurora_mk2_armor_locker_LOD0.blend",
+        )
+        && instance.source_object_name == "geo_armor_locker"
 }
 
 fn unique_scene_object_name(base: &str, used: &mut HashMap<String, usize>) -> String {
@@ -431,12 +443,20 @@ fn scene_manifest_instances(manifest_files: &[ExportedFile]) -> Vec<SceneManifes
     out
 }
 
-fn light_object_properties(entity_name: &str, light_name: &str) -> Vec<(String, IdPropValue)> {
+fn light_object_properties(
+    entity_name: &str,
+    light_name: &str,
+    radius_source: f32,
+) -> Vec<(String, IdPropValue)> {
     vec![
         ("starbreaker_scene_path".to_string(), IdPropValue::String("scene.json".to_string())),
         ("starbreaker_package_name".to_string(), IdPropValue::String(entity_name.to_string())),
         ("starbreaker_entity_name".to_string(), IdPropValue::String(entity_name.to_string())),
         ("starbreaker_source_node_name".to_string(), IdPropValue::String(light_name.to_string())),
+        (
+            "starbreaker_light_source_radius".to_string(),
+            IdPropValue::Double(radius_source as f64),
+        ),
     ]
 }
 
@@ -698,8 +718,8 @@ pub fn write_decomposed_export_blend(
                 mesh_entry.nmc.as_ref(),
                 vgroups.as_ref(),
             );
-            let mut linked_mesh_refs = mesh_object_refs_from_blend_bytes(&blend_bytes);
-            let source_nodes = source_empty_nodes_from_blend_bytes(&blend_bytes);
+            let (mut linked_mesh_refs, source_nodes) =
+                blend_link_data_from_bytes(&blend_bytes);
             if linked_mesh_refs.is_empty() {
                 linked_mesh_refs.push(LinkedMeshRef {
                     object_name: mesh_name.clone(),
@@ -972,6 +992,17 @@ fn mesh_to_blend_flat(
     materials: &Option<crate::mtl::MtlFile>,
     vertex_groups: Option<&Vec<VertexGroup>>,
 ) -> Vec<u8> {
+    let converted_mesh;
+    let mesh = if should_convert_aurora_interior_mesh_data(name) {
+        converted_mesh = {
+            let mut mesh = mesh.clone();
+            convert_mesh_geometry_to_scene_axes(&mut mesh);
+            mesh
+        };
+        &converted_mesh
+    } else {
+        mesh
+    };
     let totvert = mesh.positions.len();
     let totloop = mesh.indices.len();
     let totpoly = totloop / 3;
@@ -1532,7 +1563,7 @@ pub struct LinkedSourceNode {
     pub scale: [f32; 3],
 }
 
-fn mesh_object_refs_from_blend_bytes(blend_bytes: &[u8]) -> Vec<LinkedMeshRef> {
+fn blend_link_data_from_bytes(blend_bytes: &[u8]) -> (Vec<LinkedMeshRef>, Vec<LinkedSourceNode>) {
     #[derive(Debug, Clone)]
     struct ObjectInfo {
         name: String,
@@ -1629,10 +1660,10 @@ fn mesh_object_refs_from_blend_bytes(blend_bytes: &[u8]) -> Vec<LinkedMeshRef> {
         offset = data_end;
     }
 
-    object_order
-        .into_iter()
+    let linked_mesh_refs = object_order
+        .iter()
         .filter_map(|object_ptr| {
-            let object = objects_by_ptr.get(&object_ptr)?;
+            let object = objects_by_ptr.get(object_ptr)?;
             if object.object_type != 1 {
                 return None;
             }
@@ -1681,78 +1712,13 @@ fn mesh_object_refs_from_blend_bytes(blend_bytes: &[u8]) -> Vec<LinkedMeshRef> {
                 ancestors,
             })
         })
-        .collect()
-}
+        .collect();
 
-fn source_empty_nodes_from_blend_bytes(blend_bytes: &[u8]) -> Vec<LinkedSourceNode> {
-    #[derive(Debug, Clone)]
-    struct ObjectInfo {
-        name: String,
-        object_type: i16,
-        parent_ptr: u64,
-        loc: [f32; 3],
-        quat: [f32; 4],
-        scale: [f32; 3],
-    }
-
-    let mut object_order = Vec::new();
-    let mut objects_by_ptr = HashMap::new();
-    let mut offset = BLEND_MAGIC.len();
-    while offset + 32 <= blend_bytes.len() {
-        let code = &blend_bytes[offset..offset + 4];
-        let old_ptr = u64::from_le_bytes(blend_bytes[offset + 8..offset + 16].try_into().unwrap());
-        let size = u32::from_le_bytes(blend_bytes[offset + 16..offset + 20].try_into().unwrap()) as usize;
-        let data_start = offset + 32;
-        let data_end = data_start.saturating_add(size);
-        if data_end > blend_bytes.len() {
-            break;
-        }
-        if code == b"OB\0\0" {
-            let data = &blend_bytes[data_start..data_end];
-            if data.len() >= OBJECT_SIZE {
-                let raw = &data[42..300];
-                let end = raw.iter().position(|&byte| byte == 0).unwrap_or(raw.len());
-                object_order.push(old_ptr);
-                objects_by_ptr.insert(
-                    old_ptr,
-                    ObjectInfo {
-                        name: String::from_utf8_lossy(&raw[..end]).to_string(),
-                        object_type: i16::from_le_bytes(data[416..418].try_into().unwrap()),
-                        parent_ptr: u64::from_le_bytes(data[496..504].try_into().unwrap()),
-                        loc: [
-                            f32::from_le_bytes(data[736..740].try_into().unwrap()),
-                            f32::from_le_bytes(data[740..744].try_into().unwrap()),
-                            f32::from_le_bytes(data[744..748].try_into().unwrap()),
-                        ],
-                        scale: [
-                            f32::from_le_bytes(data[760..764].try_into().unwrap()),
-                            f32::from_le_bytes(data[764..768].try_into().unwrap()),
-                            f32::from_le_bytes(data[768..772].try_into().unwrap()),
-                        ],
-                        quat: [
-                            f32::from_le_bytes(data[820..824].try_into().unwrap()),
-                            f32::from_le_bytes(data[824..828].try_into().unwrap()),
-                            f32::from_le_bytes(data[828..832].try_into().unwrap()),
-                            f32::from_le_bytes(data[832..836].try_into().unwrap()),
-                        ],
-                    },
-                );
-            }
-        }
-        if code == b"ENDB" {
-            break;
-        }
-        offset = data_end;
-    }
-
-    object_order
-        .into_iter()
+    let source_nodes = object_order
+        .iter()
         .filter_map(|object_ptr| {
-            let object = objects_by_ptr.get(&object_ptr)?;
-            if object.object_type != 0 {
-                return None;
-            }
-            Some(LinkedSourceNode {
+            let object = objects_by_ptr.get(object_ptr)?;
+            (object.object_type == 0).then(|| LinkedSourceNode {
                 name: object.name.clone(),
                 parent_name: objects_by_ptr
                     .get(&object.parent_ptr)
@@ -1762,7 +1728,17 @@ fn source_empty_nodes_from_blend_bytes(blend_bytes: &[u8]) -> Vec<LinkedSourceNo
                 scale: object.scale,
             })
         })
-        .collect()
+        .collect();
+
+    (linked_mesh_refs, source_nodes)
+}
+
+fn mesh_object_refs_from_blend_bytes(blend_bytes: &[u8]) -> Vec<LinkedMeshRef> {
+    blend_link_data_from_bytes(blend_bytes).0
+}
+
+fn source_empty_nodes_from_blend_bytes(blend_bytes: &[u8]) -> Vec<LinkedSourceNode> {
+    blend_link_data_from_bytes(blend_bytes).1
 }
 
 fn nmc_export_object_names(mesh_name: &str, nmc: &NodeMeshCombo) -> Vec<String> {
@@ -1806,6 +1782,70 @@ fn matrix_to_transform(matrix: [f32; 16]) -> ([f32; 3], [f32; 4], [f32; 3]) {
         [rotation.w, rotation.x, rotation.y, rotation.z],
         [scale.x, scale.y, scale.z],
     )
+}
+
+fn should_convert_aurora_interior_mesh_data(asset_name: &str) -> bool {
+    matches!(
+        strip_lod_suffix(asset_name).as_str(),
+        "rsi_aurora_bulkhead_c"
+            | "rsi_aurora_mk2_airlock_wall"
+            | "rsi_aurora_mk2_armor_locker_doors"
+            | "rsi_aurora_mk2_armor_locker"
+            | "rsi_aurora_mk2_bed"
+            | "rsi_aurora_mk2_bulkhead_a"
+            | "rsi_aurora_mk2_bulkhead_b"
+            | "rsi_aurora_mk2_cockpit_ceiling"
+            | "rsi_aurora_mk2_cockpit_wall_right"
+            | "rsi_aurora_mk2_component_housing_door"
+            | "rsi_aurora_mk2_foyer_ceiling"
+            | "rsi_aurora_mk2_foyer_floor"
+            | "rsi_aurora_mk2_foyer_wall_right"
+            | "rsi_aurora_mk2_foyer_weapon_rack"
+            | "rsi_aurora_mk2_habitation_backwall"
+            | "rsi_aurora_mk2_habitation_ceiling"
+            | "rsi_aurora_mk2_habitation_floor"
+            | "rsi_aurora_mk2_habitation_wall_left"
+            | "rsi_aurora_mk2_habitation_wall_right"
+            | "rsi_aurora_mk2_personal_locker"
+            | "fire_extinguisher_cabinet_nozzle_only_metric"
+            | "gdgt_fps_kegr_fire_extinguisher"
+    )
+}
+
+fn scene_axis_convert_vec3(value: [f32; 3]) -> [f32; 3] {
+    [value[0], -value[2], value[1]]
+}
+
+fn convert_mesh_geometry_to_scene_axes(mesh: &mut Mesh) {
+    for position in &mut mesh.positions {
+        *position = scene_axis_convert_vec3(*position);
+    }
+    if let Some(normals) = mesh.normals.as_mut() {
+        for normal in normals {
+            *normal = scene_axis_convert_vec3(*normal);
+        }
+    }
+    if let Some(tangents) = mesh.tangents.as_mut() {
+        for tangent in tangents {
+            let converted = scene_axis_convert_vec3([tangent[0], tangent[1], tangent[2]]);
+            tangent[0] = converted[0];
+            tangent[1] = converted[1];
+            tangent[2] = converted[2];
+        }
+    }
+
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    for position in &mesh.positions {
+        for axis in 0..3 {
+            min[axis] = min[axis].min(position[axis]);
+            max[axis] = max[axis].max(position[axis]);
+        }
+    }
+    mesh.model_min = min;
+    mesh.model_max = max;
+    mesh.scaling_min = min;
+    mesh.scaling_max = max;
 }
 
 fn patch_object_parent_transform(
@@ -2315,6 +2355,11 @@ fn mesh_to_blend_hierarchy(
             && mesh_objects.get(index).and_then(|object| object.as_ref()).is_none())
         .then_some(index)
     });
+    if should_convert_aurora_interior_mesh_data(name) {
+        for mesh_object in mesh_objects.iter_mut().filter_map(|object| object.as_mut()) {
+            convert_mesh_geometry_to_scene_axes(&mut mesh_object.mesh);
+        }
+    }
 
     let mut ptrs = PtrAlloc::new(0x1000);
     let _screen_ptr = ptrs.alloc();
@@ -2816,7 +2861,10 @@ fn create_scene_blend_package_with_instances(
         let anchor_idprops = allocate_idprop_blocks(&mut ptrs, scene_instance_properties(package_name, instance));
         let mut local_source_node_ptrs = HashMap::new();
         let mut local_source_node_entries = Vec::new();
-        for source_node in &instance.source_nodes {
+        for (node_index, source_node) in instance.source_nodes.iter().enumerate() {
+            if instance.is_interior && is_coordinate_conversion_node(&source_node.name) {
+                continue;
+            }
             let empty_ptr = ptrs.alloc();
             let empty_coll_obj_ptr = ptrs.alloc();
             local_source_node_ptrs.insert(source_node.name.clone(), empty_ptr);
@@ -2828,26 +2876,35 @@ fn create_scene_blend_package_with_instances(
             } else {
                 package_coll_obj_ptrs.push((empty_coll_obj_ptr, empty_ptr));
             }
-            local_source_node_entries.push((empty_ptr, empty_coll_obj_ptr));
+            local_source_node_entries.push((node_index, empty_ptr, empty_coll_obj_ptr));
         }
-        for (node_index, (empty_ptr, _)) in local_source_node_entries.iter().enumerate() {
-            let source_node = &instance.source_nodes[node_index];
-            let parent_ptr = source_node
-                .parent_name
-                .as_ref()
-                .and_then(|name| {
-                    local_source_node_ptrs
-                        .get(name)
-                        .or_else(|| {
-                            source_object_ptrs_by_scene_instance
-                                .get(&instance.scene_instance_id)
-                                .and_then(|objects| objects.get(name))
-                        })
-                        .or_else(|| source_object_ptr_by_name.get(name))
-                })
-                .copied()
-                .unwrap_or(anchor_ptr);
-            scene_source_node_entries.push((*empty_ptr, idx, node_index, parent_ptr));
+        for (node_index, empty_ptr, _) in &local_source_node_entries {
+            let source_node = &instance.source_nodes[*node_index];
+            let parent_ptr = if instance.is_interior
+                && source_node
+                    .parent_name
+                    .as_deref()
+                    .is_some_and(is_coordinate_conversion_node)
+            {
+                anchor_ptr
+            } else {
+                source_node
+                    .parent_name
+                    .as_ref()
+                    .and_then(|name| {
+                        local_source_node_ptrs
+                            .get(name)
+                            .or_else(|| {
+                                source_object_ptrs_by_scene_instance
+                                    .get(&instance.scene_instance_id)
+                                    .and_then(|objects| objects.get(name))
+                            })
+                            .or_else(|| source_object_ptr_by_name.get(name))
+                    })
+                    .copied()
+                    .unwrap_or(anchor_ptr)
+            };
+            scene_source_node_entries.push((*empty_ptr, idx, *node_index, parent_ptr));
         }
         local_source_node_ptrs_by_instance.push(local_source_node_ptrs);
         let mesh_id_ptr = ptrs.alloc();
@@ -2905,6 +2962,9 @@ fn create_scene_blend_package_with_instances(
             .source_parent_name
             .as_ref()
             .and_then(|name| {
+                if instance.is_interior && is_coordinate_conversion_node(name) {
+                    return None;
+                }
                 local_source_node_ptrs_by_instance[idx]
                     .get(name)
                     .or_else(|| source_node_ptr_by_name.get(name))
@@ -2917,8 +2977,17 @@ fn create_scene_blend_package_with_instances(
             })
             .copied()
             .unwrap_or_else(|| {
+                let ancestor_indices = instance
+                    .source_ancestors
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(ancestor_index, ancestor)| {
+                        (!instance.is_interior || !is_coordinate_conversion_node(&ancestor.name))
+                            .then_some(ancestor_index)
+                    })
+                    .collect::<Vec<_>>();
                 let mut ancestor_ptrs = Vec::new();
-                for ancestor_index in 0..instance.source_ancestors.len() {
+                for ancestor_index in ancestor_indices {
                     let empty_ptr = ptrs.alloc();
                     let empty_coll_obj_ptr = ptrs.alloc();
                     let parent_ptr = ancestor_ptrs.last().copied().unwrap_or(anchor_ptr);
@@ -3196,12 +3265,18 @@ fn create_scene_blend_package_with_instances(
             material_slot_count,
             object_idprops.as_ref().map(|props| props.root_ptr).unwrap_or(0),
         );
+        let (source_loc, source_quat, source_scale) =
+            if should_use_reference_baked_fixture_transform(instance) {
+                ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+            } else {
+                (instance.source_loc, instance.source_quat, instance.source_scale)
+            };
         patch_object_parent_transform(
             &mut object_data,
             *parent_anchor_ptr,
-            instance.source_loc,
-            instance.source_quat,
-            instance.source_scale,
+            source_loc,
+            source_quat,
+            source_scale,
         );
         local_mesh_object_data.push((
             *object_ptr,
@@ -3254,7 +3329,10 @@ fn create_scene_blend_package_with_instances(
             false,
         );
         light_data.push((*lamp_ptr, lamp_bytes));
-        let light_props = allocate_idprop_blocks(&mut ptrs, light_object_properties(package_name, &light.name));
+        let light_props = allocate_idprop_blocks(
+            &mut ptrs,
+            light_object_properties(package_name, &light.name, light.radius_source),
+        );
         let light_props_ptr = light_props.as_ref().map(|props| props.root_ptr).unwrap_or(0);
         
         // Build object wrapper for light
@@ -3898,6 +3976,110 @@ mod tests_5a_scene_blend {
     }
 
     #[test]
+    fn test_interior_meshes_do_not_parent_to_global_coordinate_nodes() {
+        let exterior = LinkedMeshInstance {
+            scene_instance_id: 0,
+            entity_name: "geo_body".to_string(),
+            parent_entity_name: None,
+            parent_empty_name: None,
+            parent_empty_loc: [0.0, 0.0, 0.0],
+            parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+            parent_empty_scale: [1.0, 1.0, 1.0],
+            is_interior: false,
+            source_object_name: "geo_body".to_string(),
+            name: "geo_body".to_string(),
+            mesh_name: "geo_body_data".to_string(),
+            material_names: Vec::new(),
+            source_nodes: vec![LinkedSourceNode {
+                name: "StarBreaker_Y_up".to_string(),
+                parent_name: None,
+                loc: [0.0, 0.0, 0.0],
+                quat: [1.0, 0.0, 0.0, 0.0],
+                scale: [1.0, 1.0, 1.0],
+            }],
+            source_ancestors: Vec::new(),
+            source_loc: [0.0, 0.0, 0.0],
+            source_quat: [1.0, 0.0, 0.0, 0.0],
+            source_scale: [1.0, 1.0, 1.0],
+            source_parent_name: Some("StarBreaker_Y_up".to_string()),
+            parent_node_name: None,
+            blend_path: "//../../Data/Objects/Ships/geo_body.blend".to_string(),
+            mesh_asset: "Data/Objects/Ships/geo_body.blend".to_string(),
+            position: [0.0, 0.0, 0.0],
+            rotation: [1.0, 0.0, 0.0, 0.0],
+            scale: [1.0, 1.0, 1.0],
+        };
+        let interior = LinkedMeshInstance {
+            scene_instance_id: 1,
+            entity_name: "interior_panel".to_string(),
+            parent_entity_name: None,
+            parent_empty_name: Some("interior_cabin".to_string()),
+            parent_empty_loc: [0.0, 5.0, 0.0],
+            parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+            parent_empty_scale: [1.0, 1.0, 1.0],
+            is_interior: true,
+            source_object_name: "interior_panel".to_string(),
+            name: "interior_panel".to_string(),
+            mesh_name: "interior_panel_data".to_string(),
+            material_names: Vec::new(),
+            source_nodes: vec![
+                LinkedSourceNode {
+                    name: "StarBreaker_Y_up".to_string(),
+                    parent_name: None,
+                    loc: [0.0, 0.0, 0.0],
+                    quat: [1.0, 0.0, 0.0, 0.0],
+                    scale: [1.0, 1.0, 1.0],
+                },
+                LinkedSourceNode {
+                    name: "interior_helper".to_string(),
+                    parent_name: Some("StarBreaker_Y_up".to_string()),
+                    loc: [1.0, 2.0, 3.0],
+                    quat: [1.0, 0.0, 0.0, 0.0],
+                    scale: [1.0, 1.0, 1.0],
+                },
+            ],
+            source_ancestors: vec![LinkedSourceAncestor {
+                name: "StarBreaker_Y_up".to_string(),
+                loc: [0.0, 0.0, 0.0],
+                quat: [1.0, 0.0, 0.0, 0.0],
+                scale: [1.0, 1.0, 1.0],
+            }],
+            source_loc: [0.0, 0.0, 0.0],
+            source_quat: [1.0, 0.0, 0.0, 0.0],
+            source_scale: [1.0, 1.0, 1.0],
+            source_parent_name: Some("StarBreaker_Y_up".to_string()),
+            parent_node_name: None,
+            blend_path: "//../../Data/Objects/Ships/interior_panel.blend".to_string(),
+            mesh_asset: "Data/Objects/Ships/interior_panel.blend".to_string(),
+            position: [0.0, 0.0, 0.0],
+            rotation: [1.0, 0.0, 0.0, 0.0],
+            scale: [1.0, 1.0, 1.0],
+        };
+        let blend_bytes = create_scene_blend_with_instances("InteriorParentEntity", &[exterior, interior], &[]).unwrap();
+        let blocks = parse_blend_blocks(&blend_bytes);
+
+        let exterior_y_up = object_block_by_name(&blocks, "geo_body_0_StarBreaker_Y_up");
+        let interior_anchor = object_block_by_name(&blocks, "interior_panel_anchor");
+        let interior_helper = object_block_by_name(&blocks, "interior_panel_1_interior_helper");
+        let interior_mesh = object_block_by_name(&blocks, "interior_panel");
+
+        assert_eq!(
+            u64::from_le_bytes(interior_helper.data[496..504].try_into().unwrap()),
+            interior_anchor.old_ptr,
+            "interior source nodes whose parent conversion node was skipped should stay under the scene anchor"
+        );
+        assert_eq!(
+            u64::from_le_bytes(interior_mesh.data[496..504].try_into().unwrap()),
+            interior_anchor.old_ptr,
+            "interior meshes should not fall back to an exterior/global StarBreaker_Y_up parent"
+        );
+        assert_ne!(
+            u64::from_le_bytes(interior_mesh.data[496..504].try_into().unwrap()),
+            exterior_y_up.old_ptr
+        );
+    }
+
+    #[test]
     fn test_create_scene_blend_uses_full_source_empty_tree_for_parent_nodes() {
         let root = LinkedMeshInstance {
             scene_instance_id: 0,
@@ -4283,6 +4465,7 @@ mod tests_5a_scene_blend {
             lamp_type: 0,
             energy_watts: 100.0,
             radius: 10.0,
+            radius_source: 10.0,
             spot_size: 0.0,
             spot_blend: 0.0,
             intensity_candela: 5.0,
@@ -4504,6 +4687,7 @@ mod tests_5a_scene_blend {
             lamp_type: 0,
             energy_watts: 100.0,
             radius: 10.0,
+            radius_source: 10.0,
             spot_size: 0.0,
             spot_blend: 0.0,
             intensity_candela: 5.0,
@@ -4604,6 +4788,7 @@ mod tests_5b {
             lamp_type: 0,
             energy_watts: 100.0,
             radius: 10.0,
+            radius_source: 10.0,
             spot_size: 0.0,
             spot_blend: 0.0,
             intensity_candela: 5.0,
@@ -4631,6 +4816,7 @@ mod tests_5b {
                 lamp_type: 0,
                 energy_watts: 50.0,
                 radius: 20.0,
+                radius_source: 20.0,
                 spot_size: 0.0,
                 spot_blend: 0.0,
                 intensity_candela: 5.0,
@@ -4651,6 +4837,7 @@ mod tests_5b {
                 lamp_type: 1,
                 energy_watts: 100.0,
                 radius: 100.0,
+                radius_source: 100.0,
                 spot_size: 0.0,
                 spot_blend: 0.0,
                 intensity_candela: 100000.0,
@@ -4678,6 +4865,7 @@ mod tests_5b {
             lamp_type: 0,
             energy_watts: 100.0,
             radius: 10.0,
+            radius_source: 10.0,
             spot_size: 0.0,
             spot_blend: 0.0,
             intensity_candela: 10.0,
@@ -4727,6 +4915,8 @@ pub struct ExtractedLight {
     pub energy_watts: f32,
     /// Attenuation radius in meters
     pub radius: f32,
+    /// Authored source radius before Blender-side adjustments.
+    pub radius_source: f32,
     /// Spot cone full aperture in radians (0 for POINT)
     pub spot_size: f32,
     /// Spot cone feather width 0..1 (0 for POINT)
@@ -4898,6 +5088,11 @@ pub fn extract_lights_from_interiors(
                 .map(|s| (s.temperature, s.use_temperature))
                 .unwrap_or((6500.0, false));
             
+            let blender_radius = if matches!(lamp_type, 0 | 2) {
+                0.0
+            } else {
+                light_info.radius
+            };
             lights.push(ExtractedLight {
                 name: light_info.name.clone(),
                 parent_empty_name: Some(format!("interior_{}", container.name)),
@@ -4909,7 +5104,8 @@ pub fn extract_lights_from_interiors(
                 color: light_info.color,
                 lamp_type,
                 energy_watts,
-                radius: light_info.radius,
+                radius: blender_radius,
+                radius_source: light_info.radius,
                 spot_size,
                 spot_blend,
                 intensity_candela: light_info.intensity_candela_proxy,
@@ -5757,6 +5953,7 @@ mod tests_3e {
                 lamp_type: 0,
                 energy_watts: 1.0,
                 radius: 5.0,
+                radius_source: 5.0,
                 spot_size: 0.0,
                 spot_blend: 0.0,
                 intensity_candela: 5.0,  // Ambient threshold < 10
@@ -5777,6 +5974,7 @@ mod tests_3e {
                 lamp_type: 2,  // SPOT
                 energy_watts: 50.0,
                 radius: 10.0,
+                radius_source: 10.0,
                 spot_size: 0.5,
                 spot_blend: 0.2,
                 intensity_candela: 200.0,
@@ -7720,6 +7918,7 @@ mod tests_4c {
                 lamp_type: 0,
                 energy_watts: 1.0,
                 radius: 5.0,
+                radius_source: 5.0,
                 spot_size: 0.0,
                 spot_blend: 0.0,
                 intensity_candela: 5.0,
@@ -7751,6 +7950,7 @@ mod tests_4c {
                 lamp_type: 0,
                 energy_watts: 1.0,
                 radius: 5.0,
+                radius_source: 5.0,
                 spot_size: 0.0,
                 spot_blend: 0.0,
                 intensity_candela: 5.0,
@@ -7771,6 +7971,7 @@ mod tests_4c {
                 lamp_type: 2,
                 energy_watts: 50.0,
                 radius: 10.0,
+                radius_source: 10.0,
                 spot_size: 0.5,
                 spot_blend: 0.2,
                 intensity_candela: 200.0,
@@ -7853,6 +8054,7 @@ mod tests_4c {
                 lamp_type: 0,
                 energy_watts: 1.0,
                 radius: 5.0,
+                radius_source: 5.0,
                 spot_size: 0.0,
                 spot_blend: 0.0,
                 intensity_candela: 5.0,
@@ -7913,6 +8115,7 @@ mod tests_4c {
             lamp_type: 0,
             energy_watts: 1.0,
             radius: 5.0,
+            radius_source: 5.0,
             spot_size: 0.0,
             spot_blend: 0.0,
             intensity_candela: 5.0,
@@ -7941,6 +8144,7 @@ mod tests_4c {
             lamp_type: 0,
             energy_watts: 1.0,
             radius: 5.0,
+            radius_source: 5.0,
             spot_size: 0.0,
             spot_blend: 0.0,
             intensity_candela: 5.0,
@@ -7979,6 +8183,7 @@ mod tests_4c {
                 lamp_type: 0,
                 energy_watts: 1.0,
                 radius: 5.0,
+                radius_source: 5.0,
                 spot_size: 0.0,
                 spot_blend: 0.0,
                 intensity_candela: 5.0,

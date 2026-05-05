@@ -547,8 +547,13 @@ def _selected_package(context: bpy.types.Context) -> PackageBundle | None:
     scene_path = package_root.get(PROP_SCENE_PATH)
     if not isinstance(scene_path, str) or not scene_path:
         return None
+    resolved_scene_path = Path(scene_path)
+    if not resolved_scene_path.is_absolute():
+        blend_path = Path(bpy.data.filepath) if bpy.data.filepath else None
+        if blend_path:
+            resolved_scene_path = (blend_path.parent / resolved_scene_path).resolve()
     try:
-        return PackageBundle.load(scene_path)
+        return PackageBundle.load(str(resolved_scene_path))
     except Exception:
         return None
 
