@@ -1326,6 +1326,7 @@ pub async fn start_export(
         include_shields: false,
         texture_mip: request.mip,
         lod_level: request.lod,
+        threads: request.threads,
         include_animations: request.include_animations,
         apply_default_animation_pose: !request.include_animations,
         default_animation_tags: vec!["landing_gear_extend".to_string()],

@@ -13,7 +13,9 @@
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
+use rayon::prelude::*;
 use starbreaker_common::progress::{report as report_progress, Progress};
 use starbreaker_p4k::MappedP4k;
 use starbreaker_blend::{
@@ -57,6 +59,18 @@ struct MeshDataEntry {
     mesh: Mesh,
     materials: Option<MtlFile>,
     nmc: Option<NodeMeshCombo>,
+}
+
+struct BlendAssetJob {
+    blend_path: String,
+    mesh_name: String,
+    blend_key: String,
+}
+
+struct BuiltBlendAsset {
+    file: ExportedFile,
+    linked_mesh_refs: Vec<LinkedMeshRef>,
+    source_nodes: Vec<LinkedSourceNode>,
 }
 
 struct IdPropBlocks {
@@ -540,6 +554,8 @@ pub fn write_decomposed_export_blend(
     progress: Option<&Progress>,
     existing_asset_paths: Option<&HashSet<String>>,
 ) -> Result<DecomposedExport, Error> {
+    let total_start = Instant::now();
+    let mut phase_start = Instant::now();
     // Phase 1: Extract mesh data from input children BEFORE calling write_decomposed_export.
     // Key by the exact final .blend mesh asset path; loose entity-name matching is not
     // stable enough for similarly named ship parts.
@@ -576,6 +592,8 @@ pub fn write_decomposed_export_blend(
         
         mesh_data_map.insert(mesh_asset.to_ascii_lowercase(), entry);
     }
+    log::info!("[timing][blend] precollect_mesh_data: {:.2}s", phase_start.elapsed().as_secs_f32());
+    phase_start = Instant::now();
     
     // Extract minimal data needed for scene.blend before passing input to write_decomposed_export
     let scene_entity_name = input.entity_name.clone();
@@ -589,11 +607,17 @@ pub fn write_decomposed_export_blend(
     let _extracted_empties = input.root_nmc.as_ref()
         .and_then(|nmc| extract_empties_from_nmc(&nmc.nodes).ok())
         .unwrap_or_default();
+    log::info!("[timing][blend] extract_lights_empties: {:.2}s", phase_start.elapsed().as_secs_f32());
+    phase_start = Instant::now();
     
+    let interior_mesh_opts = crate::pipeline::ExportOptions {
+        material_mode: crate::pipeline::MaterialMode::Colors,
+        ..opts.clone()
+    };
     let mut interior_png_cache = PngCache::new();
     let mut interior_mesh_loader = |entry: &crate::pipeline::InteriorCgfEntry|
         -> Option<(Mesh, Option<crate::mtl::MtlFile>, Option<crate::nmc::NodeMeshCombo>)> {
-        let loaded = load_interior_mesh_asset(p4k, entry, opts, &mut interior_png_cache)?;
+        let loaded = load_interior_mesh_asset(p4k, entry, &interior_mesh_opts, &mut interior_png_cache)?;
         let (mesh, materials, nmc) = loaded.clone();
         let mesh_asset = blend_mesh_asset_relative_path(p4k, &entry.cgf_path, &entry.name, opts.lod_level);
         let material_view = crate::decomposed::build_decomposed_material_view(
@@ -623,6 +647,8 @@ pub fn write_decomposed_export_blend(
         existing_asset_paths,
         &mut interior_mesh_loader,
     )?;
+    log::info!("[timing][blend] base_decomposed_export: {:.2}s", phase_start.elapsed().as_secs_f32());
+    phase_start = Instant::now();
 
     // Phase 4: Collect vertex groups for all meshes BEFORE creating .blend files
     report_progress(progress, 0.45, "Collecting decal vertex groups from meshes");
@@ -680,6 +706,8 @@ pub fn write_decomposed_export_blend(
             }
         }
     }
+    log::info!("[timing][blend] collect_decal_vertex_groups: {:.2}s", phase_start.elapsed().as_secs_f32());
+    phase_start = Instant::now();
 
     report_progress(progress, 0.5, "Writing native .blend mesh assets with real geometry");
 
@@ -689,6 +717,7 @@ pub fn write_decomposed_export_blend(
     let mut other_files = Vec::new();
     let mut refs_by_asset = HashMap::new();
     let mut source_nodes_by_asset = HashMap::new();
+    let mut blend_asset_jobs = Vec::new();
     for file in base_export.files {
         if file.relative_path.ends_with(".glb") && file.kind == ExportedFileKind::MeshAsset {
             // This is a generic mesh asset placeholder from the shared decomposed enumerator.
@@ -703,41 +732,10 @@ pub fn write_decomposed_export_blend(
                 .trim_end_matches(".blend")
                 .to_string();
             let blend_key = blend_path.to_ascii_lowercase();
-            let mesh_entry = mesh_data_map.get(&blend_key).ok_or_else(|| {
-                Error::Other(format!(
-                    "native Blend export has no mesh payload for generated asset '{blend_path}'"
-                ))
-            })?;
-            // Phase 5D: Get vertex groups for this mesh
-            let vgroups = mesh_vertex_groups.get(&blend_key).cloned();
-
-            let blend_bytes = mesh_to_blend(
-                &mesh_name,
-                &mesh_entry.mesh,
-                &mesh_entry.materials,
-                mesh_entry.nmc.as_ref(),
-                vgroups.as_ref(),
-            );
-            let (mut linked_mesh_refs, source_nodes) =
-                blend_link_data_from_bytes(&blend_bytes);
-            if linked_mesh_refs.is_empty() {
-                linked_mesh_refs.push(LinkedMeshRef {
-                    object_name: mesh_name.clone(),
-                    mesh_name: mesh_name.clone(),
-                    material_names: Vec::new(),
-                    source_parent_name: None,
-                    object_loc: [0.0, 0.0, 0.0],
-                    object_quat: [1.0, 0.0, 0.0, 0.0],
-                    object_scale: [1.0, 1.0, 1.0],
-                    ancestors: Vec::new(),
-                });
-            }
-            refs_by_asset.insert(blend_path.clone(), linked_mesh_refs.clone());
-            source_nodes_by_asset.insert(blend_path.clone(), source_nodes);
-            blend_files.push(ExportedFile {
-                relative_path: blend_path,
-                bytes: blend_bytes,
-                kind: ExportedFileKind::MeshAsset,
+            blend_asset_jobs.push(BlendAssetJob {
+                blend_path,
+                mesh_name,
+                blend_key,
             });
         } else if file.kind == ExportedFileKind::PackageManifest {
             // Update manifest files to replace .glb references with .blend
@@ -754,6 +752,26 @@ pub fn write_decomposed_export_blend(
             other_files.push(file);
         }
     }
+    log::info!("[timing][blend] classify_base_files: {:.2}s", phase_start.elapsed().as_secs_f32());
+    phase_start = Instant::now();
+    for built_asset in build_native_blend_assets(
+        &blend_asset_jobs,
+        &mesh_data_map,
+        &mesh_vertex_groups,
+        opts.threads,
+    )? {
+        refs_by_asset.insert(
+            built_asset.file.relative_path.clone(),
+            built_asset.linked_mesh_refs.clone(),
+        );
+        source_nodes_by_asset.insert(
+            built_asset.file.relative_path.clone(),
+            built_asset.source_nodes,
+        );
+        blend_files.push(built_asset.file);
+    }
+    log::info!("[timing][blend] build_native_blend_assets: {:.2}s", phase_start.elapsed().as_secs_f32());
+    phase_start = Instant::now();
 
     let mut blend_file_order = Vec::new();
     let mut blend_file_by_path = HashMap::new();
@@ -854,6 +872,8 @@ pub fn write_decomposed_export_blend(
             }
         }
     }
+    log::info!("[timing][blend] scene_instance_records: {:.2}s", phase_start.elapsed().as_secs_f32());
+    phase_start = Instant::now();
 
     // Phase 3: Create scene.blend with lights and empties
     report_progress(progress, 0.7, "Creating scene.blend with linked mesh instances");
@@ -884,6 +904,8 @@ pub fn write_decomposed_export_blend(
     let compressed_scene = starbreaker_blend::compress_blend_bytes_zstd(&scene_blend_bytes);
     log::info!("[blend-debug] Compressed scene size: {} bytes", compressed_scene.len());
     log::info!("[blend-debug] First 20 bytes of compressed: {:?}", &compressed_scene[..20.min(compressed_scene.len())]);
+    log::info!("[timing][blend] scene_blend_assembly: {:.2}s", phase_start.elapsed().as_secs_f32());
+    phase_start = Instant::now();
     
     // Combine blend mesh files with other files (NOT including base_export.scene.blend)
     let mut all_files = blend_files;
@@ -914,6 +936,8 @@ pub fn write_decomposed_export_blend(
         // PackageManifest kind ensures scene.blend is always written (not skipped by skip_existing_assets)
         kind: ExportedFileKind::PackageManifest,
     });
+    log::info!("[timing][blend] final_file_assembly: {:.2}s", phase_start.elapsed().as_secs_f32());
+    log::info!("[timing][blend] total: {:.2}s", total_start.elapsed().as_secs_f32());
 
     report_progress(progress, 1.0, "Export complete");
 
@@ -1739,6 +1763,77 @@ fn mesh_object_refs_from_blend_bytes(blend_bytes: &[u8]) -> Vec<LinkedMeshRef> {
 
 fn source_empty_nodes_from_blend_bytes(blend_bytes: &[u8]) -> Vec<LinkedSourceNode> {
     blend_link_data_from_bytes(blend_bytes).1
+}
+
+fn build_native_blend_asset(
+    job: &BlendAssetJob,
+    mesh_data_map: &HashMap<String, MeshDataEntry>,
+    mesh_vertex_groups: &HashMap<String, Vec<VertexGroup>>,
+) -> Result<BuiltBlendAsset, Error> {
+    let mesh_entry = mesh_data_map.get(&job.blend_key).ok_or_else(|| {
+        Error::Other(format!(
+            "native Blend export has no mesh payload for generated asset '{}'",
+            job.blend_path
+        ))
+    })?;
+    let vgroups = mesh_vertex_groups.get(&job.blend_key).cloned();
+    let blend_bytes = mesh_to_blend(
+        &job.mesh_name,
+        &mesh_entry.mesh,
+        &mesh_entry.materials,
+        mesh_entry.nmc.as_ref(),
+        vgroups.as_ref(),
+    );
+    let (mut linked_mesh_refs, source_nodes) = blend_link_data_from_bytes(&blend_bytes);
+    if linked_mesh_refs.is_empty() {
+        linked_mesh_refs.push(LinkedMeshRef {
+            object_name: job.mesh_name.clone(),
+            mesh_name: job.mesh_name.clone(),
+            material_names: Vec::new(),
+            source_parent_name: None,
+            object_loc: [0.0, 0.0, 0.0],
+            object_quat: [1.0, 0.0, 0.0, 0.0],
+            object_scale: [1.0, 1.0, 1.0],
+            ancestors: Vec::new(),
+        });
+    }
+
+    Ok(BuiltBlendAsset {
+        file: ExportedFile {
+            relative_path: job.blend_path.clone(),
+            bytes: blend_bytes,
+            kind: ExportedFileKind::MeshAsset,
+        },
+        linked_mesh_refs,
+        source_nodes,
+    })
+}
+
+fn build_native_blend_assets(
+    jobs: &[BlendAssetJob],
+    mesh_data_map: &HashMap<String, MeshDataEntry>,
+    mesh_vertex_groups: &HashMap<String, Vec<VertexGroup>>,
+    threads: usize,
+) -> Result<Vec<BuiltBlendAsset>, Error> {
+    if threads == 1 || jobs.len() <= 1 {
+        return jobs
+            .iter()
+            .map(|job| build_native_blend_asset(job, mesh_data_map, mesh_vertex_groups))
+            .collect();
+    }
+
+    let mut builder = rayon::ThreadPoolBuilder::new();
+    if threads > 0 {
+        builder = builder.num_threads(threads);
+    }
+    let pool = builder
+        .build()
+        .map_err(|err| Error::Other(format!("failed to build blend export thread pool: {err}")))?;
+    pool.install(|| {
+        jobs.par_iter()
+            .map(|job| build_native_blend_asset(job, mesh_data_map, mesh_vertex_groups))
+            .collect()
+    })
 }
 
 fn nmc_export_object_names(mesh_name: &str, nmc: &NodeMeshCombo) -> Vec<String> {

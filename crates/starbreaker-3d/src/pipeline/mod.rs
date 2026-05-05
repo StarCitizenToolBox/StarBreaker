@@ -118,6 +118,8 @@ pub struct ExportOptions {
     pub lod_level: u32,
     /// Texture mip level (0 = full resolution, 2 = 1/4 res, 4 = 1/16 res).
     pub texture_mip: u32,
+    /// Worker threads for parallel export phases. 0 = auto/all available cores, 1 = sequential.
+    pub threads: usize,
     /// Export animation clips into decomposed scene sidecars.
     pub include_animations: bool,
     /// Apply default-state animation poses (e.g. landing-gear-deployed) to
@@ -143,6 +145,7 @@ impl Default for ExportOptions {
             include_shields: false,
             lod_level: 1,
             texture_mip: 2,
+            threads: 0,
             include_animations: false,
             apply_default_animation_pose: true,
             default_animation_tags: vec!["landing_gear_extend".to_string()],

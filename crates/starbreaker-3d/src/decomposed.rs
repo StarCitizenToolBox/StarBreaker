@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::time::Instant;
 
 use gltf_json as json;
 use starbreaker_common::progress::{report as report_progress, Progress};
@@ -10,7 +11,7 @@ use crate::gltf::{offset_to_gltf_matrix, GlbBuilder, GlbInput, GlbLoaders, GlbMe
 use crate::mtl::{MtlFile, SemanticTextureBinding, SubMaterial, TextureSemanticRole, TintPalette};
 use crate::nmc::NodeMeshCombo;
 use crate::pipeline::{
-    DecomposedExport, ExportOptions, ExportedFile, ExportedFileKind, InteriorCgfEntry,
+    DecomposedExport, ExportFormat, ExportOptions, ExportedFile, ExportedFileKind, InteriorCgfEntry,
     LoadedInteriors, MaterialMode,
     PngCache,
 };
@@ -661,6 +662,9 @@ pub(crate) fn write_decomposed_export(
     let scene_manifest_path = package_relative_path(&package_name, "scene.json");
     let palettes_manifest_path = package_relative_path(&package_name, "palettes.json");
     let liveries_manifest_path = package_relative_path(&package_name, "liveries.json");
+    let write_mesh_payloads = opts.format != ExportFormat::Blend;
+    let total_start = Instant::now();
+    let mut phase_start = Instant::now();
     report_progress(progress, 0.05, "Writing root assets");
     for palette in &input.available_palettes {
         register_palette(&mut palette_records, palette);
@@ -685,6 +689,7 @@ pub(crate) fn write_decomposed_export(
         &input.root_bones,
         opts.lod_level,
         existing_asset_paths,
+        write_mesh_payloads,
     )?;
     let root_material_sidecar = root_material_view.sidecar_materials.as_ref().map(|materials| {
         write_material_sidecar(
@@ -713,6 +718,8 @@ pub(crate) fn write_decomposed_export(
         &input.entity_name,
         root_material_sidecar.as_deref(),
     );
+    log::info!("[timing][decomposed] root_assets: {:.2}s", phase_start.elapsed().as_secs_f32());
+    phase_start = Instant::now();
 
     // Export material sidecars for each paint variant and build the paints.json manifest.
     let mut paint_variant_json: Vec<serde_json::Value> = Vec::new();
@@ -758,6 +765,8 @@ pub(crate) fn write_decomposed_export(
             }),
         );
     }
+    log::info!("[timing][decomposed] paint_variants: {:.2}s", phase_start.elapsed().as_secs_f32());
+    phase_start = Instant::now();
 
     report_progress(progress, 0.15, "Writing child assets");
 
@@ -783,6 +792,7 @@ pub(crate) fn write_decomposed_export(
             &child.bones,
             opts.lod_level,
             existing_asset_paths,
+            write_mesh_payloads,
         )?;
         let material_sidecar = child_material_view.sidecar_materials.as_ref().map(|materials| {
             write_material_sidecar(
@@ -840,6 +850,8 @@ pub(crate) fn write_decomposed_export(
     if child_count == 0 {
         report_progress(progress, 0.55, "Writing interior assets");
     }
+    log::info!("[timing][decomposed] child_assets: {:.2}s", phase_start.elapsed().as_secs_f32());
+    phase_start = Instant::now();
 
     let mut interior_asset_cache: HashMap<String, (String, Option<String>)> = HashMap::new();
     let mut interior_records = Vec::with_capacity(input.interiors.containers.len());
@@ -932,6 +944,7 @@ pub(crate) fn write_decomposed_export(
                         &[],
                         opts.lod_level,
                         existing_asset_paths,
+                        write_mesh_payloads,
                     )?
                 };
                 interior_asset_cache.insert(cache_key, (mesh_asset.clone(), material_sidecar.clone()));
@@ -1040,6 +1053,8 @@ pub(crate) fn write_decomposed_export(
     if container_count == 0 {
         report_progress(progress, 0.85, "Writing manifests");
     }
+    log::info!("[timing][decomposed] interior_assets: {:.2}s", phase_start.elapsed().as_secs_f32());
+    phase_start = Instant::now();
 
     let root_animations = if opts.include_animations {
         let mut clips: Vec<serde_json::Value> = Vec::new();
@@ -1147,6 +1162,8 @@ pub(crate) fn write_decomposed_export(
     } else {
         None
     };
+    log::info!("[timing][decomposed] animations: {:.2}s", phase_start.elapsed().as_secs_f32());
+    phase_start = Instant::now();
 
     let scene_manifest = build_scene_manifest_value(
         &input.entity_name,
@@ -1182,6 +1199,8 @@ pub(crate) fn write_decomposed_export(
         liveries_manifest_path,
         build_livery_manifest_value(&livery_usage),
     );
+    log::info!("[timing][decomposed] manifests: {:.2}s", phase_start.elapsed().as_secs_f32());
+    log::info!("[timing][decomposed] total: {:.2}s", total_start.elapsed().as_secs_f32());
 
     Ok(DecomposedExport {
         files: files
@@ -1416,6 +1435,7 @@ fn write_mesh_asset(
     bones: &[Bone],
     lod_level: u32,
     existing_asset_paths: Option<&HashSet<String>>,
+    write_payload: bool,
 ) -> Result<String, Error> {
     fn no_textures(
         _: Option<&crate::mtl::MtlFile>,
@@ -1437,6 +1457,9 @@ fn write_mesh_asset(
         .is_some_and(|paths| paths.contains(&requested_path.to_ascii_lowercase()))
     {
         return Ok(requested_path);
+    }
+    if !write_payload {
+        return Ok(insert_binary_file(files, requested_path, Vec::new()));
     }
     let glb = crate::gltf::write_glb(
         GlbInput {
@@ -1491,13 +1514,16 @@ fn write_material_sidecar(
     existing_asset_paths: Option<&HashSet<String>>,
 ) -> String {
     let source_material_path = material_source_path(p4k, materials, material_path, geometry_path);
+    let relative_path = material_sidecar_relative_path(&source_material_path, fallback_name, texture_mip);
+    if files.contains_key(&relative_path) {
+        return relative_path;
+    }
     let (sidecar_materials, sidecar_original_indices) = canonical_sidecar_materials_from_source(
         p4k,
         &source_material_path,
         materials,
         original_indices,
     );
-    let relative_path = material_sidecar_relative_path(&source_material_path, fallback_name, texture_mip);
     let extracted = sidecar_materials
         .materials
         .iter()

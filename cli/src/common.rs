@@ -49,6 +49,9 @@ pub struct ExportOpts {
     /// LOD level (0=highest detail, 1+=lower)
     #[arg(long, default_value = "1")]
     pub lod: u32,
+    /// Worker threads for parallel export phases (0=auto/all cores, 1=sequential)
+    #[arg(long, default_value = "0")]
+    pub threads: usize,
     /// Skip attached items (weapons, thrusters, landing gear)
     #[arg(long)]
     pub no_attachments: bool,
@@ -101,6 +104,7 @@ impl From<&ExportOpts> for starbreaker_3d::ExportOptions {
             include_shields: opts.include_shields,
             texture_mip: opts.mip,
             lod_level: opts.lod,
+            threads: opts.threads,
             include_animations: matches!(kind, starbreaker_3d::ExportKind::Decomposed),
             apply_default_animation_pose: !matches!(kind, starbreaker_3d::ExportKind::Decomposed),
             default_animation_tags: vec!["landing_gear_extend".to_string()],
@@ -255,4 +259,3 @@ mod tests {
         assert!(matches_filter(CGF_DEEP, None, None));
     }
 }
-
