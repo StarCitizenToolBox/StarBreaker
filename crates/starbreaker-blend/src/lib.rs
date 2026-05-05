@@ -305,8 +305,8 @@ pub fn ints2_data(values: &[[i32; 2]]) -> Vec<u8> {
 /// Blender's generic mesh topology requires `.edge_verts` on the EDGE domain
 /// and `.corner_edge` alongside `.corner_vert` on the CORNER domain.
 pub fn triangle_edge_topology(indices: &[u32]) -> (Vec<[i32; 2]>, Vec<i32>) {
-    let mut edge_map: HashMap<(u32, u32), i32> = HashMap::new();
-    let mut edge_verts = Vec::new();
+    let mut edge_map: HashMap<(u32, u32), i32> = HashMap::with_capacity(indices.len() / 2);
+    let mut edge_verts = Vec::with_capacity(indices.len() / 2);
     let mut corner_edges = Vec::with_capacity(indices.len());
 
     for tri in indices.chunks_exact(3) {
@@ -493,7 +493,7 @@ pub fn build_scene_with_motion_blur_curve_and_properties(
     }
     write_f32(&mut data, 5176, 1.0); // unit.scale_length
     data[5180] = 1; // unit.system = USER_UNIT_METRIC
-    data[5184] = 1; // unit.length_unit
+    data[5184] = 3; // unit.length_unit = METERS
     data[5185] = 1; // unit.mass_unit
     data[5186] = 1; // unit.time_unit
     data[5187] = 1; // unit.temperature_unit

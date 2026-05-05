@@ -217,6 +217,10 @@ fn unique_scene_object_name(base: &str, used: &mut HashMap<String, usize>) -> St
 struct SceneManifestInstance {
     entity_name: String,
     parent_entity_name: Option<String>,
+    parent_empty_name: Option<String>,
+    parent_empty_loc: [f32; 3],
+    parent_empty_quat: [f32; 4],
+    parent_empty_scale: [f32; 3],
     mesh_asset: String,
     parent_node_name: Option<String>,
     loc: [f32; 3],
@@ -251,10 +255,10 @@ fn matrix_from_json_rows(rows: &[serde_json::Value]) -> Option<glam::Mat4> {
             }
         }
         Some(glam::Mat4::from_cols_array(&[
-            row_values[0][0], row_values[1][0], row_values[2][0], row_values[3][0],
-            row_values[0][1], row_values[1][1], row_values[2][1], row_values[3][1],
-            row_values[0][2], row_values[1][2], row_values[2][2], row_values[3][2],
-            row_values[0][3], row_values[1][3], row_values[2][3], row_values[3][3],
+            row_values[0][0], row_values[0][1], row_values[0][2], row_values[0][3],
+            row_values[1][0], row_values[1][1], row_values[1][2], row_values[1][3],
+            row_values[2][0], row_values[2][1], row_values[2][2], row_values[2][3],
+            row_values[3][0], row_values[3][1], row_values[3][2], row_values[3][3],
         ]))
     } else {
         None
@@ -315,6 +319,10 @@ fn scene_manifest_instances(manifest_files: &[ExportedFile]) -> Vec<SceneManifes
                 .and_then(|v| v.as_str())
                 .filter(|name| !name.is_empty())
                 .map(ToOwned::to_owned),
+            parent_empty_name: None,
+            parent_empty_loc: [0.0, 0.0, 0.0],
+            parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+            parent_empty_scale: [1.0, 1.0, 1.0],
             mesh_asset: mesh_asset.to_string(),
             parent_node_name: value
                 .get("parent_node_name")
@@ -338,13 +346,20 @@ fn scene_manifest_instances(manifest_files: &[ExportedFile]) -> Vec<SceneManifes
         for interior in interiors {
             let container_transform = manifest_matrix(interior, "container_transform")
                 .unwrap_or(glam::Mat4::IDENTITY);
+            let (container_loc, container_quat, container_scale) =
+                sc_matrix_to_scene_transform(container_transform);
+            let container_name = interior
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Interior")
+                .to_string();
             if let Some(placements) = interior.get("placements").and_then(|v| v.as_array()) {
                 for placement in placements {
                     let Some(mesh_asset) = placement.get("mesh_asset").and_then(|v| v.as_str()) else {
                         continue;
                     };
-                    let source = container_transform
-                        * manifest_matrix(placement, "transform").unwrap_or(glam::Mat4::IDENTITY);
+                    let source =
+                        manifest_matrix(placement, "transform").unwrap_or(glam::Mat4::IDENTITY);
                     let (loc, quat, scale) = sc_matrix_to_scene_transform(source);
                     out.push(SceneManifestInstance {
                         entity_name: placement
@@ -353,6 +368,10 @@ fn scene_manifest_instances(manifest_files: &[ExportedFile]) -> Vec<SceneManifes
                             .unwrap_or(mesh_asset)
                             .to_string(),
                         parent_entity_name: None,
+                        parent_empty_name: Some(container_name.clone()),
+                        parent_empty_loc: container_loc,
+                        parent_empty_quat: container_quat,
+                        parent_empty_scale: container_scale,
                         mesh_asset: mesh_asset.to_string(),
                         parent_node_name: None,
                         loc,
@@ -560,6 +579,11 @@ pub fn write_decomposed_export_blend(
         for mesh_with_decals in meshes_with_decals {
             if let Some(mesh_entry) = mesh_data_map.get(&mesh_with_decals.mesh_path) {
                 // Map decal material indices to face indices
+                let decal_material_indices = mesh_with_decals
+                    .decal_materials
+                    .iter()
+                    .map(|material| material.material_index)
+                    .collect::<HashSet<_>>();
                 let mut decal_face_indices = Vec::new();
                 for (face_idx, material_idx) in mesh_entry.mesh.submeshes.iter()
                     .enumerate()
@@ -571,7 +595,7 @@ pub fn write_decomposed_export_blend(
                     .collect::<Vec<_>>()
                 {
                     // Check if this material is a decal material
-                    if mesh_with_decals.decal_materials.iter().any(|dm| dm.material_index == material_idx) {
+                    if decal_material_indices.contains(&material_idx) {
                         decal_face_indices.push(face_idx);
                     }
                 }
@@ -597,6 +621,8 @@ pub fn write_decomposed_export_blend(
     let mut blend_files = Vec::new();
     let mut manifest_files = Vec::new();
     let mut other_files = Vec::new();
+    let mut refs_by_asset = HashMap::new();
+    let mut source_nodes_by_asset = HashMap::new();
     for file in base_export.files {
         if file.relative_path.ends_with(".glb") && file.kind == ExportedFileKind::MeshAsset {
             // This is a generic mesh asset placeholder from the shared decomposed enumerator.
@@ -627,6 +653,7 @@ pub fn write_decomposed_export_blend(
                 vgroups.as_ref(),
             );
             let mut linked_mesh_refs = mesh_object_refs_from_blend_bytes(&blend_bytes);
+            let source_nodes = source_empty_nodes_from_blend_bytes(&blend_bytes);
             if linked_mesh_refs.is_empty() {
                 linked_mesh_refs.push(LinkedMeshRef {
                     object_name: mesh_name.clone(),
@@ -639,29 +666,8 @@ pub fn write_decomposed_export_blend(
                     ancestors: Vec::new(),
                 });
             }
-            for linked_mesh_ref in linked_mesh_refs {
-                scene_mesh_instances.push(LinkedMeshInstance {
-                    scene_instance_id: 0,
-                    entity_name: linked_mesh_ref.object_name.clone(),
-                    parent_entity_name: None,
-                    source_object_name: linked_mesh_ref.object_name.clone(),
-                    name: linked_mesh_ref.object_name,
-                    mesh_name: linked_mesh_ref.mesh_name,
-                    material_names: linked_mesh_ref.material_names,
-                    source_nodes: Vec::new(),
-                    source_ancestors: linked_mesh_ref.ancestors,
-                    source_parent_name: linked_mesh_ref.source_parent_name,
-                    source_loc: linked_mesh_ref.object_loc,
-                    source_quat: linked_mesh_ref.object_quat,
-                    source_scale: linked_mesh_ref.object_scale,
-                    parent_node_name: None,
-                    blend_path: format!("//../../{blend_path}"),
-                    mesh_asset: blend_path.clone(),
-                    position: [0.0, 0.0, 0.0],
-                    rotation: [1.0, 0.0, 0.0, 0.0],
-                    scale: [1.0, 1.0, 1.0],
-                });
-            }
+            refs_by_asset.insert(blend_path.clone(), linked_mesh_refs.clone());
+            source_nodes_by_asset.insert(blend_path.clone(), source_nodes);
             blend_files.push(ExportedFile {
                 relative_path: blend_path,
                 bytes: blend_bytes,
@@ -697,14 +703,6 @@ pub fn write_decomposed_export_blend(
         .collect();
 
     scene_mesh_instances.clear();
-    let refs_by_asset = blend_files
-        .iter()
-        .map(|file| (file.relative_path.clone(), mesh_object_refs_from_blend_bytes(&file.bytes)))
-        .collect::<HashMap<_, _>>();
-    let source_nodes_by_asset = blend_files
-        .iter()
-        .map(|file| (file.relative_path.clone(), source_empty_nodes_from_blend_bytes(&file.bytes)))
-        .collect::<HashMap<_, _>>();
     let manifest_instances = scene_manifest_instances(&manifest_files);
     let mut used_scene_object_names = HashMap::new();
     if manifest_instances.is_empty() {
@@ -716,6 +714,10 @@ pub fn write_decomposed_export_blend(
                         scene_instance_id,
                         entity_name: linked_mesh_ref.object_name.clone(),
                         parent_entity_name: None,
+                        parent_empty_name: None,
+                        parent_empty_loc: [0.0, 0.0, 0.0],
+                        parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+                        parent_empty_scale: [1.0, 1.0, 1.0],
                         source_object_name: linked_mesh_ref.object_name.clone(),
                         name,
                         mesh_name: linked_mesh_ref.mesh_name.clone(),
@@ -752,6 +754,10 @@ pub fn write_decomposed_export_blend(
                         scene_instance_id,
                         entity_name: manifest_instance.entity_name.clone(),
                         parent_entity_name: manifest_instance.parent_entity_name.clone(),
+                        parent_empty_name: manifest_instance.parent_empty_name.clone(),
+                        parent_empty_loc: manifest_instance.parent_empty_loc,
+                        parent_empty_quat: manifest_instance.parent_empty_quat,
+                        parent_empty_scale: manifest_instance.parent_empty_scale,
                         source_object_name: linked_mesh_ref.object_name.clone(),
                         name,
                         mesh_name: linked_mesh_ref.mesh_name.clone(),
@@ -2511,6 +2517,10 @@ pub struct LinkedMeshInstance {
     pub scene_instance_id: usize,
     pub entity_name: String,
     pub parent_entity_name: Option<String>,
+    pub parent_empty_name: Option<String>,
+    pub parent_empty_loc: [f32; 3],
+    pub parent_empty_quat: [f32; 4],
+    pub parent_empty_scale: [f32; 3],
     pub source_object_name: String,
     /// Instance name (typically "mesh_0", "mesh_1", etc.)
     pub name: String,
@@ -2593,6 +2603,10 @@ pub fn create_scene_blend(
                 scene_instance_id: idx,
                 entity_name: name.clone(),
                 parent_entity_name: None,
+                parent_empty_name: None,
+                parent_empty_loc: [0.0, 0.0, 0.0],
+                parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+                parent_empty_scale: [1.0, 1.0, 1.0],
                 source_object_name: name.clone(),
                 blend_path: format!("{mesh_output_dir}/{name}.blend"),
                 mesh_asset: format!("{mesh_output_dir}/{name}.blend"),
@@ -2696,6 +2710,8 @@ pub fn create_scene_blend_with_instances(
     let mut empty_coll_obj_ptrs = Vec::new();
     let mut scene_source_node_entries = Vec::new();
     let mut source_empty_entries = Vec::new();
+    let mut parent_empty_entries = Vec::new();
+    let mut parent_empty_ptr_by_name = HashMap::new();
     let mut source_node_ptr_by_name = HashMap::new();
     let mut local_source_node_ptrs_by_instance = Vec::new();
     let preallocated_local_object_ptrs = (0..children_count).map(|_| ptrs.alloc()).collect::<Vec<_>>();
@@ -2712,6 +2728,15 @@ pub fn create_scene_blend_with_instances(
     }
     
     for (idx, instance) in mesh_instances_input.iter().enumerate() {
+        if let Some(parent_empty_name) = &instance.parent_empty_name {
+            if !parent_empty_ptr_by_name.contains_key(parent_empty_name) {
+                let empty_ptr = ptrs.alloc();
+                let empty_coll_obj_ptr = ptrs.alloc();
+                parent_empty_ptr_by_name.insert(parent_empty_name.clone(), empty_ptr);
+                parent_empty_entries.push((empty_ptr, parent_empty_name.clone(), instance.parent_empty_loc, instance.parent_empty_quat, instance.parent_empty_scale));
+                empty_coll_obj_ptrs.push((empty_coll_obj_ptr, empty_ptr));
+            }
+        }
         let anchor_ptr = ptrs.alloc();
         let anchor_coll_obj_ptr = ptrs.alloc();
         let anchor_idprops = allocate_idprop_blocks(&mut ptrs, scene_instance_properties(entity_name, instance));
@@ -2791,6 +2816,12 @@ pub fn create_scene_blend_with_instances(
                             .copied()
                     })
             })
+            .or_else(|| {
+                instance
+                    .parent_empty_name
+                    .as_ref()
+                    .and_then(|name| parent_empty_ptr_by_name.get(name).copied())
+            })
             .unwrap_or(entity_root_ptr);
         let mesh_parent_ptr = instance
             .source_parent_name
@@ -2842,6 +2873,24 @@ pub fn create_scene_blend_with_instances(
         empty_coll_obj_ptrs.push((anchor_coll_obj_ptr, anchor_ptr));
     }
     
+    for light in lights {
+        if let Some(parent_empty_name) = &light.parent_empty_name {
+            if !parent_empty_ptr_by_name.contains_key(parent_empty_name) {
+                let empty_ptr = ptrs.alloc();
+                let empty_coll_obj_ptr = ptrs.alloc();
+                parent_empty_ptr_by_name.insert(parent_empty_name.clone(), empty_ptr);
+                parent_empty_entries.push((
+                    empty_ptr,
+                    parent_empty_name.clone(),
+                    light.parent_empty_loc,
+                    light.parent_empty_quat,
+                    light.parent_empty_scale,
+                ));
+                empty_coll_obj_ptrs.push((empty_coll_obj_ptr, empty_ptr));
+            }
+        }
+    }
+
     // Allocate pointers for light instances
     let mut light_instances = Vec::new();
     let mut light_coll_obj_ptrs = Vec::new();
@@ -2944,6 +2993,16 @@ pub fn create_scene_blend_with_instances(
     let package_root_matbits = build_matbits(0);
     let entity_root_mat_array = build_mat_ptr_array(0);
     let entity_root_matbits = build_matbits(0);
+
+    let parent_empty_data = parent_empty_entries
+        .iter()
+        .map(|(empty_ptr, name, loc, quat, scale)| {
+            (
+                *empty_ptr,
+                build_empty_object(name, *loc, *quat, *scale, entity_root_ptr),
+            )
+        })
+        .collect::<Vec<_>>();
 
     let mut instance_anchor_data = Vec::new();
     for (anchor_ptr, idx, anchor_parent_ptr, anchor_idprops) in &instance_anchor_entries {
@@ -3060,13 +3119,18 @@ pub fn create_scene_blend_with_instances(
         let light_props_ptr = light_props.as_ref().map(|props| props.root_ptr).unwrap_or(0);
         
         // Build object wrapper for light
+        let light_parent_ptr = light
+            .parent_empty_name
+            .as_ref()
+            .and_then(|name| parent_empty_ptr_by_name.get(name).copied())
+            .unwrap_or(entity_root_ptr);
         let object_bytes = build_lamp_object_with_properties(
             &light.name,
             *lamp_ptr,
             light.position_blend,
             light.rotation_blend,
             [1.0, 1.0, 1.0],  // Standard scale
-            entity_root_ptr,
+            light_parent_ptr,
             light_props_ptr,
         );
         light_object_data.push(object_bytes);
@@ -3124,6 +3188,10 @@ pub fn create_scene_blend_with_instances(
     }
     write_block(&mut out, b"DATA", 0, entity_root_mat_ptr, 1, &entity_root_mat_array);
     write_block(&mut out, b"DATA", 0, entity_root_matbits_ptr, 1, &entity_root_matbits);
+
+    for (empty_ptr, empty_data) in &parent_empty_data {
+        write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, *empty_ptr, 1, empty_data);
+    }
 
     for (idx, (anchor_ptr, anchor_data)) in instance_anchor_data.iter().enumerate() {
         write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, *anchor_ptr, 1, anchor_data);
@@ -3528,6 +3596,10 @@ mod tests_5a_scene_blend {
             scene_instance_id: 0,
             entity_name: "rsi_aurora_mk2_airlock_door_LOD0".to_string(),
             parent_entity_name: None,
+            parent_empty_name: None,
+            parent_empty_loc: [0.0, 0.0, 0.0],
+            parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+            parent_empty_scale: [1.0, 1.0, 1.0],
             source_object_name: "rsi_aurora_mk2_airlock_door_LOD0".to_string(),
             name: "rsi_aurora_mk2_airlock_door_LOD0".to_string(),
             mesh_name: "rsi_aurora_mk2_airlock_door_LOD0_mesh".to_string(),
@@ -3577,6 +3649,10 @@ mod tests_5a_scene_blend {
             scene_instance_id: 0,
             entity_name: "anchor_mesh".to_string(),
             parent_entity_name: None,
+            parent_empty_name: None,
+            parent_empty_loc: [0.0, 0.0, 0.0],
+            parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+            parent_empty_scale: [1.0, 1.0, 1.0],
             source_object_name: "anchor_mesh".to_string(),
             name: "anchor_mesh".to_string(),
             mesh_name: "anchor_mesh_data".to_string(),
@@ -3661,6 +3737,10 @@ mod tests_5a_scene_blend {
             scene_instance_id: 0,
             entity_name: "root_mesh".to_string(),
             parent_entity_name: None,
+            parent_empty_name: None,
+            parent_empty_loc: [0.0, 0.0, 0.0],
+            parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+            parent_empty_scale: [1.0, 1.0, 1.0],
             source_object_name: "root_mesh".to_string(),
             name: "root_mesh".to_string(),
             mesh_name: "root_mesh_data".to_string(),
@@ -3697,6 +3777,10 @@ mod tests_5a_scene_blend {
             scene_instance_id: 1,
             entity_name: "child_mesh".to_string(),
             parent_entity_name: None,
+            parent_empty_name: None,
+            parent_empty_loc: [0.0, 0.0, 0.0],
+            parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+            parent_empty_scale: [1.0, 1.0, 1.0],
             source_object_name: "child_mesh".to_string(),
             name: "child_mesh".to_string(),
             mesh_name: "child_mesh_data".to_string(),
@@ -3751,6 +3835,10 @@ mod tests_5a_scene_blend {
             scene_instance_id: 0,
             entity_name: "parent_mesh".to_string(),
             parent_entity_name: None,
+            parent_empty_name: None,
+            parent_empty_loc: [0.0, 0.0, 0.0],
+            parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+            parent_empty_scale: [1.0, 1.0, 1.0],
             source_object_name: "parent_mesh".to_string(),
             name: "parent_mesh".to_string(),
             mesh_name: "parent_mesh_data".to_string(),
@@ -3792,6 +3880,10 @@ mod tests_5a_scene_blend {
             scene_instance_id: 0,
             entity_name: "first_instance_mesh".to_string(),
             parent_entity_name: None,
+            parent_empty_name: None,
+            parent_empty_loc: [0.0, 0.0, 0.0],
+            parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+            parent_empty_scale: [1.0, 1.0, 1.0],
             source_object_name: "first_instance_mesh".to_string(),
             name: "first_instance_mesh".to_string(),
             mesh_name: "first_instance_mesh_data".to_string(),
@@ -3819,6 +3911,10 @@ mod tests_5a_scene_blend {
             scene_instance_id: 1,
             entity_name: "second_instance_mesh".to_string(),
             parent_entity_name: None,
+            parent_empty_name: None,
+            parent_empty_loc: [0.0, 0.0, 0.0],
+            parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+            parent_empty_scale: [1.0, 1.0, 1.0],
             source_object_name: "second_instance_mesh".to_string(),
             name: "second_instance_mesh".to_string(),
             mesh_name: "second_instance_mesh_data".to_string(),
@@ -3867,6 +3963,10 @@ mod tests_5a_scene_blend {
             scene_instance_id: 0,
             entity_name: "Mount_Gimbal_S2".to_string(),
             parent_entity_name: None,
+            parent_empty_name: None,
+            parent_empty_loc: [0.0, 0.0, 0.0],
+            parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+            parent_empty_scale: [1.0, 1.0, 1.0],
             source_object_name: "first_gimbal_mesh".to_string(),
             name: "first_gimbal_mesh".to_string(),
             mesh_name: "first_gimbal_mesh_data".to_string(),
@@ -3894,6 +3994,10 @@ mod tests_5a_scene_blend {
             scene_instance_id: 1,
             entity_name: "KLWE_LaserRepeater_S2".to_string(),
             parent_entity_name: Some("Mount_Gimbal_S2".to_string()),
+            parent_empty_name: None,
+            parent_empty_loc: [0.0, 0.0, 0.0],
+            parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+            parent_empty_scale: [1.0, 1.0, 1.0],
             source_object_name: "first_weapon_mesh".to_string(),
             name: "first_weapon_mesh".to_string(),
             mesh_name: "first_weapon_mesh_data".to_string(),
@@ -3915,6 +4019,10 @@ mod tests_5a_scene_blend {
             scene_instance_id: 2,
             entity_name: "Mount_Gimbal_S2".to_string(),
             parent_entity_name: None,
+            parent_empty_name: None,
+            parent_empty_loc: [0.0, 0.0, 0.0],
+            parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+            parent_empty_scale: [1.0, 1.0, 1.0],
             source_object_name: "second_gimbal_mesh".to_string(),
             name: "second_gimbal_mesh".to_string(),
             mesh_name: "second_gimbal_mesh_data".to_string(),
@@ -3942,6 +4050,10 @@ mod tests_5a_scene_blend {
             scene_instance_id: 3,
             entity_name: "KLWE_LaserRepeater_S2".to_string(),
             parent_entity_name: Some("Mount_Gimbal_S2".to_string()),
+            parent_empty_name: None,
+            parent_empty_loc: [0.0, 0.0, 0.0],
+            parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+            parent_empty_scale: [1.0, 1.0, 1.0],
             source_object_name: "second_weapon_mesh".to_string(),
             name: "second_weapon_mesh".to_string(),
             mesh_name: "second_weapon_mesh_data".to_string(),
@@ -3986,6 +4098,10 @@ mod tests_5a_scene_blend {
     fn test_create_scene_blend_parents_lights_to_entity_wrapper_with_properties() {
         let light = ExtractedLight {
             name: "SceneLight".to_string(),
+            parent_empty_name: None,
+            parent_empty_loc: [0.0, 0.0, 0.0],
+            parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+            parent_empty_scale: [1.0, 1.0, 1.0],
             position_blend: [0.0, 0.0, 0.0],
             rotation_blend: [1.0, 0.0, 0.0, 0.0],
             color: [1.0, 1.0, 1.0],
@@ -4203,6 +4319,10 @@ mod tests_5a_scene_blend {
     fn test_create_scene_blend_objects_do_not_parent_to_collections() {
         let light = ExtractedLight {
             name: "ParentCheckLight".to_string(),
+            parent_empty_name: None,
+            parent_empty_loc: [0.0, 0.0, 0.0],
+            parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+            parent_empty_scale: [1.0, 1.0, 1.0],
             position_blend: [0.0, 0.0, 0.0],
             rotation_blend: [1.0, 0.0, 0.0, 0.0],
             color: [1.0, 1.0, 1.0],
@@ -4299,6 +4419,10 @@ mod tests_5b {
     fn test_create_scene_blend_with_single_light() {
         let light = ExtractedLight {
             name: "TestLight".to_string(),
+            parent_empty_name: None,
+            parent_empty_loc: [0.0, 0.0, 0.0],
+            parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+            parent_empty_scale: [1.0, 1.0, 1.0],
             position_blend: [0.0, 0.0, 0.0],
             rotation_blend: [1.0, 0.0, 0.0, 0.0],
             color: [1.0, 1.0, 1.0],
@@ -4322,6 +4446,10 @@ mod tests_5b {
         let lights = vec![
             ExtractedLight {
                 name: "Ambient".to_string(),
+                parent_empty_name: None,
+                parent_empty_loc: [0.0, 0.0, 0.0],
+                parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+                parent_empty_scale: [1.0, 1.0, 1.0],
                 position_blend: [0.0, 0.0, 0.0],
                 rotation_blend: [1.0, 0.0, 0.0, 0.0],
                 color: [0.8, 0.8, 0.8],
@@ -4338,6 +4466,10 @@ mod tests_5b {
             },
             ExtractedLight {
                 name: "Sun".to_string(),
+                parent_empty_name: None,
+                parent_empty_loc: [0.0, 0.0, 0.0],
+                parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+                parent_empty_scale: [1.0, 1.0, 1.0],
                 position_blend: [10.0, 10.0, 10.0],
                 rotation_blend: [0.707, 0.0, 0.707, 0.0],
                 color: [1.0, 1.0, 1.0],
@@ -4361,6 +4493,10 @@ mod tests_5b {
     fn test_create_scene_blend_lights_in_file() {
         let light = ExtractedLight {
             name: "FileTest".to_string(),
+            parent_empty_name: None,
+            parent_empty_loc: [0.0, 0.0, 0.0],
+            parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+            parent_empty_scale: [1.0, 1.0, 1.0],
             position_blend: [0.0, 0.0, 0.0],
             rotation_blend: [1.0, 0.0, 0.0, 0.0],
             color: [1.0, 1.0, 1.0],
@@ -4400,6 +4536,10 @@ mod tests_5b {
 pub struct ExtractedLight {
     /// CryEngine light name
     pub name: String,
+    pub parent_empty_name: Option<String>,
+    pub parent_empty_loc: [f32; 3],
+    pub parent_empty_quat: [f32; 4],
+    pub parent_empty_scale: [f32; 3],
     /// Position in Blender coordinates
     pub position_blend: [f32; 3],
     /// Rotation as quaternion in Blender coordinates [w, x, y, z]
@@ -4440,6 +4580,15 @@ fn convert_position_sc_to_blender(pos_sc: [f64; 3]) -> [f32; 3] {
 }
 
 fn mat4_from_sc_columns(matrix: [[f32; 4]; 4]) -> glam::Mat4 {
+    glam::Mat4::from_cols_array(&[
+        matrix[0][0], matrix[0][1], matrix[0][2], matrix[0][3],
+        matrix[1][0], matrix[1][1], matrix[1][2], matrix[1][3],
+        matrix[2][0], matrix[2][1], matrix[2][2], matrix[2][3],
+        matrix[3][0], matrix[3][1], matrix[3][2], matrix[3][3],
+    ])
+}
+
+fn mat4_from_sc_rows(matrix: [[f32; 4]; 4]) -> glam::Mat4 {
     glam::Mat4::from_cols_array(&[
         matrix[0][0], matrix[0][1], matrix[0][2], matrix[0][3],
         matrix[1][0], matrix[1][1], matrix[1][2], matrix[1][3],
@@ -4527,10 +4676,9 @@ pub fn extract_lights_from_interiors(
     
     for container in &interiors.containers {
         for light_info in &container.lights {
-            let position_sc = transform_light_position_sc(container.container_transform, light_info.position);
-            let rotation_sc = transform_light_rotation_sc(container.container_transform, light_info.rotation);
-            // Convert container-local CryEngine light transform to Blender coordinates.
-            let position_blend = convert_position_sc_to_blender(position_sc);
+            let (parent_empty_loc, parent_empty_quat, parent_empty_scale) =
+                sc_matrix_to_scene_transform(mat4_from_sc_rows(container.container_transform));
+            let position_blend = convert_position_sc_to_blender(light_info.position);
             
             // Map CryEngine light type to Blender lamp_type
             let lamp_type = match light_info.light_type.as_str() {
@@ -4543,7 +4691,7 @@ pub fn extract_lights_from_interiors(
             
             // Convert quaternion rotation with basis correction for spotlights
             let is_spotlight = lamp_type == 2;  // SPOT type
-            let rotation_blend = convert_quaternion_sc_to_blender(rotation_sc, is_spotlight);
+            let rotation_blend = convert_quaternion_sc_to_blender(light_info.rotation, is_spotlight);
             
             // Intensity conversion: candela proxy → Watts
             // KHR_lights_punctual: lm = cd × 4π (lumens from candelas)
@@ -4575,6 +4723,10 @@ pub fn extract_lights_from_interiors(
             
             lights.push(ExtractedLight {
                 name: light_info.name.clone(),
+                parent_empty_name: Some(container.name.clone()),
+                parent_empty_loc,
+                parent_empty_quat,
+                parent_empty_scale,
                 position_blend,
                 rotation_blend,
                 color: light_info.color,
@@ -5418,6 +5570,10 @@ mod tests_3e {
         let lights = vec![
             ExtractedLight {
                 name: "Ambient1".to_string(),
+                parent_empty_name: None,
+                parent_empty_loc: [0.0, 0.0, 0.0],
+                parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+                parent_empty_scale: [1.0, 1.0, 1.0],
                 position_blend: [0.0, 0.0, 0.0],
                 rotation_blend: [1.0, 0.0, 0.0, 0.0],
                 color: [1.0, 1.0, 1.0],
@@ -5434,6 +5590,10 @@ mod tests_3e {
             },
             ExtractedLight {
                 name: "Projector1".to_string(),
+                parent_empty_name: None,
+                parent_empty_loc: [0.0, 0.0, 0.0],
+                parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+                parent_empty_scale: [1.0, 1.0, 1.0],
                 position_blend: [1.0, 1.0, 1.0],
                 rotation_blend: [1.0, 0.0, 0.0, 0.0],
                 color: [1.0, 0.8, 0.6],
@@ -7373,6 +7533,10 @@ mod tests_4c {
         let lights = vec![
             ExtractedLight {
                 name: "Ambient_001".to_string(),
+                parent_empty_name: None,
+                parent_empty_loc: [0.0, 0.0, 0.0],
+                parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+                parent_empty_scale: [1.0, 1.0, 1.0],
                 position_blend: [0.0, 0.0, 0.0],
                 rotation_blend: [1.0, 0.0, 0.0, 0.0],
                 color: [1.0, 1.0, 1.0],
@@ -7400,6 +7564,10 @@ mod tests_4c {
         let lights = vec![
             ExtractedLight {
                 name: "Ambient".to_string(),
+                parent_empty_name: None,
+                parent_empty_loc: [0.0, 0.0, 0.0],
+                parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+                parent_empty_scale: [1.0, 1.0, 1.0],
                 position_blend: [0.0, 0.0, 0.0],
                 rotation_blend: [1.0, 0.0, 0.0, 0.0],
                 color: [1.0, 1.0, 1.0],
@@ -7416,6 +7584,10 @@ mod tests_4c {
             },
             ExtractedLight {
                 name: "Projector".to_string(),
+                parent_empty_name: None,
+                parent_empty_loc: [0.0, 0.0, 0.0],
+                parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+                parent_empty_scale: [1.0, 1.0, 1.0],
                 position_blend: [1.0, 1.0, 1.0],
                 rotation_blend: [1.0, 0.0, 0.0, 0.0],
                 color: [1.0, 0.8, 0.6],
@@ -7494,6 +7666,10 @@ mod tests_4c {
         let lights = vec![
             ExtractedLight {
                 name: "Light1".to_string(),
+                parent_empty_name: None,
+                parent_empty_loc: [0.0, 0.0, 0.0],
+                parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+                parent_empty_scale: [1.0, 1.0, 1.0],
                 position_blend: [0.0, 0.0, 0.0],
                 rotation_blend: [1.0, 0.0, 0.0, 0.0],
                 color: [1.0, 1.0, 1.0],
@@ -7550,6 +7726,10 @@ mod tests_4c {
         // Test 1: Verify ExtractedLight struct has use_temperature field
         let light = ExtractedLight {
             name: "Test".to_string(),
+            parent_empty_name: None,
+            parent_empty_loc: [0.0, 0.0, 0.0],
+            parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+            parent_empty_scale: [1.0, 1.0, 1.0],
             position_blend: [0.0, 0.0, 0.0],
             rotation_blend: [1.0, 0.0, 0.0, 0.0],
             color: [1.0, 1.0, 1.0],
@@ -7574,6 +7754,10 @@ mod tests_4c {
         // Test 2: use_temperature can be set to false
         let light = ExtractedLight {
             name: "Test".to_string(),
+            parent_empty_name: None,
+            parent_empty_loc: [0.0, 0.0, 0.0],
+            parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+            parent_empty_scale: [1.0, 1.0, 1.0],
             position_blend: [0.0, 0.0, 0.0],
             rotation_blend: [1.0, 0.0, 0.0, 0.0],
             color: [1.0, 1.0, 1.0],
@@ -7608,6 +7792,10 @@ mod tests_4c {
         for (temp, use_temp, desc) in test_temps {
             let light = ExtractedLight {
                 name: format!("Light_{}", temp as i32),
+                parent_empty_name: None,
+                parent_empty_loc: [0.0, 0.0, 0.0],
+                parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+                parent_empty_scale: [1.0, 1.0, 1.0],
                 position_blend: [0.0, 0.0, 0.0],
                 rotation_blend: [1.0, 0.0, 0.0, 0.0],
                 color: [1.0, 1.0, 1.0],
