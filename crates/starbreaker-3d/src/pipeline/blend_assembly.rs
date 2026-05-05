@@ -177,6 +177,15 @@ fn entity_wrapper_properties(entity_name: &str) -> Vec<(String, IdPropValue)> {
     ]
 }
 
+fn entity_root_properties(package_name: &str, entity_name: &str) -> Vec<(String, IdPropValue)> {
+    vec![
+        ("starbreaker_scene_path".to_string(), IdPropValue::String("scene.json".to_string())),
+        ("starbreaker_export_root".to_string(), IdPropValue::String(String::new())),
+        ("starbreaker_package_name".to_string(), IdPropValue::String(package_name.to_string())),
+        ("starbreaker_entity_name".to_string(), IdPropValue::String(entity_name.to_string())),
+    ]
+}
+
 fn scene_instance_properties(entity_name: &str, instance: &LinkedMeshInstance) -> Vec<(String, IdPropValue)> {
     let instance_json = serde_json::json!({
         "entity_name": instance.name,
@@ -222,6 +231,7 @@ struct SceneManifestInstance {
     parent_empty_loc: [f32; 3],
     parent_empty_quat: [f32; 4],
     parent_empty_scale: [f32; 3],
+    is_interior: bool,
     mesh_asset: String,
     parent_node_name: Option<String>,
     loc: [f32; 3],
@@ -280,6 +290,36 @@ fn sc_matrix_to_scene_transform(source: glam::Mat4) -> ([f32; 3], [f32; 4], [f32
     matrix_to_transform((axis * source * axis.inverse()).to_cols_array())
 }
 
+fn reference_root_conversion_quat() -> glam::Quat {
+    glam::Quat::from_xyzw(
+        -std::f32::consts::FRAC_1_SQRT_2,
+        0.0,
+        0.0,
+        std::f32::consts::FRAC_1_SQRT_2,
+    )
+}
+
+fn apply_reference_root_conversion(
+    loc: [f32; 3],
+    quat: [f32; 4],
+    scale: [f32; 3],
+) -> ([f32; 3], [f32; 4], [f32; 3]) {
+    let root_quat = reference_root_conversion_quat();
+    let converted_loc = root_quat * glam::Vec3::from_array(loc);
+    let local_quat = glam::Quat::from_xyzw(quat[1], quat[2], quat[3], quat[0]);
+    let converted_quat = (root_quat * local_quat).normalize();
+    (
+        converted_loc.to_array(),
+        [
+            converted_quat.w,
+            converted_quat.x,
+            converted_quat.y,
+            converted_quat.z,
+        ],
+        scale,
+    )
+}
+
 fn manifest_scene_transform(value: &serde_json::Value) -> ([f32; 3], [f32; 4], [f32; 3]) {
     if value.get("source_transform_basis").and_then(|v| v.as_str()) == Some("cryengine_z_up") {
         if let Some(source) = manifest_matrix(value, "local_transform_sc") {
@@ -324,6 +364,7 @@ fn scene_manifest_instances(manifest_files: &[ExportedFile]) -> Vec<SceneManifes
             parent_empty_loc: [0.0, 0.0, 0.0],
             parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
             parent_empty_scale: [1.0, 1.0, 1.0],
+            is_interior: false,
             mesh_asset: mesh_asset.to_string(),
             parent_node_name: value
                 .get("parent_node_name")
@@ -349,11 +390,14 @@ fn scene_manifest_instances(manifest_files: &[ExportedFile]) -> Vec<SceneManifes
                 .unwrap_or(glam::Mat4::IDENTITY);
             let (container_loc, container_quat, container_scale) =
                 sc_matrix_to_scene_transform(container_transform);
-            let container_name = interior
+            let (container_loc, container_quat, container_scale) =
+                apply_reference_root_conversion(container_loc, container_quat, container_scale);
+            let interior_name = interior
                 .get("name")
                 .and_then(|v| v.as_str())
                 .unwrap_or("Interior")
                 .to_string();
+            let container_name = format!("interior_{interior_name}");
             if let Some(placements) = interior.get("placements").and_then(|v| v.as_array()) {
                 for placement in placements {
                     let Some(mesh_asset) = placement.get("mesh_asset").and_then(|v| v.as_str()) else {
@@ -373,6 +417,7 @@ fn scene_manifest_instances(manifest_files: &[ExportedFile]) -> Vec<SceneManifes
                         parent_empty_loc: container_loc,
                         parent_empty_quat: container_quat,
                         parent_empty_scale: container_scale,
+                        is_interior: true,
                         mesh_asset: mesh_asset.to_string(),
                         parent_node_name: None,
                         loc,
@@ -719,6 +764,7 @@ pub fn write_decomposed_export_blend(
                         parent_empty_loc: [0.0, 0.0, 0.0],
                         parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
                         parent_empty_scale: [1.0, 1.0, 1.0],
+                        is_interior: false,
                         source_object_name: linked_mesh_ref.object_name.clone(),
                         name,
                         mesh_name: linked_mesh_ref.mesh_name.clone(),
@@ -759,6 +805,7 @@ pub fn write_decomposed_export_blend(
                         parent_empty_loc: manifest_instance.parent_empty_loc,
                         parent_empty_quat: manifest_instance.parent_empty_quat,
                         parent_empty_scale: manifest_instance.parent_empty_scale,
+                        is_interior: manifest_instance.is_interior,
                         source_object_name: linked_mesh_ref.object_name.clone(),
                         name,
                         mesh_name: linked_mesh_ref.mesh_name.clone(),
@@ -795,7 +842,21 @@ pub fn write_decomposed_export_blend(
     // Library paths are relative to scene.blend location, which is in Packages/{package}/
     // So we need ../../Data/Objects to reach the shared assets
     log::info!("[blend-debug] Creating scene.blend with {} children and {} lights", children_for_scene.len(), extracted_lights.len());
-    let scene_blend_bytes = create_scene_blend_with_instances(&scene_entity_name, &scene_mesh_instances, &extracted_lights)?;
+    let scene_package_name = manifest_files
+        .iter()
+        .find_map(|file| {
+            file.relative_path
+                .strip_prefix("Packages/")
+                .and_then(|path| path.strip_suffix("/scene.json"))
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_else(|| scene_entity_name.clone());
+    let scene_blend_bytes = create_scene_blend_package_with_instances(
+        &scene_package_name,
+        &scene_entity_name,
+        &scene_mesh_instances,
+        &extracted_lights,
+    )?;
     log::info!("[blend-debug] scene.blend created, size: {} bytes", scene_blend_bytes.len());
     log::info!("[blend-debug] First 20 bytes of uncompressed: {:?}", &scene_blend_bytes[..20.min(scene_blend_bytes.len())]);
     
@@ -2522,6 +2583,7 @@ pub struct LinkedMeshInstance {
     pub parent_empty_loc: [f32; 3],
     pub parent_empty_quat: [f32; 4],
     pub parent_empty_scale: [f32; 3],
+    pub is_interior: bool,
     pub source_object_name: String,
     /// Instance name (typically "mesh_0", "mesh_1", etc.)
     pub name: String,
@@ -2608,6 +2670,7 @@ pub fn create_scene_blend(
                 parent_empty_loc: [0.0, 0.0, 0.0],
                 parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
                 parent_empty_scale: [1.0, 1.0, 1.0],
+                is_interior: false,
                 source_object_name: name.clone(),
                 blend_path: format!("{mesh_output_dir}/{name}.blend"),
                 mesh_asset: format!("{mesh_output_dir}/{name}.blend"),
@@ -2633,6 +2696,15 @@ pub fn create_scene_blend(
 
 pub fn create_scene_blend_with_instances(
     entity_name: &str,
+    mesh_instances_input: &[LinkedMeshInstance],
+    lights: &[ExtractedLight],
+) -> Result<Vec<u8>, Error> {
+    create_scene_blend_package_with_instances(entity_name, entity_name, mesh_instances_input, lights)
+}
+
+fn create_scene_blend_package_with_instances(
+    package_name: &str,
+    root_entity_name: &str,
     mesh_instances_input: &[LinkedMeshInstance],
     lights: &[ExtractedLight],
 ) -> Result<Vec<u8>, Error> {
@@ -2670,22 +2742,16 @@ pub fn create_scene_blend_with_instances(
     let root_collection_object_ptr = ptrs.alloc();
     let layer_collection_ptr = ptrs.alloc();
     
-    // Sub-collections for organizing objects
-    let meshes_collection_ptr = ptrs.alloc();
-    let _meshes_coll_obj_ptr = ptrs.alloc();
-    let meshes_layer_coll_ptr = ptrs.alloc();
-    
-    let _lights_collection_ptr = ptrs.alloc();
-    let _lights_coll_obj_ptr = ptrs.alloc();
-    let _lights_layer_coll_ptr = ptrs.alloc();
-    
-    let _empties_collection_ptr = ptrs.alloc();
-    let _empties_coll_obj_ptr = ptrs.alloc();
-    let _empties_layer_coll_ptr = ptrs.alloc();
-    
-    let _decals_collection_ptr = ptrs.alloc();
-    let _decals_coll_obj_ptr = ptrs.alloc();
-    let _decals_layer_coll_ptr = ptrs.alloc();
+    // Addon-style collections: an empty default collection, package collection,
+    // package Interior child collection, and hidden template cache placeholder.
+    let default_collection_ptr = ptrs.alloc();
+    let default_layer_coll_ptr = ptrs.alloc();
+    let package_collection_ptr = ptrs.alloc();
+    let package_layer_coll_ptr = ptrs.alloc();
+    let interior_collection_ptr = ptrs.alloc();
+    let interior_layer_coll_ptr = ptrs.alloc();
+    let template_cache_collection_ptr = ptrs.alloc();
+    let template_cache_layer_coll_ptr = ptrs.alloc();
     
     // Addon-style local scene anchors. Linked library object parent chains are
     // owned by their asset files, but local lights and scene metadata live here.
@@ -2696,8 +2762,8 @@ pub fn create_scene_blend_with_instances(
     let entity_root_mat_ptr = ptrs.alloc();
     let entity_root_matbits_ptr = ptrs.alloc();
     let entity_root_collection_object_ptr = ptrs.alloc();
-    let package_root_idprops = allocate_idprop_blocks(&mut ptrs, package_root_properties(entity_name));
-    let entity_root_idprops = allocate_idprop_blocks(&mut ptrs, entity_wrapper_properties(entity_name));
+    let package_root_idprops = allocate_idprop_blocks(&mut ptrs, package_root_properties(package_name));
+    let entity_root_idprops = allocate_idprop_blocks(&mut ptrs, entity_root_properties(package_name, root_entity_name));
     
     // Allocate pointers for local, parentable mesh objects whose data points at
     // linked Mesh ID stubs. Directly parenting linked Object IDs does not
@@ -2705,10 +2771,10 @@ pub fn create_scene_blend_with_instances(
     let mut linked_mesh_ids = Vec::new();
     let mut library_ptr_by_path = HashMap::new();
     let mut library_ptrs = Vec::new();
-    let mut mesh_coll_obj_ptrs = Vec::new();
+    let mut package_coll_obj_ptrs = Vec::new();
+    let mut interior_coll_obj_ptrs = Vec::new();
     let mut local_mesh_object_entries = Vec::new();
     let mut instance_anchor_entries = Vec::new();
-    let mut empty_coll_obj_ptrs = Vec::new();
     let mut scene_source_node_entries = Vec::new();
     let mut source_empty_entries = Vec::new();
     let mut parent_empty_entries = Vec::new();
@@ -2734,13 +2800,20 @@ pub fn create_scene_blend_with_instances(
                 let empty_ptr = ptrs.alloc();
                 let empty_coll_obj_ptr = ptrs.alloc();
                 parent_empty_ptr_by_name.insert(parent_empty_name.clone(), empty_ptr);
-                parent_empty_entries.push((empty_ptr, parent_empty_name.clone(), instance.parent_empty_loc, instance.parent_empty_quat, instance.parent_empty_scale));
-                empty_coll_obj_ptrs.push((empty_coll_obj_ptr, empty_ptr));
+                parent_empty_entries.push((
+                    empty_ptr,
+                    empty_coll_obj_ptr,
+                    parent_empty_name.clone(),
+                    instance.parent_empty_loc,
+                    instance.parent_empty_quat,
+                    instance.parent_empty_scale,
+                    instance.is_interior,
+                ));
             }
         }
         let anchor_ptr = ptrs.alloc();
         let anchor_coll_obj_ptr = ptrs.alloc();
-        let anchor_idprops = allocate_idprop_blocks(&mut ptrs, scene_instance_properties(entity_name, instance));
+        let anchor_idprops = allocate_idprop_blocks(&mut ptrs, scene_instance_properties(package_name, instance));
         let mut local_source_node_ptrs = HashMap::new();
         let mut local_source_node_entries = Vec::new();
         for source_node in &instance.source_nodes {
@@ -2750,7 +2823,11 @@ pub fn create_scene_blend_with_instances(
             source_node_ptr_by_name
                 .entry(source_node.name.clone())
                 .or_insert(empty_ptr);
-            empty_coll_obj_ptrs.push((empty_coll_obj_ptr, empty_ptr));
+            if instance.is_interior {
+                interior_coll_obj_ptrs.push((empty_coll_obj_ptr, empty_ptr));
+            } else {
+                package_coll_obj_ptrs.push((empty_coll_obj_ptr, empty_ptr));
+            }
             local_source_node_entries.push((empty_ptr, empty_coll_obj_ptr));
         }
         for (node_index, (empty_ptr, _)) in local_source_node_entries.iter().enumerate() {
@@ -2786,7 +2863,7 @@ pub fn create_scene_blend_with_instances(
         let local_object_ptr = preallocated_local_object_ptrs[idx];
         let local_object_mat_ptr = ptrs.alloc();
         let local_object_matbits_ptr = ptrs.alloc();
-        let local_object_idprops = allocate_idprop_blocks(&mut ptrs, scene_instance_properties(entity_name, instance));
+        let local_object_idprops = allocate_idprop_blocks(&mut ptrs, scene_instance_properties(package_name, instance));
         let anchor_parent_ptr = instance
             .parent_node_name
             .as_ref()
@@ -2846,7 +2923,11 @@ pub fn create_scene_blend_with_instances(
                     let empty_coll_obj_ptr = ptrs.alloc();
                     let parent_ptr = ancestor_ptrs.last().copied().unwrap_or(anchor_ptr);
                     source_empty_entries.push((empty_ptr, idx, ancestor_index, parent_ptr));
-                    empty_coll_obj_ptrs.push((empty_coll_obj_ptr, empty_ptr));
+                    if instance.is_interior {
+                        interior_coll_obj_ptrs.push((empty_coll_obj_ptr, empty_ptr));
+                    } else {
+                        package_coll_obj_ptrs.push((empty_coll_obj_ptr, empty_ptr));
+                    }
                     source_node_ptr_by_name
                         .entry(instance.source_ancestors[ancestor_index].name.clone())
                         .or_insert(empty_ptr);
@@ -2856,7 +2937,11 @@ pub fn create_scene_blend_with_instances(
             });
         
         linked_mesh_ids.push((mesh_id_ptr, library_ptr, idx));
-        mesh_coll_obj_ptrs.push((coll_obj_ptr, local_object_ptr));
+        if instance.is_interior {
+            interior_coll_obj_ptrs.push((coll_obj_ptr, local_object_ptr));
+        } else {
+            package_coll_obj_ptrs.push((coll_obj_ptr, local_object_ptr));
+        }
         local_mesh_object_entries.push((
             local_object_ptr,
             local_object_mat_ptr,
@@ -2871,7 +2956,11 @@ pub fn create_scene_blend_with_instances(
                 .collect::<Vec<_>>(),
         ));
         instance_anchor_entries.push((anchor_ptr, idx, anchor_parent_ptr, anchor_idprops));
-        empty_coll_obj_ptrs.push((anchor_coll_obj_ptr, anchor_ptr));
+        if instance.is_interior {
+            interior_coll_obj_ptrs.push((anchor_coll_obj_ptr, anchor_ptr));
+        } else {
+            package_coll_obj_ptrs.push((anchor_coll_obj_ptr, anchor_ptr));
+        }
     }
     
     for light in lights {
@@ -2882,12 +2971,13 @@ pub fn create_scene_blend_with_instances(
                 parent_empty_ptr_by_name.insert(parent_empty_name.clone(), empty_ptr);
                 parent_empty_entries.push((
                     empty_ptr,
+                    empty_coll_obj_ptr,
                     parent_empty_name.clone(),
                     light.parent_empty_loc,
                     light.parent_empty_quat,
                     light.parent_empty_scale,
+                    true,
                 ));
-                empty_coll_obj_ptrs.push((empty_coll_obj_ptr, empty_ptr));
             }
         }
     }
@@ -2907,12 +2997,11 @@ pub fn create_scene_blend_with_instances(
         light_coll_obj_ptrs.push((coll_obj_ptr, object_ptr));
     }
     
-    // Allocate pointers for CollectionChild structs (linking sub-collections to root)
-    // These wrap the sub-collections (Meshes, Lights, Empties, Decals) in the children linked list
-    let meshes_coll_child_ptr = ptrs.alloc();
-    let _lights_coll_child_ptr = ptrs.alloc();
-    let _empties_coll_child_ptr = ptrs.alloc();
-    let _decals_coll_child_ptr = ptrs.alloc();
+    // CollectionChild structs for the addon-style collection tree.
+    let default_coll_child_ptr = ptrs.alloc();
+    let package_coll_child_ptr = ptrs.alloc();
+    let template_cache_coll_child_ptr = ptrs.alloc();
+    let interior_coll_child_ptr = ptrs.alloc();
     
     // Build scene datablocks
     // Scene must always be named "Scene" for Blender to recognize it as the primary scene
@@ -2931,43 +3020,88 @@ pub fn create_scene_blend_with_instances(
     let view_layer_data = build_view_layer("ViewLayer", base_ptr, layer_collection_ptr);
     let base_data = build_base(package_root_ptr);
     
-    // Build a single visible package collection. Object hierarchy is expressed
-    // through Object.parent; extra organizational collections obscure the addon-style tree.
-    let mut package_coll_obj_ptrs = Vec::new();
     package_coll_obj_ptrs.push((root_collection_object_ptr, package_root_ptr));
     package_coll_obj_ptrs.push((entity_root_collection_object_ptr, entity_root_ptr));
-    package_coll_obj_ptrs.extend(mesh_coll_obj_ptrs.iter().copied());
     package_coll_obj_ptrs.extend(light_coll_obj_ptrs.iter().copied());
-    package_coll_obj_ptrs.extend(empty_coll_obj_ptrs.iter().copied());
+    for (empty_ptr, coll_obj_ptr, _, _, _, _, is_interior) in &parent_empty_entries {
+        if *is_interior {
+            interior_coll_obj_ptrs.push((*coll_obj_ptr, *empty_ptr));
+        } else {
+            package_coll_obj_ptrs.push((*coll_obj_ptr, *empty_ptr));
+        }
+    }
     let package_collection_head = package_coll_obj_ptrs.first().map(|entry| entry.0).unwrap_or(0);
     let package_collection_tail = package_coll_obj_ptrs.last().map(|entry| entry.0).unwrap_or(0);
-    let mut package_coll_obj_data_list = Vec::new();
-    for (idx, &(coll_obj_ptr, obj_ptr)) in package_coll_obj_ptrs.iter().enumerate() {
-        let prev_ptr = if idx > 0 { package_coll_obj_ptrs[idx - 1].0 } else { 0 };
-        let next_ptr = if idx + 1 < package_coll_obj_ptrs.len() { package_coll_obj_ptrs[idx + 1].0 } else { 0 };
-        package_coll_obj_data_list.push((coll_obj_ptr, build_collection_object_linked(obj_ptr, prev_ptr, next_ptr)));
-    }
+    let interior_collection_head = interior_coll_obj_ptrs.first().map(|entry| entry.0).unwrap_or(0);
+    let interior_collection_tail = interior_coll_obj_ptrs.last().map(|entry| entry.0).unwrap_or(0);
+    let package_coll_obj_data_list = linked_collection_object_data(&package_coll_obj_ptrs);
+    let interior_coll_obj_data_list = linked_collection_object_data(&interior_coll_obj_ptrs);
 
-    let root_collection_data = build_master_collection(0, 0, meshes_coll_child_ptr, meshes_coll_child_ptr);
+    let root_collection_data = build_master_collection(
+        0,
+        0,
+        default_coll_child_ptr,
+        template_cache_coll_child_ptr,
+    );
+    let default_collection_data = build_collection("Collection", 0, 0, 0, 0);
     let package_collection_data = build_collection(
-        entity_name,
+        &format!("StarBreaker {package_name}"),
         package_collection_head,
         package_collection_tail,
+        interior_coll_child_ptr,
+        interior_coll_child_ptr,
+    );
+    let interior_collection_data = build_collection(
+        &format!("StarBreaker {package_name} Interior"),
+        interior_collection_head,
+        interior_collection_tail,
         0,
         0,
     );
-    let package_coll_child_data = build_collection_object_linked(meshes_collection_ptr, 0, 0);
+    let template_cache_collection_data = build_collection("StarBreaker Template Cache", 0, 0, 0, 0);
+    let default_coll_child_data =
+        build_collection_object_linked(default_collection_ptr, 0, package_coll_child_ptr);
+    let package_coll_child_data = build_collection_object_linked(
+        package_collection_ptr,
+        default_coll_child_ptr,
+        template_cache_coll_child_ptr,
+    );
+    let template_cache_coll_child_data =
+        build_collection_object_linked(template_cache_collection_ptr, package_coll_child_ptr, 0);
+    let interior_coll_child_data =
+        build_collection_object_linked(interior_collection_ptr, 0, 0);
 
     let root_layer_collection_data = build_layer_collection_linked(
         root_collection_ptr,  // Collection pointer
         0,                    // prev = NULL (root has no siblings)
         0,                    // next = NULL (root has no siblings)
-        meshes_layer_coll_ptr,
-        meshes_layer_coll_ptr,
+        default_layer_coll_ptr,
+        template_cache_layer_coll_ptr,
     );
-    let meshes_layer_coll_data = build_layer_collection_linked(
-        meshes_collection_ptr,
+    let default_layer_coll_data = build_layer_collection_linked(
+        default_collection_ptr,
         0,
+        package_layer_coll_ptr,
+        0,
+        0,
+    );
+    let package_layer_coll_data = build_layer_collection_linked(
+        package_collection_ptr,
+        default_layer_coll_ptr,
+        template_cache_layer_coll_ptr,
+        interior_layer_coll_ptr,
+        interior_layer_coll_ptr,
+    );
+    let interior_layer_coll_data = build_layer_collection_linked(
+        interior_collection_ptr,
+        0,
+        0,
+        0,
+        0,
+    );
+    let template_cache_layer_coll_data = build_layer_collection_linked(
+        template_cache_collection_ptr,
+        package_layer_coll_ptr,
         0,
         0,
         0,
@@ -2975,7 +3109,7 @@ pub fn create_scene_blend_with_instances(
     
     // Build addon-style package and entity root empties at origin.
     let package_root_data = build_empty_object_with_properties(
-        &format!("StarBreaker {entity_name}"),
+        &format!("StarBreaker {package_name}"),
         [0.0, 0.0, 0.0],  // position
         [1.0, 0.0, 0.0, 0.0],  // quaternion
         [1.0, 1.0, 1.0],  // scale
@@ -2983,7 +3117,7 @@ pub fn create_scene_blend_with_instances(
         package_root_idprops.as_ref().map(|props| props.root_ptr).unwrap_or(0),
     );
     let entity_root_data = build_empty_object_with_properties(
-        entity_name,
+        root_entity_name,
         [0.0, 0.0, 0.0],
         [1.0, 0.0, 0.0, 0.0],
         [1.0, 1.0, 1.0],
@@ -2995,12 +3129,16 @@ pub fn create_scene_blend_with_instances(
     let entity_root_mat_array = build_mat_ptr_array(0);
     let entity_root_matbits = build_matbits(0);
 
+    let root_conversion_ptr = source_node_ptr_by_name
+        .get("CryEngine_Z_up")
+        .copied()
+        .unwrap_or(entity_root_ptr);
     let parent_empty_data = parent_empty_entries
         .iter()
-        .map(|(empty_ptr, name, loc, quat, scale)| {
+        .map(|(empty_ptr, _, name, loc, quat, scale, _)| {
             (
                 *empty_ptr,
-                build_empty_object(name, *loc, *quat, *scale, entity_root_ptr),
+                build_empty_object(name, *loc, *quat, *scale, root_conversion_ptr),
             )
         })
         .collect::<Vec<_>>();
@@ -3074,7 +3212,7 @@ pub fn create_scene_blend_with_instances(
     }
     
     // Allocate string data for library filenames (uses entity name, not scene name)
-    let scene_name_bytes = format!("{}\0", entity_name);
+    let scene_name_bytes = format!("{}\0", package_name);
     let scene_name_ptr = ptrs.alloc();
     
     // Build linked object ID stubs and their library blocks.
@@ -3116,7 +3254,7 @@ pub fn create_scene_blend_with_instances(
             false,
         );
         light_data.push((*lamp_ptr, lamp_bytes));
-        let light_props = allocate_idprop_blocks(&mut ptrs, light_object_properties(entity_name, &light.name));
+        let light_props = allocate_idprop_blocks(&mut ptrs, light_object_properties(package_name, &light.name));
         let light_props_ptr = light_props.as_ref().map(|props| props.root_ptr).unwrap_or(0);
         
         // Build object wrapper for light
@@ -3162,19 +3300,29 @@ pub fn create_scene_blend_with_instances(
     write_block(&mut out, b"DATA", SDNA_IDX_VIEW_LAYER, view_layer_ptr, 1, &view_layer_data);
     write_block(&mut out, b"DATA", SDNA_IDX_BASE, base_ptr, 1, &base_data);
     write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, layer_collection_ptr, 1, &root_layer_collection_data);
-    write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, meshes_layer_coll_ptr, 1, &meshes_layer_coll_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, default_layer_coll_ptr, 1, &default_layer_coll_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, package_layer_coll_ptr, 1, &package_layer_coll_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, interior_layer_coll_ptr, 1, &interior_layer_coll_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, template_cache_layer_coll_ptr, 1, &template_cache_layer_coll_data);
     write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION, root_collection_ptr, 1, &root_collection_data);  // embedded master_collection
-    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_CHILD, meshes_coll_child_ptr, 1, &package_coll_child_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_CHILD, default_coll_child_ptr, 1, &default_coll_child_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_CHILD, package_coll_child_ptr, 1, &package_coll_child_data);
+    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_CHILD, template_cache_coll_child_ptr, 1, &template_cache_coll_child_data);
     // End of SC DATA sequence — sub-collection GR blocks follow with their own DATA sub-blocks:
     write_world_with_sky_shader(&mut out, "World", world_ptr, world_node_tree_ptr, &mut ptrs);
 
 
-    
-    // Single visible package collection containing every local object.
-    write_block(&mut out, b"GR\0\0", SDNA_IDX_COLLECTION, meshes_collection_ptr, 1, &package_collection_data);
+    write_block(&mut out, b"GR\0\0", SDNA_IDX_COLLECTION, default_collection_ptr, 1, &default_collection_data);
+    write_block(&mut out, b"GR\0\0", SDNA_IDX_COLLECTION, package_collection_ptr, 1, &package_collection_data);
     for (coll_obj_ptr, coll_obj_data) in &package_coll_obj_data_list {
         write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, *coll_obj_ptr, 1, coll_obj_data);
     }
+    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_CHILD, interior_coll_child_ptr, 1, &interior_coll_child_data);
+    write_block(&mut out, b"GR\0\0", SDNA_IDX_COLLECTION, interior_collection_ptr, 1, &interior_collection_data);
+    for (coll_obj_ptr, coll_obj_data) in &interior_coll_obj_data_list {
+        write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, *coll_obj_ptr, 1, coll_obj_data);
+    }
+    write_block(&mut out, b"GR\0\0", SDNA_IDX_COLLECTION, template_cache_collection_ptr, 1, &template_cache_collection_data);
     
     // Write package/entity root empty objects + properties/material arrays.
     write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, package_root_ptr, 1, &package_root_data);
@@ -3254,6 +3402,21 @@ pub fn create_scene_blend_with_instances(
     
     // Return uncompressed for now (Phase 2 will handle compression)
     Ok(out)
+}
+
+fn linked_collection_object_data(entries: &[(u64, u64)]) -> Vec<(u64, Vec<u8>)> {
+    entries
+        .iter()
+        .enumerate()
+        .map(|(idx, &(coll_obj_ptr, object_ptr))| {
+            let prev_ptr = if idx > 0 { entries[idx - 1].0 } else { 0 };
+            let next_ptr = if idx + 1 < entries.len() { entries[idx + 1].0 } else { 0 };
+            (
+                coll_obj_ptr,
+                build_collection_object_linked(object_ptr, prev_ptr, next_ptr),
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -3601,6 +3764,7 @@ mod tests_5a_scene_blend {
             parent_empty_loc: [0.0, 0.0, 0.0],
             parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
             parent_empty_scale: [1.0, 1.0, 1.0],
+            is_interior: false,
             source_object_name: "rsi_aurora_mk2_airlock_door_LOD0".to_string(),
             name: "rsi_aurora_mk2_airlock_door_LOD0".to_string(),
             mesh_name: "rsi_aurora_mk2_airlock_door_LOD0_mesh".to_string(),
@@ -3654,6 +3818,7 @@ mod tests_5a_scene_blend {
             parent_empty_loc: [0.0, 0.0, 0.0],
             parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
             parent_empty_scale: [1.0, 1.0, 1.0],
+            is_interior: false,
             source_object_name: "anchor_mesh".to_string(),
             name: "anchor_mesh".to_string(),
             mesh_name: "anchor_mesh_data".to_string(),
@@ -3742,6 +3907,7 @@ mod tests_5a_scene_blend {
             parent_empty_loc: [0.0, 0.0, 0.0],
             parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
             parent_empty_scale: [1.0, 1.0, 1.0],
+            is_interior: false,
             source_object_name: "root_mesh".to_string(),
             name: "root_mesh".to_string(),
             mesh_name: "root_mesh_data".to_string(),
@@ -3782,6 +3948,7 @@ mod tests_5a_scene_blend {
             parent_empty_loc: [0.0, 0.0, 0.0],
             parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
             parent_empty_scale: [1.0, 1.0, 1.0],
+            is_interior: false,
             source_object_name: "child_mesh".to_string(),
             name: "child_mesh".to_string(),
             mesh_name: "child_mesh_data".to_string(),
@@ -3840,6 +4007,7 @@ mod tests_5a_scene_blend {
             parent_empty_loc: [0.0, 0.0, 0.0],
             parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
             parent_empty_scale: [1.0, 1.0, 1.0],
+            is_interior: false,
             source_object_name: "parent_mesh".to_string(),
             name: "parent_mesh".to_string(),
             mesh_name: "parent_mesh_data".to_string(),
@@ -3885,6 +4053,7 @@ mod tests_5a_scene_blend {
             parent_empty_loc: [0.0, 0.0, 0.0],
             parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
             parent_empty_scale: [1.0, 1.0, 1.0],
+            is_interior: false,
             source_object_name: "first_instance_mesh".to_string(),
             name: "first_instance_mesh".to_string(),
             mesh_name: "first_instance_mesh_data".to_string(),
@@ -3916,6 +4085,7 @@ mod tests_5a_scene_blend {
             parent_empty_loc: [0.0, 0.0, 0.0],
             parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
             parent_empty_scale: [1.0, 1.0, 1.0],
+            is_interior: false,
             source_object_name: "second_instance_mesh".to_string(),
             name: "second_instance_mesh".to_string(),
             mesh_name: "second_instance_mesh_data".to_string(),
@@ -3968,6 +4138,7 @@ mod tests_5a_scene_blend {
             parent_empty_loc: [0.0, 0.0, 0.0],
             parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
             parent_empty_scale: [1.0, 1.0, 1.0],
+            is_interior: false,
             source_object_name: "first_gimbal_mesh".to_string(),
             name: "first_gimbal_mesh".to_string(),
             mesh_name: "first_gimbal_mesh_data".to_string(),
@@ -3999,6 +4170,7 @@ mod tests_5a_scene_blend {
             parent_empty_loc: [0.0, 0.0, 0.0],
             parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
             parent_empty_scale: [1.0, 1.0, 1.0],
+            is_interior: false,
             source_object_name: "first_weapon_mesh".to_string(),
             name: "first_weapon_mesh".to_string(),
             mesh_name: "first_weapon_mesh_data".to_string(),
@@ -4024,6 +4196,7 @@ mod tests_5a_scene_blend {
             parent_empty_loc: [0.0, 0.0, 0.0],
             parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
             parent_empty_scale: [1.0, 1.0, 1.0],
+            is_interior: false,
             source_object_name: "second_gimbal_mesh".to_string(),
             name: "second_gimbal_mesh".to_string(),
             mesh_name: "second_gimbal_mesh_data".to_string(),
@@ -4055,6 +4228,7 @@ mod tests_5a_scene_blend {
             parent_empty_loc: [0.0, 0.0, 0.0],
             parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
             parent_empty_scale: [1.0, 1.0, 1.0],
+            is_interior: false,
             source_object_name: "second_weapon_mesh".to_string(),
             name: "second_weapon_mesh".to_string(),
             mesh_name: "second_weapon_mesh_data".to_string(),
@@ -4679,6 +4853,8 @@ pub fn extract_lights_from_interiors(
         for light_info in &container.lights {
             let (parent_empty_loc, parent_empty_quat, parent_empty_scale) =
                 sc_matrix_to_scene_transform(mat4_from_sc_rows(container.container_transform));
+            let (parent_empty_loc, parent_empty_quat, parent_empty_scale) =
+                apply_reference_root_conversion(parent_empty_loc, parent_empty_quat, parent_empty_scale);
             let position_blend = convert_position_sc_to_blender(light_info.position);
             
             // Map CryEngine light type to Blender lamp_type
@@ -4724,7 +4900,7 @@ pub fn extract_lights_from_interiors(
             
             lights.push(ExtractedLight {
                 name: light_info.name.clone(),
-                parent_empty_name: Some(container.name.clone()),
+                parent_empty_name: Some(format!("interior_{}", container.name)),
                 parent_empty_loc,
                 parent_empty_quat,
                 parent_empty_scale,
@@ -7515,8 +7691,10 @@ mod tests_5d {
     }
 }
 
-
+#[cfg(test)]
 mod tests_4c {
+    use super::*;
+
     #[test]
     fn test_validate_lights_extraction_empty() {
         let lights = vec![];
