@@ -9,7 +9,7 @@
 //! - File structure: presence, validity, reasonable sizes
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::error::Error;
 
@@ -227,6 +227,7 @@ mod tests {
     use super::*;
     use std::fs;
     use std::io::Write;
+    use std::path::PathBuf;
 
     /// Helper: create a temporary test directory with proper structure
     fn create_test_export_dir(name: &str) -> PathBuf {

@@ -93,6 +93,25 @@ pub const IDPROPERTY_SIZE: usize = 144;
 pub const LIBRARY_SIZE: usize = 1472;  // ID (408) + filepath[1024] + flag (2) + undo_runtime_tag (2) + _pad (4) + archive_parent_library (8) + packedfile (8) + runtime (8) + _pad2 (8)
 pub const ID_STUB_SIZE: usize = 408;
 
+const NODE_TEX_SKY_REFERENCE_HEX: &str = concat!(
+    "0000000000000000000000000000000000000000000000000000803f0000803f0000803f0000000001020300000000000000803f000000000000000000000000",
+    "000000000000803f000000000000000000000000000000000000803f000000000000000000000000000000000000803f0000000000000000000000000000803f",
+    "0000803f0000803f000000000000000002000000000000000000000000000000000000000000803f00000000000000000000803f0000803f0000803f0000803f",
+    "0000803f000000000000003f0000003f0000003f0000803f0000003f000000000000003f0000003f0000003f0000803f0000003f000000000000003f0000003f",
+    "0000003f0000803f0000003f000000000000003f0000003f0000003f0000803f0000003f000000000000003f0000003f0000003f0000803f0000003f00000000",
+    "0000003f0000003f0000003f0000803f0000003f000000000000003f0000003f0000003f0000803f0000003f000000000000003f0000003f0000003f0000803f",
+    "0000003f000000000000003f0000003f0000003f0000803f0000003f000000000000003f0000003f0000003f0000803f0000003f000000000000003f0000003f",
+    "0000003f0000803f0000003f000000000000003f0000003f0000003f0000803f0000003f000000000000003f0000003f0000003f0000803f0000003f00000000",
+    "0000003f0000003f0000003f0000803f0000003f000000000000003f0000003f0000003f0000803f0000003f000000000000003f0000003f0000003f0000803f",
+    "0000003f000000000000003f0000003f0000003f0000803f0000003f000000000000003f0000003f0000003f0000803f0000003f000000000000003f0000003f",
+    "0000003f0000803f0000003f000000000000003f0000003f0000003f0000803f0000003f000000000000003f0000003f0000003f0000803f0000003f00000000",
+    "0000003f0000003f0000003f0000803f0000003f000000000000003f0000003f0000003f0000803f0000003f000000000000003f0000003f0000003f0000803f",
+    "0000003f000000000000003f0000003f0000003f0000803f0000003f000000000000003f0000003f0000003f0000803f0000003f000000000000003f0000003f",
+    "0000003f0000803f0000003f000000000000003f0000003f0000003f0000803f0000003f000000000000003f0000003f0000003f0000803f0000003f00000000",
+    "0000003f0000003f0000003f0000803f0000003f000000000000803f0000803f0000803f00000000cdcc4c3fcdcc4c3fcdcc4c3f000000000000000000000000",
+    "0300000000000000000000000000803fcdcc0c409a99993e68d81b3c0000803f920a863edb0fc93f0000c8420000803f0000803f0000803f0100000000000000",
+);
+
 // ── Attribute enums ───────────────────────────────────────────────────────────
 pub const ATTR_DOMAIN_POINT: u8 = 0;
 pub const ATTR_DOMAIN_EDGE: u8 = 1;
@@ -569,9 +588,9 @@ pub fn build_world(world_name: &str) -> Vec<u8> {
 pub fn build_world_with_node_tree(world_name: &str, node_tree_ptr: u64) -> Vec<u8> {
     let mut data = vec![0u8; WORLD_SIZE];
     write_id_name(&mut data, "WO", world_name);
-    write_f32(&mut data, 424, 1.0); // horr
-    write_f32(&mut data, 428, 1.0); // horg
-    write_f32(&mut data, 432, 1.0); // horb
+    write_f32(&mut data, 424, 0.050876088); // horr
+    write_f32(&mut data, 428, 0.050876088); // horg
+    write_f32(&mut data, 432, 0.050876088); // horb
     write_i16(&mut data, 450, 1 << 4); // flag = WO_USE_SUN_SHADOW
     write_f32(&mut data, 456, 5.0); // miststa
     write_f32(&mut data, 460, 25.0); // mistdist
@@ -584,6 +603,17 @@ pub fn build_world_with_node_tree(world_name: &str, node_tree_ptr: u64) -> Vec<u
     write_f32(&mut data, 492, 10.0); // sun_shadow_jitter_overblur
     write_f32(&mut data, 496, 1.0); // sun_shadow_filter_radius
     write_ptr(&mut data, 512, node_tree_ptr); // nodetree
+    data
+}
+
+fn reference_sky_texture_storage() -> Vec<u8> {
+    let mut data = Vec::with_capacity(NODE_TEX_SKY_SIZE);
+    for pair in NODE_TEX_SKY_REFERENCE_HEX.as_bytes().chunks_exact(2) {
+        let hi = (pair[0] as char).to_digit(16).expect("valid sky storage hex");
+        let lo = (pair[1] as char).to_digit(16).expect("valid sky storage hex");
+        data.push(((hi << 4) | lo) as u8);
+    }
+    debug_assert_eq!(data.len(), NODE_TEX_SKY_SIZE);
     data
 }
 
@@ -665,6 +695,13 @@ pub fn build_view_layer(
     write_ptr(&mut data, 120, layer_collection_ptr);
     write_ptr(&mut data, 128, layer_collection_ptr);
     write_ptr(&mut data, 136, layer_collection_ptr);
+    // Match Blender's renderable ViewLayer defaults: combined/sky/solid/volume
+    // passes must be enabled or Cycles/EEVEE render an all-black Combined pass.
+    write_i32(&mut data, 144, 0x7fff);
+    write_i32(&mut data, 148, 1);
+    write_f32(&mut data, 152, 0.5);
+    write_i16(&mut data, 156, 8);
+    write_i16(&mut data, 158, 6);
     data
 }
 
@@ -1382,6 +1419,7 @@ pub fn write_world_with_sky_shader(
         write_ptr(&mut d, 0x010, wo_surface_ptr);              // inputs.first
         write_ptr(&mut d, 0x018, wo_volume_ptr);               // inputs.last
         write_i32(&mut d, 0x074, 0x00010042i32);               // flag
+        write_cstr_fixed(&mut d, 0x030, 64, "World Output");
         write_cstr_fixed(&mut d, 0x078, 64, "ShaderNodeOutputWorld");
         write_i16(&mut d, 0x0c0, 125);                         // type = SH_NODE_OUTPUT_WORLD
         write_f32(&mut d, 0x100, 120.0); write_f32(&mut d, 0x104, 100.0);
@@ -1407,6 +1445,7 @@ pub fn write_world_with_sky_shader(
         write_ptr(&mut d, 0x020, bg_out_ptr);                  // outputs.first
         write_ptr(&mut d, 0x028, bg_out_ptr);                  // outputs.last
         write_i32(&mut d, 0x074, 0x00010002i32);               // flag
+        write_cstr_fixed(&mut d, 0x030, 64, "Background");
         write_cstr_fixed(&mut d, 0x078, 64, "ShaderNodeBackground");
         write_i16(&mut d, 0x0c0, 130);                         // type = SH_NODE_BACKGROUND
         write_i16(&mut d, 0x0c2, 1);                           // ui_order
@@ -1420,8 +1459,8 @@ pub fn write_world_with_sky_shader(
             2, 0x0044, 1, 1, "NodeSocketColor", bg_color_def_ptr, link2_ptr));
     {
         let mut d = vec![0u8; BNSV_RGBA_SIZE];
-        write_f32(&mut d, 0, 0.793); write_f32(&mut d, 4, 0.793);
-        write_f32(&mut d, 8, 0.793); write_f32(&mut d, 12, 1.0);
+        write_f32(&mut d, 0, 0.7948867); write_f32(&mut d, 4, 0.7948867);
+        write_f32(&mut d, 8, 0.7948867); write_f32(&mut d, 12, 1.0);
         write_block(out, b"DATA", SDNA_IDX_BNSV_RGBA, bg_color_def_ptr, 1, &d);
     }
     // Background.Strength (FLOAT in)
@@ -1430,8 +1469,8 @@ pub fn write_world_with_sky_shader(
             0, 0x0040, 1, 1, "NodeSocketFloat", bg_strength_def_ptr, 0));
     {
         let mut d = vec![0u8; BNSV_FLOAT_SIZE];
-        // subtype=0, value=1.0, min=0.0, max=1_000_000.0
-        write_f32(&mut d, 4, 1.0);
+        // subtype=0, value=0.1, min=0.0, max=1_000_000.0
+        write_f32(&mut d, 4, 0.1);
         write_f32(&mut d, 12, 1_000_000.0_f32);
         write_block(out, b"DATA", SDNA_IDX_BNSV_FLOAT, bg_strength_def_ptr, 1, &d);
     }
@@ -1460,6 +1499,7 @@ pub fn write_world_with_sky_shader(
         write_ptr(&mut d, 0x020, sky_color_out_ptr);           // outputs.first
         write_ptr(&mut d, 0x028, sky_color_out_ptr);           // outputs.last
         write_i32(&mut d, 0x074, 0x00014012u32 as i32);        // flag
+        write_cstr_fixed(&mut d, 0x030, 64, "Sky Texture");
         write_cstr_fixed(&mut d, 0x078, 64, "ShaderNodeTexSky");
         write_i16(&mut d, 0x0c0, 145);                         // type = SH_NODE_TEX_SKY
         write_i16(&mut d, 0x0c2, 2);                           // ui_order
@@ -1493,22 +1533,8 @@ pub fn write_world_with_sky_shader(
 
     // ── NodeTexSky storage ───────────────────────────────────────────────────
     {
-        let mut d = vec![0u8; NODE_TEX_SKY_SIZE]; // bytes 0–959: NodeTexBase = zeros
-        write_i32(&mut d, 960, 2);          // sky_model = 2 (NISHITA)
-        write_f32(&mut d, 964, 0.0);        // sun_direction.x
-        write_f32(&mut d, 968, 0.0);        // sun_direction.y
-        write_f32(&mut d, 972, 1.0);        // sun_direction.z (pointing up)
-        write_f32(&mut d, 976, 2.2);        // turbidity
-        write_f32(&mut d, 980, 0.3);        // ground_albedo
-        write_f32(&mut d, 984, 0.009512);   // sun_size
-        write_f32(&mut d, 988, 1.0);        // sun_intensity
-        write_f32(&mut d, 992, 0.2618);     // sun_elevation (≈15°)
-        write_f32(&mut d, 996, 0.0);        // sun_rotation
-        write_f32(&mut d, 1000, 0.0);       // altitude
-        write_f32(&mut d, 1004, 1.0);       // air_density
-        write_f32(&mut d, 1008, 1.0);       // dust_density
-        write_f32(&mut d, 1012, 1.0);       // ozone_density
-        d[1016] = 1;                        // sun_disc = true
+        let mut d = reference_sky_texture_storage();
+        write_f32(&mut d, 988, 0.1); // sun_intensity
         write_block(out, b"DATA", SDNA_IDX_NODE_TEX_SKY, sky_storage_ptr, 1, &d);
     }
 

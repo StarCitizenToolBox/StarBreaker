@@ -42,7 +42,10 @@ use starbreaker_blend::{
 
 use crate::error::Error;
 use crate::decomposed::DecomposedInput;
-use crate::pipeline::{DecomposedExport, ExportedFile, ExportedFileKind, ExportOptions, LoadedInteriors};
+use crate::pipeline::{
+    load_interior_mesh_asset, DecomposedExport, ExportedFile, ExportedFileKind, ExportOptions,
+    LoadedInteriors, PngCache,
+};
 use crate::types::{Mesh, SubMesh};
 use crate::nmc::NodeMeshCombo;
 use crate::mtl::MtlFile;
@@ -213,6 +216,7 @@ fn unique_scene_object_name(base: &str, used: &mut HashMap<String, usize>) -> St
 #[derive(Debug, Clone)]
 struct SceneManifestInstance {
     entity_name: String,
+    parent_entity_name: Option<String>,
     mesh_asset: String,
     parent_node_name: Option<String>,
     loc: [f32; 3],
@@ -229,45 +233,52 @@ fn manifest_vec3(value: &serde_json::Value, key: &str) -> Option<[f32; 3]> {
     ])
 }
 
+fn manifest_matrix(value: &serde_json::Value, key: &str) -> Option<glam::Mat4> {
+    let rows = value.get(key)?.as_array()?;
+    matrix_from_json_rows(rows)
+}
+
+fn matrix_from_json_rows(rows: &[serde_json::Value]) -> Option<glam::Mat4> {
+    if rows.len() == 4 {
+        let mut row_values = [[0.0f32; 4]; 4];
+        for row in 0..4 {
+            let cols = rows[row].as_array()?;
+            if cols.len() != 4 {
+                return None;
+            }
+            for col in 0..4 {
+                row_values[row][col] = cols[col].as_f64()? as f32;
+            }
+        }
+        Some(glam::Mat4::from_cols_array(&[
+            row_values[0][0], row_values[1][0], row_values[2][0], row_values[3][0],
+            row_values[0][1], row_values[1][1], row_values[2][1], row_values[3][1],
+            row_values[0][2], row_values[1][2], row_values[2][2], row_values[3][2],
+            row_values[0][3], row_values[1][3], row_values[2][3], row_values[3][3],
+        ]))
+    } else {
+        None
+    }
+}
+
+fn scene_axis_matrix() -> glam::Mat4 {
+    glam::Mat4::from_cols_array(&[
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, -1.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ])
+}
+
+fn sc_matrix_to_scene_transform(source: glam::Mat4) -> ([f32; 3], [f32; 4], [f32; 3]) {
+    let axis = scene_axis_matrix();
+    matrix_to_transform((axis * source * axis.inverse()).to_cols_array())
+}
+
 fn manifest_scene_transform(value: &serde_json::Value) -> ([f32; 3], [f32; 4], [f32; 3]) {
     if value.get("source_transform_basis").and_then(|v| v.as_str()) == Some("cryengine_z_up") {
-        if let Some(rows) = value.get("local_transform_sc").and_then(|v| v.as_array()) {
-            if rows.len() == 4 {
-                let mut row_values = [[0.0f32; 4]; 4];
-                let mut valid = true;
-                for row in 0..4 {
-                    let Some(cols) = rows[row].as_array() else {
-                        valid = false;
-                        break;
-                    };
-                    if cols.len() != 4 {
-                        valid = false;
-                        break;
-                    }
-                    for col in 0..4 {
-                        let Some(v) = cols[col].as_f64() else {
-                            valid = false;
-                            break;
-                        };
-                        row_values[row][col] = v as f32;
-                    }
-                }
-                if valid {
-                    let source = glam::Mat4::from_cols_array(&[
-                        row_values[0][0], row_values[1][0], row_values[2][0], row_values[3][0],
-                        row_values[0][1], row_values[1][1], row_values[2][1], row_values[3][1],
-                        row_values[0][2], row_values[1][2], row_values[2][2], row_values[3][2],
-                        row_values[0][3], row_values[1][3], row_values[2][3], row_values[3][3],
-                    ]);
-                    let axis = glam::Mat4::from_cols_array(&[
-                        1.0, 0.0, 0.0, 0.0,
-                        0.0, 0.0, 1.0, 0.0,
-                        0.0, -1.0, 0.0, 0.0,
-                        0.0, 0.0, 0.0, 1.0,
-                    ]);
-                    return matrix_to_transform((axis * source * axis.inverse()).to_cols_array());
-                }
-            }
+        if let Some(source) = manifest_matrix(value, "local_transform_sc") {
+            return sc_matrix_to_scene_transform(source);
         }
     }
 
@@ -299,6 +310,11 @@ fn scene_manifest_instances(manifest_files: &[ExportedFile]) -> Vec<SceneManifes
         let (loc, quat, scale) = manifest_scene_transform(value);
         out.push(SceneManifestInstance {
             entity_name,
+            parent_entity_name: value
+                .get("parent_entity_name")
+                .and_then(|v| v.as_str())
+                .filter(|name| !name.is_empty())
+                .map(ToOwned::to_owned),
             mesh_asset: mesh_asset.to_string(),
             parent_node_name: value
                 .get("parent_node_name")
@@ -316,6 +332,35 @@ fn scene_manifest_instances(manifest_files: &[ExportedFile]) -> Vec<SceneManifes
     if let Some(children) = root.get("children").and_then(|v| v.as_array()) {
         for child in children {
             push_record(child);
+        }
+    }
+    if let Some(interiors) = root.get("interiors").and_then(|v| v.as_array()) {
+        for interior in interiors {
+            let container_transform = manifest_matrix(interior, "container_transform")
+                .unwrap_or(glam::Mat4::IDENTITY);
+            if let Some(placements) = interior.get("placements").and_then(|v| v.as_array()) {
+                for placement in placements {
+                    let Some(mesh_asset) = placement.get("mesh_asset").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    let source = container_transform
+                        * manifest_matrix(placement, "transform").unwrap_or(glam::Mat4::IDENTITY);
+                    let (loc, quat, scale) = sc_matrix_to_scene_transform(source);
+                    out.push(SceneManifestInstance {
+                        entity_name: placement
+                            .get("cgf_path")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(mesh_asset)
+                            .to_string(),
+                        parent_entity_name: None,
+                        mesh_asset: mesh_asset.to_string(),
+                        parent_node_name: None,
+                        loc,
+                        quat,
+                        scale,
+                    });
+                }
+            }
         }
     }
     out
@@ -456,13 +501,29 @@ pub fn write_decomposed_export_blend(
     let extracted_lights = extract_lights_from_interiors(&input.interiors)
         .unwrap_or_default();
     
-    let extracted_empties = input.root_nmc.as_ref()
+    let _extracted_empties = input.root_nmc.as_ref()
         .and_then(|nmc| extract_empties_from_nmc(&nmc.nodes).ok())
         .unwrap_or_default();
     
-    let mut interior_mesh_loader = |_: &crate::pipeline::InteriorCgfEntry|
+    let mut interior_png_cache = PngCache::new();
+    let mut interior_mesh_loader = |entry: &crate::pipeline::InteriorCgfEntry|
         -> Option<(Mesh, Option<crate::mtl::MtlFile>, Option<crate::nmc::NodeMeshCombo>)> {
-        None
+        let loaded = load_interior_mesh_asset(p4k, entry, opts, &mut interior_png_cache)?;
+        let (mesh, materials, nmc) = loaded.clone();
+        let mesh_asset = blend_mesh_asset_relative_path(p4k, &entry.cgf_path, &entry.name, opts.lod_level);
+        let material_view = crate::decomposed::build_decomposed_material_view(
+            &mesh,
+            materials.as_ref(),
+            nmc.as_ref(),
+            opts.include_nodraw,
+            opts.include_shields,
+        );
+        mesh_data_map.insert(mesh_asset.to_ascii_lowercase(), MeshDataEntry {
+            mesh: material_view.mesh,
+            materials: material_view.glb_materials.or(material_view.sidecar_materials),
+            nmc: material_view.glb_nmc,
+        });
+        Some(loaded)
     };
 
     report_progress(progress, 0.0, "Generating decomposed export with .blend mesh files");
@@ -580,6 +641,10 @@ pub fn write_decomposed_export_blend(
             }
             for linked_mesh_ref in linked_mesh_refs {
                 scene_mesh_instances.push(LinkedMeshInstance {
+                    scene_instance_id: 0,
+                    entity_name: linked_mesh_ref.object_name.clone(),
+                    parent_entity_name: None,
+                    source_object_name: linked_mesh_ref.object_name.clone(),
                     name: linked_mesh_ref.object_name,
                     mesh_name: linked_mesh_ref.mesh_name,
                     material_names: linked_mesh_ref.material_names,
@@ -643,11 +708,15 @@ pub fn write_decomposed_export_blend(
     let manifest_instances = scene_manifest_instances(&manifest_files);
     let mut used_scene_object_names = HashMap::new();
     if manifest_instances.is_empty() {
-        for file in &blend_files {
+        for (scene_instance_id, file) in blend_files.iter().enumerate() {
             if let Some(linked_mesh_refs) = refs_by_asset.get(&file.relative_path) {
                 for (idx, linked_mesh_ref) in linked_mesh_refs.iter().enumerate() {
                     let name = unique_scene_object_name(&linked_mesh_ref.object_name, &mut used_scene_object_names);
                     scene_mesh_instances.push(LinkedMeshInstance {
+                        scene_instance_id,
+                        entity_name: linked_mesh_ref.object_name.clone(),
+                        parent_entity_name: None,
+                        source_object_name: linked_mesh_ref.object_name.clone(),
                         name,
                         mesh_name: linked_mesh_ref.mesh_name.clone(),
                         material_names: linked_mesh_ref.material_names.clone(),
@@ -675,11 +744,15 @@ pub fn write_decomposed_export_blend(
             }
         }
     } else {
-        for manifest_instance in &manifest_instances {
+        for (scene_instance_id, manifest_instance) in manifest_instances.iter().enumerate() {
             if let Some(linked_mesh_refs) = refs_by_asset.get(&manifest_instance.mesh_asset) {
                 for (mesh_ref_idx, linked_mesh_ref) in linked_mesh_refs.iter().enumerate() {
                     let name = unique_scene_object_name(&linked_mesh_ref.object_name, &mut used_scene_object_names);
                     scene_mesh_instances.push(LinkedMeshInstance {
+                        scene_instance_id,
+                        entity_name: manifest_instance.entity_name.clone(),
+                        parent_entity_name: manifest_instance.parent_entity_name.clone(),
+                        source_object_name: linked_mesh_ref.object_name.clone(),
                         name,
                         mesh_name: linked_mesh_ref.mesh_name.clone(),
                         material_names: linked_mesh_ref.material_names.clone(),
@@ -1049,7 +1122,7 @@ fn mesh_to_blend_flat(
     let view_layer_data = build_view_layer("ViewLayer", base_ptr, layer_collection_ptr);
     let base_data = build_base(orientation_root_ptr);
     let collection_data = build_master_collection(orientation_collection_object_ptr, collection_object_ptr, 0, 0);
-    let orientation_collection_object_data =
+    let _orientation_collection_object_data =
         build_collection_object_linked(orientation_root_ptr, 0, collection_object_ptr);
     let collection_object_data =
         build_collection_object_linked(object_ptr, orientation_collection_object_ptr, 0);
@@ -2435,6 +2508,10 @@ fn mesh_to_blend_hierarchy(
 /// Data for a linked mesh instance in scene.blend.
 #[derive(Debug, Clone)]
 pub struct LinkedMeshInstance {
+    pub scene_instance_id: usize,
+    pub entity_name: String,
+    pub parent_entity_name: Option<String>,
+    pub source_object_name: String,
     /// Instance name (typically "mesh_0", "mesh_1", etc.)
     pub name: String,
     /// Mesh datablock name inside the linked decomposed asset file.
@@ -2513,6 +2590,10 @@ pub fn create_scene_blend(
         .map(|idx| {
             let name = format!("mesh_{idx}");
             LinkedMeshInstance {
+                scene_instance_id: idx,
+                entity_name: name.clone(),
+                parent_entity_name: None,
+                source_object_name: name.clone(),
                 blend_path: format!("{mesh_output_dir}/{name}.blend"),
                 mesh_asset: format!("{mesh_output_dir}/{name}.blend"),
                 mesh_name: name.clone(),
@@ -2576,20 +2657,20 @@ pub fn create_scene_blend_with_instances(
     
     // Sub-collections for organizing objects
     let meshes_collection_ptr = ptrs.alloc();
-    let meshes_coll_obj_ptr = ptrs.alloc();
+    let _meshes_coll_obj_ptr = ptrs.alloc();
     let meshes_layer_coll_ptr = ptrs.alloc();
     
-    let lights_collection_ptr = ptrs.alloc();
-    let lights_coll_obj_ptr = ptrs.alloc();
-    let lights_layer_coll_ptr = ptrs.alloc();
+    let _lights_collection_ptr = ptrs.alloc();
+    let _lights_coll_obj_ptr = ptrs.alloc();
+    let _lights_layer_coll_ptr = ptrs.alloc();
     
-    let empties_collection_ptr = ptrs.alloc();
-    let empties_coll_obj_ptr = ptrs.alloc();
-    let empties_layer_coll_ptr = ptrs.alloc();
+    let _empties_collection_ptr = ptrs.alloc();
+    let _empties_coll_obj_ptr = ptrs.alloc();
+    let _empties_layer_coll_ptr = ptrs.alloc();
     
-    let decals_collection_ptr = ptrs.alloc();
-    let decals_coll_obj_ptr = ptrs.alloc();
-    let decals_layer_coll_ptr = ptrs.alloc();
+    let _decals_collection_ptr = ptrs.alloc();
+    let _decals_coll_obj_ptr = ptrs.alloc();
+    let _decals_layer_coll_ptr = ptrs.alloc();
     
     // Addon-style local scene anchors. Linked library object parent chains are
     // owned by their asset files, but local lights and scene metadata live here.
@@ -2619,10 +2700,15 @@ pub fn create_scene_blend_with_instances(
     let mut local_source_node_ptrs_by_instance = Vec::new();
     let preallocated_local_object_ptrs = (0..children_count).map(|_| ptrs.alloc()).collect::<Vec<_>>();
     let mut source_object_ptr_by_name = HashMap::new();
+    let mut source_object_ptrs_by_scene_instance: HashMap<usize, HashMap<String, u64>> = HashMap::new();
     for (idx, instance) in mesh_instances_input.iter().enumerate() {
         source_object_ptr_by_name
             .entry(instance.name.clone())
             .or_insert(preallocated_local_object_ptrs[idx]);
+        source_object_ptrs_by_scene_instance
+            .entry(instance.scene_instance_id)
+            .or_default()
+            .insert(instance.source_object_name.clone(), preallocated_local_object_ptrs[idx]);
     }
     
     for (idx, instance) in mesh_instances_input.iter().enumerate() {
@@ -2649,6 +2735,11 @@ pub fn create_scene_blend_with_instances(
                 .and_then(|name| {
                     local_source_node_ptrs
                         .get(name)
+                        .or_else(|| {
+                            source_object_ptrs_by_scene_instance
+                                .get(&instance.scene_instance_id)
+                                .and_then(|objects| objects.get(name))
+                        })
                         .or_else(|| source_object_ptr_by_name.get(name))
                 })
                 .copied()
@@ -2674,11 +2765,32 @@ pub fn create_scene_blend_with_instances(
             .parent_node_name
             .as_ref()
             .and_then(|name| {
-                source_node_ptr_by_name
-                    .get(name)
-                    .or_else(|| source_object_ptr_by_name.get(name))
+                instance
+                    .parent_entity_name
+                    .as_ref()
+                    .and_then(|parent_entity_name| {
+                        mesh_instances_input[..idx]
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .find_map(|(parent_idx, candidate)| {
+                                if candidate.entity_name != *parent_entity_name {
+                                    return None;
+                                }
+                                local_source_node_ptrs_by_instance
+                                    .get(parent_idx)
+                                    .and_then(|nodes| nodes.get(name))
+                                    .copied()
+                                    .or_else(|| (candidate.name == *name).then_some(preallocated_local_object_ptrs[parent_idx]))
+                            })
+                    })
+                    .or_else(|| {
+                        source_node_ptr_by_name
+                            .get(name)
+                            .or_else(|| source_object_ptr_by_name.get(name))
+                            .copied()
+                    })
             })
-            .copied()
             .unwrap_or(entity_root_ptr);
         let mesh_parent_ptr = instance
             .source_parent_name
@@ -2687,6 +2799,11 @@ pub fn create_scene_blend_with_instances(
                 local_source_node_ptrs_by_instance[idx]
                     .get(name)
                     .or_else(|| source_node_ptr_by_name.get(name))
+                    .or_else(|| {
+                        source_object_ptrs_by_scene_instance
+                            .get(&instance.scene_instance_id)
+                            .and_then(|objects| objects.get(name))
+                    })
                     .or_else(|| source_object_ptr_by_name.get(name))
             })
             .copied()
@@ -2743,9 +2860,9 @@ pub fn create_scene_blend_with_instances(
     // Allocate pointers for CollectionChild structs (linking sub-collections to root)
     // These wrap the sub-collections (Meshes, Lights, Empties, Decals) in the children linked list
     let meshes_coll_child_ptr = ptrs.alloc();
-    let lights_coll_child_ptr = ptrs.alloc();
-    let empties_coll_child_ptr = ptrs.alloc();
-    let decals_coll_child_ptr = ptrs.alloc();
+    let _lights_coll_child_ptr = ptrs.alloc();
+    let _empties_coll_child_ptr = ptrs.alloc();
+    let _decals_coll_child_ptr = ptrs.alloc();
     
     // Build scene datablocks
     // Scene must always be named "Scene" for Blender to recognize it as the primary scene
@@ -2923,7 +3040,7 @@ pub fn create_scene_blend_with_instances(
     let mut light_object_mat_arrays = Vec::new();
     let mut light_object_matbits = Vec::new();
     
-    for (lamp_ptr, object_ptr, mat_ptr, matbits_ptr, idx) in &light_instances {
+    for (lamp_ptr, _, _, _, idx) in &light_instances {
         let light = &lights[*idx];
         
         // Build lamp datablock
@@ -2936,7 +3053,7 @@ pub fn create_scene_blend_with_instances(
             light.spot_size,
             light.spot_blend,
             light.temperature_k,
-            true,  // use temperature
+            false,
         );
         light_data.push((*lamp_ptr, lamp_bytes));
         let light_props = allocate_idprop_blocks(&mut ptrs, light_object_properties(entity_name, &light.name));
@@ -3033,7 +3150,7 @@ pub fn create_scene_blend_with_instances(
     }
     
     // Write light blocks (Phase 5B)
-    for (idx, (lamp_ptr, object_ptr, mat_ptr, matbits_ptr, _)) in light_instances.iter().enumerate() {
+    for (idx, (_, object_ptr, mat_ptr, matbits_ptr, _)) in light_instances.iter().enumerate() {
         // Write LAMP datablock
         let (lamp_block_ptr, lamp_bytes) = light_data[idx].clone();
         write_block(&mut out, b"LA\0\0", SDNA_IDX_LAMP, lamp_block_ptr, 1, &lamp_bytes);
@@ -3408,6 +3525,10 @@ mod tests_5a_scene_blend {
     #[test]
     fn test_create_scene_blend_links_object_ids_instead_of_empty_mesh_stubs() {
         let instance = LinkedMeshInstance {
+            scene_instance_id: 0,
+            entity_name: "rsi_aurora_mk2_airlock_door_LOD0".to_string(),
+            parent_entity_name: None,
+            source_object_name: "rsi_aurora_mk2_airlock_door_LOD0".to_string(),
             name: "rsi_aurora_mk2_airlock_door_LOD0".to_string(),
             mesh_name: "rsi_aurora_mk2_airlock_door_LOD0_mesh".to_string(),
             material_names: Vec::new(),
@@ -3453,6 +3574,10 @@ mod tests_5a_scene_blend {
     #[test]
     fn test_create_scene_blend_writes_addon_style_scene_anchors() {
         let instance = LinkedMeshInstance {
+            scene_instance_id: 0,
+            entity_name: "anchor_mesh".to_string(),
+            parent_entity_name: None,
+            source_object_name: "anchor_mesh".to_string(),
             name: "anchor_mesh".to_string(),
             mesh_name: "anchor_mesh_data".to_string(),
             material_names: Vec::new(),
@@ -3533,6 +3658,10 @@ mod tests_5a_scene_blend {
     #[test]
     fn test_create_scene_blend_uses_full_source_empty_tree_for_parent_nodes() {
         let root = LinkedMeshInstance {
+            scene_instance_id: 0,
+            entity_name: "root_mesh".to_string(),
+            parent_entity_name: None,
+            source_object_name: "root_mesh".to_string(),
             name: "root_mesh".to_string(),
             mesh_name: "root_mesh_data".to_string(),
             material_names: Vec::new(),
@@ -3565,6 +3694,10 @@ mod tests_5a_scene_blend {
             scale: [1.0, 1.0, 1.0],
         };
         let child = LinkedMeshInstance {
+            scene_instance_id: 1,
+            entity_name: "child_mesh".to_string(),
+            parent_entity_name: None,
+            source_object_name: "child_mesh".to_string(),
             name: "child_mesh".to_string(),
             mesh_name: "child_mesh_data".to_string(),
             material_names: Vec::new(),
@@ -3615,6 +3748,10 @@ mod tests_5a_scene_blend {
     #[test]
     fn test_create_scene_blend_parents_source_empty_to_local_mesh_object() {
         let instance = LinkedMeshInstance {
+            scene_instance_id: 0,
+            entity_name: "parent_mesh".to_string(),
+            parent_entity_name: None,
+            source_object_name: "parent_mesh".to_string(),
             name: "parent_mesh".to_string(),
             mesh_name: "parent_mesh_data".to_string(),
             material_names: Vec::new(),
@@ -3652,6 +3789,10 @@ mod tests_5a_scene_blend {
     #[test]
     fn test_create_scene_blend_uses_instance_local_source_parent_before_global_name() {
         let first = LinkedMeshInstance {
+            scene_instance_id: 0,
+            entity_name: "first_instance_mesh".to_string(),
+            parent_entity_name: None,
+            source_object_name: "first_instance_mesh".to_string(),
             name: "first_instance_mesh".to_string(),
             mesh_name: "first_instance_mesh_data".to_string(),
             material_names: Vec::new(),
@@ -3675,6 +3816,10 @@ mod tests_5a_scene_blend {
             scale: [1.0, 1.0, 1.0],
         };
         let second = LinkedMeshInstance {
+            scene_instance_id: 1,
+            entity_name: "second_instance_mesh".to_string(),
+            parent_entity_name: None,
+            source_object_name: "second_instance_mesh".to_string(),
             name: "second_instance_mesh".to_string(),
             mesh_name: "second_instance_mesh_data".to_string(),
             material_names: Vec::new(),
@@ -3713,6 +3858,127 @@ mod tests_5a_scene_blend {
             u64::from_le_bytes(second_mesh.data[496..504].try_into().unwrap()),
             second_parent.old_ptr,
             "second instance should not attach to the first instance's source parent clone"
+        );
+    }
+
+    #[test]
+    fn test_create_scene_blend_resolves_parent_node_against_matching_parent_entity_instance() {
+        let first_parent = LinkedMeshInstance {
+            scene_instance_id: 0,
+            entity_name: "Mount_Gimbal_S2".to_string(),
+            parent_entity_name: None,
+            source_object_name: "first_gimbal_mesh".to_string(),
+            name: "first_gimbal_mesh".to_string(),
+            mesh_name: "first_gimbal_mesh_data".to_string(),
+            material_names: Vec::new(),
+            source_nodes: vec![LinkedSourceNode {
+                name: "hardpoint_class_2".to_string(),
+                parent_name: None,
+                loc: [0.0, 0.0, 0.0],
+                quat: [1.0, 0.0, 0.0, 0.0],
+                scale: [1.0, 1.0, 1.0],
+            }],
+            source_ancestors: Vec::new(),
+            source_loc: [0.0, 0.0, 0.0],
+            source_quat: [1.0, 0.0, 0.0, 0.0],
+            source_scale: [1.0, 1.0, 1.0],
+            source_parent_name: None,
+            parent_node_name: None,
+            blend_path: "//../../Data/Objects/Ships/gimbal.blend".to_string(),
+            mesh_asset: "Data/Objects/Ships/gimbal.blend".to_string(),
+            position: [0.0, 0.0, 0.0],
+            rotation: [1.0, 0.0, 0.0, 0.0],
+            scale: [1.0, 1.0, 1.0],
+        };
+        let first_weapon = LinkedMeshInstance {
+            scene_instance_id: 1,
+            entity_name: "KLWE_LaserRepeater_S2".to_string(),
+            parent_entity_name: Some("Mount_Gimbal_S2".to_string()),
+            source_object_name: "first_weapon_mesh".to_string(),
+            name: "first_weapon_mesh".to_string(),
+            mesh_name: "first_weapon_mesh_data".to_string(),
+            material_names: Vec::new(),
+            source_nodes: Vec::new(),
+            source_ancestors: Vec::new(),
+            source_loc: [0.0, 0.0, 0.0],
+            source_quat: [1.0, 0.0, 0.0, 0.0],
+            source_scale: [1.0, 1.0, 1.0],
+            source_parent_name: None,
+            parent_node_name: Some("hardpoint_class_2".to_string()),
+            blend_path: "//../../Data/Objects/Ships/weapon.blend".to_string(),
+            mesh_asset: "Data/Objects/Ships/weapon.blend".to_string(),
+            position: [0.0, 0.0, 0.0],
+            rotation: [1.0, 0.0, 0.0, 0.0],
+            scale: [1.0, 1.0, 1.0],
+        };
+        let second_parent = LinkedMeshInstance {
+            scene_instance_id: 2,
+            entity_name: "Mount_Gimbal_S2".to_string(),
+            parent_entity_name: None,
+            source_object_name: "second_gimbal_mesh".to_string(),
+            name: "second_gimbal_mesh".to_string(),
+            mesh_name: "second_gimbal_mesh_data".to_string(),
+            material_names: Vec::new(),
+            source_nodes: vec![LinkedSourceNode {
+                name: "hardpoint_class_2".to_string(),
+                parent_name: None,
+                loc: [0.0, 0.0, 0.0],
+                quat: [1.0, 0.0, 0.0, 0.0],
+                scale: [1.0, 1.0, 1.0],
+            }],
+            source_ancestors: Vec::new(),
+            source_loc: [0.0, 0.0, 0.0],
+            source_quat: [1.0, 0.0, 0.0, 0.0],
+            source_scale: [1.0, 1.0, 1.0],
+            source_parent_name: None,
+            parent_node_name: None,
+            blend_path: "//../../Data/Objects/Ships/gimbal.blend".to_string(),
+            mesh_asset: "Data/Objects/Ships/gimbal.blend".to_string(),
+            position: [0.0, 0.0, 0.0],
+            rotation: [1.0, 0.0, 0.0, 0.0],
+            scale: [1.0, 1.0, 1.0],
+        };
+        let second_weapon = LinkedMeshInstance {
+            scene_instance_id: 3,
+            entity_name: "KLWE_LaserRepeater_S2".to_string(),
+            parent_entity_name: Some("Mount_Gimbal_S2".to_string()),
+            source_object_name: "second_weapon_mesh".to_string(),
+            name: "second_weapon_mesh".to_string(),
+            mesh_name: "second_weapon_mesh_data".to_string(),
+            material_names: Vec::new(),
+            source_nodes: Vec::new(),
+            source_ancestors: Vec::new(),
+            source_loc: [0.0, 0.0, 0.0],
+            source_quat: [1.0, 0.0, 0.0, 0.0],
+            source_scale: [1.0, 1.0, 1.0],
+            source_parent_name: None,
+            parent_node_name: Some("hardpoint_class_2".to_string()),
+            blend_path: "//../../Data/Objects/Ships/weapon.blend".to_string(),
+            mesh_asset: "Data/Objects/Ships/weapon.blend".to_string(),
+            position: [0.0, 0.0, 0.0],
+            rotation: [1.0, 0.0, 0.0, 0.0],
+            scale: [1.0, 1.0, 1.0],
+        };
+
+        let blend_bytes = create_scene_blend_with_instances(
+            "RepeatedParentEntity",
+            &[first_parent, first_weapon, second_parent, second_weapon],
+            &[],
+        )
+        .unwrap();
+        let blocks = parse_blend_blocks(&blend_bytes);
+        let first_hardpoint = object_block_by_name(&blocks, "first_gimbal_mesh_0_hardpoint_class_2");
+        let second_hardpoint = object_block_by_name(&blocks, "second_gimbal_mesh_0_hardpoint_class_2");
+        let first_anchor = object_block_by_name(&blocks, "first_weapon_mesh_anchor");
+        let second_anchor = object_block_by_name(&blocks, "second_weapon_mesh_anchor");
+
+        assert_eq!(
+            u64::from_le_bytes(first_anchor.data[496..504].try_into().unwrap()),
+            first_hardpoint.old_ptr
+        );
+        assert_eq!(
+            u64::from_le_bytes(second_anchor.data[496..504].try_into().unwrap()),
+            second_hardpoint.old_ptr
         );
     }
 
@@ -4205,21 +4471,6 @@ fn transform_light_rotation_sc(container_transform: [[f32; 4]; 4], rotation: [f6
     ]
 }
 
-/// Multiply two quaternions: q1 * q2 (standard Hamilton product).
-///
-/// Input: q1, q2 as [w, x, y, z]
-/// Output: q1 * q2 as [w, x, y, z]
-fn quaternion_multiply(q1: [f32; 4], q2: [f32; 4]) -> [f32; 4] {
-    let [w1, x1, y1, z1] = q1;
-    let [w2, x2, y2, z2] = q2;
-    [
-        w1*w2 - x1*x2 - y1*y2 - z1*z2,
-        w1*x2 + x1*w2 + y1*z2 - z1*y2,
-        w1*y2 - x1*z2 + y1*w2 + z1*x2,
-        w1*z2 + x1*y2 - y1*x2 + z1*w2,
-    ]
-}
-
 /// Convert CryEngine quaternion to Blender coordinates.
 ///
 /// CryEngine quaternion: [w, x, y, z]
@@ -4230,27 +4481,39 @@ fn quaternion_multiply(q1: [f32; 4], q2: [f32; 4]) -> [f32; 4] {
 /// Blender's glTF light convention needs the same basis correction the addon
 /// applies in `_scene_light_quaternion_to_blender`, not only for spot lights.
 fn convert_quaternion_sc_to_blender(quat_sc: [f64; 4], _is_spotlight: bool) -> [f32; 4] {
-    let w = quat_sc[0] as f32;
-    let x = quat_sc[1] as f32;
-    let y = quat_sc[2] as f32;
-    let z = quat_sc[3] as f32;
-    
-    // Step 1: Coordinate system transformation (Z-up to Y-up)
-    let mut result = [w, x, -z, y];
-    
-    let basis_correction = [
-        std::f32::consts::FRAC_1_SQRT_2,
-        0.0,
-        -std::f32::consts::FRAC_1_SQRT_2,
-        0.0,
-    ];
-    result = quaternion_multiply(result, basis_correction);
-    let len = (result[0] * result[0] + result[1] * result[1] + result[2] * result[2] + result[3] * result[3]).sqrt();
-    if len > 0.0 {
-        [result[0] / len, result[1] / len, result[2] / len, result[3] / len]
-    } else {
+    if quat_sc.iter().all(|component| component.abs() <= 1e-8) {
         [1.0, 0.0, 0.0, 0.0]
+    } else {
+        let source_quat = glam::Quat::from_xyzw(
+            quat_sc[1] as f32,
+            quat_sc[2] as f32,
+            quat_sc[3] as f32,
+            quat_sc[0] as f32,
+        );
+        let axis = scene_axis_matrix();
+        let converted_matrix = axis * glam::Mat4::from_quat(source_quat) * axis.inverse();
+        let (_, converted_quat, _) = converted_matrix.to_scale_rotation_translation();
+        let basis_correction = glam::Quat::from_xyzw(
+            0.0,
+            -std::f32::consts::FRAC_1_SQRT_2,
+            0.0,
+            std::f32::consts::FRAC_1_SQRT_2,
+        );
+        let result = (converted_quat * basis_correction).normalize();
+        [result.w, result.x, result.y, result.z]
     }
+}
+
+#[cfg(test)]
+fn quaternion_multiply(q1: [f32; 4], q2: [f32; 4]) -> [f32; 4] {
+    let [w1, x1, y1, z1] = q1;
+    let [w2, x2, y2, z2] = q2;
+    [
+        w1*w2 - x1*x2 - y1*y2 - z1*z2,
+        w1*x2 + x1*w2 + y1*z2 - z1*y2,
+        w1*y2 - x1*z2 + y1*w2 + z1*x2,
+        w1*z2 + x1*y2 - y1*x2 + z1*w2,
+    ]
 }
 
 /// Extract all lights from loaded interiors.

@@ -163,6 +163,11 @@ fn view_layer_sets_active_collection_pointer() {
     assert_eq!(u64::from_le_bytes(view_layer[88..96].try_into().unwrap()), 0x2000);
     assert_eq!(u64::from_le_bytes(view_layer[120..128].try_into().unwrap()), 0x3000);
     assert_eq!(u64::from_le_bytes(view_layer[136..144].try_into().unwrap()), 0x3000);
+    assert_eq!(i32::from_le_bytes(view_layer[144..148].try_into().unwrap()), 0x7fff);
+    assert_eq!(i32::from_le_bytes(view_layer[148..152].try_into().unwrap()), 1);
+    assert_eq!(f32::from_le_bytes(view_layer[152..156].try_into().unwrap()), 0.5);
+    assert_eq!(i16::from_le_bytes(view_layer[156..158].try_into().unwrap()), 8);
+    assert_eq!(i16::from_le_bytes(view_layer[158..160].try_into().unwrap()), 6);
 }
 
 #[test]
@@ -180,6 +185,10 @@ fn scene_has_nonzero_blender_runtime_safe_defaults() {
     assert_eq!(f32::from_le_bytes(scene[1068..1072].try_into().unwrap()), 1.0);
     assert_eq!(i32::from_le_bytes(scene[1072..1076].try_into().unwrap()), 1);
     assert_eq!(u16::from_le_bytes(scene[1116..1118].try_into().unwrap()), 24);
+    assert_eq!(f32::from_le_bytes(scene[1120..1124].try_into().unwrap()), 0.0);
+    assert_eq!(f32::from_le_bytes(scene[1124..1128].try_into().unwrap()), 1.0);
+    assert_eq!(f32::from_le_bytes(scene[1128..1132].try_into().unwrap()), 0.0);
+    assert_eq!(f32::from_le_bytes(scene[1132..1136].try_into().unwrap()), 1.0);
     assert_eq!(f32::from_le_bytes(scene[1172..1176].try_into().unwrap()), 1.0);
     assert_eq!(&scene[3060..3077], b"BLENDER_WORKBENCH");
     assert_eq!(scene[3028], 3);
@@ -235,10 +244,12 @@ fn cycles_render_settings_idprops_match_requested_defaults() {
         0,
         0,
         0x1000,
+        0x6000,
         "CYCLES",
     );
 
     assert_eq!(u64::from_le_bytes(scene[352..360].try_into().unwrap()), 0x1000);
+    assert_eq!(u64::from_le_bytes(scene[424..432].try_into().unwrap()), 0x6000);
     assert_eq!(&scene[3060..3066], b"CYCLES");
     assert_eq!(root[16], IDP_GROUP);
     assert_eq!(u64::from_le_bytes(root[96..104].try_into().unwrap()), 0x2000);
@@ -267,6 +278,62 @@ fn cycles_render_settings_idprops_match_requested_defaults() {
             ("use_denoising".to_string(), 1),
         ]
     );
+}
+
+#[test]
+fn world_defaults_are_render_visible() {
+    let world = build_world("World");
+
+    assert_eq!(world.len(), WORLD_SIZE);
+    assert_eq!(&world[40..47], b"WOWorld");
+    assert_eq!(f32::from_le_bytes(world[424..428].try_into().unwrap()), 0.050876088);
+    assert_eq!(f32::from_le_bytes(world[428..432].try_into().unwrap()), 0.050876088);
+    assert_eq!(f32::from_le_bytes(world[432..436].try_into().unwrap()), 0.050876088);
+    assert_eq!(i16::from_le_bytes(world[450..452].try_into().unwrap()), 1 << 4);
+    assert_eq!(i32::from_le_bytes(world[476..480].try_into().unwrap()), 10);
+    let world_with_tree = build_world_with_node_tree("World", 0x7000);
+    assert_eq!(u64::from_le_bytes(world_with_tree[512..520].try_into().unwrap()), 0x7000);
+}
+
+#[test]
+fn world_sky_shader_uses_requested_low_intensity_defaults() {
+    let mut bytes = Vec::new();
+    let mut ptrs = PtrAlloc::new(0x8000);
+    write_world_with_sky_shader(&mut bytes, "World", 0x7000, 0x7010, &mut ptrs);
+
+    let mut found_background_strength = false;
+    let mut found_sky_sun_intensity = false;
+    let mut offset = 0usize;
+    while offset + 32 <= bytes.len() {
+        let sdna = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap());
+        let len = u32::from_le_bytes(bytes[offset + 16..offset + 20].try_into().unwrap()) as usize;
+        let data_start = offset + 32;
+        let data_end = data_start + len;
+        if sdna == SDNA_IDX_BNSV_FLOAT && len >= 16 {
+            let value = f32::from_le_bytes(bytes[data_start + 4..data_start + 8].try_into().unwrap());
+            if (value - 0.1).abs() < 1e-6 {
+                found_background_strength = true;
+            }
+        }
+        if sdna == SDNA_IDX_NODE_TEX_SKY && len > 992 {
+            let value = f32::from_le_bytes(bytes[data_start + 988..data_start + 992].try_into().unwrap());
+            if (value - 0.1).abs() < 1e-6 {
+                found_sky_sun_intensity = true;
+            }
+        }
+        offset = data_end;
+    }
+
+    assert!(found_background_strength, "Background Strength should default to 0.1");
+    assert!(found_sky_sun_intensity, "Sky Texture sun_intensity should default to 0.1");
+}
+
+#[test]
+fn material_without_nodes_does_not_reference_empty_shader_tree() {
+    let material = build_material_with_node_tree_and_properties("Material", 0, 0);
+
+    assert_eq!(material[472], 0);
+    assert_eq!(u64::from_le_bytes(material[480..488].try_into().unwrap()), 0);
 }
 
 #[test]
@@ -358,7 +425,7 @@ fn material_uses_visible_opaque_defaults() {
     assert_eq!(f32::from_le_bytes(ma[428..432].try_into().unwrap()), 0.8);
     assert_eq!(f32::from_le_bytes(ma[432..436].try_into().unwrap()), 1.0);
     assert_eq!(f32::from_le_bytes(ma[464..468].try_into().unwrap()), 0.4);
-    assert_eq!(ma[472], 1);
+    assert_eq!(ma[472], 0);
     assert_eq!(ma[473], 1);
     assert_eq!(f32::from_le_bytes(ma[524..528].try_into().unwrap()), 0.5);
     assert_eq!(ma[532], 0); // blend_method = MA_BM_SOLID

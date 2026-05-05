@@ -244,7 +244,6 @@ pub fn assemble_glb_with_loadout_with_progress(
         loaded_interiors.unique_cgfs.len()
     );
 
-    let phase_start = Instant::now();
     let mut preloaded_interior_meshes = if opts.kind == ExportKind::Bundled {
         preload_interior_meshes(&loaded_interiors, p4k, &child_opts)
     } else {
@@ -472,4 +471,3 @@ pub(crate) fn path_is_shield_related(path: Option<&str>) -> bool {
     path.is_some_and(|value| value.to_ascii_lowercase().contains("/shields/"))
         || path.is_some_and(|value| value.to_ascii_lowercase().contains("\\shields\\"))
 }
-
