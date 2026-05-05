@@ -68,6 +68,7 @@ pub const MATERIAL_SIZE: usize = 584;
 pub const BNODE_TREE_SIZE: usize = 736;
 pub const ATTRIBUTE_SIZE: usize = 24;
 pub const ATTRIBUTE_ARRAY_SIZE: usize = 32;
+pub const CURVE_MAP_POINT_SIZE: usize = 12;
 pub const BDEFORMGROUP_SIZE: usize = 88;
 pub const MDEFORMVERT_SIZE: usize = 16;
 pub const MDEFORMWEIGHT_SIZE: usize = 8;
@@ -337,11 +338,47 @@ pub fn build_scene(
     master_collection_ptr: u64,
     tool_settings_ptr: u64,
 ) -> Vec<u8> {
+    build_scene_with_motion_blur_curve(scene_name, view_layer_ptr, master_collection_ptr, tool_settings_ptr, 0)
+}
+
+pub fn build_scene_with_motion_blur_curve(
+    scene_name: &str,
+    view_layer_ptr: u64,
+    master_collection_ptr: u64,
+    tool_settings_ptr: u64,
+    motion_blur_curve_points_ptr: u64,
+) -> Vec<u8> {
+    build_scene_with_motion_blur_curve_and_properties(
+        scene_name,
+        view_layer_ptr,
+        master_collection_ptr,
+        tool_settings_ptr,
+        motion_blur_curve_points_ptr,
+        0,
+        "BLENDER_WORKBENCH",
+    )
+}
+
+pub fn build_scene_with_motion_blur_curve_and_properties(
+    scene_name: &str,
+    view_layer_ptr: u64,
+    master_collection_ptr: u64,
+    tool_settings_ptr: u64,
+    motion_blur_curve_points_ptr: u64,
+    system_properties_ptr: u64,
+    render_engine: &str,
+) -> Vec<u8> {
     let mut data = vec![0u8; SCENE_SIZE];
     write_id_name(&mut data, "SC", scene_name);
     // Minimal Blender 5.1 Scene defaults mirrored from DNA_scene_types.h / scene_init_data().
     // Leaving RenderData fully zeroed makes Blender's post-load code hit invalid time/render
     // state before Python can inspect the file.
+    data[322] = 32; // scene preview image planes = R_IMF_PLANES_RGBA
+    data[609] = 17; // r.im_format.imtype = R_IMF_IMTYPE_PNG
+    data[610] = 2; // r.im_format.depth = R_IMF_CHAN_DEPTH_8
+    data[611] = 32; // r.im_format.planes = R_IMF_PLANES_RGBA
+    data[613] = 90; // r.im_format.quality
+    data[614] = 15; // r.im_format.compress
     write_i32(&mut data, 1032, 1); // r.cfra
     write_i32(&mut data, 1036, 1); // r.sfra
     write_i32(&mut data, 1040, 250); // r.efra
@@ -376,10 +413,33 @@ pub fn build_scene(
     }
     write_f32(&mut data, 3040, 1.0); // r.simplify_particles
     write_f32(&mut data, 3048, 1.0); // r.simplify_volumes
-    write_i32(&mut data, 3052, 0); // r.line_thickness_mode
+    data[3028] = 3; // r.seq_prev_type = OB_SOLID
+    write_i32(&mut data, 3052, 1); // r.line_thickness_mode = R_LINE_THICKNESS_ABSOLUTE
     write_f32(&mut data, 3056, 1.0); // r.unit_line_thickness
-    write_cstr_fixed(&mut data, 3060, 32, "BLENDER_WORKBENCH"); // r.engine
+    write_cstr_fixed(&mut data, 3060, 32, render_engine); // r.engine
     write_f32(&mut data, 4544, 0.5); // r.motion_blur_shutter
+    // Blender initializes RenderData.mblur_shutter_curve for every new scene.
+    // Cycles reads this curve unconditionally when building the camera shutter
+    // table, so generated scenes must carry the inline CurveMapping defaults
+    // and a valid cm[0].curve pointer.
+    write_i32(&mut data, 4552, 17); // r.mblur_shutter_curve.flag
+    write_f32(&mut data, 4568, 0.0); // curr.xmin
+    write_f32(&mut data, 4572, 1.0); // curr.xmax
+    write_f32(&mut data, 4576, 0.0); // curr.ymin
+    write_f32(&mut data, 4580, 1.0); // curr.ymax
+    write_f32(&mut data, 4584, 0.0); // clipr.xmin
+    write_f32(&mut data, 4588, 1.0); // clipr.xmax
+    write_f32(&mut data, 4592, 0.0); // clipr.ymin
+    write_f32(&mut data, 4596, 1.0); // clipr.ymax
+    write_i16(&mut data, 4600, 3); // cm[0].totpoint
+    write_i16(&mut data, 4602, 1); // cm[0].flag
+    write_f32(&mut data, 4604, 256.0); // cm[0].range
+    write_f32(&mut data, 4608, 0.0); // cm[0].mintable
+    write_f32(&mut data, 4612, 1.0); // cm[0].maxtable
+    for offset in [4616, 4620, 4624, 4628] {
+        write_f32(&mut data, offset, -std::f32::consts::FRAC_1_SQRT_2);
+    }
+    write_ptr(&mut data, 4632, motion_blur_curve_points_ptr); // cm[0].curve
     write_f32(&mut data, 4996, 1.0); // r.time_jump_delta
     write_i32(&mut data, 5000, 1); // r.time_jump_unit
     write_i32(&mut data, 5008, 48000); // audio.mixrate
@@ -477,9 +537,65 @@ pub fn build_scene(
     write_ptr(&mut data, 5640, view_layer_ptr);
     write_ptr(&mut data, 5648, master_collection_ptr);
     write_ptr(&mut data, 568, tool_settings_ptr);
+    write_ptr(&mut data, 352, system_properties_ptr);
     write_i32(&mut data, 5664, 1);
     write_i32(&mut data, 5668, 250);
     data
+}
+
+pub fn build_motion_blur_shutter_curve_points() -> Vec<u8> {
+    let mut data = vec![0u8; CURVE_MAP_POINT_SIZE * 3];
+    for (idx, (x, y)) in [(0.0, 1.0), (0.5, 1.0), (1.0, 1.0)].into_iter().enumerate() {
+        let off = idx * CURVE_MAP_POINT_SIZE;
+        write_f32(&mut data, off, x);
+        write_f32(&mut data, off + 4, y);
+    }
+    data
+}
+
+pub fn build_cycles_render_settings_system_properties(
+    _root_ptr: u64,
+    cycles_group_ptr: u64,
+    child_ptrs: &[u64; 6],
+) -> (Vec<u8>, Vec<u8>, Vec<(u64, Vec<u8>)>) {
+    let root = build_idproperty(
+        IDP_GROUP, "", 0, 0, 0, cycles_group_ptr, cycles_group_ptr, 0, 0.0, 1, 1,
+    );
+    let cycles_group = build_idproperty(
+        IDP_GROUP,
+        "cycles",
+        0,
+        0,
+        0,
+        child_ptrs[0],
+        child_ptrs[5],
+        0,
+        0.0,
+        child_ptrs.len() as i32,
+        child_ptrs.len() as i32,
+    );
+    let values = [
+        ("sampling_pattern", 1),
+        ("device", 1),
+        ("preview_samples", 64),
+        ("use_preview_denoising", 1),
+        ("samples", 512),
+        ("use_denoising", 1),
+    ];
+    let children = values
+        .iter()
+        .enumerate()
+        .map(|(idx, (name, value))| {
+            let next_ptr = if idx + 1 < child_ptrs.len() { child_ptrs[idx + 1] } else { 0 };
+            let prev_ptr = if idx > 0 { child_ptrs[idx - 1] } else { 0 };
+            let mut block = build_idproperty(
+                IDP_INT, name, next_ptr, prev_ptr, 0, 0, 0, *value, 0.0, 0, 0,
+            );
+            block[17] = 0;
+            (child_ptrs[idx], block)
+        })
+        .collect();
+    (root, cycles_group, children)
 }
 
 pub fn build_tool_settings() -> Vec<u8> {
@@ -1139,8 +1255,12 @@ pub fn build_material_with_node_tree_and_properties(
 /// empty tree is valid in Blender 5.1 and lets Blender/Python/UI add shader
 /// nodes later; default Principled/Output nodes are intentionally not faked.
 pub fn build_empty_shader_node_tree(owner_material_ptr: u64) -> Vec<u8> {
+    build_empty_shader_node_tree_named(owner_material_ptr, "Shader Nodetree")
+}
+
+pub fn build_empty_shader_node_tree_named(owner_material_ptr: u64, tree_name: &str) -> Vec<u8> {
     let mut data = vec![0u8; BNODE_TREE_SIZE];
-    write_id_name(&mut data, "NT", "Shader Nodetree");
+    write_id_name(&mut data, "NT", tree_name);
     write_i16(&mut data, 298, 0x0400); // ID_FLAG_EMBEDDED_DATA
     write_ptr(&mut data, 416, owner_material_ptr); // owner_id
     write_cstr_fixed(&mut data, 432, 64, "ShaderNodeTree"); // idname

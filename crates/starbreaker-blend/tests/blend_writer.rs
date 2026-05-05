@@ -172,11 +172,18 @@ fn scene_has_nonzero_blender_runtime_safe_defaults() {
     assert_eq!(i32::from_le_bytes(scene[1032..1036].try_into().unwrap()), 1);
     assert_eq!(i32::from_le_bytes(scene[1036..1040].try_into().unwrap()), 1);
     assert_eq!(i32::from_le_bytes(scene[1040..1044].try_into().unwrap()), 250);
+    assert_eq!(scene[609], 17);
+    assert_eq!(scene[610], 2);
+    assert_eq!(scene[611], 32);
+    assert_eq!(scene[613], 90);
+    assert_eq!(scene[614], 15);
     assert_eq!(f32::from_le_bytes(scene[1068..1072].try_into().unwrap()), 1.0);
     assert_eq!(i32::from_le_bytes(scene[1072..1076].try_into().unwrap()), 1);
     assert_eq!(u16::from_le_bytes(scene[1116..1118].try_into().unwrap()), 24);
     assert_eq!(f32::from_le_bytes(scene[1172..1176].try_into().unwrap()), 1.0);
     assert_eq!(&scene[3060..3077], b"BLENDER_WORKBENCH");
+    assert_eq!(scene[3028], 3);
+    assert_eq!(i32::from_le_bytes(scene[3052..3056].try_into().unwrap()), 1);
     assert_eq!(i32::from_le_bytes(scene[5008..5012].try_into().unwrap()), 48000);
     assert_eq!(i32::from_le_bytes(scene[5072..5076].try_into().unwrap()), 1);
     assert_eq!(i32::from_le_bytes(scene[5076..5080].try_into().unwrap()), -1);
@@ -185,6 +192,81 @@ fn scene_has_nonzero_blender_runtime_safe_defaults() {
     assert_eq!(u64::from_le_bytes(scene[568..576].try_into().unwrap()), 0x4000);
     assert_eq!(i32::from_le_bytes(scene[5664..5668].try_into().unwrap()), 1);
     assert_eq!(i32::from_le_bytes(scene[5668..5672].try_into().unwrap()), 250);
+}
+
+#[test]
+fn scene_initializes_cycles_safe_motion_blur_curve() {
+    let scene = build_scene_with_motion_blur_curve("Scene", 0x2000, 0x3000, 0x4000, 0x5000);
+    let points = build_motion_blur_shutter_curve_points();
+
+    assert_eq!(i32::from_le_bytes(scene[4552..4556].try_into().unwrap()), 17);
+    assert_eq!(f32::from_le_bytes(scene[4568..4572].try_into().unwrap()), 0.0);
+    assert_eq!(f32::from_le_bytes(scene[4572..4576].try_into().unwrap()), 1.0);
+    assert_eq!(f32::from_le_bytes(scene[4584..4588].try_into().unwrap()), 0.0);
+    assert_eq!(f32::from_le_bytes(scene[4588..4592].try_into().unwrap()), 1.0);
+    assert_eq!(i16::from_le_bytes(scene[4600..4602].try_into().unwrap()), 3);
+    assert_eq!(i16::from_le_bytes(scene[4602..4604].try_into().unwrap()), 1);
+    assert_eq!(f32::from_le_bytes(scene[4604..4608].try_into().unwrap()), 256.0);
+    assert_eq!(f32::from_le_bytes(scene[4612..4616].try_into().unwrap()), 1.0);
+    assert_eq!(u64::from_le_bytes(scene[4632..4640].try_into().unwrap()), 0x5000);
+
+    assert_eq!(points.len(), CURVE_MAP_POINT_SIZE * 3);
+    let values = (0..3)
+        .map(|idx| {
+            let off = idx * CURVE_MAP_POINT_SIZE;
+            (
+                f32::from_le_bytes(points[off..off + 4].try_into().unwrap()),
+                f32::from_le_bytes(points[off + 4..off + 8].try_into().unwrap()),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(values, vec![(0.0, 1.0), (0.5, 1.0), (1.0, 1.0)]);
+}
+
+#[test]
+fn cycles_render_settings_idprops_match_requested_defaults() {
+    let child_ptrs = [0x3000, 0x3010, 0x3020, 0x3030, 0x3040, 0x3050];
+    let (root, cycles_group, children) =
+        build_cycles_render_settings_system_properties(0x1000, 0x2000, &child_ptrs);
+    let scene = build_scene_with_motion_blur_curve_and_properties(
+        "Scene",
+        0,
+        0,
+        0,
+        0,
+        0x1000,
+        "CYCLES",
+    );
+
+    assert_eq!(u64::from_le_bytes(scene[352..360].try_into().unwrap()), 0x1000);
+    assert_eq!(&scene[3060..3066], b"CYCLES");
+    assert_eq!(root[16], IDP_GROUP);
+    assert_eq!(u64::from_le_bytes(root[96..104].try_into().unwrap()), 0x2000);
+    assert_eq!(&cycles_group[20..26], b"cycles");
+    assert_eq!(i32::from_le_bytes(cycles_group[128..132].try_into().unwrap()), 6);
+
+    let values = children
+        .iter()
+        .map(|(_, block)| {
+            (
+                String::from_utf8_lossy(&block[20..84])
+                    .trim_end_matches('\0')
+                    .to_string(),
+                i32::from_le_bytes(block[120..124].try_into().unwrap()),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        values,
+        vec![
+            ("sampling_pattern".to_string(), 1),
+            ("device".to_string(), 1),
+            ("preview_samples".to_string(), 64),
+            ("use_preview_denoising".to_string(), 1),
+            ("samples".to_string(), 512),
+            ("use_denoising".to_string(), 1),
+        ]
+    );
 }
 
 #[test]

@@ -21,7 +21,9 @@ use starbreaker_blend::{
     build_file_global, build_layer_collection, build_layer_collection_linked, build_mat_ptr_array,
     build_empty_shader_node_tree, build_idprop_tree, build_mat_ptr_array_from_ptrs,
     build_material_with_node_tree_and_properties,
-    build_matbits, build_mesh, build_object, build_scene, build_tool_settings,
+    build_matbits, build_mesh, build_motion_blur_shutter_curve_points, build_object,
+    build_cycles_render_settings_system_properties, build_scene_with_motion_blur_curve_and_properties,
+    build_tool_settings, build_empty_shader_node_tree_named,
     build_view_layer,
     floats2_data, floats3_data, ints_data, startup_ui_prefix_bytes, write_block, write_block_header, PtrAlloc,
     ATTR_DOMAIN_CORNER, ATTR_DOMAIN_EDGE, ATTR_DOMAIN_FACE, ATTR_DOMAIN_POINT, ATTR_TYPE_BYTE_COLOR,
@@ -58,6 +60,51 @@ struct IdPropBlocks {
     root: Vec<u8>,
     children: Vec<(u64, Vec<u8>)>,
     strings: Vec<(u64, Vec<u8>)>,
+}
+
+struct CyclesSceneProps {
+    root_ptr: u64,
+    root: Vec<u8>,
+    cycles_group_ptr: u64,
+    cycles_group: Vec<u8>,
+    children: Vec<(u64, Vec<u8>)>,
+}
+
+fn allocate_cycles_scene_props(ptrs: &mut PtrAlloc) -> CyclesSceneProps {
+    let root_ptr = ptrs.alloc();
+    let cycles_group_ptr = ptrs.alloc();
+    let child_ptrs = [
+        ptrs.alloc(),
+        ptrs.alloc(),
+        ptrs.alloc(),
+        ptrs.alloc(),
+        ptrs.alloc(),
+        ptrs.alloc(),
+    ];
+    let (root, cycles_group, children) =
+        build_cycles_render_settings_system_properties(root_ptr, cycles_group_ptr, &child_ptrs);
+    CyclesSceneProps {
+        root_ptr,
+        root,
+        cycles_group_ptr,
+        cycles_group,
+        children,
+    }
+}
+
+fn write_cycles_scene_props(out: &mut Vec<u8>, props: &CyclesSceneProps) {
+    write_block(out, b"DATA", SDNA_IDX_IDPROPERTY, props.root_ptr, 1, &props.root);
+    write_block(
+        out,
+        b"DATA",
+        SDNA_IDX_IDPROPERTY,
+        props.cycles_group_ptr,
+        1,
+        &props.cycles_group,
+    );
+    for (child_ptr, child_data) in &props.children {
+        write_block(out, b"DATA", SDNA_IDX_IDPROPERTY, *child_ptr, 1, child_data);
+    }
 }
 
 fn allocate_idprop_blocks(ptrs: &mut PtrAlloc, props: Vec<(String, IdPropValue)>) -> Option<IdPropBlocks> {
@@ -523,6 +570,7 @@ pub fn write_decomposed_export_blend(
                 linked_mesh_refs.push(LinkedMeshRef {
                     object_name: mesh_name.clone(),
                     mesh_name: mesh_name.clone(),
+                    material_names: Vec::new(),
                     source_parent_name: None,
                     object_loc: [0.0, 0.0, 0.0],
                     object_quat: [1.0, 0.0, 0.0, 0.0],
@@ -533,11 +581,12 @@ pub fn write_decomposed_export_blend(
             for linked_mesh_ref in linked_mesh_refs {
                 scene_mesh_instances.push(LinkedMeshInstance {
                     name: linked_mesh_ref.object_name,
-                        mesh_name: linked_mesh_ref.mesh_name,
-                        source_nodes: Vec::new(),
-                        source_ancestors: linked_mesh_ref.ancestors,
-                        source_parent_name: linked_mesh_ref.source_parent_name,
-                        source_loc: linked_mesh_ref.object_loc,
+                    mesh_name: linked_mesh_ref.mesh_name,
+                    material_names: linked_mesh_ref.material_names,
+                    source_nodes: Vec::new(),
+                    source_ancestors: linked_mesh_ref.ancestors,
+                    source_parent_name: linked_mesh_ref.source_parent_name,
+                    source_loc: linked_mesh_ref.object_loc,
                     source_quat: linked_mesh_ref.object_quat,
                     source_scale: linked_mesh_ref.object_scale,
                     parent_node_name: None,
@@ -601,6 +650,7 @@ pub fn write_decomposed_export_blend(
                     scene_mesh_instances.push(LinkedMeshInstance {
                         name,
                         mesh_name: linked_mesh_ref.mesh_name.clone(),
+                        material_names: linked_mesh_ref.material_names.clone(),
                         source_nodes: if idx == 0 {
                             source_nodes_by_asset
                                 .get(&file.relative_path)
@@ -632,6 +682,7 @@ pub fn write_decomposed_export_blend(
                     scene_mesh_instances.push(LinkedMeshInstance {
                         name,
                         mesh_name: linked_mesh_ref.mesh_name.clone(),
+                        material_names: linked_mesh_ref.material_names.clone(),
                         source_nodes: if mesh_ref_idx == 0 {
                             source_nodes_by_asset
                                 .get(&manifest_instance.mesh_asset)
@@ -809,6 +860,8 @@ fn mesh_to_blend_flat(
     let scene_ptr      = ptrs.alloc();
     let view_layer_ptr = ptrs.alloc();
     let tool_settings_ptr = ptrs.alloc();
+    let motion_blur_curve_points_ptr = ptrs.alloc();
+    let cycles_scene_props = allocate_cycles_scene_props(&mut ptrs);
     let base_ptr       = ptrs.alloc();
     let collection_ptr = ptrs.alloc();
     let orientation_collection_object_ptr = ptrs.alloc();
@@ -980,7 +1033,16 @@ fn mesh_to_blend_flat(
         [1.0, 0.0, 0.0, 0.0],
         [1.0, 1.0, 1.0],
     );
-    let scene_data = build_scene(name, view_layer_ptr, collection_ptr, tool_settings_ptr);
+    let scene_data = build_scene_with_motion_blur_curve_and_properties(
+        name,
+        view_layer_ptr,
+        collection_ptr,
+        tool_settings_ptr,
+        motion_blur_curve_points_ptr,
+        cycles_scene_props.root_ptr,
+        "CYCLES",
+    );
+    let motion_blur_curve_points_data = build_motion_blur_shutter_curve_points();
     let tool_settings_data = build_tool_settings();
     let view_layer_data = build_view_layer("ViewLayer", base_ptr, layer_collection_ptr);
     let base_data = build_base(orientation_root_ptr);
@@ -1020,6 +1082,8 @@ fn mesh_to_blend_flat(
     // Blender's readfile.cc reads them all into fd->datamap, then clears it after each ID block.
     write_block(&mut out, b"SC\0\0", SDNA_IDX_SCENE, scene_ptr, 1, &scene_data);
     // SC DATA sequence (all consecutive, no non-DATA blocks until OB):
+    write_block(&mut out, b"DATA", 0, motion_blur_curve_points_ptr, 3, &motion_blur_curve_points_data);
+    write_cycles_scene_props(&mut out, &cycles_scene_props);
     write_block(&mut out, b"DATA", SDNA_IDX_TOOL_SETTINGS, tool_settings_ptr, 1, &tool_settings_data);
     write_block(&mut out, b"DATA", SDNA_IDX_VIEW_LAYER, view_layer_ptr, 1, &view_layer_data);
     write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, layer_collection_ptr, 1, &layer_collection_data);
@@ -1302,6 +1366,7 @@ fn linked_scene_object_names(
 struct LinkedMeshRef {
     object_name: String,
     mesh_name: String,
+    material_names: Vec<String>,
     source_parent_name: Option<String>,
     object_loc: [f32; 3],
     object_quat: [f32; 4],
@@ -1337,10 +1402,18 @@ fn mesh_object_refs_from_blend_bytes(blend_bytes: &[u8]) -> Vec<LinkedMeshRef> {
         quat: [f32; 4],
         scale: [f32; 3],
     }
+    #[derive(Debug, Clone)]
+    struct MeshInfo {
+        name: String,
+        mat_ptr: u64,
+        mat_slots: usize,
+    }
 
     let mut object_order = Vec::new();
     let mut objects_by_ptr = HashMap::new();
-    let mut mesh_names_by_ptr = HashMap::new();
+    let mut meshes_by_ptr = HashMap::new();
+    let mut material_names_by_ptr = HashMap::new();
+    let mut data_by_ptr = HashMap::new();
     let mut offset = BLEND_MAGIC.len();
     while offset + 32 <= blend_bytes.len() {
         let code = &blend_bytes[offset..offset + 4];
@@ -1356,8 +1429,24 @@ fn mesh_object_refs_from_blend_bytes(blend_bytes: &[u8]) -> Vec<LinkedMeshRef> {
             if data.len() >= 300 {
                 let raw = &data[42..300];
                 let end = raw.iter().position(|&byte| byte == 0).unwrap_or(raw.len());
-                mesh_names_by_ptr.insert(old_ptr, String::from_utf8_lossy(&raw[..end]).to_string());
+                meshes_by_ptr.insert(
+                    old_ptr,
+                    MeshInfo {
+                        name: String::from_utf8_lossy(&raw[..end]).to_string(),
+                        mat_ptr: u64::from_le_bytes(data[424..432].try_into().unwrap()),
+                        mat_slots: i16::from_le_bytes(data[1618..1620].try_into().unwrap()).max(0) as usize,
+                    },
+                );
             }
+        } else if code == b"MA\0\0" {
+            let data = &blend_bytes[data_start..data_end];
+            if data.len() >= 300 {
+                let raw = &data[42..300];
+                let end = raw.iter().position(|&byte| byte == 0).unwrap_or(raw.len());
+                material_names_by_ptr.insert(old_ptr, String::from_utf8_lossy(&raw[..end]).to_string());
+            }
+        } else if code == b"DATA" {
+            data_by_ptr.insert(old_ptr, blend_bytes[data_start..data_end].to_vec());
         } else if code == b"OB\0\0" {
             let data = &blend_bytes[data_start..data_end];
             if data.len() >= OBJECT_SIZE {
@@ -1406,10 +1495,23 @@ fn mesh_object_refs_from_blend_bytes(blend_bytes: &[u8]) -> Vec<LinkedMeshRef> {
             if object.object_type != 1 {
                 return None;
             }
-            let mesh_name = mesh_names_by_ptr
-                .get(&object.mesh_ptr)
-                .cloned()
+            let mesh_info = meshes_by_ptr.get(&object.mesh_ptr);
+            let mesh_name = mesh_info
+                .map(|mesh| mesh.name.clone())
                 .unwrap_or_else(|| object.name.clone());
+            let material_names = mesh_info
+                .and_then(|mesh| data_by_ptr.get(&mesh.mat_ptr).map(|data| (mesh, data)))
+                .map(|(mesh, data)| {
+                    (0..mesh.mat_slots)
+                        .filter_map(|slot| {
+                            let start = slot * 8;
+                            (start + 8 <= data.len())
+                                .then(|| u64::from_le_bytes(data[start..start + 8].try_into().unwrap()))
+                                .and_then(|ptr| material_names_by_ptr.get(&ptr).cloned())
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
             let mut ancestors = Vec::new();
             let mut parent_ptr = object.parent_ptr;
             while parent_ptr != 0 {
@@ -1428,6 +1530,7 @@ fn mesh_object_refs_from_blend_bytes(blend_bytes: &[u8]) -> Vec<LinkedMeshRef> {
             Some(LinkedMeshRef {
                 object_name: object.name.clone(),
                 mesh_name,
+                material_names,
                 source_parent_name: objects_by_ptr
                     .get(&object.parent_ptr)
                     .map(|parent| parent.name.clone()),
@@ -2120,13 +2223,24 @@ fn mesh_to_blend_hierarchy(
     let scene_ptr = ptrs.alloc();
     let view_layer_ptr = ptrs.alloc();
     let tool_settings_ptr = ptrs.alloc();
+    let motion_blur_curve_points_ptr = ptrs.alloc();
+    let cycles_scene_props = allocate_cycles_scene_props(&mut ptrs);
     let base_ptr = ptrs.alloc();
     let collection_ptr = ptrs.alloc();
     let layer_collection_ptr = ptrs.alloc();
     let object_count = 3 + nmc.nodes.len() - usize::from(collapsed_wrapper_node.is_some());
     let collection_object_ptrs = (0..object_count).map(|_| ptrs.alloc()).collect::<Vec<_>>();
 
-    let scene_data = build_scene(name, view_layer_ptr, collection_ptr, tool_settings_ptr);
+    let scene_data = build_scene_with_motion_blur_curve_and_properties(
+        name,
+        view_layer_ptr,
+        collection_ptr,
+        tool_settings_ptr,
+        motion_blur_curve_points_ptr,
+        cycles_scene_props.root_ptr,
+        "CYCLES",
+    );
+    let motion_blur_curve_points_data = build_motion_blur_shutter_curve_points();
     let tool_settings_data = build_tool_settings();
     let view_layer_data = build_view_layer("ViewLayer", base_ptr, layer_collection_ptr);
     let base_data = build_base(orientation_root_ptr);
@@ -2163,6 +2277,8 @@ fn mesh_to_blend_hierarchy(
     write_block(&mut out, b"GLOB", SDNA_IDX_FILE_GLOBAL, 0x10, 1, &file_global);
     out.extend_from_slice(&startup_ui_prefix_bytes());
     write_block(&mut out, b"SC\0\0", SDNA_IDX_SCENE, scene_ptr, 1, &scene_data);
+    write_block(&mut out, b"DATA", 0, motion_blur_curve_points_ptr, 3, &motion_blur_curve_points_data);
+    write_cycles_scene_props(&mut out, &cycles_scene_props);
     write_block(&mut out, b"DATA", SDNA_IDX_TOOL_SETTINGS, tool_settings_ptr, 1, &tool_settings_data);
     write_block(&mut out, b"DATA", SDNA_IDX_VIEW_LAYER, view_layer_ptr, 1, &view_layer_data);
     write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, layer_collection_ptr, 1, &layer_collection_data);
@@ -2321,6 +2437,7 @@ pub struct LinkedMeshInstance {
     pub name: String,
     /// Mesh datablock name inside the linked decomposed asset file.
     pub mesh_name: String,
+    pub material_names: Vec<String>,
     /// Source asset empty ancestors, ordered root-to-parent.
     pub source_ancestors: Vec<LinkedSourceAncestor>,
     /// Full source empty tree for this scene instance, when available.
@@ -2397,6 +2514,7 @@ pub fn create_scene_blend(
                 blend_path: format!("{mesh_output_dir}/{name}.blend"),
                 mesh_asset: format!("{mesh_output_dir}/{name}.blend"),
                 mesh_name: name.clone(),
+                material_names: Vec::new(),
                 source_nodes: Vec::new(),
                 source_ancestors: Vec::new(),
                 source_loc: [0.0, 0.0, 0.0],
@@ -2429,6 +2547,27 @@ pub fn create_scene_blend_with_instances(
     let scene_ptr = ptrs.alloc();
     let view_layer_ptr = ptrs.alloc();
     let tool_settings_ptr = ptrs.alloc();
+    let motion_blur_curve_points_ptr = ptrs.alloc();
+    let cycles_scene_props = allocate_cycles_scene_props(&mut ptrs);
+    let mut scene_material_ptrs: HashMap<String, u64> = HashMap::new();
+    let mut scene_material_blocks = Vec::new();
+    for material_name in mesh_instances_input
+        .iter()
+        .flat_map(|instance| instance.material_names.iter())
+    {
+        if scene_material_ptrs.contains_key(material_name) {
+            continue;
+        }
+        let material_ptr = ptrs.alloc();
+        let node_tree_ptr = ptrs.alloc();
+        scene_material_ptrs.insert(material_name.clone(), material_ptr);
+        scene_material_blocks.push((
+            material_ptr,
+            build_material_with_node_tree_and_properties(material_name, node_tree_ptr, 0),
+            node_tree_ptr,
+            build_empty_shader_node_tree_named(material_ptr, &format!("{material_name} Nodetree")),
+        ));
+    }
     let base_ptr = ptrs.alloc();
     let root_collection_ptr = ptrs.alloc();
     let root_collection_object_ptr = ptrs.alloc();
@@ -2479,21 +2618,26 @@ pub fn create_scene_blend_with_instances(
     
     for (idx, instance) in mesh_instances_input.iter().enumerate() {
         let mut local_source_node_ptrs = HashMap::new();
-        for (node_index, source_node) in instance.source_nodes.iter().enumerate() {
+        let mut local_source_node_entries = Vec::new();
+        for source_node in &instance.source_nodes {
             let empty_ptr = ptrs.alloc();
             let empty_coll_obj_ptr = ptrs.alloc();
+            local_source_node_ptrs.insert(source_node.name.clone(), empty_ptr);
+            source_node_ptr_by_name
+                .entry(source_node.name.clone())
+                .or_insert(empty_ptr);
+            empty_coll_obj_ptrs.push((empty_coll_obj_ptr, empty_ptr));
+            local_source_node_entries.push((empty_ptr, empty_coll_obj_ptr));
+        }
+        for (node_index, (empty_ptr, _)) in local_source_node_entries.iter().enumerate() {
+            let source_node = &instance.source_nodes[node_index];
             let parent_ptr = source_node
                 .parent_name
                 .as_ref()
                 .and_then(|name| local_source_node_ptrs.get(name))
                 .copied()
                 .unwrap_or(entity_root_ptr);
-            local_source_node_ptrs.insert(source_node.name.clone(), empty_ptr);
-            source_node_ptr_by_name
-                .entry(source_node.name.clone())
-                .or_insert(empty_ptr);
-            scene_source_node_entries.push((empty_ptr, idx, node_index, parent_ptr));
-            empty_coll_obj_ptrs.push((empty_coll_obj_ptr, empty_ptr));
+            scene_source_node_entries.push((*empty_ptr, idx, node_index, parent_ptr));
         }
         let mesh_id_ptr = ptrs.alloc();
         let library_ptr = if let Some(&ptr) = library_ptr_by_path.get(&instance.blend_path) {
@@ -2548,6 +2692,11 @@ pub fn create_scene_blend_with_instances(
             idx,
             local_object_idprops,
             mesh_parent_ptr,
+            instance
+                .material_names
+                .iter()
+                .filter_map(|name| scene_material_ptrs.get(name).copied())
+                .collect::<Vec<_>>(),
         ));
         instance_anchor_entries.push((anchor_ptr, idx, anchor_parent_ptr, anchor_idprops));
         empty_coll_obj_ptrs.push((anchor_coll_obj_ptr, anchor_ptr));
@@ -2577,7 +2726,16 @@ pub fn create_scene_blend_with_instances(
     
     // Build scene datablocks
     // Scene must always be named "Scene" for Blender to recognize it as the primary scene
-    let scene_data = build_scene("Scene", view_layer_ptr, root_collection_ptr, tool_settings_ptr);
+    let scene_data = build_scene_with_motion_blur_curve_and_properties(
+        "Scene",
+        view_layer_ptr,
+        root_collection_ptr,
+        tool_settings_ptr,
+        motion_blur_curve_points_ptr,
+        cycles_scene_props.root_ptr,
+        "CYCLES",
+    );
+    let motion_blur_curve_points_data = build_motion_blur_shutter_curve_points();
     let tool_settings_data = build_tool_settings();
     let view_layer_data = build_view_layer("ViewLayer", base_ptr, layer_collection_ptr);
     let base_data = build_base(package_root_ptr);
@@ -2687,15 +2845,16 @@ pub fn create_scene_blend_with_instances(
     }
 
     let mut local_mesh_object_data = Vec::new();
-    for (object_ptr, mat_ptr, matbits_ptr, idx, object_idprops, parent_anchor_ptr) in &local_mesh_object_entries {
+    for (object_ptr, mat_ptr, matbits_ptr, idx, object_idprops, parent_anchor_ptr, material_ptrs) in &local_mesh_object_entries {
         let instance = &mesh_instances_input[*idx];
         let (mesh_id_ptr, _, _) = linked_mesh_ids[*idx];
+        let material_slot_count = material_ptrs.len() as i32;
         let mut object_data = build_object(
             &instance.name,
             mesh_id_ptr,
             *mat_ptr,
             *matbits_ptr,
-            0,
+            material_slot_count,
             object_idprops.as_ref().map(|props| props.root_ptr).unwrap_or(0),
         );
         patch_object_parent_transform(
@@ -2708,8 +2867,8 @@ pub fn create_scene_blend_with_instances(
         local_mesh_object_data.push((
             *object_ptr,
             object_data,
-            build_mat_ptr_array(0),
-            build_matbits(0),
+            build_mat_ptr_array_from_ptrs(material_ptrs),
+            vec![1u8; material_ptrs.len()],
         ));
     }
     
@@ -2791,6 +2950,8 @@ pub fn create_scene_blend_with_instances(
     // Any non-DATA block between SC and its data will truncate the datamap.
     write_block(&mut out, b"SC\0\0", SDNA_IDX_SCENE, scene_ptr, 1, &scene_data);
     // SC DATA sequence — ToolSettings, ViewLayer, all LayerCollections, master_collection, CollectionChildren, Base:
+    write_block(&mut out, b"DATA", 0, motion_blur_curve_points_ptr, 3, &motion_blur_curve_points_data);
+    write_cycles_scene_props(&mut out, &cycles_scene_props);
     write_block(&mut out, b"DATA", SDNA_IDX_TOOL_SETTINGS, tool_settings_ptr, 1, &tool_settings_data);
     write_block(&mut out, b"DATA", SDNA_IDX_VIEW_LAYER, view_layer_ptr, 1, &view_layer_data);
     write_block(&mut out, b"DATA", SDNA_IDX_BASE, base_ptr, 1, &base_data);
@@ -2838,6 +2999,11 @@ pub fn create_scene_blend_with_instances(
         }
         write_block(&mut out, b"DATA", 0, local_mesh_object_entries[idx].1, 1, mat_array);
         write_block(&mut out, b"DATA", 0, local_mesh_object_entries[idx].2, 1, matbits);
+    }
+
+    for (material_ptr, material_data, node_tree_ptr, node_tree_data) in &scene_material_blocks {
+        write_block(&mut out, b"MA\0\0", SDNA_IDX_MATERIAL, *material_ptr, 1, material_data);
+        write_block(&mut out, b"DATA", SDNA_IDX_BNODE_TREE, *node_tree_ptr, 1, node_tree_data);
     }
     
     // Write light blocks (Phase 5B)
@@ -3218,6 +3384,7 @@ mod tests_5a_scene_blend {
         let instance = LinkedMeshInstance {
             name: "rsi_aurora_mk2_airlock_door_LOD0".to_string(),
             mesh_name: "rsi_aurora_mk2_airlock_door_LOD0_mesh".to_string(),
+            material_names: Vec::new(),
             source_nodes: Vec::new(),
             source_ancestors: Vec::new(),
             source_loc: [0.0, 0.0, 0.0],
@@ -3262,6 +3429,7 @@ mod tests_5a_scene_blend {
         let instance = LinkedMeshInstance {
             name: "anchor_mesh".to_string(),
             mesh_name: "anchor_mesh_data".to_string(),
+            material_names: Vec::new(),
             source_nodes: Vec::new(),
             source_ancestors: vec![
                 LinkedSourceAncestor {
@@ -3341,18 +3509,19 @@ mod tests_5a_scene_blend {
         let root = LinkedMeshInstance {
             name: "root_mesh".to_string(),
             mesh_name: "root_mesh_data".to_string(),
+            material_names: Vec::new(),
             source_nodes: vec![
-                LinkedSourceNode {
-                    name: "Root".to_string(),
-                    parent_name: None,
-                    loc: [0.0, 0.0, 0.0],
-                    quat: [1.0, 0.0, 0.0, 0.0],
-                    scale: [1.0, 1.0, 1.0],
-                },
                 LinkedSourceNode {
                     name: "hardpoint_child".to_string(),
                     parent_name: Some("Root".to_string()),
                     loc: [1.0, 2.0, 3.0],
+                    quat: [1.0, 0.0, 0.0, 0.0],
+                    scale: [1.0, 1.0, 1.0],
+                },
+                LinkedSourceNode {
+                    name: "Root".to_string(),
+                    parent_name: None,
+                    loc: [0.0, 0.0, 0.0],
                     quat: [1.0, 0.0, 0.0, 0.0],
                     scale: [1.0, 1.0, 1.0],
                 },
@@ -3372,6 +3541,7 @@ mod tests_5a_scene_blend {
         let child = LinkedMeshInstance {
             name: "child_mesh".to_string(),
             mesh_name: "child_mesh_data".to_string(),
+            material_names: Vec::new(),
             source_nodes: Vec::new(),
             source_ancestors: Vec::new(),
             source_loc: [0.0, 0.0, 0.0],
@@ -3388,10 +3558,16 @@ mod tests_5a_scene_blend {
         let blend_bytes = create_scene_blend_with_instances("ParentNodeEntity", &[root, child], &[]).unwrap();
         let blocks = parse_blend_blocks(&blend_bytes);
 
-        let hardpoint = object_block_by_name(&blocks, "root_mesh_1_hardpoint_child");
+        let hardpoint = object_block_by_name(&blocks, "root_mesh_0_hardpoint_child");
+        let root_empty = object_block_by_name(&blocks, "root_mesh_1_Root");
         let child_anchor = object_block_by_name(&blocks, "child_mesh_anchor");
         let root_mesh = object_block_by_name(&blocks, "root_mesh");
 
+        assert_eq!(
+            u64::from_le_bytes(hardpoint.data[496..504].try_into().unwrap()),
+            root_empty.old_ptr,
+            "source-empty parent resolution must be independent of source node block order"
+        );
         assert_eq!(
             u64::from_le_bytes(child_anchor.data[496..504].try_into().unwrap()),
             hardpoint.old_ptr,
@@ -3861,6 +4037,38 @@ fn convert_position_sc_to_blender(pos_sc: [f64; 3]) -> [f32; 3] {
     ]
 }
 
+fn mat4_from_sc_columns(matrix: [[f32; 4]; 4]) -> glam::Mat4 {
+    glam::Mat4::from_cols_array(&[
+        matrix[0][0], matrix[0][1], matrix[0][2], matrix[0][3],
+        matrix[1][0], matrix[1][1], matrix[1][2], matrix[1][3],
+        matrix[2][0], matrix[2][1], matrix[2][2], matrix[2][3],
+        matrix[3][0], matrix[3][1], matrix[3][2], matrix[3][3],
+    ])
+}
+
+fn transform_light_position_sc(container_transform: [[f32; 4]; 4], position: [f64; 3]) -> [f64; 3] {
+    let transformed = mat4_from_sc_columns(container_transform)
+        .transform_point3(glam::Vec3::new(position[0] as f32, position[1] as f32, position[2] as f32));
+    [transformed.x as f64, transformed.y as f64, transformed.z as f64]
+}
+
+fn transform_light_rotation_sc(container_transform: [[f32; 4]; 4], rotation: [f64; 4]) -> [f64; 4] {
+    let (_, container_rotation, _) = mat4_from_sc_columns(container_transform).to_scale_rotation_translation();
+    let local_rotation = glam::Quat::from_xyzw(
+        rotation[1] as f32,
+        rotation[2] as f32,
+        rotation[3] as f32,
+        rotation[0] as f32,
+    );
+    let transformed = (container_rotation * local_rotation).normalize();
+    [
+        transformed.w as f64,
+        transformed.x as f64,
+        transformed.y as f64,
+        transformed.z as f64,
+    ]
+}
+
 /// Multiply two quaternions: q1 * q2 (standard Hamilton product).
 ///
 /// Input: q1, q2 as [w, x, y, z]
@@ -3920,8 +4128,10 @@ pub fn extract_lights_from_interiors(
     
     for container in &interiors.containers {
         for light_info in &container.lights {
-            // Convert position from CryEngine to Blender coordinates
-            let position_blend = convert_position_sc_to_blender(light_info.position);
+            let position_sc = transform_light_position_sc(container.container_transform, light_info.position);
+            let rotation_sc = transform_light_rotation_sc(container.container_transform, light_info.rotation);
+            // Convert container-local CryEngine light transform to Blender coordinates.
+            let position_blend = convert_position_sc_to_blender(position_sc);
             
             // Map CryEngine light type to Blender lamp_type
             let lamp_type = match light_info.light_type.as_str() {
@@ -3934,7 +4144,7 @@ pub fn extract_lights_from_interiors(
             
             // Convert quaternion rotation with basis correction for spotlights
             let is_spotlight = lamp_type == 2;  // SPOT type
-            let rotation_blend = convert_quaternion_sc_to_blender(light_info.rotation, is_spotlight);
+            let rotation_blend = convert_quaternion_sc_to_blender(rotation_sc, is_spotlight);
             
             // Intensity conversion: candela proxy → Watts
             // KHR_lights_punctual: lm = cd × 4π (lumens from candelas)
@@ -4007,6 +4217,24 @@ mod tests {
     fn test_convert_position_negative() {
         let result = convert_position_sc_to_blender([-1.0, -2.0, -3.0]);
         assert_eq!(result, [-1.0, 3.0, -2.0]);
+    }
+
+    #[test]
+    fn test_light_position_includes_container_transform() {
+        let container_transform = crate::socpak::build_container_transform([10.0, 20.0, 30.0], [0.0, 0.0, 0.0]);
+        let transformed = transform_light_position_sc(container_transform, [1.0, 2.0, 3.0]);
+        assert_eq!(transformed, [11.0, 22.0, 33.0]);
+        assert_eq!(convert_position_sc_to_blender(transformed), [11.0, -33.0, 22.0]);
+    }
+
+    #[test]
+    fn test_light_rotation_includes_container_transform() {
+        let container_transform = crate::socpak::build_container_transform([0.0, 0.0, 0.0], [0.0, 0.0, 90.0]);
+        let transformed = transform_light_rotation_sc(container_transform, [1.0, 0.0, 0.0, 0.0]);
+        assert!((transformed[0] - std::f64::consts::FRAC_1_SQRT_2).abs() < 0.0001);
+        assert!(transformed[1].abs() < 0.0001);
+        assert!(transformed[2].abs() < 0.0001);
+        assert!((transformed[3] - std::f64::consts::FRAC_1_SQRT_2).abs() < 0.0001);
     }
     
     #[test]
