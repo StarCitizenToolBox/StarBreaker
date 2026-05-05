@@ -312,6 +312,7 @@ pub(crate) fn mesh_to_blend(name: &str, mesh: &Mesh) -> Vec<u8> {
 /// trigger "Library file, loading empty scene". To avoid that, we emit a tiny
 /// placeholder mesh/object scene. The addon can replace/remove this placeholder
 /// once it links real component assets.
+#[allow(dead_code)]
 pub(crate) fn create_master_blend(entity_name: &str) -> Vec<u8> {
     let placeholder = Mesh {
         positions: vec![[0.0, 0.0, 0.0], [0.001, 0.0, 0.0], [0.0, 0.001, 0.0]],

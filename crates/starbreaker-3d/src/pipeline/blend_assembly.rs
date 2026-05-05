@@ -10,6 +10,7 @@
 //! Phase 3 (lights and empties) — extraction and creation
 //! Phase 4 (decal vertex groups) — material identification
 //! Phase 5D (decal material assignment) — vertex group material assignment
+#![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
 
@@ -7516,8 +7517,6 @@ mod tests_5d {
 
 
 mod tests_4c {
-    use super::*;
-    
     #[test]
     fn test_validate_lights_extraction_empty() {
         let lights = vec![];
