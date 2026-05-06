@@ -222,20 +222,114 @@ def refresh_materials_for_package_root(
     package = _load_package_from_root(package_root)
     importer = PackageImporter(context, package, package_root=package_root)
     applied = 0
+    needs_view_layer_update = False
     with _suspend_heavy_viewports(context), _temporary_object_mode(context):
         for obj in _iter_package_objects(package_root):
             if getattr(obj, "type", None) != "MESH":
                 continue
             if _string_prop(obj, PROP_MATERIAL_SIDECAR) is None:
                 continue
-            applied += importer.rebuild_object_materials(obj, palette_id)
+            object_palette_id = _material_refresh_palette_id(package, obj, palette_id)
+            applied += importer.rebuild_object_materials(obj, object_palette_id)
+            needs_view_layer_update = _refresh_mesh_material_evaluation(obj) or needs_view_layer_update
             if palette_id is not None:
                 obj[PROP_PALETTE_ID] = palette_id
         if palette_id is not None:
             package_root[PROP_PALETTE_ID] = palette_id
+    if needs_view_layer_update:
+        view_layer = getattr(context, "view_layer", None)
+        update = getattr(view_layer, "update", None)
+        if callable(update):
+            update()
     _purge_orphaned_runtime_groups()
     _purge_orphaned_file_backed_images()
     return applied
+
+
+def _material_refresh_palette_id(
+    package: PackageBundle,
+    obj: bpy.types.Object,
+    explicit_palette_id: str | None,
+) -> str | None:
+    if explicit_palette_id is not None:
+        return explicit_palette_id
+    object_palette_id = _string_prop(obj, PROP_PALETTE_ID)
+    if object_palette_id is not None:
+        return object_palette_id
+    sidecar_path = _string_prop(obj, PROP_MATERIAL_SIDECAR)
+    if sidecar_path is None:
+        return None
+    return _sidecar_default_palette_id(package, sidecar_path)
+
+
+def _sidecar_default_palette_id(package: PackageBundle, sidecar_path: str) -> str | None:
+    load_sidecar = getattr(package, "load_material_sidecar", None)
+    if not callable(load_sidecar):
+        return None
+    sidecar = load_sidecar(sidecar_path)
+    if sidecar is None:
+        return None
+    attributes = (
+        getattr(sidecar, "raw", {})
+        .get("authored_material_set", {})
+        .get("attributes", [])
+    )
+    for attribute in attributes:
+        name = str(attribute.get("name", ""))
+        if not name.lower() == "defaultpalette":
+            continue
+        value = str(attribute.get("value", "")).replace("\\", "/").strip()
+        source_name = value.rsplit("/", 1)[-1].strip().lower()
+        if source_name:
+            return f"palette/{source_name}"
+    return None
+
+
+def _refresh_mesh_material_evaluation(
+    obj: bpy.types.Object,
+    _context: bpy.types.Context | None = None,
+) -> bool:
+    data = getattr(obj, "data", None)
+    changed = _ensure_active_uv_layer(data)
+    data_tagged = _tag_id_for_refresh(data)
+    object_tagged = _tag_id_for_refresh(obj)
+    return changed or data_tagged or object_tagged
+
+
+def _ensure_active_uv_layer(mesh: Any) -> bool:
+    uv_layers = getattr(mesh, "uv_layers", None)
+    if uv_layers is None or len(uv_layers) == 0:
+        return False
+    active = getattr(uv_layers, "active", None)
+    active_index = int(getattr(uv_layers, "active_index", -1))
+    if active is not None and active_index >= 0:
+        return False
+    preferred_index = _uv_layer_index(uv_layers, "UVMap")
+    uv_layers.active_index = preferred_index if preferred_index is not None else 0
+    return True
+
+
+def _uv_layer_index(uv_layers: Any, name: str) -> int | None:
+    find = getattr(uv_layers, "find", None)
+    if callable(find):
+        index = int(find(name))
+        if index >= 0:
+            return index
+    for index, layer in enumerate(uv_layers):
+        if getattr(layer, "name", None) == name:
+            return index
+    return None
+
+
+def _tag_id_for_refresh(data_block: Any) -> bool:
+    update_tag = getattr(data_block, "update_tag", None)
+    if not callable(update_tag):
+        return False
+    try:
+        update_tag(refresh={"DATA"})
+    except (RuntimeError, TypeError):
+        update_tag()
+    return True
 
 
 def package_root_needs_material_refresh(package_root: bpy.types.Object) -> bool:

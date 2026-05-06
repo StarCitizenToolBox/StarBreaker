@@ -373,7 +373,7 @@ class PaletteMixin:
             and getattr(item, "in_out", None) == "INPUT"
         }
 
-        expected_inputs: set[str] = set()
+        expected_inputs: set[str] = {"Decal UV"}
         expected_outputs = {
             "Decal Color",
             "Decal Alpha",
@@ -439,6 +439,10 @@ class PaletteMixin:
                 group.interface.new_socket(
                     name=socket_name, in_out="OUTPUT", socket_type=socket_type
                 )
+        if "Decal UV" not in existing_inputs:
+            group.interface.new_socket(
+                name="Decal UV", in_out="INPUT", socket_type="NodeSocketVector"
+            )
 
         for item in list(group.interface.items_tree):
             if (
@@ -463,6 +467,10 @@ class PaletteMixin:
             group.nodes, palette_decal_texture(palette), x=-900, y=-520, is_color=True
         )
         if palette_decal_node is not None:
+            decal_uv_socket = group_input.outputs.get("Decal UV")
+            decal_vector_socket = palette_decal_node.inputs.get("Vector")
+            if decal_uv_socket is not None and decal_vector_socket is not None:
+                group.links.new(decal_uv_socket, decal_vector_socket)
             adaptor_tree = self._ensure_tint_decal_adaptor_group()
             decal_converter = group.nodes.new("ShaderNodeGroup")
             decal_converter.name = "DecalConverter"
@@ -541,6 +549,26 @@ class PaletteMixin:
         group_node = existing or nodes.new("ShaderNodeGroup")
         group_node.node_tree = self._ensure_palette_group(palette)
         _refresh_group_node_sockets(group_node)
+        decal_uv_input = group_node.inputs.get("Decal UV")
+        if decal_uv_input is not None and not decal_uv_input.is_linked:
+            uv_node = next(
+                (
+                    node
+                    for node in nodes
+                    if node.bl_idname == "ShaderNodeUVMap"
+                    and getattr(node, "name", "") == "STARBREAKER_PALETTE_DECAL_UV"
+                ),
+                None,
+            )
+            if uv_node is None:
+                uv_node = nodes.new("ShaderNodeUVMap")
+                uv_node.name = "STARBREAKER_PALETTE_DECAL_UV"
+                uv_node.label = "StarBreaker Palette Decal UV"
+                uv_node.uv_map = "UVMap"
+                uv_node.location = (x - 220, y - 180)
+            uv_socket = _output_socket(uv_node, "UV")
+            if uv_socket is not None:
+                links.new(uv_socket, decal_uv_input)
         group_node.location = (x, y)
         group_node.label = "StarBreaker Palette"
         group_node.name = expected_name

@@ -121,6 +121,79 @@ fn mesh_to_blend_exports_secondary_uv_map() {
 }
 
 #[test]
+fn scene_manifest_instances_inherit_interior_palette_for_placements() {
+    let scene = br#"{
+        "interiors": [
+            {
+                "name": "cabin",
+                "palette_id": "palette/interior",
+                "placements": [
+                    {
+                        "mesh_asset": "Data/Objects/interior_panel_LOD0.blend",
+                        "cgf_path": "Data/Objects/interior_panel.cgf",
+                        "material_sidecar": "Data/Materials/interior.materials.json",
+                        "palette_id": null,
+                        "transform": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
+                    }
+                ]
+            }
+        ]
+    }"#;
+    let files = vec![ExportedFile {
+        relative_path: "Packages/Test/scene.json".to_string(),
+        bytes: scene.to_vec(),
+        kind: ExportedFileKind::PackageManifest,
+    }];
+
+    let instances = scene_manifest_instances(&files);
+
+    assert_eq!(instances.len(), 1);
+    assert_eq!(instances[0].palette_id.as_deref(), Some("palette/interior"));
+}
+
+#[test]
+fn scene_manifest_instances_use_material_sidecar_default_palette() {
+    let scene = br#"{
+        "children": [
+            {
+                "entity_name": "seat",
+                "mesh_asset": "Data/Objects/seat_LOD0.blend",
+                "material_sidecar": "Data/Materials/interior_TEX0.materials.json",
+                "palette_id": null
+            }
+        ]
+    }"#;
+    let sidecar = br#"{
+        "normalized_export_relative_path": "Data/Materials/interior_TEX0.materials.json",
+        "authored_material_set": {
+            "attributes": [
+                {
+                    "name": "DefaultPalette",
+                    "value": "Libs/Foundry/Records/TintPalettes/Brand/RSI/rsi_interior/rsi_interior_default"
+                }
+            ]
+        }
+    }"#;
+    let files = vec![
+        ExportedFile {
+            relative_path: "Packages/Test/scene.json".to_string(),
+            bytes: scene.to_vec(),
+            kind: ExportedFileKind::PackageManifest,
+        },
+        ExportedFile {
+            relative_path: "Data/Materials/interior_TEX0.materials.json".to_string(),
+            bytes: sidecar.to_vec(),
+            kind: ExportedFileKind::MaterialSidecar,
+        },
+    ];
+
+    let instances = scene_manifest_instances(&files);
+
+    assert_eq!(instances.len(), 1);
+    assert_eq!(instances[0].palette_id.as_deref(), Some("palette/rsi_interior_default"));
+}
+
+#[test]
 fn interior_placement_mesh_geometry_converts_to_scene_axes() {
     let mut mesh = Mesh {
         positions: vec![[1.0, 2.0, 3.0]],
@@ -1289,6 +1362,7 @@ fn test_create_scene_blend_parents_lights_to_entity_wrapper_with_properties() {
         lamp_type: 0,
         energy_watts: 100.0,
         radius: 10.0,
+        cutoff_distance: 10.0,
         radius_source: 10.0,
         spot_size: 0.0,
         spot_blend: 0.0,
@@ -1297,6 +1371,7 @@ fn test_create_scene_blend_parents_lights_to_entity_wrapper_with_properties() {
         use_temperature: false,
         gobo_path: None,
         active_state: "default".to_string(),
+            states_json: None,
     };
     let blend_bytes = create_scene_blend("LightEntity", 0, "Data/Objects", &[light]).unwrap();
     let blocks = parse_blend_blocks(&blend_bytes);
@@ -1511,6 +1586,7 @@ fn test_create_scene_blend_objects_do_not_parent_to_collections() {
         lamp_type: 0,
         energy_watts: 100.0,
         radius: 10.0,
+        cutoff_distance: 10.0,
         radius_source: 10.0,
         spot_size: 0.0,
         spot_blend: 0.0,
@@ -1519,6 +1595,7 @@ fn test_create_scene_blend_objects_do_not_parent_to_collections() {
         use_temperature: false,
         gobo_path: None,
         active_state: "default".to_string(),
+            states_json: None,
     };
     let blend_bytes = create_scene_blend("ParentCheck", 2, "Data/Objects", &[light]).unwrap();
     let blocks = parse_blend_blocks(&blend_bytes);

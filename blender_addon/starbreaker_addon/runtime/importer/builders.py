@@ -47,7 +47,6 @@ from ..record_utils import (
     _float_authored_attribute,
     _float_public_param,
     _hard_surface_angle_shift_enabled,
-    _is_virtual_tint_palette_stencil_decal,
     _layer_texture_reference,
     _matching_texture_reference,
     _mean_triplet,
@@ -2249,4 +2248,3 @@ class BuildersMixin:
         except Exception:
             pass
         return clone
-

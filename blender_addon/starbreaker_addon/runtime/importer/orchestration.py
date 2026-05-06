@@ -366,6 +366,33 @@ class OrchestrationMixin:
         if slot_mapping is None:
             inferred_slot_mapping: list[int | None] = []
             inferred_matches = 0
+            if mesh_materials is not None:
+                for slot_material in mesh_materials:
+                    if slot_material is None:
+                        inferred_slot_mapping.append(None)
+                        continue
+                    canonical_slot_name = _canonical_source_name(slot_material.name)
+                    if canonical_slot_name is None:
+                        inferred_slot_mapping.append(None)
+                        continue
+                    matched_submaterial = target_submaterials_by_name.get(canonical_slot_name)
+                    if matched_submaterial is None:
+                        candidates = target_submaterials_by_name_all.get(canonical_slot_name)
+                        if candidates:
+                            matched_submaterial = min(
+                                candidates,
+                                key=lambda item: abs(item.index - len(inferred_slot_mapping)),
+                            )
+                    if matched_submaterial is None:
+                        inferred_slot_mapping.append(None)
+                        continue
+                    inferred_slot_mapping.append(matched_submaterial.index)
+                    inferred_matches += 1
+            if inferred_matches > 0:
+                slot_mapping = inferred_slot_mapping
+        if slot_mapping is None:
+            inferred_slot_mapping: list[int | None] = []
+            inferred_matches = 0
             for slot_index, slot in enumerate(obj.material_slots):
                 slot_material = slot.material
                 if slot_material is None:

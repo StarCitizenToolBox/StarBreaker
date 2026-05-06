@@ -101,7 +101,7 @@ fn mesh_size_is_1960() {
 
 #[test]
 fn lamp_size_is_568() {
-    let la = build_lamp("TestLamp", 0, [1.0, 1.0, 1.0], 10.0, 0.1, 0.5, 0.1, 6500.0, false);
+    let la = build_lamp("TestLamp", 0, [1.0, 1.0, 1.0], 10.0, 0.1, 1.0, 0.5, 0.1, 6500.0, false);
     assert_eq!(la.len(), LAMP_SIZE);
     assert_eq!(LAMP_SIZE, 568);
 }
@@ -629,22 +629,83 @@ fn triangle_edge_topology_ignores_incomplete_trailing_indices() {
 
 #[test]
 fn lamp_type_point_at_416() {
-    let la = build_lamp("L", 0, [1.0, 0.5, 0.0], 100.0, 0.25, 0.0, 0.0, 6500.0, false);
+    let la = build_lamp("L", 0, [1.0, 0.5, 0.0], 100.0, 0.25, 1.0, 0.0, 0.0, 6500.0, false);
     assert_eq!(i16::from_le_bytes(la[416..418].try_into().unwrap()), 0);
 }
 
 #[test]
 fn lamp_energy_at_440() {
-    let la = build_lamp("L", 0, [1.0, 1.0, 1.0], 77.5, 0.0, 0.0, 0.0, 6500.0, false);
+    let la = build_lamp("L", 0, [1.0, 1.0, 1.0], 77.5, 0.0, 1.0, 0.0, 0.0, 6500.0, false);
     assert_eq!(f32::from_le_bytes(la[440..444].try_into().unwrap()), 77.5_f32);
 }
 
 #[test]
+fn lamp_cutoff_distance_at_528() {
+    let la = build_lamp("L", 0, [1.0, 1.0, 1.0], 77.5, 0.02, 1.23, 0.0, 0.0, 6500.0, false);
+    assert_eq!(f32::from_le_bytes(la[528..532].try_into().unwrap()), 1.23_f32);
+}
+
+#[test]
 fn lamp_color_fields() {
-    let la = build_lamp("L", 0, [0.1, 0.2, 0.3], 1.0, 0.0, 0.0, 0.0, 6500.0, false);
+    let la = build_lamp("L", 0, [0.1, 0.2, 0.3], 1.0, 0.0, 1.0, 0.0, 0.0, 6500.0, false);
     assert!((f32::from_le_bytes(la[424..428].try_into().unwrap()) - 0.1_f32).abs() < 1e-6);
     assert!((f32::from_le_bytes(la[428..432].try_into().unwrap()) - 0.2_f32).abs() < 1e-6);
     assert!((f32::from_le_bytes(la[432..436].try_into().unwrap()) - 0.3_f32).abs() < 1e-6);
+}
+
+#[test]
+fn lamp_with_node_tree_sets_nodetree_and_use_nodes() {
+    let la = build_lamp_with_node_tree(
+        "L",
+        0,
+        [1.0, 1.0, 1.0],
+        10.0,
+        0.02,
+        1.0,
+        0.0,
+        0.0,
+        5000.0,
+        false,
+        0x1234,
+    );
+    assert_eq!(i16::from_le_bytes(la[486..488].try_into().unwrap()), 1);
+    assert_eq!(u64::from_le_bytes(la[552..560].try_into().unwrap()), 0x1234);
+}
+
+#[test]
+fn lamp_object_can_hide_camera_visibility() {
+    let ob = build_lamp_object_with_properties_and_visibility(
+        "L",
+        0x1000,
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+        [1.0, 1.0, 1.0],
+        0,
+        0,
+        true,
+    );
+    assert_eq!(i16::from_le_bytes(ob[1082..1084].try_into().unwrap()), 0x0008);
+}
+
+#[test]
+fn light_gobo_node_tree_writes_embedded_data_before_image_id() {
+    let mut out = Vec::new();
+    let mut ptrs = PtrAlloc::new(0x2000);
+    write_light_gobo_node_tree(
+        &mut out,
+        0x1000,
+        0x1010,
+        0x1020,
+        "spot_075.dds",
+        "//../../Data/Textures/lights/generic/spot_075.dds",
+        &mut ptrs,
+    );
+    assert_eq!(&out[0..4], b"DATA");
+    assert!(out.windows("ShaderNodeTexImage".len()).any(|window| window == b"ShaderNodeTexImage"));
+    assert!(out.windows("IMspot_075.dds".len()).any(|window| window == b"IMspot_075.dds"));
+    assert!(out
+        .windows("//../../Data/Textures/lights/generic/spot_075.dds".len())
+        .any(|window| window == b"//../../Data/Textures/lights/generic/spot_075.dds"));
 }
 
 // ── IDProperty field layout ───────────────────────────────────────────────────

@@ -16,6 +16,7 @@ fn test_create_scene_blend_with_single_light() {
         lamp_type: 0,
         energy_watts: 100.0,
         radius: 10.0,
+        cutoff_distance: 10.0,
         radius_source: 10.0,
         spot_size: 0.0,
         spot_blend: 0.0,
@@ -24,6 +25,7 @@ fn test_create_scene_blend_with_single_light() {
         use_temperature: false,
         gobo_path: None,
         active_state: "default".to_string(),
+            states_json: None,
     };
     let result = create_scene_blend("TestWithLight", 1, "Data/Objects", &[light]);
     assert!(result.is_ok(), "Should create scene with light");
@@ -44,6 +46,7 @@ fn test_create_scene_blend_with_multiple_lights() {
             lamp_type: 0,
             energy_watts: 50.0,
             radius: 20.0,
+            cutoff_distance: 20.0,
             radius_source: 20.0,
             spot_size: 0.0,
             spot_blend: 0.0,
@@ -52,6 +55,7 @@ fn test_create_scene_blend_with_multiple_lights() {
             use_temperature: false,
             gobo_path: None,
             active_state: "default".to_string(),
+            states_json: None,
         },
         ExtractedLight {
             name: "Sun".to_string(),
@@ -65,6 +69,7 @@ fn test_create_scene_blend_with_multiple_lights() {
             lamp_type: 1,
             energy_watts: 100.0,
             radius: 100.0,
+            cutoff_distance: 0.0,
             radius_source: 100.0,
             spot_size: 0.0,
             spot_blend: 0.0,
@@ -73,6 +78,7 @@ fn test_create_scene_blend_with_multiple_lights() {
             use_temperature: true,
             gobo_path: None,
             active_state: "default".to_string(),
+            states_json: None,
         },
     ];
     let result = create_scene_blend("MultiLight", 1, "Data/Objects", &lights);
@@ -93,6 +99,7 @@ fn test_create_scene_blend_lights_in_file() {
         lamp_type: 0,
         energy_watts: 100.0,
         radius: 10.0,
+        cutoff_distance: 10.0,
         radius_source: 10.0,
         spot_size: 0.0,
         spot_blend: 0.0,
@@ -101,6 +108,7 @@ fn test_create_scene_blend_lights_in_file() {
         use_temperature: false,
         gobo_path: None,
         active_state: "default".to_string(),
+            states_json: None,
     };
     let result = create_scene_blend("FileTest", 1, "Data/Objects", &[light]);
     assert!(result.is_ok());

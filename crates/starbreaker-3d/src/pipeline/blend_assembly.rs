@@ -35,12 +35,13 @@ use starbreaker_blend::{
     SDNA_IDX_COLLECTION_OBJECT, SDNA_IDX_DNA1, SDNA_IDX_FILE_GLOBAL, SDNA_IDX_LAYER_COLLECTION,
     SDNA_IDX_IDPROPERTY, SDNA_IDX_MATERIAL, SDNA_IDX_MESH, SDNA_IDX_OBJECT, SDNA_IDX_SCENE, SDNA_IDX_TOOL_SETTINGS,
     SDNA_IDX_VIEW_LAYER, SDNA_IDX_LIBRARY, SDNA_IDX_ID,
-    build_lamp, build_lamp_object, build_lamp_object_with_properties, build_empty_object, build_empty_object_with_properties,
+    build_lamp, build_lamp_with_node_tree_and_properties, build_lamp_object,
+    build_lamp_object_with_properties_and_visibility, build_empty_object, build_empty_object_with_properties,
     build_library_block, build_id_stub, LAMP_SIZE, OBJECT_SIZE,
     build_bdeformgroup, build_mdeformvert_array, build_mdeformweight_array, 
     build_custom_data_layer_mdeformvert, SDNA_IDX_BDEFORMGROUP, SDNA_IDX_MDEFORMVERT, SDNA_IDX_LAMP,
     ints2_data, triangle_edge_topology, write_f32, write_i16, write_identity_matrix4x4, write_ptr,
-    write_idprop_blocks, ATTR_TYPE_INT32_2D, IdPropValue, STARTUP_UI_SCREEN_PTR,
+    write_idprop_blocks, write_light_gobo_node_tree, ATTR_TYPE_INT32_2D, IdPropValue, STARTUP_UI_SCREEN_PTR,
 };
 
 use crate::error::Error;
@@ -334,6 +335,48 @@ fn manifest_scene_transform(value: &serde_json::Value) -> ([f32; 3], [f32; 4], [
     )
 }
 
+fn material_sidecar_default_palettes(manifest_files: &[ExportedFile]) -> HashMap<String, String> {
+    let mut palettes = HashMap::new();
+    for file in manifest_files.iter().filter(|file| file.relative_path.ends_with(".materials.json")) {
+        let Ok(root) = serde_json::from_slice::<serde_json::Value>(&file.bytes) else {
+            continue;
+        };
+        let Some(default_palette) = sidecar_default_palette_id(&root) else {
+            continue;
+        };
+        palettes.insert(file.relative_path.clone(), default_palette.clone());
+        if let Some(normalized_path) = root
+            .get("normalized_export_relative_path")
+            .and_then(|value| value.as_str())
+            .filter(|path| !path.is_empty())
+        {
+            palettes.insert(normalized_path.to_string(), default_palette);
+        }
+    }
+    palettes
+}
+
+fn sidecar_default_palette_id(sidecar: &serde_json::Value) -> Option<String> {
+    let attributes = sidecar
+        .get("authored_material_set")
+        .and_then(|value| value.get("attributes"))
+        .and_then(|value| value.as_array())?;
+    let default_palette_path = attributes.iter().find_map(|attribute| {
+        let name = attribute.get("name").and_then(|value| value.as_str())?;
+        if !name.eq_ignore_ascii_case("DefaultPalette") {
+            return None;
+        }
+        attribute.get("value").and_then(|value| value.as_str())
+    })?;
+    let source_name = default_palette_path
+        .replace('\\', "/")
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())?
+        .to_ascii_lowercase();
+    Some(format!("palette/{source_name}"))
+}
+
 fn scene_manifest_instances(manifest_files: &[ExportedFile]) -> Vec<SceneManifestInstance> {
     let Some(scene_file) = manifest_files.iter().find(|file| file.relative_path.ends_with("scene.json")) else {
         return Vec::new();
@@ -341,6 +384,7 @@ fn scene_manifest_instances(manifest_files: &[ExportedFile]) -> Vec<SceneManifes
     let Ok(root) = serde_json::from_slice::<serde_json::Value>(&scene_file.bytes) else {
         return Vec::new();
     };
+    let default_palette_by_sidecar = material_sidecar_default_palettes(manifest_files);
     let mut out = Vec::new();
     let mut push_record = |value: &serde_json::Value| {
         let Some(mesh_asset) = value.get("mesh_asset").and_then(|v| v.as_str()) else {
@@ -352,6 +396,14 @@ fn scene_manifest_instances(manifest_files: &[ExportedFile]) -> Vec<SceneManifes
             .unwrap_or(mesh_asset)
             .to_string();
         let (loc, quat, scale) = manifest_scene_transform(value);
+        let material_sidecar = value
+            .get("material_sidecar")
+            .and_then(|v| v.as_str())
+            .filter(|path| !path.is_empty())
+            .map(ToOwned::to_owned);
+        let sidecar_palette_id = material_sidecar
+            .as_deref()
+            .and_then(|path| default_palette_by_sidecar.get(path).cloned());
         out.push(SceneManifestInstance {
             entity_name,
             parent_entity_name: value
@@ -365,16 +417,13 @@ fn scene_manifest_instances(manifest_files: &[ExportedFile]) -> Vec<SceneManifes
             parent_empty_scale: [1.0, 1.0, 1.0],
             is_interior: false,
             mesh_asset: mesh_asset.to_string(),
-            material_sidecar: value
-                .get("material_sidecar")
-                .and_then(|v| v.as_str())
-                .filter(|path| !path.is_empty())
-                .map(ToOwned::to_owned),
+            material_sidecar,
             palette_id: value
                 .get("palette_id")
                 .and_then(|v| v.as_str())
                 .filter(|palette| !palette.is_empty())
-                .map(ToOwned::to_owned),
+                .map(ToOwned::to_owned)
+                .or(sidecar_palette_id),
             parent_node_name: value
                 .get("parent_node_name")
                 .and_then(|v| v.as_str())
@@ -406,6 +455,11 @@ fn scene_manifest_instances(manifest_files: &[ExportedFile]) -> Vec<SceneManifes
                 .and_then(|v| v.as_str())
                 .unwrap_or("Interior")
                 .to_string();
+            let interior_palette_id = interior
+                .get("palette_id")
+                .and_then(|v| v.as_str())
+                .filter(|palette| !palette.is_empty())
+                .map(ToOwned::to_owned);
             let container_name = format!("interior_{interior_name}");
             if let Some(placements) = interior.get("placements").and_then(|v| v.as_array()) {
                 for placement in placements {
@@ -415,6 +469,14 @@ fn scene_manifest_instances(manifest_files: &[ExportedFile]) -> Vec<SceneManifes
                     let source =
                         manifest_matrix(placement, "transform").unwrap_or(glam::Mat4::IDENTITY);
                     let (loc, quat, scale) = sc_matrix_to_scene_transform(source);
+                    let material_sidecar = placement
+                        .get("material_sidecar")
+                        .and_then(|v| v.as_str())
+                        .filter(|path| !path.is_empty())
+                        .map(ToOwned::to_owned);
+                    let sidecar_palette_id = material_sidecar
+                        .as_deref()
+                        .and_then(|path| default_palette_by_sidecar.get(path).cloned());
                     out.push(SceneManifestInstance {
                         entity_name: placement
                             .get("cgf_path")
@@ -428,16 +490,14 @@ fn scene_manifest_instances(manifest_files: &[ExportedFile]) -> Vec<SceneManifes
                         parent_empty_scale: container_scale,
                         is_interior: true,
                         mesh_asset: mesh_asset.to_string(),
-                        material_sidecar: placement
-                            .get("material_sidecar")
-                            .and_then(|v| v.as_str())
-                            .filter(|path| !path.is_empty())
-                            .map(ToOwned::to_owned),
+                        material_sidecar,
                         palette_id: placement
                             .get("palette_id")
                             .and_then(|v| v.as_str())
                             .filter(|palette| !palette.is_empty())
-                            .map(ToOwned::to_owned),
+                            .map(ToOwned::to_owned)
+                            .or_else(|| interior_palette_id.clone())
+                            .or(sidecar_palette_id),
                         parent_node_name: None,
                         loc,
                         quat,
@@ -465,6 +525,26 @@ fn light_object_properties(
             IdPropValue::Double(radius_source as f64),
         ),
     ]
+}
+
+fn light_data_properties(
+    active_state: &str,
+    states_json: Option<&str>,
+) -> Vec<(String, IdPropValue)> {
+    let mut props = Vec::new();
+    if let Some(states_json) = states_json.filter(|value| !value.is_empty()) {
+        props.push((
+            "starbreaker_light_states".to_string(),
+            IdPropValue::String(states_json.to_string()),
+        ));
+    }
+    if !active_state.is_empty() {
+        props.push((
+            "starbreaker_light_active_state".to_string(),
+            IdPropValue::String(active_state.to_string()),
+        ));
+    }
+    props
 }
 
 fn insert_stem_suffix(path: &str, suffix: &str) -> String {
@@ -3544,6 +3624,7 @@ fn create_scene_blend_package_with_instances(
     // Build light objects for lights collection
     let mut light_data = Vec::new();
     let mut light_object_data = Vec::new();
+    let mut light_data_idprops = Vec::new();
     let mut light_object_idprops = Vec::new();
     let mut light_object_mat_arrays = Vec::new();
     let mut light_object_matbits = Vec::new();
@@ -3551,19 +3632,48 @@ fn create_scene_blend_package_with_instances(
     for (lamp_ptr, _, _, _, idx) in &light_instances {
         let light = &lights[*idx];
         
+        let gobo_blocks = light.gobo_path.as_ref().map(|gobo_path| {
+            let node_tree_ptr = ptrs.alloc();
+            let image_ptr = ptrs.alloc();
+            let normalized_path = gobo_image_blend_filepath(gobo_path);
+            let image_filename = gobo_path
+                .replace('\\', "/")
+                .rsplit('/')
+                .next()
+                .filter(|name| !name.is_empty())
+                .unwrap_or("light_gobo.dds")
+                .to_string();
+            let image_name = format!("{}_{}", light.name, image_filename);
+            (node_tree_ptr, image_ptr, image_name, normalized_path)
+        });
+        let node_tree_ptr = gobo_blocks
+            .as_ref()
+            .map(|(node_tree_ptr, _, _, _)| *node_tree_ptr)
+            .unwrap_or(0);
+
+        let light_data_props = allocate_idprop_blocks(
+            &mut ptrs,
+            light_data_properties(&light.active_state, light.states_json.as_deref()),
+        );
+        let light_data_props_ptr = light_data_props.as_ref().map(|props| props.root_ptr).unwrap_or(0);
+
         // Build lamp datablock
-        let lamp_bytes = build_lamp(
+        let lamp_bytes = build_lamp_with_node_tree_and_properties(
             &light.name,
             light.lamp_type,
             light.color,
             light.energy_watts,
             light.radius,
+            light.cutoff_distance,
             light.spot_size,
             light.spot_blend,
             light.temperature_k,
             false,
+            node_tree_ptr,
+            light_data_props_ptr,
         );
-        light_data.push((*lamp_ptr, lamp_bytes));
+        light_data.push((*lamp_ptr, lamp_bytes, gobo_blocks));
+        light_data_idprops.push(light_data_props);
         let light_props = allocate_idprop_blocks(
             &mut ptrs,
             light_object_properties(package_name, &light.name, light.radius_source),
@@ -3576,7 +3686,7 @@ fn create_scene_blend_package_with_instances(
             .as_ref()
             .and_then(|name| parent_empty_ptr_by_name.get(name).copied())
             .unwrap_or(entity_root_ptr);
-        let object_bytes = build_lamp_object_with_properties(
+        let object_bytes = build_lamp_object_with_properties_and_visibility(
             &light.name,
             *lamp_ptr,
             light.position_blend,
@@ -3584,6 +3694,7 @@ fn create_scene_blend_package_with_instances(
             [1.0, 1.0, 1.0],  // Standard scale
             light_parent_ptr,
             light_props_ptr,
+            true,
         );
         light_object_data.push(object_bytes);
         light_object_idprops.push(light_props);
@@ -3682,8 +3793,22 @@ fn create_scene_blend_package_with_instances(
     // Write light blocks (Phase 5B)
     for (idx, (_, object_ptr, mat_ptr, matbits_ptr, _)) in light_instances.iter().enumerate() {
         // Write LAMP datablock
-        let (lamp_block_ptr, lamp_bytes) = light_data[idx].clone();
+        let (lamp_block_ptr, lamp_bytes, gobo_blocks) = light_data[idx].clone();
         write_block(&mut out, b"LA\0\0", SDNA_IDX_LAMP, lamp_block_ptr, 1, &lamp_bytes);
+        if let Some(props) = &light_data_idprops[idx] {
+            write_idprop_blocks(&mut out, props);
+        }
+        if let Some((node_tree_ptr, image_ptr, image_name, image_filepath)) = gobo_blocks {
+            write_light_gobo_node_tree(
+                &mut out,
+                lamp_block_ptr,
+                node_tree_ptr,
+                image_ptr,
+                &image_name,
+                &image_filepath,
+                &mut ptrs,
+            );
+        }
         
         // Write light object
         write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, *object_ptr, 1, &light_object_data[idx]);
@@ -3764,8 +3889,10 @@ pub struct ExtractedLight {
     pub lamp_type: i16,
     /// Energy in Watts (radiant flux)
     pub energy_watts: f32,
-    /// Attenuation radius in meters
+    /// Blender point/spot soft-shadow size, or area-light size.
     pub radius: f32,
+    /// Blender attenuation cutoff distance in meters.
+    pub cutoff_distance: f32,
     /// Authored source radius before Blender-side adjustments.
     pub radius_source: f32,
     /// Spot cone full aperture in radians (0 for POINT)
@@ -3782,6 +3909,8 @@ pub struct ExtractedLight {
     pub gobo_path: Option<String>,
     /// Currently active state name
     pub active_state: String,
+    /// Authored light states serialized for the Blender addon's state switcher.
+    pub states_json: Option<String>,
 }
 
 /// Convert CryEngine position to Blender coordinates.
@@ -3811,7 +3940,11 @@ fn lamp_type_for_light(light_type: &str, semantic_light_kind: &str) -> i16 {
     }
 }
 
-fn light_energy_to_blender(lamp_type: i16, intensity_candela_proxy: f32, intensity_raw: f32) -> f32 {
+fn light_energy_to_blender(
+    lamp_type: i16,
+    intensity_candela_proxy: f32,
+    intensity_raw: f32,
+) -> f32 {
     const LIGHT_CANDELA_TO_WATT: f32 = 4.0 * std::f32::consts::PI / 683.0;
     const LIGHT_VISUAL_GAIN: f32 = 20.0;
     const LUMENS_PER_WATT_WHITE: f32 = 120.0;
@@ -3820,6 +3953,22 @@ fn light_energy_to_blender(lamp_type: i16, intensity_candela_proxy: f32, intensi
         1 => intensity_candela_proxy / 683.0,
         4 => intensity_raw / LUMENS_PER_WATT_WHITE,
         _ => intensity_candela_proxy * LIGHT_CANDELA_TO_WATT * LIGHT_VISUAL_GAIN,
+    }
+}
+
+fn gobo_image_blend_filepath(gobo_path: &str) -> String {
+    let normalized = gobo_path.replace('\\', "/");
+    let lower = normalized.to_ascii_lowercase();
+    if normalized.starts_with("//") || normalized.starts_with('/') {
+        normalized
+    } else if lower.starts_with("data/textures/") {
+        format!("//../../Data/Textures/{}", &normalized["Data/Textures/".len()..])
+    } else if lower.starts_with("textures/") {
+        format!("//../../Data/Textures/{}", &normalized["Textures/".len()..])
+    } else if normalized.starts_with("Data/") {
+        format!("//../../{normalized}")
+    } else {
+        format!("//../../{normalized}")
     }
 }
 
@@ -3960,12 +4109,33 @@ pub fn extract_lights_from_interiors(
                 .get(&light_info.active_state)
                 .map(|s| (s.temperature, s.use_temperature))
                 .unwrap_or((6500.0, false));
+            let states_json = if light_info.states.is_empty() {
+                None
+            } else {
+                let mut payload = serde_json::Map::new();
+                for (state_name, state) in &light_info.states {
+                    payload.insert(
+                        state_name.clone(),
+                        serde_json::json!({
+                            "intensity_raw": state.intensity_raw,
+                            "intensity_unit": state.intensity_unit,
+                            "intensity_cd": state.intensity_cd,
+                            "intensity_candela_proxy": state.intensity_candela_proxy,
+                            "temperature": state.temperature,
+                            "use_temperature": state.use_temperature,
+                            "color": state.color,
+                        }),
+                    );
+                }
+                Some(serde_json::Value::Object(payload).to_string())
+            };
             
             let blender_radius = if matches!(lamp_type, 0 | 2) {
-                0.0
+                0.02
             } else {
                 light_info.radius
             };
+            let cutoff_distance = if lamp_type == 1 { 0.0 } else { light_info.radius };
             lights.push(ExtractedLight {
                 name: light_info.name.clone(),
                 parent_empty_name: Some(format!("interior_{}", container.name)),
@@ -3978,6 +4148,7 @@ pub fn extract_lights_from_interiors(
                 lamp_type,
                 energy_watts,
                 radius: blender_radius,
+                cutoff_distance,
                 radius_source: light_info.radius,
                 spot_size,
                 spot_blend,
@@ -3986,6 +4157,7 @@ pub fn extract_lights_from_interiors(
                 use_temperature,
                 gobo_path: light_info.projector_texture.clone(),
                 active_state: light_info.active_state.clone(),
+                states_json,
             });
         }
     }
@@ -4208,6 +4380,7 @@ pub fn build_lamp_blocks(
         light.color,
         light.energy_watts,
         light.radius,
+        light.cutoff_distance,
         light.spot_size,
         light.spot_blend,
         light.temperature_k,

@@ -57,6 +57,7 @@ from ..record_utils import (
     _float_authored_attribute,
     _layer_texture_reference,
     _matching_texture_reference,
+    _is_virtual_tint_palette_stencil_decal,
     _routes_virtual_tint_palette_decal_alpha_to_decal_source,
     _routes_virtual_tint_palette_decal_to_decal_source,
     _submaterial_texture_reference,
@@ -1027,4 +1028,3 @@ class MaterialsMixin:
 
     def _link_color_output(self, output: Any, input_socket: Any) -> None:
         output.node.id_data.links.new(output, input_socket)
-

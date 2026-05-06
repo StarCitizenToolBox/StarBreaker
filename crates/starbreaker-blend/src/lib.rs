@@ -53,9 +53,12 @@ pub const SDNA_IDX_DNA1: u32 = 0;
 pub const SDNA_IDX_SCREEN: u32 = 758;  // bScreen struct
 pub const SDNA_IDX_WINDOWMANAGER: u32 = 960;  // wmWindowManager struct
 pub const SDNA_IDX_WORLD: u32 = 974;
+pub const SDNA_IDX_IMAGE: u32 = 242;
+pub const SDNA_IDX_IMAGE_TILE: u32 = 241;
 pub const SDNA_IDX_BNODE: u32 = 468;
 pub const SDNA_IDX_BNODE_SOCKET: u32 = 466;
 pub const SDNA_IDX_BNODE_LINK: u32 = 470;
+pub const SDNA_IDX_NODE_TEX_IMAGE: u32 = 531;
 pub const SDNA_IDX_NODE_TEX_SKY: u32 = 530;
 pub const SDNA_IDX_BNSV_RGBA: u32 = 479;
 pub const SDNA_IDX_BNSV_FLOAT: u32 = 475;
@@ -76,11 +79,14 @@ pub const LAYER_COLLECTION_SIZE: usize = 64;
 pub const OBJECT_SIZE: usize = 1288;
 pub const MESH_SIZE: usize = 1960;
 pub const LAMP_SIZE: usize = 568;
+pub const IMAGE_SIZE: usize = 1696;
+pub const IMAGE_TILE_SIZE: usize = 136;
 pub const MATERIAL_SIZE: usize = 584;
 pub const BNODE_TREE_SIZE: usize = 736;
 pub const BNODE_SIZE: usize = 384;
 pub const BNODE_SOCKET_SIZE: usize = 464;
 pub const BNODE_LINK_SIZE: usize = 56;
+pub const NODE_TEX_IMAGE_SIZE: usize = 1024;
 pub const NODE_TEX_SKY_SIZE: usize = 1024;
 pub const BNSV_RGBA_SIZE: usize = 16;
 pub const BNSV_FLOAT_SIZE: usize = 16;
@@ -953,6 +959,29 @@ pub fn build_lamp_object_with_properties(
     parent_ptr: u64,
     properties_ptr: u64,
 ) -> Vec<u8> {
+    build_lamp_object_with_properties_and_visibility(
+        object_name,
+        lamp_ptr,
+        loc,
+        quat,
+        scale,
+        parent_ptr,
+        properties_ptr,
+        false,
+    )
+}
+
+/// Build an `OB_LAMP` Object with optional custom properties and ray visibility.
+pub fn build_lamp_object_with_properties_and_visibility(
+    object_name: &str,
+    lamp_ptr: u64,
+    loc: [f32; 3],
+    quat: [f32; 4],
+    scale: [f32; 3],
+    parent_ptr: u64,
+    properties_ptr: u64,
+    hide_camera: bool,
+) -> Vec<u8> {
     let mut data = vec![0u8; OBJECT_SIZE];
     write_id_name(&mut data, "OB", object_name);
     write_i16(&mut data, 416, 10); // OB_LAMP
@@ -975,6 +1004,9 @@ pub fn build_lamp_object_with_properties(
     write_f32(&mut data, 1048, 1.0);
     write_f32(&mut data, 1052, 1.0);
     for i in 0..4 { write_f32(&mut data, 1064 + i * 4, 1.0); }
+    if hide_camera {
+        write_i16(&mut data, 1082, 0x0008); // OB_HIDE_CAMERA
+    }
     data
 }
 
@@ -1027,25 +1059,138 @@ pub fn build_lamp(
     color: [f32; 3],
     energy: f32,
     radius: f32,
+    cutoff_distance: f32,
     spot_size: f32,
     spot_blend: f32,
     temperature_k: f32,
     use_temperature: bool,
 ) -> Vec<u8> {
+    build_lamp_with_node_tree(
+        lamp_name,
+        lamp_type,
+        color,
+        energy,
+        radius,
+        cutoff_distance,
+        spot_size,
+        spot_blend,
+        temperature_k,
+        use_temperature,
+        0,
+    )
+}
+
+/// Build a `Lamp` (Light) datablock with an optional embedded shader node tree.
+///
+/// `lamp_type`: 0 = POINT, 1 = SUN, 2 = SPOT, 4 = AREA.
+pub fn build_lamp_with_node_tree(
+    lamp_name: &str,
+    lamp_type: i16,
+    color: [f32; 3],
+    energy: f32,
+    radius: f32,
+    cutoff_distance: f32,
+    spot_size: f32,
+    spot_blend: f32,
+    temperature_k: f32,
+    use_temperature: bool,
+    node_tree_ptr: u64,
+) -> Vec<u8> {
+    build_lamp_with_node_tree_and_properties(
+        lamp_name,
+        lamp_type,
+        color,
+        energy,
+        radius,
+        cutoff_distance,
+        spot_size,
+        spot_blend,
+        temperature_k,
+        use_temperature,
+        node_tree_ptr,
+        0,
+    )
+}
+
+/// Build a `Lamp` (Light) datablock with optional shader node tree and custom properties.
+pub fn build_lamp_with_node_tree_and_properties(
+    lamp_name: &str,
+    lamp_type: i16,
+    color: [f32; 3],
+    energy: f32,
+    radius: f32,
+    cutoff_distance: f32,
+    spot_size: f32,
+    spot_blend: f32,
+    temperature_k: f32,
+    use_temperature: bool,
+    node_tree_ptr: u64,
+    properties_ptr: u64,
+) -> Vec<u8> {
     let mut data = vec![0u8; LAMP_SIZE];
     write_id_name(&mut data, "LA", lamp_name);
+    write_ptr(&mut data, 344, properties_ptr);
     write_i16(&mut data, 416, lamp_type);
+    let mut mode = 0x0020_0001u32; // LA_SHADOW | LA_USE_SOFT_FALLOFF
+    if use_temperature {
+        mode |= 1 << 24; // LA_USE_TEMPERATURE
+    }
+    write_u32(&mut data, 420, mode);
     write_f32(&mut data, 424, color[0]);
     write_f32(&mut data, 428, color[1]);
     write_f32(&mut data, 432, color[2]);
+    write_f32(&mut data, 436, temperature_k);
     write_f32(&mut data, 440, energy);
     write_f32(&mut data, 448, radius);
     write_f32(&mut data, 452, spot_size);
     write_f32(&mut data, 456, spot_blend);
-    // Write temperature fields (Blender 5.1 Lamp struct)
-    // temperature at offset 460 (f32), use_temperature at offset 464 (bool)
-    write_f32(&mut data, 460, temperature_k);
-    data[464] = if use_temperature { 1 } else { 0 };
+    write_f32(&mut data, 512, 1.0); // diffuse_factor
+    write_f32(&mut data, 516, 1.0); // specular_factor
+    write_f32(&mut data, 520, 1.0); // transmission_factor
+    write_f32(&mut data, 524, 1.0); // volume_factor
+    write_f32(&mut data, 528, cutoff_distance);
+    if node_tree_ptr != 0 {
+        write_i16(&mut data, 486, 1); // use_nodes
+        write_ptr(&mut data, 552, node_tree_ptr); // nodetree
+    }
+    write_f32(&mut data, 560, energy); // deprecated energy mirror
+    data
+}
+
+/// Build an Image datablock for a file-backed texture.
+pub fn build_image(image_name: &str, filepath: &str) -> Vec<u8> {
+    build_image_with_tile(image_name, filepath, 0)
+}
+
+/// Build an Image datablock for a file-backed texture with an optional default tile.
+pub fn build_image_with_tile(image_name: &str, filepath: &str, tile_ptr: u64) -> Vec<u8> {
+    let mut data = vec![0u8; IMAGE_SIZE];
+    write_id_name(&mut data, "IM", image_name);
+    write_cstr_fixed(&mut data, 416, 1024, filepath);
+    write_i16(&mut data, 1488, 1); // source = IMA_SRC_FILE
+    write_i16(&mut data, 1490, 0); // type = IMA_TYPE_IMAGE
+    write_i16(&mut data, 1496, 8); // seam_margin
+    write_i32(&mut data, 1540, 1024); // generated width fallback
+    write_i32(&mut data, 1544, 1024); // generated height fallback
+    data[1548] = 1; // gen_type = IMA_GENTYPE_GRID
+    write_f32(&mut data, 1568, 1.0); // aspx
+    write_f32(&mut data, 1572, 1.0); // aspy
+    write_cstr_fixed(&mut data, 1576, 64, "Linear Rec.709");
+    if tile_ptr != 0 {
+        write_i32(&mut data, 1644, 0); // active_tile_index
+        write_ptr(&mut data, 1648, tile_ptr); // tiles.first
+        write_ptr(&mut data, 1656, tile_ptr); // tiles.last
+    }
+    data
+}
+
+/// Build Blender's default ImageTile record for a single-tile file image.
+pub fn build_image_tile() -> Vec<u8> {
+    let mut data = vec![0u8; IMAGE_TILE_SIZE];
+    write_i32(&mut data, 40, 1001); // tile_number
+    write_i32(&mut data, 44, 1024); // gen_x
+    write_i32(&mut data, 48, 1024); // gen_y
+    data[52] = 1; // gen_type = IMA_GENTYPE_GRID
     data
 }
 
@@ -1569,6 +1714,285 @@ pub fn write_world_with_sky_shader(
     }
 }
 
+/// Write a file-backed projector/gobo shader graph for a Lamp.
+///
+/// The graph is equivalent to the addon's runtime gobo group but avoids a
+/// custom node-group interface:
+/// `Texture Coordinate.UV -> Mapping -> Image Texture -> Emission -> Light Output`.
+pub fn write_light_gobo_node_tree(
+    out: &mut Vec<u8>,
+    lamp_ptr: u64,
+    node_tree_ptr: u64,
+    image_ptr: u64,
+    image_name: &str,
+    image_filepath: &str,
+    ptrs: &mut PtrAlloc,
+) {
+    let tex_coord_ptr = ptrs.alloc();
+    let mapping_ptr = ptrs.alloc();
+    let image_tex_ptr = ptrs.alloc();
+    let emission_ptr = ptrs.alloc();
+    let output_ptr = ptrs.alloc();
+
+    let tex_uv_out_ptr = ptrs.alloc();
+    let mapping_vector_in_ptr = ptrs.alloc();
+    let mapping_vector_out_ptr = ptrs.alloc();
+    let image_vector_in_ptr = ptrs.alloc();
+    let image_color_out_ptr = ptrs.alloc();
+    let emission_color_in_ptr = ptrs.alloc();
+    let emission_strength_in_ptr = ptrs.alloc();
+    let emission_out_ptr = ptrs.alloc();
+    let output_surface_in_ptr = ptrs.alloc();
+
+    let mapping_vector_def_ptr = ptrs.alloc();
+    let image_vector_def_ptr = ptrs.alloc();
+    let emission_color_def_ptr = ptrs.alloc();
+    let emission_strength_def_ptr = ptrs.alloc();
+    let image_storage_ptr = ptrs.alloc();
+    let image_tile_ptr = ptrs.alloc();
+
+    let link_uv_mapping_ptr = ptrs.alloc();
+    let link_mapping_image_ptr = ptrs.alloc();
+    let link_image_emission_ptr = ptrs.alloc();
+    let link_emission_output_ptr = ptrs.alloc();
+
+    {
+        let mut d = vec![0u8; BNODE_TREE_SIZE];
+        write_id_name(&mut d, "NT", "Shader Nodetree");
+        write_i16(&mut d, 298, 0x0400); // ID_FLAG_EMBEDDED_DATA
+        write_ptr(&mut d, 416, lamp_ptr); // owner_id
+        write_cstr_fixed(&mut d, 432, 64, "ShaderNodeTree");
+        write_ptr(&mut d, 520, tex_coord_ptr);
+        write_ptr(&mut d, 528, output_ptr);
+        write_ptr(&mut d, 536, link_uv_mapping_ptr);
+        write_ptr(&mut d, 544, link_emission_output_ptr);
+        write_i32(&mut d, 552, 0); // NTREE_SHADER
+        write_block(out, b"DATA", SDNA_IDX_BNODE_TREE, node_tree_ptr, 1, &d);
+    }
+
+    write_shader_node(
+        out,
+        tex_coord_ptr,
+        0,
+        mapping_ptr,
+        0,
+        0,
+        tex_uv_out_ptr,
+        tex_uv_out_ptr,
+        "Texture Coordinate",
+        "ShaderNodeTexCoord",
+        155,
+        0,
+        0,
+        -800.0,
+        0.0,
+    );
+    write_shader_node(
+        out,
+        mapping_ptr,
+        tex_coord_ptr,
+        image_tex_ptr,
+        mapping_vector_in_ptr,
+        mapping_vector_in_ptr,
+        mapping_vector_out_ptr,
+        mapping_vector_out_ptr,
+        "Mapping",
+        "ShaderNodeMapping",
+        109,
+        0,
+        0,
+        -600.0,
+        0.0,
+    );
+    write_shader_node(
+        out,
+        image_tex_ptr,
+        mapping_ptr,
+        emission_ptr,
+        image_vector_in_ptr,
+        image_vector_in_ptr,
+        image_color_out_ptr,
+        image_color_out_ptr,
+        "Image Texture",
+        "ShaderNodeTexImage",
+        143,
+        image_ptr,
+        image_storage_ptr,
+        -400.0,
+        0.0,
+    );
+    write_shader_node(
+        out,
+        emission_ptr,
+        image_tex_ptr,
+        output_ptr,
+        emission_color_in_ptr,
+        emission_strength_in_ptr,
+        emission_out_ptr,
+        emission_out_ptr,
+        "Emission",
+        "ShaderNodeEmission",
+        140,
+        0,
+        0,
+        -100.0,
+        0.0,
+    );
+    write_shader_node(
+        out,
+        output_ptr,
+        emission_ptr,
+        0,
+        output_surface_in_ptr,
+        output_surface_in_ptr,
+        0,
+        0,
+        "Light Output",
+        "ShaderNodeOutputLight",
+        126,
+        0,
+        0,
+        100.0,
+        0.0,
+    );
+
+    write_vector_socket(out, tex_uv_out_ptr, 0, 0, "UV", 4095, 2, 0, link_uv_mapping_ptr);
+    write_vector_socket(out, mapping_vector_in_ptr, 0, 0, "Vector", 1, 1, mapping_vector_def_ptr, link_uv_mapping_ptr);
+    write_vector_socket(out, mapping_vector_out_ptr, 0, 0, "Vector", 4095, 2, 0, link_mapping_image_ptr);
+    write_vector_socket(out, image_vector_in_ptr, 0, 0, "Vector", 1, 1, image_vector_def_ptr, link_mapping_image_ptr);
+    write_color_socket(out, image_color_out_ptr, 0, 0, "Color", 4095, 2, 0, link_image_emission_ptr);
+    write_color_socket(out, emission_color_in_ptr, emission_strength_in_ptr, 0, "Color", 1, 1, emission_color_def_ptr, link_image_emission_ptr);
+    write_float_socket(out, emission_strength_in_ptr, 0, emission_color_in_ptr, "Strength", 1, 1, emission_strength_def_ptr, 0);
+    write_shader_socket(out, emission_out_ptr, 0, 0, "Emission", 4095, 2, 0, link_emission_output_ptr);
+    write_shader_socket(out, output_surface_in_ptr, 0, 0, "Surface", 1, 1, 0, link_emission_output_ptr);
+
+    write_vector_default(out, mapping_vector_def_ptr, [0.0, 0.0, 0.0]);
+    write_vector_default(out, image_vector_def_ptr, [0.0, 0.0, 0.0]);
+    write_color_default(out, emission_color_def_ptr, [1.0, 1.0, 1.0, 1.0]);
+    write_float_default(out, emission_strength_def_ptr, 1.0);
+
+    write_block(out, b"DATA", SDNA_IDX_NODE_TEX_IMAGE, image_storage_ptr, 1, &vec![0u8; NODE_TEX_IMAGE_SIZE]);
+
+    write_node_link(out, link_uv_mapping_ptr, 0, link_mapping_image_ptr, tex_coord_ptr, mapping_ptr, tex_uv_out_ptr, mapping_vector_in_ptr);
+    write_node_link(out, link_mapping_image_ptr, link_uv_mapping_ptr, link_image_emission_ptr, mapping_ptr, image_tex_ptr, mapping_vector_out_ptr, image_vector_in_ptr);
+    write_node_link(out, link_image_emission_ptr, link_mapping_image_ptr, link_emission_output_ptr, image_tex_ptr, emission_ptr, image_color_out_ptr, emission_color_in_ptr);
+    write_node_link(out, link_emission_output_ptr, link_image_emission_ptr, 0, emission_ptr, output_ptr, emission_out_ptr, output_surface_in_ptr);
+
+    write_block(
+        out,
+        b"IM\0\0",
+        SDNA_IDX_IMAGE,
+        image_ptr,
+        1,
+        &build_image_with_tile(image_name, image_filepath, image_tile_ptr),
+    );
+    write_block(out, b"DATA", SDNA_IDX_IMAGE_TILE, image_tile_ptr, 1, &build_image_tile());
+}
+
+fn write_shader_node(
+    out: &mut Vec<u8>,
+    ptr: u64,
+    prev_ptr: u64,
+    next_ptr: u64,
+    inputs_first: u64,
+    inputs_last: u64,
+    outputs_first: u64,
+    outputs_last: u64,
+    name: &str,
+    idname: &str,
+    node_type: i16,
+    id_ptr: u64,
+    storage_ptr: u64,
+    x: f32,
+    y: f32,
+) {
+    let mut d = vec![0u8; BNODE_SIZE];
+    write_ptr(&mut d, 0x000, next_ptr);
+    write_ptr(&mut d, 0x008, prev_ptr);
+    write_ptr(&mut d, 0x010, inputs_first);
+    write_ptr(&mut d, 0x018, inputs_last);
+    write_ptr(&mut d, 0x020, outputs_first);
+    write_ptr(&mut d, 0x028, outputs_last);
+    write_cstr_fixed(&mut d, 0x030, 64, name);
+    write_i32(&mut d, 0x074, 0x0001_0002u32 as i32);
+    write_cstr_fixed(&mut d, 0x078, 64, idname);
+    write_i16(&mut d, 0x0c0, node_type);
+    write_ptr(&mut d, 0x0d8, id_ptr);
+    write_ptr(&mut d, 0x0e0, storage_ptr);
+    write_f32(&mut d, 0x100, x);
+    write_f32(&mut d, 0x104, y);
+    write_f32(&mut d, 0x108, 140.0);
+    write_f32(&mut d, 0x10c, 100.0);
+    write_block(out, b"DATA", SDNA_IDX_BNODE, ptr, 1, &d);
+}
+
+fn write_vector_socket(out: &mut Vec<u8>, ptr: u64, next: u64, prev: u64, name: &str, limit: i16, in_out: i16, default_ptr: u64, link_ptr: u64) {
+    write_block(out, b"DATA", SDNA_IDX_BNODE_SOCKET, ptr, 1,
+        &build_bnode_socket(next, prev, name, name, 1, 0x0044, limit, in_out, "NodeSocketVector", default_ptr, link_ptr));
+}
+
+fn write_color_socket(out: &mut Vec<u8>, ptr: u64, next: u64, prev: u64, name: &str, limit: i16, in_out: i16, default_ptr: u64, link_ptr: u64) {
+    write_block(out, b"DATA", SDNA_IDX_BNODE_SOCKET, ptr, 1,
+        &build_bnode_socket(next, prev, name, name, 2, 0x0044, limit, in_out, "NodeSocketColor", default_ptr, link_ptr));
+}
+
+fn write_float_socket(out: &mut Vec<u8>, ptr: u64, next: u64, prev: u64, name: &str, limit: i16, in_out: i16, default_ptr: u64, link_ptr: u64) {
+    write_block(out, b"DATA", SDNA_IDX_BNODE_SOCKET, ptr, 1,
+        &build_bnode_socket(next, prev, name, name, 0, 0x0040, limit, in_out, "NodeSocketFloat", default_ptr, link_ptr));
+}
+
+fn write_shader_socket(out: &mut Vec<u8>, ptr: u64, next: u64, prev: u64, name: &str, limit: i16, in_out: i16, default_ptr: u64, link_ptr: u64) {
+    write_block(out, b"DATA", SDNA_IDX_BNODE_SOCKET, ptr, 1,
+        &build_bnode_socket(next, prev, name, name, 3, 0x0044, limit, in_out, "NodeSocketShader", default_ptr, link_ptr));
+}
+
+fn write_vector_default(out: &mut Vec<u8>, ptr: u64, value: [f32; 3]) {
+    let mut d = vec![0u8; BNSV_VECTOR_SIZE];
+    write_f32(&mut d, 4, value[0]);
+    write_f32(&mut d, 8, value[1]);
+    write_f32(&mut d, 12, value[2]);
+    write_f32(&mut d, 16, f32::from_bits(0xff7fffff));
+    write_f32(&mut d, 20, f32::from_bits(0x7f7fffff));
+    write_i32(&mut d, 24, 3);
+    write_block(out, b"DATA", SDNA_IDX_BNSV_VECTOR, ptr, 1, &d);
+}
+
+fn write_color_default(out: &mut Vec<u8>, ptr: u64, value: [f32; 4]) {
+    let mut d = vec![0u8; BNSV_RGBA_SIZE];
+    for (idx, component) in value.iter().enumerate() {
+        write_f32(&mut d, idx * 4, *component);
+    }
+    write_block(out, b"DATA", SDNA_IDX_BNSV_RGBA, ptr, 1, &d);
+}
+
+fn write_float_default(out: &mut Vec<u8>, ptr: u64, value: f32) {
+    let mut d = vec![0u8; BNSV_FLOAT_SIZE];
+    write_f32(&mut d, 4, value);
+    write_f32(&mut d, 12, 1_000_000.0);
+    write_block(out, b"DATA", SDNA_IDX_BNSV_FLOAT, ptr, 1, &d);
+}
+
+fn write_node_link(
+    out: &mut Vec<u8>,
+    ptr: u64,
+    prev_ptr: u64,
+    next_ptr: u64,
+    from_node: u64,
+    to_node: u64,
+    from_socket: u64,
+    to_socket: u64,
+) {
+    let mut d = vec![0u8; BNODE_LINK_SIZE];
+    write_ptr(&mut d, 0, next_ptr);
+    write_ptr(&mut d, 8, prev_ptr);
+    write_ptr(&mut d, 16, from_node);
+    write_ptr(&mut d, 24, to_node);
+    write_ptr(&mut d, 32, from_socket);
+    write_ptr(&mut d, 40, to_socket);
+    write_i32(&mut d, 48, 2);
+    write_block(out, b"DATA", SDNA_IDX_BNODE_LINK, ptr, 1, &d);
+}
+
 fn build_bnode_socket(
     next_ptr: u64,
     prev_ptr: u64,
@@ -1700,6 +2124,7 @@ mod tests {
             [1.0, 1.0, 1.0],
             100.0,
             5.0,
+            5.0,
             0.0,
             0.0,
             5000.0,  // temperature_k
@@ -1719,6 +2144,7 @@ mod tests {
             0,
             [1.0, 1.0, 1.0],
             100.0,
+            5.0,
             5.0,
             0.0,
             0.0,
@@ -1744,6 +2170,7 @@ mod tests {
             [1.0, 1.0, 1.0],
             100.0,
             5.0,
+            5.0,
             0.0,
             0.0,
             5000.0,
@@ -1762,6 +2189,7 @@ mod tests {
             0,
             [1.0, 1.0, 1.0],
             100.0,
+            5.0,
             5.0,
             0.0,
             0.0,
@@ -1790,6 +2218,7 @@ mod tests {
                 0,
                 [1.0, 1.0, 1.0],
                 100.0,
+                5.0,
                 5.0,
                 0.0,
                 0.0,

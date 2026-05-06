@@ -60,6 +60,7 @@ fn test_organize_lights_creates_type_collections() {
             lamp_type: 0,
             energy_watts: 1.0,
             radius: 5.0,
+            cutoff_distance: 5.0,
             radius_source: 5.0,
             spot_size: 0.0,
             spot_blend: 0.0,
@@ -68,6 +69,7 @@ fn test_organize_lights_creates_type_collections() {
             use_temperature: false,
             gobo_path: None,
             active_state: "defaultState".to_string(),
+            states_json: None,
         },
         ExtractedLight {
             name: "Projector1".to_string(),
@@ -81,6 +83,7 @@ fn test_organize_lights_creates_type_collections() {
             lamp_type: 2,
             energy_watts: 50.0,
             radius: 10.0,
+            cutoff_distance: 10.0,
             radius_source: 10.0,
             spot_size: 0.5,
             spot_blend: 0.2,
@@ -89,6 +92,7 @@ fn test_organize_lights_creates_type_collections() {
             use_temperature: false,
             gobo_path: Some("path/to/gobo.dds".to_string()),
             active_state: "defaultState".to_string(),
+            states_json: None,
         },
     ];
 

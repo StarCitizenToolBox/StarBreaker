@@ -27,6 +27,7 @@ fn test_validate_lights_extraction_single_ambient() {
             lamp_type: 0,
             energy_watts: 1.0,
             radius: 5.0,
+            cutoff_distance: 5.0,
             radius_source: 5.0,
             spot_size: 0.0,
             spot_blend: 0.0,
@@ -35,6 +36,7 @@ fn test_validate_lights_extraction_single_ambient() {
             use_temperature: false,
             gobo_path: None,
             active_state: "defaultState".to_string(),
+            states_json: None,
         },
     ];
     
@@ -59,6 +61,7 @@ fn test_validate_lights_extraction_categorization() {
             lamp_type: 0,
             energy_watts: 1.0,
             radius: 5.0,
+            cutoff_distance: 5.0,
             radius_source: 5.0,
             spot_size: 0.0,
             spot_blend: 0.0,
@@ -67,6 +70,7 @@ fn test_validate_lights_extraction_categorization() {
             use_temperature: false,
             gobo_path: None,
             active_state: "defaultState".to_string(),
+            states_json: None,
         },
         ExtractedLight {
             name: "Projector".to_string(),
@@ -80,6 +84,7 @@ fn test_validate_lights_extraction_categorization() {
             lamp_type: 2,
             energy_watts: 50.0,
             radius: 10.0,
+            cutoff_distance: 10.0,
             radius_source: 10.0,
             spot_size: 0.5,
             spot_blend: 0.2,
@@ -88,6 +93,7 @@ fn test_validate_lights_extraction_categorization() {
             use_temperature: false,
             gobo_path: None,
             active_state: "defaultState".to_string(),
+            states_json: None,
         },
     ];
     
@@ -163,6 +169,7 @@ fn test_validate_complete_phase_3_4_export_full() {
             lamp_type: 0,
             energy_watts: 1.0,
             radius: 5.0,
+            cutoff_distance: 5.0,
             radius_source: 5.0,
             spot_size: 0.0,
             spot_blend: 0.0,
@@ -171,6 +178,7 @@ fn test_validate_complete_phase_3_4_export_full() {
             use_temperature: false,
             gobo_path: None,
             active_state: "defaultState".to_string(),
+            states_json: None,
         },
     ];
     
@@ -224,6 +232,7 @@ fn test_extracted_light_has_use_temperature_field() {
         lamp_type: 0,
         energy_watts: 1.0,
         radius: 5.0,
+        cutoff_distance: 5.0,
         radius_source: 5.0,
         spot_size: 0.0,
         spot_blend: 0.0,
@@ -232,6 +241,7 @@ fn test_extracted_light_has_use_temperature_field() {
         use_temperature: true,  // Verify field exists and can be set
         gobo_path: None,
         active_state: "defaultState".to_string(),
+            states_json: None,
     };
     
     assert_eq!(light.temperature_k, 6500.0);
@@ -253,6 +263,7 @@ fn test_extracted_light_temperature_false() {
         lamp_type: 0,
         energy_watts: 1.0,
         radius: 5.0,
+        cutoff_distance: 5.0,
         radius_source: 5.0,
         spot_size: 0.0,
         spot_blend: 0.0,
@@ -261,6 +272,7 @@ fn test_extracted_light_temperature_false() {
         use_temperature: false,  // Explicitly false
         gobo_path: None,
         active_state: "defaultState".to_string(),
+            states_json: None,
     };
     
     assert_eq!(light.temperature_k, 3000.0);
@@ -292,6 +304,7 @@ fn test_temperature_values_range() {
             lamp_type: 0,
             energy_watts: 1.0,
             radius: 5.0,
+            cutoff_distance: 5.0,
             radius_source: 5.0,
             spot_size: 0.0,
             spot_blend: 0.0,
@@ -300,6 +313,7 @@ fn test_temperature_values_range() {
             use_temperature: use_temp,
             gobo_path: None,
             active_state: "defaultState".to_string(),
+            states_json: None,
         };
         
         assert_eq!(light.temperature_k, temp, "Failed for {}: {}", temp, desc);
