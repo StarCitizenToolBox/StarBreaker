@@ -62,6 +62,7 @@ for _pkg in ("starbreaker_addon", "starbreaker_addon.runtime", "starbreaker_addo
 
 from starbreaker_addon.manifest import MaterialSidecar, SubmaterialRecord
 from starbreaker_addon.runtime.importer.utils import (
+    _canonical_source_name,
     _material_identity,
     _remapped_submaterial_for_slot,
     _submaterials_by_name,
@@ -89,6 +90,27 @@ def _make_sidecar(*entries: tuple[int, str]) -> MaterialSidecar:
         submaterials=submaterials,
         raw={},
     )
+
+
+# ---------------------------------------------------------------------------
+# Tests for _submaterials_by_name
+# ---------------------------------------------------------------------------
+
+class TestCanonicalSourceName(unittest.TestCase):
+    def test_strips_blender_numeric_suffix(self) -> None:
+        self.assertEqual(_canonical_source_name("paint.001"), "paint")
+
+    def test_native_blend_material_slot_name_maps_to_submaterial_name(self) -> None:
+        self.assertEqual(
+            _canonical_source_name("rsi_aurora_mk2_mtl_Decal_POM_07"),
+            "Decal_POM",
+        )
+
+    def test_native_blend_material_slot_preserves_internal_numbers(self) -> None:
+        self.assertEqual(
+            _canonical_source_name("ship_mtl_screen_1x1_10"),
+            "screen_1x1",
+        )
 
 
 # ---------------------------------------------------------------------------

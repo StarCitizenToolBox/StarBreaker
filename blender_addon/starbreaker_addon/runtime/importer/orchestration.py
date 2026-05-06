@@ -362,10 +362,11 @@ class OrchestrationMixin:
             slot_mapping = _slot_mapping_for_object(obj)
             self.slot_mapping_cache[data_pointer] = slot_mapping
         target_submaterials_by_name = self._submaterials_by_unique_name(sidecar_path, sidecar)
+        target_submaterials_by_name_all = self._submaterials_by_name_all(sidecar_path, sidecar)
         if slot_mapping is None:
             inferred_slot_mapping: list[int | None] = []
             inferred_matches = 0
-            for slot in obj.material_slots:
+            for slot_index, slot in enumerate(obj.material_slots):
                 slot_material = slot.material
                 if slot_material is None:
                     inferred_slot_mapping.append(None)
@@ -375,6 +376,13 @@ class OrchestrationMixin:
                     inferred_slot_mapping.append(None)
                     continue
                 matched_submaterial = target_submaterials_by_name.get(canonical_slot_name)
+                if matched_submaterial is None:
+                    candidates = target_submaterials_by_name_all.get(canonical_slot_name)
+                    if candidates:
+                        matched_submaterial = min(
+                            candidates,
+                            key=lambda item: abs(item.index - slot_index),
+                        )
                 if matched_submaterial is None:
                     inferred_slot_mapping.append(None)
                     continue
@@ -392,7 +400,6 @@ class OrchestrationMixin:
                 source_sidecar = sidecar
             source_submaterials_by_index = self._submaterials_by_index(source_sidecar_path, source_sidecar)
             target_submaterials_by_index = self._submaterials_by_index(sidecar_path, sidecar)
-            target_submaterials_by_name_all = self._submaterials_by_name_all(sidecar_path, sidecar)
             for slot_index, mapped_index in enumerate(slot_mapping):
                 fallback_index = mapped_index if mapped_index is not None else slot_index
                 source_submaterial = source_submaterials_by_index.get(fallback_index)

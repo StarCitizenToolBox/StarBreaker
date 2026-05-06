@@ -124,6 +124,108 @@ fn test_collect_decal_vertices_empty_faces() {
 }
 
 #[test]
+fn test_decal_face_indices_use_source_material_id() {
+    let mesh = Mesh {
+        positions: vec![[0.0, 0.0, 0.0]; 6],
+        indices: vec![0, 1, 2, 3, 4, 5],
+        uvs: None,
+        secondary_uvs: None,
+        normals: None,
+        tangents: None,
+        colors: None,
+        submeshes: vec![SubMesh {
+            material_name: None,
+            material_id: 0,
+            source_material_id: Some(2),
+            first_index: 0,
+            num_indices: 6,
+            first_vertex: 0,
+            num_vertices: 6,
+            node_parent_index: 0,
+        }],
+        model_min: [0.0, 0.0, 0.0],
+        model_max: [0.0, 0.0, 0.0],
+        scaling_min: [0.0, 0.0, 0.0],
+        scaling_max: [0.0, 0.0, 0.0],
+    };
+    let mesh_with_decals = MeshWithDecals {
+        mesh_path: "source_id_mesh".to_string(),
+        decal_materials: vec![DecalMaterial {
+            material_name: "decal".to_string(),
+            is_decal: true,
+            is_pom: false,
+            material_index: 2,
+        }],
+        decal_face_indices: Vec::new(),
+    };
+
+    let faces = decal_face_indices_for_mesh(&mesh, &mesh_with_decals);
+
+    assert_eq!(faces, vec![0, 1]);
+}
+
+#[test]
+fn test_decal_face_indices_fall_back_to_submesh_material_name() {
+    let mesh = Mesh {
+        positions: vec![[0.0, 0.0, 0.0]; 3],
+        indices: vec![0, 1, 2],
+        uvs: None,
+        secondary_uvs: None,
+        normals: None,
+        tangents: None,
+        colors: None,
+        submeshes: vec![SubMesh {
+            material_name: Some("Decal_POM".to_string()),
+            material_id: 7,
+            source_material_id: None,
+            first_index: 0,
+            num_indices: 3,
+            first_vertex: 0,
+            num_vertices: 3,
+            node_parent_index: 0,
+        }],
+        model_min: [0.0, 0.0, 0.0],
+        model_max: [0.0, 0.0, 0.0],
+        scaling_min: [0.0, 0.0, 0.0],
+        scaling_max: [0.0, 0.0, 0.0],
+    };
+    let mesh_with_decals = MeshWithDecals {
+        mesh_path: "name_fallback_mesh".to_string(),
+        decal_materials: vec![DecalMaterial {
+            material_name: "Decal_POM".to_string(),
+            is_decal: true,
+            is_pom: true,
+            material_index: 24,
+        }],
+        decal_face_indices: Vec::new(),
+    };
+
+    let faces = decal_face_indices_for_mesh(&mesh, &mesh_with_decals);
+
+    assert_eq!(faces, vec![0]);
+}
+
+#[test]
+fn test_decal_vertex_group_is_valid_for_all_decal_meshes() {
+    let mesh_with_decals = MeshWithDecals {
+        mesh_path: "all_decal".to_string(),
+        decal_materials: vec![DecalMaterial {
+            material_name: "decal".to_string(),
+            is_decal: true,
+            is_pom: false,
+            material_index: 0,
+        }],
+        decal_face_indices: Vec::new(),
+    };
+
+    let result = collect_decal_vertices(&mesh_with_decals, &[], &[], 3).unwrap();
+
+    assert_eq!(result.vertex_groups.len(), 1);
+    assert_eq!(result.vertex_groups[0].name, "starbreaker_decal_offset");
+    assert!(result.vertex_groups[0].vertex_indices.is_empty());
+}
+
+#[test]
 fn test_validate_vertex_groups_valid() {
     let vgroups = vec![
         VertexGroup {

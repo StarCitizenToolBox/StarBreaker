@@ -133,10 +133,14 @@ fn material_custom_properties(material_name: &str, materials: &Option<MtlFile>) 
     props
 }
 
+fn package_scene_path(package_name: &str) -> String {
+    format!("Packages/{package_name}/scene.json")
+}
+
 fn package_root_properties(entity_name: &str) -> Vec<(String, IdPropValue)> {
     vec![
         ("starbreaker_package_root".to_string(), IdPropValue::Int(1)),
-        ("starbreaker_scene_path".to_string(), IdPropValue::String("scene.json".to_string())),
+        ("starbreaker_scene_path".to_string(), IdPropValue::String(package_scene_path(entity_name))),
         ("starbreaker_export_root".to_string(), IdPropValue::String(String::new())),
         ("starbreaker_package_name".to_string(), IdPropValue::String(entity_name.to_string())),
         ("starbreaker_entity_name".to_string(), IdPropValue::String(entity_name.to_string())),
@@ -146,7 +150,7 @@ fn package_root_properties(entity_name: &str) -> Vec<(String, IdPropValue)> {
 
 fn entity_wrapper_properties(entity_name: &str) -> Vec<(String, IdPropValue)> {
     vec![
-        ("starbreaker_scene_path".to_string(), IdPropValue::String("scene.json".to_string())),
+        ("starbreaker_scene_path".to_string(), IdPropValue::String(package_scene_path(entity_name))),
         ("starbreaker_export_root".to_string(), IdPropValue::String(String::new())),
         ("starbreaker_package_name".to_string(), IdPropValue::String(entity_name.to_string())),
         ("starbreaker_entity_name".to_string(), IdPropValue::String(entity_name.to_string())),
@@ -155,7 +159,7 @@ fn entity_wrapper_properties(entity_name: &str) -> Vec<(String, IdPropValue)> {
 
 fn entity_root_properties(package_name: &str, entity_name: &str) -> Vec<(String, IdPropValue)> {
     vec![
-        ("starbreaker_scene_path".to_string(), IdPropValue::String("scene.json".to_string())),
+        ("starbreaker_scene_path".to_string(), IdPropValue::String(package_scene_path(package_name))),
         ("starbreaker_export_root".to_string(), IdPropValue::String(String::new())),
         ("starbreaker_package_name".to_string(), IdPropValue::String(package_name.to_string())),
         ("starbreaker_entity_name".to_string(), IdPropValue::String(entity_name.to_string())),
@@ -166,18 +170,31 @@ fn scene_instance_properties(entity_name: &str, instance: &LinkedMeshInstance) -
     let instance_json = serde_json::json!({
         "entity_name": instance.name,
         "mesh_asset": instance.mesh_asset,
-        "material_sidecar": null,
-        "palette_id": null,
+        "material_sidecar": instance.material_sidecar,
+        "palette_id": instance.palette_id,
     })
     .to_string();
-    vec![
-        ("starbreaker_scene_path".to_string(), IdPropValue::String("scene.json".to_string())),
+    let mut props = vec![
+        ("starbreaker_scene_path".to_string(), IdPropValue::String(package_scene_path(entity_name))),
         ("starbreaker_export_root".to_string(), IdPropValue::String(String::new())),
         ("starbreaker_package_name".to_string(), IdPropValue::String(entity_name.to_string())),
         ("starbreaker_entity_name".to_string(), IdPropValue::String(instance.name.clone())),
         ("starbreaker_mesh_asset".to_string(), IdPropValue::String(instance.mesh_asset.clone())),
         ("starbreaker_instance_json".to_string(), IdPropValue::String(instance_json)),
-    ]
+    ];
+    if let Some(material_sidecar) = &instance.material_sidecar {
+        props.push((
+            "starbreaker_material_sidecar".to_string(),
+            IdPropValue::String(material_sidecar.clone()),
+        ));
+    }
+    if let Some(palette_id) = &instance.palette_id {
+        props.push((
+            "starbreaker_palette_id".to_string(),
+            IdPropValue::String(palette_id.clone()),
+        ));
+    }
+    props
 }
 
 fn scene_anchor_name(instance_name: &str) -> String {
@@ -213,6 +230,8 @@ struct SceneManifestInstance {
     parent_empty_scale: [f32; 3],
     is_interior: bool,
     mesh_asset: String,
+    material_sidecar: Option<String>,
+    palette_id: Option<String>,
     parent_node_name: Option<String>,
     loc: [f32; 3],
     quat: [f32; 4],
@@ -346,6 +365,16 @@ fn scene_manifest_instances(manifest_files: &[ExportedFile]) -> Vec<SceneManifes
             parent_empty_scale: [1.0, 1.0, 1.0],
             is_interior: false,
             mesh_asset: mesh_asset.to_string(),
+            material_sidecar: value
+                .get("material_sidecar")
+                .and_then(|v| v.as_str())
+                .filter(|path| !path.is_empty())
+                .map(ToOwned::to_owned),
+            palette_id: value
+                .get("palette_id")
+                .and_then(|v| v.as_str())
+                .filter(|palette| !palette.is_empty())
+                .map(ToOwned::to_owned),
             parent_node_name: value
                 .get("parent_node_name")
                 .and_then(|v| v.as_str())
@@ -399,6 +428,16 @@ fn scene_manifest_instances(manifest_files: &[ExportedFile]) -> Vec<SceneManifes
                         parent_empty_scale: container_scale,
                         is_interior: true,
                         mesh_asset: mesh_asset.to_string(),
+                        material_sidecar: placement
+                            .get("material_sidecar")
+                            .and_then(|v| v.as_str())
+                            .filter(|path| !path.is_empty())
+                            .map(ToOwned::to_owned),
+                        palette_id: placement
+                            .get("palette_id")
+                            .and_then(|v| v.as_str())
+                            .filter(|palette| !palette.is_empty())
+                            .map(ToOwned::to_owned),
                         parent_node_name: None,
                         loc,
                         quat,
@@ -417,7 +456,7 @@ fn light_object_properties(
     radius_source: f32,
 ) -> Vec<(String, IdPropValue)> {
     vec![
-        ("starbreaker_scene_path".to_string(), IdPropValue::String("scene.json".to_string())),
+        ("starbreaker_scene_path".to_string(), IdPropValue::String(package_scene_path(entity_name))),
         ("starbreaker_package_name".to_string(), IdPropValue::String(entity_name.to_string())),
         ("starbreaker_entity_name".to_string(), IdPropValue::String(entity_name.to_string())),
         ("starbreaker_source_node_name".to_string(), IdPropValue::String(light_name.to_string())),
@@ -438,6 +477,33 @@ fn insert_stem_suffix(path: &str, suffix: &str) -> String {
         None => (file, ""),
     };
     format!("{dir}{stem}{suffix}{ext}")
+}
+
+fn decal_face_indices_for_mesh(mesh: &Mesh, mesh_with_decals: &MeshWithDecals) -> Vec<usize> {
+    let decal_material_indices = mesh_with_decals
+        .decal_materials
+        .iter()
+        .map(|material| material.material_index)
+        .collect::<HashSet<_>>();
+    let decal_material_names = mesh_with_decals
+        .decal_materials
+        .iter()
+        .map(|material| material.material_name.as_str())
+        .collect::<HashSet<_>>();
+    let mut decal_face_indices = Vec::new();
+    for submesh in &mesh.submeshes {
+        let material_id = submesh.source_material_id.unwrap_or(submesh.material_id) as usize;
+        let material_name_matches = submesh
+            .material_name
+            .as_deref()
+            .is_some_and(|name| decal_material_names.contains(name));
+        if decal_material_indices.contains(&material_id) || material_name_matches {
+            let start_face = submesh.first_index / 3;
+            let num_faces = submesh.num_indices / 3;
+            decal_face_indices.extend((start_face..start_face + num_faces).map(|face| face as usize));
+        }
+    }
+    decal_face_indices
 }
 
 fn replace_extension(path: &str, new_extension: &str) -> String {
@@ -616,8 +682,8 @@ pub fn write_decomposed_export_blend(
     let mut mesh_materials = Vec::new();
     for (mesh_key, entry) in &mesh_data_map {
         if let Some(ref mtl) = entry.materials {
-            let material_list: Vec<(String, String)> = mtl.materials.iter()
-                .map(|sub| (sub.name.clone(), sub.string_gen_mask.clone()))
+            let material_list: Vec<(String, String, String)> = mtl.materials.iter()
+                .map(|sub| (sub.name.clone(), sub.shader.clone(), sub.string_gen_mask.clone()))
                 .collect();
             mesh_materials.push((mesh_key.clone(), material_list));
         }
@@ -627,38 +693,15 @@ pub fn write_decomposed_export_blend(
     if let Ok(meshes_with_decals) = identify_meshes_with_decals(&mesh_materials) {
         for mesh_with_decals in meshes_with_decals {
             if let Some(mesh_entry) = mesh_data_map.get(&mesh_with_decals.mesh_path) {
-                // Map decal material indices to face indices
-                let decal_material_indices = mesh_with_decals
-                    .decal_materials
-                    .iter()
-                    .map(|material| material.material_index)
-                    .collect::<HashSet<_>>();
-                let mut decal_face_indices = Vec::new();
-                for (face_idx, material_idx) in mesh_entry.mesh.submeshes.iter()
-                    .enumerate()
-                    .flat_map(|(mat_idx, submesh)| {
-                        let start_face = submesh.first_index / 3;
-                        let num_faces = submesh.num_indices / 3;
-                        (start_face..start_face + num_faces).map(move |f| (f as usize, mat_idx))
-                    })
-                    .collect::<Vec<_>>()
-                {
-                    // Check if this material is a decal material
-                    if decal_material_indices.contains(&material_idx) {
-                        decal_face_indices.push(face_idx);
-                    }
-                }
-                
-                // Collect decal vertices if any decal faces found
-                if !decal_face_indices.is_empty() {
-                    if let Ok(vgroups) = collect_decal_vertices(
-                        &mesh_with_decals,
-                        &decal_face_indices,
-                        &mesh_entry.mesh.indices.iter().map(|&i| i as u32).collect::<Vec<_>>(),
-                        3, // verts_per_face for triangles
-                    ) {
-                        mesh_vertex_groups.insert(mesh_with_decals.mesh_path.clone(), vgroups.vertex_groups);
-                    }
+                let decal_face_indices = decal_face_indices_for_mesh(&mesh_entry.mesh, &mesh_with_decals);
+
+                if let Ok(vgroups) = collect_decal_vertices(
+                    &mesh_with_decals,
+                    &decal_face_indices,
+                    &mesh_entry.mesh.indices.iter().map(|&i| i as u32).collect::<Vec<_>>(),
+                    3, // verts_per_face for triangles
+                ) {
+                    mesh_vertex_groups.insert(mesh_with_decals.mesh_path.clone(), vgroups.vertex_groups);
                 }
             }
         }
@@ -764,6 +807,8 @@ pub fn write_decomposed_export_blend(
                         name,
                         mesh_name: linked_mesh_ref.mesh_name.clone(),
                         material_names: linked_mesh_ref.material_names.clone(),
+                        material_sidecar: None,
+                        palette_id: None,
                         source_nodes: if idx == 0 {
                             source_nodes_by_asset
                                 .get(&file.relative_path)
@@ -805,6 +850,8 @@ pub fn write_decomposed_export_blend(
                         name,
                         mesh_name: linked_mesh_ref.mesh_name.clone(),
                         material_names: linked_mesh_ref.material_names.clone(),
+                        material_sidecar: manifest_instance.material_sidecar.clone(),
+                        palette_id: manifest_instance.palette_id.clone(),
                         source_nodes: if mesh_ref_idx == 0 {
                             source_nodes_by_asset
                                 .get(&manifest_instance.mesh_asset)
@@ -1032,13 +1079,17 @@ fn mesh_to_blend_flat(
     let array_matidx_ptr = ptrs.alloc();
     let raw_matidx_ptr = ptrs.alloc();
 
-    // Optional: UV map
+    // Optional: UV maps
     let (name_uv_ptr, array_uv_ptr, raw_uv_ptr) = if mesh.uvs.is_some() {
         (ptrs.alloc(), ptrs.alloc(), ptrs.alloc())
     } else {
         (0, 0, 0)
     };
-
+    let (name_uv2_ptr, array_uv2_ptr, raw_uv2_ptr) = if mesh.secondary_uvs.is_some() {
+        (ptrs.alloc(), ptrs.alloc(), ptrs.alloc())
+    } else {
+        (0, 0, 0)
+    };
     // Optional: vertex colors
     let (name_col_ptr, array_col_ptr, raw_col_ptr) = if mesh.colors.is_some() {
         (ptrs.alloc(), ptrs.alloc(), ptrs.alloc())
@@ -1110,11 +1161,16 @@ fn mesh_to_blend_flat(
     }
     let raw_material_index = ints_data(&material_indices);
 
-    // Expand per-vertex UV → per-loop (CORNER domain requires one entry per loop corner)
-    let raw_uv: Option<Vec<u8>> = mesh.uvs.as_ref().map(|uvs| {
-        let expanded: Vec<[f32; 2]> = mesh.indices.iter().map(|&i| uvs[i as usize]).collect();
-        floats2_data(&expanded)
-    });
+    // Expand per-vertex UVs to per-loop data. Blender's UV origin is opposite
+    // the exported Star Citizen texture-space V origin, so V is flipped here.
+    let raw_uv = mesh
+        .uvs
+        .as_ref()
+        .map(|uvs| expanded_blender_uv_data(&mesh.indices, uvs));
+    let raw_uv2 = mesh
+        .secondary_uvs
+        .as_ref()
+        .map(|uvs| expanded_blender_uv_data(&mesh.indices, uvs));
 
     // Expand per-vertex colors → per-loop
     let raw_color: Option<Vec<u8>> = mesh.colors.as_ref().map(|colors| {
@@ -1145,6 +1201,12 @@ fn mesh_to_blend_flat(
     if mesh.uvs.is_some() {
         attr_blob.extend_from_slice(&build_attribute(
             name_uv_ptr, ATTR_TYPE_FLOAT2, ATTR_DOMAIN_CORNER, array_uv_ptr,
+        ));
+        num_attrs += 1;
+    }
+    if mesh.secondary_uvs.is_some() {
+        attr_blob.extend_from_slice(&build_attribute(
+            name_uv2_ptr, ATTR_TYPE_FLOAT2, ATTR_DOMAIN_CORNER, array_uv2_ptr,
         ));
         num_attrs += 1;
     }
@@ -1278,6 +1340,12 @@ fn mesh_to_blend_flat(
         write_block(&mut out, b"DATA", 0,  name_uv_ptr,  1, b"UVMap\0");
         write_block(&mut out, b"DATA", SDNA_IDX_ATTRIBUTE_ARRAY, array_uv_ptr, 1, &arr_uv);
         write_block(&mut out, b"DATA", 0,  raw_uv_ptr,   1, uv_data);
+    }
+    if let Some(ref uv_data) = raw_uv2 {
+        let arr_uv = build_attribute_array(raw_uv2_ptr, totloop as i64);
+        write_block(&mut out, b"DATA", 0, name_uv2_ptr, 1, b"UVMap.001\0");
+        write_block(&mut out, b"DATA", SDNA_IDX_ATTRIBUTE_ARRAY, array_uv2_ptr, 1, &arr_uv);
+        write_block(&mut out, b"DATA", 0, raw_uv2_ptr, 1, uv_data);
     }
 
     // Optional: vertex colors
@@ -1443,6 +1511,9 @@ struct MeshBlockData {
     name_uv_ptr: u64,
     array_uv_ptr: u64,
     raw_uv_ptr: u64,
+    name_uv2_ptr: u64,
+    array_uv2_ptr: u64,
+    raw_uv2_ptr: u64,
     name_col_ptr: u64,
     array_col_ptr: u64,
     raw_col_ptr: u64,
@@ -1465,9 +1536,22 @@ struct MeshBlockData {
     raw_corner_edge: Vec<u8>,
     raw_material_index: Vec<u8>,
     raw_uv: Option<Vec<u8>>,
+    raw_uv2: Option<Vec<u8>>,
     raw_color: Option<Vec<u8>>,
     attr_blob: Vec<u8>,
     material_slot_indices: Vec<usize>,
+}
+
+fn uv_to_blender(uv: [f32; 2]) -> [f32; 2] {
+    [uv[0], 1.0 - uv[1]]
+}
+
+fn expanded_blender_uv_data(indices: &[u32], uvs: &[[f32; 2]]) -> Vec<u8> {
+    let expanded = indices
+        .iter()
+        .map(|&i| uvs.get(i as usize).copied().map(uv_to_blender).unwrap_or([0.0; 2]))
+        .collect::<Vec<_>>();
+    floats2_data(&expanded)
 }
 
 fn strip_lod_suffix(name: &str) -> String {
@@ -2136,6 +2220,11 @@ fn allocate_mesh_block(
     } else {
         (0, 0, 0)
     };
+    let (name_uv2_ptr, array_uv2_ptr, raw_uv2_ptr) = if mesh.secondary_uvs.is_some() {
+        (ptrs.alloc(), ptrs.alloc(), ptrs.alloc())
+    } else {
+        (0, 0, 0)
+    };
     let (name_col_ptr, array_col_ptr, raw_col_ptr) = if mesh.colors.is_some() {
         (ptrs.alloc(), ptrs.alloc(), ptrs.alloc())
     } else {
@@ -2181,14 +2270,14 @@ fn allocate_mesh_block(
         }
     }
     let raw_material_index = ints_data(&material_indices);
-    let raw_uv = mesh.uvs.as_ref().map(|uvs| {
-        let expanded = mesh
-            .indices
-            .iter()
-            .map(|&i| uvs.get(i as usize).copied().unwrap_or([0.0; 2]))
-            .collect::<Vec<_>>();
-        floats2_data(&expanded)
-    });
+    let raw_uv = mesh
+        .uvs
+        .as_ref()
+        .map(|uvs| expanded_blender_uv_data(&mesh.indices, uvs));
+    let raw_uv2 = mesh
+        .secondary_uvs
+        .as_ref()
+        .map(|uvs| expanded_blender_uv_data(&mesh.indices, uvs));
     let raw_color = mesh.colors.as_ref().map(|colors| {
         let expanded = mesh
             .indices
@@ -2207,6 +2296,10 @@ fn allocate_mesh_block(
     attr_blob.extend_from_slice(&build_attribute(name_matidx_ptr, ATTR_TYPE_INT, ATTR_DOMAIN_FACE, array_matidx_ptr));
     if mesh.uvs.is_some() {
         attr_blob.extend_from_slice(&build_attribute(name_uv_ptr, ATTR_TYPE_FLOAT2, ATTR_DOMAIN_CORNER, array_uv_ptr));
+        num_attrs += 1;
+    }
+    if mesh.secondary_uvs.is_some() {
+        attr_blob.extend_from_slice(&build_attribute(name_uv2_ptr, ATTR_TYPE_FLOAT2, ATTR_DOMAIN_CORNER, array_uv2_ptr));
         num_attrs += 1;
     }
     if mesh.colors.is_some() {
@@ -2240,6 +2333,9 @@ fn allocate_mesh_block(
         name_uv_ptr,
         array_uv_ptr,
         raw_uv_ptr,
+        name_uv2_ptr,
+        array_uv2_ptr,
+        raw_uv2_ptr,
         name_col_ptr,
         array_col_ptr,
         raw_col_ptr,
@@ -2262,6 +2358,7 @@ fn allocate_mesh_block(
         raw_corner_edge,
         raw_material_index,
         raw_uv,
+        raw_uv2,
         raw_color,
         attr_blob,
         material_slot_indices,
@@ -2335,6 +2432,11 @@ fn write_mesh_block(
         write_block(out, b"DATA", 0, block.name_uv_ptr, 1, b"UVMap\0");
         write_block(out, b"DATA", SDNA_IDX_ATTRIBUTE_ARRAY, block.array_uv_ptr, 1, &build_attribute_array(block.raw_uv_ptr, block.totloop as i64));
         write_block(out, b"DATA", 0, block.raw_uv_ptr, 1, uv_data);
+    }
+    if let Some(ref uv_data) = block.raw_uv2 {
+        write_block(out, b"DATA", 0, block.name_uv2_ptr, 1, b"UVMap.001\0");
+        write_block(out, b"DATA", SDNA_IDX_ATTRIBUTE_ARRAY, block.array_uv2_ptr, 1, &build_attribute_array(block.raw_uv2_ptr, block.totloop as i64));
+        write_block(out, b"DATA", 0, block.raw_uv2_ptr, 1, uv_data);
     }
     if let Some(ref color_data) = block.raw_color {
         write_block(out, b"DATA", 0, block.name_col_ptr, 1, b"Color\0");
@@ -2652,6 +2754,9 @@ fn mesh_to_blend_hierarchy(
                     name_uv_ptr: block.name_uv_ptr,
                     array_uv_ptr: block.array_uv_ptr,
                     raw_uv_ptr: block.raw_uv_ptr,
+                    name_uv2_ptr: block.name_uv2_ptr,
+                    array_uv2_ptr: block.array_uv2_ptr,
+                    raw_uv2_ptr: block.raw_uv2_ptr,
                     name_col_ptr: block.name_col_ptr,
                     array_col_ptr: block.array_col_ptr,
                     raw_col_ptr: block.raw_col_ptr,
@@ -2674,6 +2779,7 @@ fn mesh_to_blend_hierarchy(
                     raw_corner_edge: block.raw_corner_edge.clone(),
                     raw_material_index: block.raw_material_index.clone(),
                     raw_uv: block.raw_uv.clone(),
+                    raw_uv2: block.raw_uv2.clone(),
                     raw_color: block.raw_color.clone(),
                     attr_blob: block.attr_blob.clone(),
                     material_slot_indices: block.material_slot_indices.clone(),
@@ -2731,6 +2837,8 @@ pub struct LinkedMeshInstance {
     /// Mesh datablock name inside the linked decomposed asset file.
     pub mesh_name: String,
     pub material_names: Vec<String>,
+    pub material_sidecar: Option<String>,
+    pub palette_id: Option<String>,
     /// Source asset empty ancestors, ordered root-to-parent.
     pub source_ancestors: Vec<LinkedSourceAncestor>,
     /// Full source empty tree for this scene instance, when available.
@@ -2817,6 +2925,8 @@ pub fn create_scene_blend(
                 mesh_asset: format!("{mesh_output_dir}/{name}.blend"),
                 mesh_name: name.clone(),
                 material_names: Vec::new(),
+                material_sidecar: None,
+                palette_id: None,
                 source_nodes: Vec::new(),
                 source_ancestors: Vec::new(),
                 source_loc: [0.0, 0.0, 0.0],
@@ -3685,6 +3795,34 @@ fn convert_position_sc_to_blender(pos_sc: [f64; 3]) -> [f32; 3] {
     ]
 }
 
+fn lamp_type_for_light(light_type: &str, semantic_light_kind: &str) -> i16 {
+    match semantic_light_kind.to_ascii_lowercase().as_str() {
+        "area" => 4,
+        "sun" | "directional" => 1,
+        "spot" => 2,
+        "point" => 0,
+        _ => match light_type {
+            "Omni" | "SoftOmni" | "Ambient" => 0,
+            "Projector" => 2,
+            "Directional" | "Sun" => 1,
+            "Planar" => 4,
+            _ => 0,
+        },
+    }
+}
+
+fn light_energy_to_blender(lamp_type: i16, intensity_candela_proxy: f32, intensity_raw: f32) -> f32 {
+    const LIGHT_CANDELA_TO_WATT: f32 = 4.0 * std::f32::consts::PI / 683.0;
+    const LIGHT_VISUAL_GAIN: f32 = 20.0;
+    const LUMENS_PER_WATT_WHITE: f32 = 120.0;
+
+    match lamp_type {
+        1 => intensity_candela_proxy / 683.0,
+        4 => intensity_raw / LUMENS_PER_WATT_WHITE,
+        _ => intensity_candela_proxy * LIGHT_CANDELA_TO_WATT * LIGHT_VISUAL_GAIN,
+    }
+}
+
 fn mat4_from_sc_columns(matrix: [[f32; 4]; 4]) -> glam::Mat4 {
     glam::Mat4::from_cols_array(&[
         matrix[0][0], matrix[0][1], matrix[0][2], matrix[0][3],
@@ -3788,24 +3926,18 @@ pub fn extract_lights_from_interiors(
                 apply_reference_root_conversion(parent_empty_loc, parent_empty_quat, parent_empty_scale);
             let position_blend = convert_position_sc_to_blender(light_info.position);
             
-            // Map CryEngine light type to Blender lamp_type
-            let lamp_type = match light_info.light_type.as_str() {
-                "Omni" | "SoftOmni" => 0,  // POINT
-                "Projector" => 2,          // SPOT
-                "Ambient" => 0,            // POINT (ambient = low-energy point)
-                "Directional" | "Sun" => 1, // SUN
-                _ => 0,                    // Default to POINT
-            };
+            let lamp_type =
+                lamp_type_for_light(&light_info.light_type, &light_info.semantic_light_kind);
             
             // Convert quaternion rotation with basis correction for spotlights
             let is_spotlight = lamp_type == 2;  // SPOT type
             let rotation_blend = convert_quaternion_sc_to_blender(light_info.rotation, is_spotlight);
             
-            // Intensity conversion: candela proxy → Watts
-            // KHR_lights_punctual: lm = cd × 4π (lumens from candelas)
-            // Cycles: W = lm / 683 (Watt to candela conversion)
-            // Visual gain: × 20 (empirical scaling for SC lights)
-            let energy_watts = (light_info.intensity_candela_proxy * 4.0 * std::f32::consts::PI / 683.0) * 20.0;
+            let energy_watts = light_energy_to_blender(
+                lamp_type,
+                light_info.intensity_candela_proxy,
+                light_info.intensity_raw,
+            );
             
             // Spot angles (if present)
             let (spot_size, spot_blend) = if let (Some(inner), Some(outer)) = (
@@ -4702,9 +4834,21 @@ pub struct MeshWithDecals {
 /// - `%PARALLAX` or `%POM` — indicates parallax occlusion mapping
 ///
 /// Returns (is_decal, is_pom).
-pub fn identify_decal_material_flags(string_gen_mask: &str) -> (bool, bool) {
-    let is_decal = string_gen_mask.contains("%DECAL");
-    let is_pom = string_gen_mask.contains("%PARALLAX") || string_gen_mask.contains("%POM");
+pub fn identify_decal_material_flags(shader: &str, string_gen_mask: &str) -> (bool, bool) {
+    let upper_mask = string_gen_mask.to_ascii_uppercase();
+    let tokens = string_gen_mask
+        .split('%')
+        .filter(|token| !token.is_empty())
+        .map(|token| token.trim().to_ascii_uppercase())
+        .collect::<HashSet<_>>();
+    let is_decal = tokens.contains("DECAL")
+        || upper_mask.contains("%DECAL")
+        || shader.eq_ignore_ascii_case("MeshDecal");
+    let is_pom = tokens.contains("PARALLAX")
+        || tokens.contains("POM")
+        || tokens.contains("PARALLAX_OCCLUSION_MAPPING")
+        || upper_mask.contains("%PARALLAX")
+        || upper_mask.contains("%POM");
     (is_decal, is_pom)
 }
 
@@ -4715,15 +4859,15 @@ pub fn identify_decal_material_flags(string_gen_mask: &str) -> (bool, bool) {
 ///
 /// Returns list of meshes that have decal materials and need vertex groups.
 pub fn identify_meshes_with_decals(
-    mesh_materials: &[(String, Vec<(String, String)>)],  // (mesh_path, [(material_name, string_gen_mask)])
+    mesh_materials: &[(String, Vec<(String, String, String)>)],  // (mesh_path, [(material_name, shader, string_gen_mask)])
 ) -> Result<Vec<MeshWithDecals>, String> {
     let mut result = Vec::new();
     
     for (mesh_path, materials) in mesh_materials {
         let mut decal_materials = Vec::new();
         
-        for (mat_idx, (material_name, string_gen_mask)) in materials.iter().enumerate() {
-            let (is_decal, is_pom) = identify_decal_material_flags(string_gen_mask);
+        for (mat_idx, (material_name, shader, string_gen_mask)) in materials.iter().enumerate() {
+            let (is_decal, is_pom) = identify_decal_material_flags(shader, string_gen_mask);
             
             if is_decal || is_pom {
                 decal_materials.push(DecalMaterial {
@@ -4915,8 +5059,8 @@ pub fn assign_decal_materials_to_vertex_groups(input: &DecomposedInput) -> Resul
     
     // Add root mesh materials
     if let Some(ref mtl) = input.root_materials {
-        let material_list: Vec<(String, String)> = mtl.materials.iter()
-            .map(|sub| (sub.name.clone(), sub.string_gen_mask.clone()))
+        let material_list: Vec<(String, String, String)> = mtl.materials.iter()
+            .map(|sub| (sub.name.clone(), sub.shader.clone(), sub.string_gen_mask.clone()))
             .collect();
         mesh_materials.push(("__root__".to_string(), material_list));
     }
@@ -4924,8 +5068,8 @@ pub fn assign_decal_materials_to_vertex_groups(input: &DecomposedInput) -> Resul
     // Add child mesh materials
     for child in &input.children {
         if let Some(ref mtl) = child.materials {
-            let material_list: Vec<(String, String)> = mtl.materials.iter()
-                .map(|sub| (sub.name.clone(), sub.string_gen_mask.clone()))
+            let material_list: Vec<(String, String, String)> = mtl.materials.iter()
+                .map(|sub| (sub.name.clone(), sub.shader.clone(), sub.string_gen_mask.clone()))
                 .collect();
             mesh_materials.push((child.entity_name.clone(), material_list));
         }

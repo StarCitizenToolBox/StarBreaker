@@ -54,6 +54,25 @@ fn screen_blocks_use_forward_compatible_sn_filecode() {
     assert_eq!(&out[32 + 40..32 + 42], b"SR");
 }
 
+#[test]
+fn startup_ui_prefix_uses_50mm_view3d_lenses() {
+    let bytes = startup_ui_prefix_bytes();
+    let lens_50 = 50.0f32.to_le_bytes();
+    let lens_100 = 100.0f32.to_le_bytes();
+
+    let count_50 = bytes
+        .windows(lens_50.len())
+        .filter(|window| *window == lens_50)
+        .count();
+    let count_100 = bytes
+        .windows(lens_100.len())
+        .filter(|window| *window == lens_100)
+        .count();
+
+    assert_eq!(count_50, 15);
+    assert_eq!(count_100, 0);
+}
+
 // ── PtrAlloc ──────────────────────────────────────────────────────────────────
 
 #[test]

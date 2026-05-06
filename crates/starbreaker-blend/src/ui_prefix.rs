@@ -300,5 +300,25 @@ fn decode_base64(input: &str) -> Vec<u8> {
 
 pub fn startup_ui_prefix_bytes() -> Vec<u8> {
     let compressed = decode_base64(STARTUP_UI_PREFIX_ZSTD_BASE64);
-    zstd::stream::decode_all(&compressed[..]).expect("embedded Blender startup UI prefix must decompress")
+    let mut bytes = zstd::stream::decode_all(&compressed[..])
+        .expect("embedded Blender startup UI prefix must decompress");
+    patch_startup_view3d_lens(&mut bytes);
+    bytes
+}
+
+fn patch_startup_view3d_lens(bytes: &mut [u8]) {
+    const LENS_100MM: [u8; 4] = 100.0f32.to_le_bytes();
+    const LENS_50MM: [u8; 4] = 50.0f32.to_le_bytes();
+
+    let mut patched = 0usize;
+    for idx in 0..bytes.len().saturating_sub(LENS_100MM.len() - 1) {
+        if bytes[idx..idx + LENS_100MM.len()] == LENS_100MM {
+            bytes[idx..idx + LENS_50MM.len()].copy_from_slice(&LENS_50MM);
+            patched += 1;
+        }
+    }
+    assert_eq!(
+        patched, 2,
+        "embedded startup UI prefix should contain two View3D 100mm lens values"
+    );
 }

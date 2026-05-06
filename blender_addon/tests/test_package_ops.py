@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import json
 from pathlib import Path
 import sys
+import tempfile
 import types
 import unittest
 
@@ -17,6 +18,8 @@ class FakeObject(dict):
         self.name = name
         self.parent = None
         self.children: list[FakeObject] = []
+        self.type = "EMPTY"
+        self.material_slots = []
 
     @property
     def children_recursive(self) -> list[FakeObject]:
@@ -40,13 +43,25 @@ class FakeObjects(list):
             super().remove(obj)
 
 
+class FakeMaterial(dict):
+    def __init__(self, name: str, *, library=None, **props):
+        super().__init__(props)
+        self.name = name
+        self.library = library
+
+
+class FakeSlot:
+    def __init__(self, material=None):
+        self.material = material
+
+
 def _load_package_ops() -> tuple[types.ModuleType, types.ModuleType]:
     bpy = sys.modules.get("bpy")
     if bpy is None:
         bpy = types.ModuleType("bpy")
         sys.modules["bpy"] = bpy
     bpy.types = types.SimpleNamespace(Context=object, Object=object, ID=object, Light=object)
-    bpy.data = types.SimpleNamespace(objects=FakeObjects(), lights=[])
+    bpy.data = types.SimpleNamespace(objects=FakeObjects(), lights=[], filepath="")
 
     mathutils = sys.modules.get("mathutils")
     if mathutils is None:
@@ -109,14 +124,19 @@ def _load_package_ops() -> tuple[types.ModuleType, types.ModuleType]:
     importer_stub.events = []
 
     class PackageImporter:
-        def __init__(self, context, package, progress_callback=None):
+        def __init__(self, context, package, progress_callback=None, package_root=None):
             self.context = context
             self.package = package
             self.progress_callback = progress_callback
+            self.package_root = package_root
 
         def import_scene(self, prefer_cycles=True, palette_id=None):
             importer_stub.events.append(("import", str(self.package.scene_path), prefer_cycles, palette_id))
             return "imported-root"
+
+        def rebuild_object_materials(self, obj, palette_id):
+            importer_stub.events.append(("rebuild", obj.name, palette_id))
+            return 1
 
     importer_stub.PackageImporter = PackageImporter
     sys.modules["sb_pkg_test_runtime.importer"] = importer_stub
@@ -196,6 +216,85 @@ class PackageOpsTests(unittest.TestCase):
             importer_stub.events,
             [("import", "/tmp/vulture/scene.json", False, "palette/test")],
         )
+
+    def test_refresh_materials_rebuilds_only_meshes_with_sidecars(self) -> None:
+        @contextmanager
+        def _no_suspend(_context):
+            yield
+
+        @contextmanager
+        def _no_mode(_context):
+            yield
+
+        package_root = FakeObject(
+            "StarBreaker RSI Aurora",
+            starbreaker_package_root=True,
+            starbreaker_scene_path="/tmp/aurora/scene.json",
+        )
+        mesh = FakeObject("hull", starbreaker_material_sidecar="hull.materials.json")
+        mesh.type = "MESH"
+        empty = FakeObject("helper", starbreaker_material_sidecar="helper.materials.json")
+        empty.type = "EMPTY"
+        mesh.parent = package_root
+        empty.parent = package_root
+        package_root.children.extend([mesh, empty])
+
+        importer_stub = sys.modules["sb_pkg_test_runtime.importer"]
+        importer_stub.events = []
+        original_suspend = self.package_ops._suspend_heavy_viewports
+        original_mode = self.package_ops._temporary_object_mode
+        try:
+            self.package_ops._suspend_heavy_viewports = _no_suspend
+            self.package_ops._temporary_object_mode = _no_mode
+            applied = self.package_ops.refresh_materials_for_package_root(
+                types.SimpleNamespace(),
+                package_root,
+                "palette/test",
+            )
+        finally:
+            self.package_ops._suspend_heavy_viewports = original_suspend
+            self.package_ops._temporary_object_mode = original_mode
+
+        self.assertEqual(applied, 1)
+        self.assertEqual(importer_stub.events, [("rebuild", "hull", "palette/test")])
+        self.assertEqual(package_root["starbreaker_palette_id"], "palette/test")
+        self.assertEqual(mesh["starbreaker_palette_id"], "palette/test")
+
+    def test_package_root_needs_material_refresh_for_linked_or_unmanaged_slots(self) -> None:
+        package_root = FakeObject("Root", starbreaker_package_root=True)
+        mesh = FakeObject("mesh", starbreaker_material_sidecar="mesh.materials.json")
+        mesh.type = "MESH"
+        mesh.parent = package_root
+        package_root.children.append(mesh)
+
+        self.assertTrue(self.package_ops.package_root_needs_material_refresh(package_root))
+
+        mesh.material_slots = [FakeSlot(FakeMaterial("linked", library=object(), starbreaker_material_identity="id"))]
+        self.assertTrue(self.package_ops.package_root_needs_material_refresh(package_root))
+
+        mesh.material_slots = [FakeSlot(FakeMaterial("local"))]
+        self.assertTrue(self.package_ops.package_root_needs_material_refresh(package_root))
+
+        mesh.material_slots = [FakeSlot(FakeMaterial("local", starbreaker_material_identity="id"))]
+        self.assertFalse(self.package_ops.package_root_needs_material_refresh(package_root))
+
+    def test_resolve_package_relative_scene_path_from_opened_blend_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scene_path = root / "Packages" / "RSI Aurora Mk2_LOD0_TEX0" / "scene.json"
+            scene_path.parent.mkdir(parents=True)
+            scene_path.write_text("{}", encoding="utf-8")
+            self.bpy.data.filepath = str(scene_path.with_suffix(".blend"))
+            package_root = FakeObject(
+                "StarBreaker RSI Aurora",
+                starbreaker_package_root=True,
+                starbreaker_scene_path="Packages/RSI Aurora Mk2_LOD0_TEX0/scene.json",
+            )
+
+            resolved = self.package_ops.resolve_package_scene_path(package_root)
+
+            self.assertEqual(resolved, scene_path)
+        self.bpy.data.filepath = ""
 
     def test_apply_paint_to_package_root_restores_base_sidecar_when_leaving_variant(self) -> None:
         @contextmanager

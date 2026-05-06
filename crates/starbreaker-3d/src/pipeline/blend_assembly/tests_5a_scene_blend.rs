@@ -82,6 +82,45 @@ fn test_submesh(material_id: u32, material_name: &str, first_index: u32) -> SubM
 }
 
 #[test]
+fn blender_uv_writer_flips_v_coordinate() {
+    let raw = expanded_blender_uv_data(&[0, 1, 2], &[[0.25, 0.75], [0.5, 0.125], [1.0, 0.0]]);
+    let values = raw
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+        .collect::<Vec<_>>();
+
+    assert_eq!(values, vec![0.25, 0.25, 0.5, 0.875, 1.0, 1.0]);
+}
+
+#[test]
+fn mesh_to_blend_exports_secondary_uv_map() {
+    let mesh = Mesh {
+        positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        indices: vec![0, 1, 2],
+        uvs: Some(vec![[0.0, 0.0], [0.5, 0.25], [1.0, 1.0]]),
+        secondary_uvs: Some(vec![[0.25, 0.75], [0.5, 0.125], [1.0, 0.0]]),
+        normals: None,
+        tangents: None,
+        colors: None,
+        submeshes: vec![test_submesh(0, "mat", 0)],
+        model_min: [0.0, 0.0, 0.0],
+        model_max: [1.0, 1.0, 0.0],
+        scaling_min: [0.0, 0.0, 0.0],
+        scaling_max: [1.0, 1.0, 0.0],
+    };
+
+    let bytes = mesh_to_blend("uv_test", &mesh, &None, None, None);
+
+    assert!(bytes.windows(b"UVMap\0".len()).any(|window| window == b"UVMap\0"));
+    assert!(bytes
+        .windows(b"UVMap.001\0".len())
+        .any(|window| window == b"UVMap.001\0"));
+    assert!(bytes
+        .windows(0.875f32.to_le_bytes().len())
+        .any(|window| window == 0.875f32.to_le_bytes()));
+}
+
+#[test]
 fn interior_placement_mesh_geometry_converts_to_scene_axes() {
     let mut mesh = Mesh {
         positions: vec![[1.0, 2.0, 3.0]],
@@ -487,6 +526,8 @@ fn test_create_scene_blend_links_object_ids_instead_of_empty_mesh_stubs() {
         name: "rsi_aurora_mk2_airlock_door_LOD0".to_string(),
         mesh_name: "rsi_aurora_mk2_airlock_door_LOD0_mesh".to_string(),
         material_names: Vec::new(),
+        material_sidecar: None,
+        palette_id: None,
         source_nodes: Vec::new(),
         source_ancestors: Vec::new(),
         source_loc: [0.0, 0.0, 0.0],
@@ -541,6 +582,8 @@ fn test_create_scene_blend_writes_addon_style_scene_anchors() {
         name: "anchor_mesh".to_string(),
         mesh_name: "anchor_mesh_data".to_string(),
         material_names: Vec::new(),
+        material_sidecar: None,
+        palette_id: None,
         source_nodes: Vec::new(),
         source_ancestors: vec![
             LinkedSourceAncestor {
@@ -612,6 +655,7 @@ fn test_create_scene_blend_writes_addon_style_scene_anchors() {
     assert_ne!(u64::from_le_bytes(local_mesh.data[344..352].try_into().unwrap()), 0);
     assert!(blend_bytes.windows(b"starbreaker_package_root".len()).any(|w| w == b"starbreaker_package_root"));
     assert!(blend_bytes.windows(b"starbreaker_mesh_asset".len()).any(|w| w == b"starbreaker_mesh_asset"));
+    assert!(blend_bytes.windows(b"Packages/AnchorEntity/scene.json".len()).any(|w| w == b"Packages/AnchorEntity/scene.json"));
     assert!(blend_bytes.windows(b"Data/Objects/Ships/anchor_mesh.blend".len()).any(|w| w == b"Data/Objects/Ships/anchor_mesh.blend"));
 }
 
@@ -630,6 +674,8 @@ fn test_interior_meshes_do_not_parent_to_global_coordinate_nodes() {
         name: "geo_body".to_string(),
         mesh_name: "geo_body_data".to_string(),
         material_names: Vec::new(),
+        material_sidecar: None,
+        palette_id: None,
         source_nodes: vec![LinkedSourceNode {
             name: "StarBreaker_Y_up".to_string(),
             parent_name: None,
@@ -662,6 +708,8 @@ fn test_interior_meshes_do_not_parent_to_global_coordinate_nodes() {
         name: "interior_panel".to_string(),
         mesh_name: "interior_panel_data".to_string(),
         material_names: Vec::new(),
+        material_sidecar: None,
+        palette_id: None,
         source_nodes: vec![
             LinkedSourceNode {
                 name: "StarBreaker_Y_up".to_string(),
@@ -734,6 +782,8 @@ fn test_create_scene_blend_uses_full_source_empty_tree_for_parent_nodes() {
         name: "root_mesh".to_string(),
         mesh_name: "root_mesh_data".to_string(),
         material_names: Vec::new(),
+        material_sidecar: None,
+        palette_id: None,
         source_nodes: vec![
             LinkedSourceNode {
                 name: "hardpoint_child".to_string(),
@@ -775,6 +825,8 @@ fn test_create_scene_blend_uses_full_source_empty_tree_for_parent_nodes() {
         name: "child_mesh".to_string(),
         mesh_name: "child_mesh_data".to_string(),
         material_names: Vec::new(),
+        material_sidecar: None,
+        palette_id: None,
         source_nodes: Vec::new(),
         source_ancestors: Vec::new(),
         source_loc: [0.0, 0.0, 0.0],
@@ -834,6 +886,8 @@ fn test_create_scene_blend_parents_source_empty_to_local_mesh_object() {
         name: "parent_mesh".to_string(),
         mesh_name: "parent_mesh_data".to_string(),
         material_names: Vec::new(),
+        material_sidecar: None,
+        palette_id: None,
         source_nodes: vec![LinkedSourceNode {
             name: "child_empty".to_string(),
             parent_name: Some("parent_mesh".to_string()),
@@ -880,6 +934,8 @@ fn test_create_scene_blend_uses_instance_local_source_parent_before_global_name(
         name: "first_instance_mesh".to_string(),
         mesh_name: "first_instance_mesh_data".to_string(),
         material_names: Vec::new(),
+        material_sidecar: None,
+        palette_id: None,
         source_nodes: vec![LinkedSourceNode {
             name: "shared_source_parent".to_string(),
             parent_name: None,
@@ -912,6 +968,8 @@ fn test_create_scene_blend_uses_instance_local_source_parent_before_global_name(
         name: "second_instance_mesh".to_string(),
         mesh_name: "second_instance_mesh_data".to_string(),
         material_names: Vec::new(),
+        material_sidecar: None,
+        palette_id: None,
         source_nodes: vec![LinkedSourceNode {
             name: "shared_source_parent".to_string(),
             parent_name: None,
@@ -965,6 +1023,8 @@ fn test_create_scene_blend_reuses_source_tree_for_same_scene_instance_mesh_refs(
         name: "decoy_mesh".to_string(),
         mesh_name: "decoy_mesh_data".to_string(),
         material_names: Vec::new(),
+        material_sidecar: None,
+        palette_id: None,
         source_nodes: vec![LinkedSourceNode {
             name: "mav_main".to_string(),
             parent_name: None,
@@ -997,6 +1057,8 @@ fn test_create_scene_blend_reuses_source_tree_for_same_scene_instance_mesh_refs(
         name: "housing_mesh".to_string(),
         mesh_name: "housing_mesh_data".to_string(),
         material_names: Vec::new(),
+        material_sidecar: None,
+        palette_id: None,
         source_nodes: vec![LinkedSourceNode {
             name: "mav_main".to_string(),
             parent_name: None,
@@ -1029,6 +1091,8 @@ fn test_create_scene_blend_reuses_source_tree_for_same_scene_instance_mesh_refs(
         name: "geo_mav_main".to_string(),
         mesh_name: "geo_mav_main_data".to_string(),
         material_names: Vec::new(),
+        material_sidecar: None,
+        palette_id: None,
         source_nodes: Vec::new(),
         source_ancestors: Vec::new(),
         source_loc: [0.0, 0.0, 0.0],
@@ -1077,6 +1141,8 @@ fn test_create_scene_blend_resolves_parent_node_against_matching_parent_entity_i
         name: "first_gimbal_mesh".to_string(),
         mesh_name: "first_gimbal_mesh_data".to_string(),
         material_names: Vec::new(),
+        material_sidecar: None,
+        palette_id: None,
         source_nodes: vec![LinkedSourceNode {
             name: "hardpoint_class_2".to_string(),
             parent_name: None,
@@ -1109,6 +1175,8 @@ fn test_create_scene_blend_resolves_parent_node_against_matching_parent_entity_i
         name: "first_weapon_mesh".to_string(),
         mesh_name: "first_weapon_mesh_data".to_string(),
         material_names: Vec::new(),
+        material_sidecar: None,
+        palette_id: None,
         source_nodes: Vec::new(),
         source_ancestors: Vec::new(),
         source_loc: [0.0, 0.0, 0.0],
@@ -1135,6 +1203,8 @@ fn test_create_scene_blend_resolves_parent_node_against_matching_parent_entity_i
         name: "second_gimbal_mesh".to_string(),
         mesh_name: "second_gimbal_mesh_data".to_string(),
         material_names: Vec::new(),
+        material_sidecar: None,
+        palette_id: None,
         source_nodes: vec![LinkedSourceNode {
             name: "hardpoint_class_2".to_string(),
             parent_name: None,
@@ -1167,6 +1237,8 @@ fn test_create_scene_blend_resolves_parent_node_against_matching_parent_entity_i
         name: "second_weapon_mesh".to_string(),
         mesh_name: "second_weapon_mesh_data".to_string(),
         material_names: Vec::new(),
+        material_sidecar: None,
+        palette_id: None,
         source_nodes: Vec::new(),
         source_ancestors: Vec::new(),
         source_loc: [0.0, 0.0, 0.0],

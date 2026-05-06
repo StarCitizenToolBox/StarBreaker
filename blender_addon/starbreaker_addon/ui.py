@@ -8,6 +8,7 @@ import bpy
 import blf
 import gpu
 import mathutils
+from bpy.app.handlers import persistent
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 from bpy.types import Operator, Panel
 from bpy_extras.io_utils import ImportHelper
@@ -22,6 +23,7 @@ from .runtime import (
     PROP_ENTITY_NAME,
     PROP_MATERIAL_SIDECAR,
     PROP_PACKAGE_NAME,
+    PROP_PACKAGE_ROOT,
     PROP_PALETTE_ID,
     PROP_SCENE_PATH,
     PROP_SHADER_FAMILY,
@@ -49,6 +51,9 @@ from .runtime import (
     solo_animation_instance,
     package_animation_instances,
     package_animation_mode_map,
+    package_root_needs_material_refresh,
+    refresh_materials_for_package_root,
+    resolve_package_scene_path,
     update_animation_instance_start_frame,
 )
 
@@ -544,16 +549,8 @@ def _selected_package(context: bpy.types.Context) -> PackageBundle | None:
     package_root = _package_root_from_context(context)
     if package_root is None:
         return None
-    scene_path = package_root.get(PROP_SCENE_PATH)
-    if not isinstance(scene_path, str) or not scene_path:
-        return None
-    resolved_scene_path = Path(scene_path)
-    if not resolved_scene_path.is_absolute():
-        blend_path = Path(bpy.data.filepath) if bpy.data.filepath else None
-        if blend_path:
-            resolved_scene_path = (blend_path.parent / resolved_scene_path).resolve()
     try:
-        return PackageBundle.load(str(resolved_scene_path))
+        return PackageBundle.load(str(resolve_package_scene_path(package_root)))
     except Exception:
         return None
 
@@ -815,6 +812,47 @@ class STARBREAKER_OT_import_progress_popup(Operator):
         percent.alignment = "RIGHT"
         percent.label(text=f"{int(round(fraction * 100.0))}%")
         layout.label(text=description)
+
+class STARBREAKER_OT_refresh_materials(Operator):
+    bl_idname = "starbreaker.refresh_materials"
+    bl_label = "Refresh Materials"
+    bl_options = {"REGISTER", "UNDO"}
+    bl_description = "Rebuild StarBreaker materials without reimporting meshes, empties, or lights"
+
+    package_root_name: StringProperty(options={"HIDDEN"}, default="")  # type: ignore[assignment]
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return _package_root_from_context(context) is not None or any(
+            bool(obj.get(PROP_PACKAGE_ROOT)) for obj in bpy.data.objects
+        )
+
+    def _package_root(self, context: bpy.types.Context) -> bpy.types.Object | None:
+        if self.package_root_name:
+            candidate = bpy.data.objects.get(self.package_root_name)
+            if candidate is not None and bool(candidate.get(PROP_PACKAGE_ROOT)):
+                return candidate
+        return _package_root_from_context(context)
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        package_root = self._package_root(context)
+        if package_root is None:
+            self.report({"ERROR"}, "Select an imported StarBreaker object first")
+            return {"CANCELLED"}
+        palette_id = package_root.get(PROP_PALETTE_ID, "")
+        try:
+            applied = refresh_materials_for_package_root(
+                context,
+                package_root,
+                palette_id if isinstance(palette_id, str) and palette_id else None,
+            )
+        except Exception as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"Refreshed {applied} material slot group(s)")
+        return {"FINISHED"}
+
+    def invoke(self, context: bpy.types.Context, event: bpy.types.Event) -> set[str]:
+        return self.execute(context)
 
 
 class STARBREAKER_OT_apply_paint(Operator):
@@ -1256,6 +1294,7 @@ class STARBREAKER_PT_tools(Panel):
 
         actions = layout.row(align=True)
         actions.operator_menu_enum(STARBREAKER_OT_apply_paint.bl_idname, "paint_id", text="Apply Paint", icon="BRUSH_DATA")
+        actions.operator(STARBREAKER_OT_refresh_materials.bl_idname, text="Refresh Materials", icon="MATERIAL")
         layout.operator(STARBREAKER_OT_dump_metadata.bl_idname, icon="TEXT")
 
         tuning = layout.box()
@@ -1438,10 +1477,33 @@ def _should_change_viewport(prefs: object | None) -> bool:
     return bool(getattr(prefs, "viewport_change_after_import", True))
 
 
+def _material_refresh_prompt_timer() -> float | None:
+    for obj in bpy.data.objects:
+        if not bool(obj.get(PROP_PACKAGE_ROOT)):
+            continue
+        if not package_root_needs_material_refresh(obj):
+            continue
+        try:
+            bpy.ops.starbreaker.refresh_materials("EXEC_DEFAULT", package_root_name=obj.name)
+        except Exception:
+            return None
+        return None
+    return None
+
+
+@persistent
+def _starbreaker_load_post(_dummy: object) -> None:
+    try:
+        bpy.app.timers.register(_material_refresh_prompt_timer, first_interval=0.5, persistent=False)
+    except Exception:
+        pass
+
+
 CLASSES = [
     STARBREAKER_AP_preferences,
     STARBREAKER_OT_import_decomposed_package,
     STARBREAKER_OT_import_progress_popup,
+    STARBREAKER_OT_refresh_materials,
     STARBREAKER_OT_apply_paint,
     STARBREAKER_OT_apply_palette,
     STARBREAKER_OT_apply_livery,
@@ -1519,10 +1581,14 @@ def register() -> None:
     )
     for cls in CLASSES:
         bpy.utils.register_class(cls)
+    if _starbreaker_load_post not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_starbreaker_load_post)
 
 
 def unregister() -> None:
     _remove_import_progress_overlay()
+    if _starbreaker_load_post in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_starbreaker_load_post)
     for cls in reversed(CLASSES):
         try:
             bpy.utils.unregister_class(cls)

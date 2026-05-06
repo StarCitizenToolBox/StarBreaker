@@ -26,6 +26,7 @@ from .constants import (
     PROP_INSTANCE_JSON,
     PROP_LIGHT_ACTIVE_STATE,
     PROP_LIGHT_STATES_JSON,
+    PROP_MATERIAL_IDENTITY,
     PROP_MATERIAL_SIDECAR,
     PROP_PACKAGE_ROOT,
     PROP_PAINT_VARIANT_SIDECAR,
@@ -209,6 +210,63 @@ def apply_livery_to_selected_package(context: bpy.types.Context, livery_id: str)
     if package_root is None:
         raise RuntimeError("Select an imported StarBreaker object first")
     return apply_livery_to_package_root(context, package_root, livery_id)
+
+
+def refresh_materials_for_package_root(
+    context: bpy.types.Context,
+    package_root: bpy.types.Object,
+    palette_id: str | None = None,
+) -> int:
+    from .importer import PackageImporter
+
+    package = _load_package_from_root(package_root)
+    importer = PackageImporter(context, package, package_root=package_root)
+    applied = 0
+    with _suspend_heavy_viewports(context), _temporary_object_mode(context):
+        for obj in _iter_package_objects(package_root):
+            if getattr(obj, "type", None) != "MESH":
+                continue
+            if _string_prop(obj, PROP_MATERIAL_SIDECAR) is None:
+                continue
+            applied += importer.rebuild_object_materials(obj, palette_id)
+            if palette_id is not None:
+                obj[PROP_PALETTE_ID] = palette_id
+        if palette_id is not None:
+            package_root[PROP_PALETTE_ID] = palette_id
+    _purge_orphaned_runtime_groups()
+    _purge_orphaned_file_backed_images()
+    return applied
+
+
+def package_root_needs_material_refresh(package_root: bpy.types.Object) -> bool:
+    for obj in _iter_package_objects(package_root):
+        if getattr(obj, "type", None) != "MESH":
+            continue
+        if _string_prop(obj, PROP_MATERIAL_SIDECAR) is None:
+            continue
+        material_slots = getattr(obj, "material_slots", ())
+        if len(material_slots) == 0:
+            return True
+        used_slot_indices = _used_material_slot_indices(obj)
+        for slot_index in used_slot_indices:
+            if slot_index >= len(material_slots):
+                return True
+            slot = material_slots[slot_index]
+            material = getattr(slot, "material", None)
+            if material is None:
+                return True
+            if getattr(material, "library", None) is not None:
+                return True
+            if _string_prop(material, PROP_MATERIAL_IDENTITY) is None:
+                return True
+    return False
+
+
+def _used_material_slot_indices(obj: bpy.types.Object) -> set[int]:
+    polygons = getattr(getattr(obj, "data", None), "polygons", None)
+    if polygons is None:
+        return set(range(len(getattr(obj, "material_slots", ()))))
+    return {int(poly.material_index) for poly in polygons}
 
 
 def dump_selected_metadata(context: bpy.types.Context) -> list[str]:
@@ -417,10 +475,33 @@ def _temporary_object_mode(context: bpy.types.Context):
 
 
 def _load_package_from_root(package_root: bpy.types.Object) -> PackageBundle:
+    scene_path = resolve_package_scene_path(package_root)
+    return PackageBundle.load(scene_path)
+
+
+def resolve_package_scene_path(package_root: bpy.types.Object) -> Path:
     scene_path = _string_prop(package_root, PROP_SCENE_PATH)
     if scene_path is None:
         raise RuntimeError("Selected object is missing StarBreaker scene metadata")
-    return PackageBundle.load(scene_path)
+    raw_path = Path(scene_path)
+    if raw_path.is_absolute():
+        return raw_path
+
+    blend_file = Path(bpy.data.filepath) if getattr(bpy.data, "filepath", "") else None
+    search_roots: list[Path] = []
+    if blend_file is not None:
+        blend_parent = blend_file.parent
+        search_roots.append(blend_parent)
+        search_roots.extend(blend_parent.parents)
+    search_roots.append(Path.cwd())
+
+    for root in search_roots:
+        candidate = (root / raw_path).resolve()
+        if candidate.is_file():
+            return candidate
+    if blend_file is not None:
+        return (blend_file.parent / raw_path).resolve()
+    return raw_path.resolve()
 
 
 def _scene_instance_from_object(obj: bpy.types.Object) -> SceneInstanceRecord | None:

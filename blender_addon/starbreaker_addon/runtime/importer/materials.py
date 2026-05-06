@@ -92,6 +92,7 @@ class MaterialsMixin:
 
         reusable = self._reusable_material(sidecar_path, sidecar, submaterial, palette, palette_scope, cache_key)
         if reusable is not None:
+            reusable = self._local_editable_material(reusable, cache_key)
             existing_identity = reusable.get(PROP_MATERIAL_IDENTITY)
             existing_template_key = reusable.get(PROP_TEMPLATE_KEY)
             if (
@@ -113,6 +114,35 @@ class MaterialsMixin:
         self.material_cache[cache_key] = material
         self.material_identity_index[cache_key] = material
         return material
+
+
+
+    def _local_editable_material(self, material: bpy.types.Material, material_identity: str) -> bpy.types.Material:
+        if getattr(material, "library", None) is None:
+            return material
+
+        self._ensure_material_identity_index()
+        indexed_material = self.material_identity_index.get(material_identity)
+        if indexed_material is not None and getattr(indexed_material, "library", None) is None:
+            return indexed_material
+
+        for candidate in bpy.data.materials:
+            if candidate is material:
+                continue
+            if getattr(candidate, "library", None) is not None:
+                continue
+            if candidate.get(PROP_MATERIAL_IDENTITY) == material_identity:
+                self.material_identity_index[material_identity] = candidate
+                return candidate
+
+        local_material = material.copy()
+        try:
+            local_material.name = material.name
+        except Exception:
+            pass
+        local_material[PROP_MATERIAL_IDENTITY] = material_identity
+        self.material_identity_index[material_identity] = local_material
+        return local_material
 
 
 
@@ -997,5 +1027,4 @@ class MaterialsMixin:
 
     def _link_color_output(self, output: Any, input_socket: Any) -> None:
         output.node.id_data.links.new(output, input_socket)
-
 

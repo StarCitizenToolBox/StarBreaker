@@ -70,6 +70,9 @@ from .package_ops import (
     exterior_palette_ids,
     find_package_root,
     import_package,
+    package_root_needs_material_refresh,
+    refresh_materials_for_package_root,
+    resolve_package_scene_path,
     insert_animation_clip_at_frame,
     package_animation_instances,
     package_animation_mode_map,
@@ -77,4 +80,3 @@ from .package_ops import (
     solo_animation_instance,
     update_animation_instance_start_frame,
 )
-

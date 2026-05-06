@@ -92,13 +92,21 @@ class FakeNodeTree:
 
 class FakeMaterial(dict):
     def __init__(self, name: str, **props):
+        library = props.pop("library", None)
         super().__init__(props)
         self.name = name
         self.node_tree = FakeNodeTree()
         self.use_nodes = True
+        self.library = library
+
+    def copy(self):
+        return FakeMaterial(self.name, library=None, **dict(self))
 
 
 class FakeMaterialsCollection(dict):
+    def __iter__(self):
+        return iter(self.values())
+
     def get(self, name: str, default=None):
         return super().get(name, default)
 
@@ -538,6 +546,51 @@ class MaterialReuseTests(unittest.TestCase):
             self.assertIs(material, stale)
             self.assertEqual(importer.rebuild_calls, [stale.name])
             self.assertEqual(material[PROP_TEMPLATE_KEY], "nodraw")
+        finally:
+            bpy.data.materials = original_materials
+
+    @unittest.skipUnless(
+        VULTURE_ALT_A.is_file(),
+        "Vulture fixtures not present; skipping material localization regression test",
+    )
+    def test_linked_reusable_material_is_copied_before_rebuild(self) -> None:
+        sidecar = MaterialSidecar.from_file(VULTURE_ALT_A)
+        submaterial = next(
+            candidate
+            for candidate in sidecar.submaterials
+            if candidate.submaterial_name == "livery_decal"
+        )
+
+        bpy = sys.modules["bpy"]
+        original_materials = getattr(bpy.data, "materials", None)
+        materials = FakeMaterialsCollection()
+        bpy.data.materials = materials
+        try:
+            sidecar_path = _canonical_material_sidecar_path("", sidecar)
+            palette_scope = "test-scope"
+            material_identity = _material_identity(sidecar_path, sidecar, submaterial, None, palette_scope)
+            linked = FakeMaterial(
+                submaterial.blender_material_name or "DRAK_Vulture:livery_decal",
+                library=object(),
+                **{
+                    PROP_TEMPLATE_KEY: "wrong-template",
+                    PROP_MATERIAL_IDENTITY: material_identity,
+                    PROP_MATERIAL_SIDECAR: sidecar_path,
+                    PROP_SUBMATERIAL_JSON: json.dumps(submaterial.raw, sort_keys=True),
+                    PROP_PALETTE_SCOPE: palette_scope,
+                },
+            )
+            materials[linked.name] = linked
+
+            importer = MaterialReuseImporterUnderTest()
+            material = importer.material_for_submaterial(sidecar_path, sidecar, submaterial, None)
+            second = importer.material_for_submaterial(sidecar_path, sidecar, submaterial, None)
+
+            self.assertIsNot(material, linked)
+            self.assertIs(second, material)
+            self.assertIsNone(material.library)
+            self.assertEqual(material[PROP_MATERIAL_IDENTITY], material_identity)
+            self.assertEqual(importer.rebuild_calls, [material.name])
         finally:
             bpy.data.materials = original_materials
 

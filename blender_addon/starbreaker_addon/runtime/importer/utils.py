@@ -188,7 +188,13 @@ def _palette_group_name(package_name: str, palette_scope: str) -> str:
 
 def _canonical_source_name(name: str) -> str:
     if len(name) > 4 and name[-4] == "." and name[-3:].isdigit():
-        return name[:-4]
+        name = name[:-4]
+    if "_mtl_" in name:
+        material_name = name.rsplit("_mtl_", 1)[1]
+        stem, separator, suffix = material_name.rpartition("_")
+        if separator and suffix.isdigit():
+            return stem
+        return material_name
     return name
 
 
