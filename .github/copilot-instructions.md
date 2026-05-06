@@ -7,13 +7,22 @@ from `Data.p4k`. The workspace includes the CLI (`cli/`, binary
 Blender addon (`blender_addon/`). Read `AGENTS.md` first for the full project
 rules; read `blender_addon/AGENTS.md` before editing addon code.
 
-The parent workspace also has root-level instructions at
-`../.github/copilot-instructions.md`. Read and follow those instructions too,
-especially the mandatory Visual Fix Loop (VFL) for Blender-visible behavior,
-addon/Tauri UI behavior, subjective visual fixes, and user-verified performance
-work. If this repo is opened directly and the parent file is not visible, apply
-the VFL rules from the workspace copy before committing visual or interactive
-fixes.
+## Required first reads
+
+Before planning or editing, read the relevant instruction files in this order:
+
+1. `AGENTS.md` in the StarBreaker root.
+2. `blender_addon/AGENTS.md` before any Blender addon work.
+3. This file (`StarBreaker/.github/copilot-instructions.md`).
+
+Do not rely on memory when these files are available. Re-read them when changing
+component, starting a new phase, or resuming after a long interruption.
+
+## Context: Parent workspace and this repo
+
+- The parent workspace root is at `../../` and contains `AGENTS.md`, `.github/copilot-instructions.md`, and documentation.
+- StarBreaker is the main git repository; work inside this folder.
+- Workspace-level guidance applies here too. Follow both this file and the parent workspace instructions.
 
 ## Build, test, and lint commands
 
@@ -147,16 +156,29 @@ SC_DATA_P4K="$HOME/Games/star-citizen/drive_c/Program Files/Roberts Space Indust
   Then purge cached `starbreaker_addon` modules, reset the scene, and re-enable
   the addon before validating.
 
+## Mandatory troubleshooting principles
+
+- Fix root causes, not symptoms.
+- Do not add fallback defaults, clamps, broad catches, silent early returns, or
+  placeholder data unless the surrounding code already has a documented,
+  intentional pattern for that exact behavior.
+- **No heuristics or hard-coded asset fixes in production code.**
+  - Do not gate code on a specific ship, object name, mesh name, material name,
+    texture path, asset path, item ID, or instance suffix.
+  - Do not use branches like `if name == ...` or `matches!(asset_path, ...)` for
+    exporter behavior.
+  - Named assets are acceptable ONLY in regression tests, diagnostics, temporary
+    repro scripts, and validation notes.
+  - A production fix must be derived from structural source data such as NMC node
+    metadata, transform basis, geometry flags, shader family, blend mode,
+    material XML, `.chrparams`, DBA/CAF metadata, DataCore records, or Blender
+    SDNA/API behavior.
+  - If the structural rule is not known, investigate it with StarBreaker MCP,
+    Blender MCP, source data, and tests. Do not commit a name-matched workaround
+    as a temporary fix.
+
 ## Key conventions
 
-- No heuristics or hard-coded asset fixes in production code. Do not gate code
-  on a specific ship, object name, mesh name, asset path, material name, item
-  ID, or instance suffix. Avoid branches like `if name == ...` or
-  `matches!(asset_path, ...)` for exporter behavior. Named assets are acceptable
-  in regression tests, diagnostics, and repro scripts only; the production fix
-  must derive a structural rule from Star Citizen/CryEngine data such as NMC
-  node metadata, transform basis, geometry flags, shader family, blend mode,
-  material XML, `.chrparams`, or DataCore records, then fix the whole category.
 - New Rust source files must start with a `//!` module-doc header describing the
   file responsibility, important public types, and key functions. Update the
   header when the file's role changes.
@@ -173,3 +195,163 @@ SC_DATA_P4K="$HOME/Games/star-citizen/drive_c/Program Files/Roberts Space Indust
   `docs/blender-material-contract-naming-rules.md` and related docs.
 - Do not run multiple cargo builds/tests in parallel against the same target
   directory; agents sharing the same build output can race.
+
+## Visual Fix Loop (VFL)
+
+### Purpose
+
+Use VFL for any task where correctness is visual, interactive, subjective, or
+hard to prove with programmatic tests alone.
+
+VFL applies to:
+
+- Blender visuals: lighting, UVs, materials, decals, transforms, render output,
+  linked libraries, view settings, hierarchy, and scene assembly.
+- Blender addon UI/UX and import behavior.
+- Tauri UI/UX.
+- Performance where the user-visible result cannot be fully measured by an
+  existing automated test.
+
+The goal is to validate fixes in Blender through MCP whenever possible before
+spending time on Rust rebuild, re-export, and user-verification cycles.
+
+### Entry conditions
+
+Enter VFL when any one of these is true:
+
+- The output must be visually verified.
+- The result is unclear, subjective, or depends on user perception.
+- A fix may require rebuild/re-export/reload to validate.
+- The user is unsure whether a previous fix worked.
+- The task affects Blender scene appearance, addon behavior, Tauri UI behavior,
+  or perceived performance.
+
+When VFL applies, explicitly follow the VFL loop. Do not silently switch to a
+normal code-only workflow.
+
+### Core rules
+
+1. **MCP first**
+   - Blender MCP is the only live validation path.
+   - If a fix can be tested or approximated in the current Blender instance,
+     test or prototype it there before modifying Rust.
+   - Do not trigger Rust rebuilds or full re-exports until they are necessary to
+     make the fix persistent or to test behavior that cannot be exercised live.
+
+2. **Strict loop**
+   Repeat these steps until the user confirms success or tells you to stop:
+   - Research the issue. Use sub-agents when the investigation can be safely
+     parallelized.
+   - Write or update the plan.
+   - Implement one focused fix.
+   - Test in the current Blender instance with MCP if possible.
+   - If MCP-only validation is impossible, rebuild/re-export/reload and then
+     test.
+   - Ask the user to verify using the question tool.
+
+3. **User verification required**
+   - Every attempted visual or interactive fix is a hypothesis.
+   - Never claim a VFL fix is complete until the user confirms it.
+   - After every attempt, ask the user to verify using the question tool.
+
+4. **Question tool rules (MANDATORY)**
+   - **ALWAYS use the question tool** for VFL verification. Never ask in plain text.
+   - Ask one clear question.
+   - Include a clear success choice, such as `Yes, this is fixed`.
+   - **Always provide a free-text input option** so the user can explain what is
+     still wrong or partially working.
+   - If multiple issues are in scope, the question must let the user confirm
+     that all scoped issues are fixed or describe which issue remains.
+
+5. **Assume failure until confirmed**
+   - Treat every fix as unconfirmed until the user says it worked.
+   - If the user reports failure or partial success, continue the VFL loop.
+   - Do not commit VFL fixes until the scoped issues are confirmed fixed unless
+     the user explicitly instructs you to commit an intermediate state.
+
+### Rust and Tauri workflow inside VFL
+
+Use this sequence when a change cannot be validated only through MCP:
+
+1. Prototype or approximate the behavior in Blender MCP if possible.
+2. Implement the persistent fix in Rust, Python, or Tauri code.
+3. Run the smallest relevant build/test command.
+4. Rebuild/re-export/reload only what is required.
+5. Validate in Blender MCP or the relevant UI.
+6. Ask the user for confirmation using the question tool.
+7. Repeat until confirmed.
+
+### Performance inside VFL
+
+If VFL work makes load, refresh, import, render setup, or UI interaction slower:
+
+- Treat the slowdown as part of the same task.
+- Investigate and fix it before exiting VFL.
+- Prefer existing profiling tools. If a profiler was previously created and
+  removed, recreate it and keep it for future use.
+- Preserve behavior while optimizing. For exported `.blend` assets, compare
+  selected MD5 sums before and after performance changes when the task requires
+  binary stability.
+
+### Crash handling
+
+If Blender crashes during MCP use:
+
+1. Stop the current validation attempt.
+2. Identify the likely cause from recent changes or the last MCP operation.
+3. Add a prevention fix or reduce the repro to a stable operation.
+4. Resume testing only after the crash cause is addressed or isolated.
+
+If Blender must be restarted:
+
+- Ask the user using the question tool to restart Blender.
+- Wait for confirmation before continuing MCP validation.
+- Do not ignore Blender crashes or treat them as unrelated unless proven.
+
+### Scope control
+
+- Stay focused on the current VFL plan.
+- If the user reports a new issue that is a regression from current changes, fix
+  it inside the same VFL loop.
+- If the user reports an unrelated issue, record it in the plan or task notes,
+  then ask using the question tool whether it should be added to the current
+  plan.
+- Continue the current task unless the user explicitly changes priority.
+
+### Exit conditions
+
+Exit VFL only when one of these is true:
+
+- The user explicitly confirms all scoped issues are fixed.
+- The user tells you to stop, pause, commit an intermediate state, or move on.
+
+### Key principle
+
+Blender MCP is the fastest feedback loop for Blender-visible behavior. Use it
+whenever possible. Rebuild only when required.
+
+## Planning and sub-agents
+
+- Use sub-agents when work decomposes into independent research, implementation,
+  or review tracks.
+- Do not run parallel agents that will race on the same Cargo target directory,
+  generated export root, Blender instance, or mutable file set.
+- Give sub-agents complete context, including the no-hardcoding rule, relevant
+  file paths, validation target, and required tests.
+- Require sub-agents doing code work to self-review for architecture,
+  integration, tests, error handling, conventions, regressions, performance, and
+  documentation before reporting complete.
+- After sub-agent work, perform a manager review before accepting the result.
+
+## Asking questions about planning and next steps
+
+When asking the user about planning decisions or what to do next (e.g., which
+of multiple options to pursue, whether to move to a different task, whether to
+prioritize a discovered issue), **ALWAYS use the question tool**.
+
+Provide:
+- A clear question.
+- Relevant options as choices (if multiple discrete options exist).
+- A free-text input option so the user can explain or suggest alternatives.
+
+Never ask planning questions in plain text output.
