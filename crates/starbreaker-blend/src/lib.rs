@@ -13,7 +13,10 @@ use std::io::Write;
 use rustc_hash::FxHashMap;
 use zstd::Encoder;
 
+mod idprop;
 mod ui_prefix;
+
+pub use idprop::{allocate_idprop_blocks, write_idprop_blocks, IdPropBlocks};
 pub use ui_prefix::{startup_ui_prefix_bytes, STARTUP_UI_SCREEN_PTR};
 
 pub const DNA1_BYTES: &[u8] = include_bytes!("dna1_blender501.bin");
