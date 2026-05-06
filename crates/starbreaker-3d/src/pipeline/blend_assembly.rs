@@ -230,14 +230,6 @@ fn scene_source_empty_name(instance_name: &str, ancestor_index: usize, ancestor_
     format!("{instance_name}_{ancestor_index}_{ancestor_name}")
 }
 
-fn should_use_reference_baked_fixture_transform(instance: &LinkedMeshInstance) -> bool {
-    instance.is_interior
-        && instance.mesh_asset.ends_with(
-            "Data/Objects/Spaceships/Ships/RSI/aurora_mk2/interior/rsi_aurora_mk2_armor_locker_LOD0.blend",
-        )
-        && instance.source_object_name == "geo_armor_locker"
-}
-
 fn unique_scene_object_name(base: &str, used: &mut HashMap<String, usize>) -> String {
     let count = used.entry(base.to_string()).or_insert(0);
     let name = if *count == 0 {
@@ -1016,17 +1008,6 @@ fn mesh_to_blend_flat(
     materials: &Option<crate::mtl::MtlFile>,
     vertex_groups: Option<&Vec<VertexGroup>>,
 ) -> Vec<u8> {
-    let converted_mesh;
-    let mesh = if should_convert_aurora_interior_mesh_data(name) {
-        converted_mesh = {
-            let mut mesh = mesh.clone();
-            convert_mesh_geometry_to_scene_axes(&mut mesh);
-            mesh
-        };
-        &converted_mesh
-    } else {
-        mesh
-    };
     let totvert = mesh.positions.len();
     let totloop = mesh.indices.len();
     let totpoly = totloop / 3;
@@ -1454,6 +1435,23 @@ struct MeshObjectExport {
     vertex_groups: Option<Vec<VertexGroup>>,
 }
 
+fn empty_anchor_mesh() -> Mesh {
+    Mesh {
+        positions: Vec::new(),
+        indices: Vec::new(),
+        uvs: None,
+        secondary_uvs: None,
+        normals: None,
+        tangents: None,
+        colors: None,
+        submeshes: Vec::new(),
+        model_min: [0.0; 3],
+        model_max: [0.0; 3],
+        scaling_min: [0.0; 3],
+        scaling_max: [0.0; 3],
+    }
+}
+
 struct MeshBlockData {
     object_ptr: u64,
     mesh_ptr: u64,
@@ -1877,70 +1875,6 @@ fn matrix_to_transform(matrix: [f32; 16]) -> ([f32; 3], [f32; 4], [f32; 3]) {
         [rotation.w, rotation.x, rotation.y, rotation.z],
         [scale.x, scale.y, scale.z],
     )
-}
-
-fn should_convert_aurora_interior_mesh_data(asset_name: &str) -> bool {
-    matches!(
-        strip_lod_suffix(asset_name).as_str(),
-        "rsi_aurora_bulkhead_c"
-            | "rsi_aurora_mk2_airlock_wall"
-            | "rsi_aurora_mk2_armor_locker_doors"
-            | "rsi_aurora_mk2_armor_locker"
-            | "rsi_aurora_mk2_bed"
-            | "rsi_aurora_mk2_bulkhead_a"
-            | "rsi_aurora_mk2_bulkhead_b"
-            | "rsi_aurora_mk2_cockpit_ceiling"
-            | "rsi_aurora_mk2_cockpit_wall_right"
-            | "rsi_aurora_mk2_component_housing_door"
-            | "rsi_aurora_mk2_foyer_ceiling"
-            | "rsi_aurora_mk2_foyer_floor"
-            | "rsi_aurora_mk2_foyer_wall_right"
-            | "rsi_aurora_mk2_foyer_weapon_rack"
-            | "rsi_aurora_mk2_habitation_backwall"
-            | "rsi_aurora_mk2_habitation_ceiling"
-            | "rsi_aurora_mk2_habitation_floor"
-            | "rsi_aurora_mk2_habitation_wall_left"
-            | "rsi_aurora_mk2_habitation_wall_right"
-            | "rsi_aurora_mk2_personal_locker"
-            | "fire_extinguisher_cabinet_nozzle_only_metric"
-            | "gdgt_fps_kegr_fire_extinguisher"
-    )
-}
-
-fn scene_axis_convert_vec3(value: [f32; 3]) -> [f32; 3] {
-    [value[0], -value[2], value[1]]
-}
-
-fn convert_mesh_geometry_to_scene_axes(mesh: &mut Mesh) {
-    for position in &mut mesh.positions {
-        *position = scene_axis_convert_vec3(*position);
-    }
-    if let Some(normals) = mesh.normals.as_mut() {
-        for normal in normals {
-            *normal = scene_axis_convert_vec3(*normal);
-        }
-    }
-    if let Some(tangents) = mesh.tangents.as_mut() {
-        for tangent in tangents {
-            let converted = scene_axis_convert_vec3([tangent[0], tangent[1], tangent[2]]);
-            tangent[0] = converted[0];
-            tangent[1] = converted[1];
-            tangent[2] = converted[2];
-        }
-    }
-
-    let mut min = [f32::INFINITY; 3];
-    let mut max = [f32::NEG_INFINITY; 3];
-    for position in &mesh.positions {
-        for axis in 0..3 {
-            min[axis] = min[axis].min(position[axis]);
-            max[axis] = max[axis].max(position[axis]);
-        }
-    }
-    mesh.model_min = min;
-    mesh.model_max = max;
-    mesh.scaling_min = min;
-    mesh.scaling_max = max;
 }
 
 fn patch_object_parent_transform(
@@ -2450,12 +2384,6 @@ fn mesh_to_blend_hierarchy(
             && mesh_objects.get(index).and_then(|object| object.as_ref()).is_none())
         .then_some(index)
     });
-    if should_convert_aurora_interior_mesh_data(name) {
-        for mesh_object in mesh_objects.iter_mut().filter_map(|object| object.as_mut()) {
-            convert_mesh_geometry_to_scene_axes(&mut mesh_object.mesh);
-        }
-    }
-
     let mut ptrs = PtrAlloc::new(0x1000);
     let _screen_ptr = ptrs.alloc();
     let _wm_ptr = ptrs.alloc();
@@ -2495,6 +2423,25 @@ fn mesh_to_blend_hierarchy(
             })
         })
         .collect::<Vec<_>>();
+    let fallback_anchor = if mesh_objects.iter().all(Option::is_none) {
+        let fallback_object = MeshObjectExport {
+            name: name.to_string(),
+            mesh: empty_anchor_mesh(),
+            vertex_groups: None,
+        };
+        let (local_slot_by_material_id, material_slot_indices) =
+            local_material_slot_map(&fallback_object.mesh, &submesh_slot_by_material_id);
+        let fallback_block = allocate_mesh_block(
+            &mut ptrs,
+            &fallback_object.mesh,
+            None,
+            &local_slot_by_material_id,
+            material_slot_indices,
+        );
+        Some((fallback_object, fallback_block))
+    } else {
+        None
+    };
     let material_ptrs = (0..material_names.len()).map(|_| ptrs.alloc()).collect::<Vec<_>>();
     let material_idprops = material_names
         .iter()
@@ -2510,7 +2457,10 @@ fn mesh_to_blend_hierarchy(
     let base_ptr = ptrs.alloc();
     let collection_ptr = ptrs.alloc();
     let layer_collection_ptr = ptrs.alloc();
-    let object_count = 3 + nmc.nodes.len() - usize::from(collapsed_wrapper_node.is_some());
+    let object_count = 3
+        + usize::from(fallback_anchor.is_some())
+        + nmc.nodes.len()
+        - usize::from(collapsed_wrapper_node.is_some());
     let collection_object_ptrs = (0..object_count).map(|_| ptrs.alloc()).collect::<Vec<_>>();
 
     let scene_data = build_scene_with_motion_blur_curve_and_properties(
@@ -2537,6 +2487,7 @@ fn mesh_to_blend_hierarchy(
     let object_ptr_sequence = std::iter::once(orientation_root_ptr)
         .chain(std::iter::once(coord_root_ptr))
         .chain(std::iter::once(wrapper_ptr))
+        .chain(fallback_anchor.as_ref().map(|(_, block)| block.object_ptr))
         .chain(
             nmc_object_ptrs
                 .iter()
@@ -2607,6 +2558,17 @@ fn mesh_to_blend_hierarchy(
     write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, wrapper_ptr, 1, &wrapper_data);
     write_block(&mut out, b"DATA", 0, wrapper_mat_ptr, 1, &build_mat_ptr_array(0));
     write_block(&mut out, b"DATA", 0, wrapper_matbits_ptr, 1, &build_matbits(0));
+
+    if let Some((fallback_object, fallback_block)) = &fallback_anchor {
+        write_mesh_block(
+            &mut out,
+            fallback_block,
+            fallback_object,
+            &material_ptrs,
+            wrapper_ptr,
+            ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0]),
+        );
+    }
 
     for (node_index, node) in nmc.nodes.iter().enumerate() {
         if collapsed_wrapper_node == Some(node_index) {
@@ -2920,6 +2882,7 @@ fn create_scene_blend_package_with_instances(
     let mut parent_empty_entries = Vec::new();
     let mut parent_empty_ptr_by_name = HashMap::new();
     let mut source_node_ptr_by_name = HashMap::new();
+    let mut source_node_ptrs_by_scene_instance: HashMap<usize, HashMap<String, u64>> = HashMap::new();
     let mut local_source_node_ptrs_by_instance = Vec::new();
     let preallocated_local_object_ptrs = (0..children_count).map(|_| ptrs.alloc()).collect::<Vec<_>>();
     let mut source_object_ptr_by_name = HashMap::new();
@@ -2990,6 +2953,11 @@ fn create_scene_blend_package_with_instances(
                         local_source_node_ptrs
                             .get(name)
                             .or_else(|| {
+                                source_node_ptrs_by_scene_instance
+                                    .get(&instance.scene_instance_id)
+                                    .and_then(|nodes| nodes.get(name))
+                            })
+                            .or_else(|| {
                                 source_object_ptrs_by_scene_instance
                                     .get(&instance.scene_instance_id)
                                     .and_then(|objects| objects.get(name))
@@ -3000,6 +2968,12 @@ fn create_scene_blend_package_with_instances(
                     .unwrap_or(anchor_ptr)
             };
             scene_source_node_entries.push((*empty_ptr, idx, *node_index, parent_ptr));
+        }
+        if !local_source_node_ptrs.is_empty() {
+            source_node_ptrs_by_scene_instance
+                .entry(instance.scene_instance_id)
+                .or_default()
+                .extend(local_source_node_ptrs.iter().map(|(name, ptr)| (name.clone(), *ptr)));
         }
         local_source_node_ptrs_by_instance.push(local_source_node_ptrs);
         let mesh_id_ptr = ptrs.alloc();
@@ -3036,12 +3010,25 @@ fn create_scene_blend_package_with_instances(
                                     .get(parent_idx)
                                     .and_then(|nodes| nodes.get(name))
                                     .copied()
+                                    .or_else(|| {
+                                        source_node_ptrs_by_scene_instance
+                                            .get(&candidate.scene_instance_id)
+                                            .and_then(|nodes| nodes.get(name))
+                                            .copied()
+                                    })
                                     .or_else(|| (candidate.name == *name).then_some(preallocated_local_object_ptrs[parent_idx]))
                             })
                     })
                     .or_else(|| {
-                        source_node_ptr_by_name
-                            .get(name)
+                        source_node_ptrs_by_scene_instance
+                            .get(&instance.scene_instance_id)
+                            .and_then(|nodes| nodes.get(name))
+                            .or_else(|| source_node_ptr_by_name.get(name))
+                            .or_else(|| {
+                                source_object_ptrs_by_scene_instance
+                                    .get(&instance.scene_instance_id)
+                                    .and_then(|objects| objects.get(name))
+                            })
                             .or_else(|| source_object_ptr_by_name.get(name))
                             .copied()
                     })
@@ -3062,12 +3049,17 @@ fn create_scene_blend_package_with_instances(
                 }
                 local_source_node_ptrs_by_instance[idx]
                     .get(name)
-                    .or_else(|| source_node_ptr_by_name.get(name))
+                    .or_else(|| {
+                        source_node_ptrs_by_scene_instance
+                            .get(&instance.scene_instance_id)
+                            .and_then(|nodes| nodes.get(name))
+                    })
                     .or_else(|| {
                         source_object_ptrs_by_scene_instance
                             .get(&instance.scene_instance_id)
                             .and_then(|objects| objects.get(name))
                     })
+                    .or_else(|| source_node_ptr_by_name.get(name))
                     .or_else(|| source_object_ptr_by_name.get(name))
             })
             .copied()
@@ -3093,6 +3085,11 @@ fn create_scene_blend_package_with_instances(
                         package_coll_obj_ptrs.push((empty_coll_obj_ptr, empty_ptr));
                     }
                     source_node_ptr_by_name
+                        .entry(instance.source_ancestors[ancestor_index].name.clone())
+                        .or_insert(empty_ptr);
+                    source_node_ptrs_by_scene_instance
+                        .entry(instance.scene_instance_id)
+                        .or_default()
                         .entry(instance.source_ancestors[ancestor_index].name.clone())
                         .or_insert(empty_ptr);
                     ancestor_ptrs.push(empty_ptr);
@@ -3360,18 +3357,12 @@ fn create_scene_blend_package_with_instances(
             material_slot_count,
             object_idprops.as_ref().map(|props| props.root_ptr).unwrap_or(0),
         );
-        let (source_loc, source_quat, source_scale) =
-            if should_use_reference_baked_fixture_transform(instance) {
-                ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
-            } else {
-                (instance.source_loc, instance.source_quat, instance.source_scale)
-            };
         patch_object_parent_transform(
             &mut object_data,
             *parent_anchor_ptr,
-            source_loc,
-            source_quat,
-            source_scale,
+            instance.source_loc,
+            instance.source_quat,
+            instance.source_scale,
         );
         local_mesh_object_data.push((
             *object_ptr,
@@ -3840,6 +3831,57 @@ mod tests_5a_scene_blend {
         assert_eq!(u64::from_le_bytes(cry_root.data[496..504].try_into().unwrap()), orientation.old_ptr);
         assert!((f32::from_le_bytes(orientation.data[820..824].try_into().unwrap()) - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.0001);
         assert!((f32::from_le_bytes(orientation.data[824..828].try_into().unwrap()) - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.0001);
+    }
+
+    #[test]
+    fn empty_only_nmc_asset_writes_linkable_anchor_mesh() {
+        let identity = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ];
+        let nmc = NodeMeshCombo {
+            nodes: vec![
+                crate::nmc::NmcNode {
+                    name: "EmptyHelper".to_string(),
+                    parent_index: None,
+                    world_to_bone: identity,
+                    bone_to_world: identity,
+                    scale: [1.0; 3],
+                    geometry_type: 3,
+                    properties: HashMap::new(),
+                },
+                crate::nmc::NmcNode {
+                    name: "IP_child".to_string(),
+                    parent_index: Some(0),
+                    world_to_bone: identity,
+                    bone_to_world: identity,
+                    scale: [1.0; 3],
+                    geometry_type: 3,
+                    properties: HashMap::new(),
+                },
+            ],
+            material_indices: Vec::new(),
+        };
+
+        let blend_bytes = mesh_to_blend("EmptyHelper_LOD0", &empty_anchor_mesh(), &None, Some(&nmc), None);
+        let blocks = parse_blend_blocks(&blend_bytes);
+
+        assert_eq!(
+            blocks
+                .iter()
+                .filter(|block| block.code == b"ME\0\0")
+                .count(),
+            1,
+            "empty-only helper assets still need a real mesh datablock for scene library links"
+        );
+        let (linked_refs, source_nodes) = blend_link_data_from_bytes(&blend_bytes);
+        assert_eq!(linked_refs.len(), 1);
+        assert_eq!(linked_refs[0].mesh_name, "EmptyHelper_LOD0");
+        assert!(
+            source_nodes.iter().any(|node| node.name == "IP_child"),
+            "the helper source-empty tree must still be available for child parenting"
+        );
     }
 
     #[test]
@@ -4402,6 +4444,118 @@ mod tests_5a_scene_blend {
             u64::from_le_bytes(second_mesh.data[496..504].try_into().unwrap()),
             second_parent.old_ptr,
             "second instance should not attach to the first instance's source parent clone"
+        );
+    }
+
+    #[test]
+    fn test_create_scene_blend_reuses_source_tree_for_same_scene_instance_mesh_refs() {
+        let global_decoy = LinkedMeshInstance {
+            scene_instance_id: 0,
+            entity_name: "decoy_mesh".to_string(),
+            parent_entity_name: None,
+            parent_empty_name: None,
+            parent_empty_loc: [0.0, 0.0, 0.0],
+            parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+            parent_empty_scale: [1.0, 1.0, 1.0],
+            is_interior: false,
+            source_object_name: "decoy_mesh".to_string(),
+            name: "decoy_mesh".to_string(),
+            mesh_name: "decoy_mesh_data".to_string(),
+            material_names: Vec::new(),
+            source_nodes: vec![LinkedSourceNode {
+                name: "mav_main".to_string(),
+                parent_name: None,
+                loc: [0.0, 0.0, 0.0],
+                quat: [1.0, 0.0, 0.0, 0.0],
+                scale: [1.0, 1.0, 1.0],
+            }],
+            source_ancestors: Vec::new(),
+            source_loc: [0.0, 0.0, 0.0],
+            source_quat: [1.0, 0.0, 0.0, 0.0],
+            source_scale: [1.0, 1.0, 1.0],
+            source_parent_name: Some("mav_main".to_string()),
+            parent_node_name: None,
+            blend_path: "//../../Data/Objects/Ships/decoy.blend".to_string(),
+            mesh_asset: "Data/Objects/Ships/decoy.blend".to_string(),
+            position: [0.0, 0.0, 0.0],
+            rotation: [1.0, 0.0, 0.0, 0.0],
+            scale: [1.0, 1.0, 1.0],
+        };
+        let instance_source_tree_holder = LinkedMeshInstance {
+            scene_instance_id: 1,
+            entity_name: "mav_housing".to_string(),
+            parent_entity_name: None,
+            parent_empty_name: None,
+            parent_empty_loc: [0.0, 0.0, 0.0],
+            parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+            parent_empty_scale: [1.0, 1.0, 1.0],
+            is_interior: false,
+            source_object_name: "housing_mesh".to_string(),
+            name: "housing_mesh".to_string(),
+            mesh_name: "housing_mesh_data".to_string(),
+            material_names: Vec::new(),
+            source_nodes: vec![LinkedSourceNode {
+                name: "mav_main".to_string(),
+                parent_name: None,
+                loc: [0.0, 0.0, 0.0],
+                quat: [1.0, 0.0, 0.0, 0.0],
+                scale: [1.0, 1.0, 1.0],
+            }],
+            source_ancestors: Vec::new(),
+            source_loc: [0.0, 0.0, 0.0],
+            source_quat: [1.0, 0.0, 0.0, 0.0],
+            source_scale: [1.0, 1.0, 1.0],
+            source_parent_name: Some("mav_main".to_string()),
+            parent_node_name: None,
+            blend_path: "//../../Data/Objects/Ships/mav.blend".to_string(),
+            mesh_asset: "Data/Objects/Ships/mav.blend".to_string(),
+            position: [0.0, 0.0, 0.0],
+            rotation: [1.0, 0.0, 0.0, 0.0],
+            scale: [1.0, 1.0, 1.0],
+        };
+        let second_mesh_ref_same_scene_instance = LinkedMeshInstance {
+            scene_instance_id: 1,
+            entity_name: "geo_mav_main".to_string(),
+            parent_entity_name: None,
+            parent_empty_name: None,
+            parent_empty_loc: [0.0, 0.0, 0.0],
+            parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+            parent_empty_scale: [1.0, 1.0, 1.0],
+            is_interior: false,
+            source_object_name: "geo_mav_main".to_string(),
+            name: "geo_mav_main".to_string(),
+            mesh_name: "geo_mav_main_data".to_string(),
+            material_names: Vec::new(),
+            source_nodes: Vec::new(),
+            source_ancestors: Vec::new(),
+            source_loc: [0.0, 0.0, 0.0],
+            source_quat: [1.0, 0.0, 0.0, 0.0],
+            source_scale: [1.0, 1.0, 1.0],
+            source_parent_name: Some("mav_main".to_string()),
+            parent_node_name: None,
+            blend_path: "//../../Data/Objects/Ships/mav.blend".to_string(),
+            mesh_asset: "Data/Objects/Ships/mav.blend".to_string(),
+            position: [0.0, 0.0, 0.0],
+            rotation: [1.0, 0.0, 0.0, 0.0],
+            scale: [1.0, 1.0, 1.0],
+        };
+
+        let blend_bytes = create_scene_blend_with_instances(
+            "MavEntity",
+            &[global_decoy, instance_source_tree_holder, second_mesh_ref_same_scene_instance],
+            &[],
+        )
+        .unwrap();
+        let blocks = parse_blend_blocks(&blend_bytes);
+        let decoy_parent = object_block_by_name(&blocks, "decoy_mesh_0_mav_main");
+        let instance_parent = object_block_by_name(&blocks, "housing_mesh_0_mav_main");
+        let mav_mesh = object_block_by_name(&blocks, "geo_mav_main");
+
+        assert_ne!(decoy_parent.old_ptr, instance_parent.old_ptr);
+        assert_eq!(
+            u64::from_le_bytes(mav_mesh.data[496..504].try_into().unwrap()),
+            instance_parent.old_ptr,
+            "a second linked mesh ref from the same asset instance must use that instance's source tree, not the first global same-named source node"
         );
     }
 
