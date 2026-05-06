@@ -51,6 +51,20 @@ fn object_block_by_name<'a>(blocks: &'a [BlendBlock<'a>], name: &str) -> &'a Ble
         .unwrap_or_else(|| panic!("missing Object block named {name}"))
 }
 
+fn mesh_block_by_name<'a>(blocks: &'a [BlendBlock<'a>], name: &str) -> &'a BlendBlock<'a> {
+    blocks
+        .iter()
+        .find(|block| {
+            if block.code != b"ME\0\0" {
+                return false;
+            }
+            let raw = &block.data[42..300];
+            let end = raw.iter().position(|&byte| byte == 0).unwrap_or(raw.len());
+            &raw[..end] == name.as_bytes()
+        })
+        .unwrap_or_else(|| panic!("missing Mesh block named {name}"))
+}
+
 fn test_mesh_with_submeshes(submeshes: Vec<SubMesh>) -> Mesh {
     Mesh {
         positions: vec![[0.0, 0.0, 0.0]; 3],
@@ -118,6 +132,15 @@ fn mesh_to_blend_exports_secondary_uv_map() {
     assert!(bytes
         .windows(0.875f32.to_le_bytes().len())
         .any(|window| window == 0.875f32.to_le_bytes()));
+
+    let blocks = parse_blend_blocks(&bytes);
+    let mesh_block = mesh_block_by_name(&blocks, "uv_test");
+    let active_uv_ptr = u64::from_le_bytes(mesh_block.data[1584..1592].try_into().unwrap());
+    let default_uv_ptr = u64::from_le_bytes(mesh_block.data[1592..1600].try_into().unwrap());
+    assert_ne!(active_uv_ptr, 0, "mesh should persist its active UV map name");
+    assert_ne!(default_uv_ptr, 0, "mesh should persist its render-active UV map name");
+    assert!(blocks.iter().any(|block| block.old_ptr == active_uv_ptr && block.data == b"UVMap\0"));
+    assert!(blocks.iter().any(|block| block.old_ptr == default_uv_ptr && block.data == b"UVMap\0"));
 }
 
 #[test]

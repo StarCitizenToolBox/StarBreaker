@@ -300,13 +300,19 @@ def _ensure_active_uv_layer(mesh: Any) -> bool:
     uv_layers = getattr(mesh, "uv_layers", None)
     if uv_layers is None or len(uv_layers) == 0:
         return False
+    preferred_index = _uv_layer_index(uv_layers, "UVMap")
+    target_index = preferred_index if preferred_index is not None else 0
+    changed = False
     active = getattr(uv_layers, "active", None)
     active_index = int(getattr(uv_layers, "active_index", -1))
-    if active is not None and active_index >= 0:
-        return False
-    preferred_index = _uv_layer_index(uv_layers, "UVMap")
-    uv_layers.active_index = preferred_index if preferred_index is not None else 0
-    return True
+    if active is None or active_index != target_index:
+        uv_layers.active_index = target_index
+        changed = True
+    target_layer = uv_layers[target_index]
+    if hasattr(target_layer, "active_render") and not bool(getattr(target_layer, "active_render")):
+        target_layer.active_render = True
+        changed = True
+    return changed
 
 
 def _uv_layer_index(uv_layers: Any, name: str) -> int | None:

@@ -1165,6 +1165,11 @@ fn mesh_to_blend_flat(
     } else {
         (0, 0, 0)
     };
+    let (active_uv_name_ptr, default_uv_name_ptr) = if mesh.uvs.is_some() {
+        (ptrs.alloc(), ptrs.alloc())
+    } else {
+        (0, 0)
+    };
     let (name_uv2_ptr, array_uv2_ptr, raw_uv2_ptr) = if mesh.secondary_uvs.is_some() {
         (ptrs.alloc(), ptrs.alloc(), ptrs.alloc())
     } else {
@@ -1338,13 +1343,17 @@ fn mesh_to_blend_flat(
     let collection_object_data =
         build_collection_object_linked(object_ptr, orientation_collection_object_ptr, 0);
     let layer_collection_data = build_layer_collection(collection_ptr);
-    let mesh_data = build_mesh(
+    let mut mesh_data = build_mesh(
         name, totvert, totedge, totpoly, totloop,
         poly_offs_ptr, attrs_ptr,
         mesh_mat_ptr, mat_slots,
         vgroup_first_ptr, vgroup_last_ptr, vgroup_count, cdl_ptr,
         num_attrs,
     );
+    if raw_uv.is_some() {
+        write_ptr(&mut mesh_data, 1584, active_uv_name_ptr);
+        write_ptr(&mut mesh_data, 1592, default_uv_name_ptr);
+    }
     let mesh_mat_array = build_mat_ptr_array_from_ptrs(&material_ptrs);
     let obj_mat_array  = build_mat_ptr_array(mat_slots as usize);
     let obj_matbits    = build_matbits(mat_slots as usize);
@@ -1418,6 +1427,8 @@ fn mesh_to_blend_flat(
     if let Some(ref uv_data) = raw_uv {
         let arr_uv = build_attribute_array(raw_uv_ptr, totloop as i64);
         write_block(&mut out, b"DATA", 0,  name_uv_ptr,  1, b"UVMap\0");
+        write_block(&mut out, b"DATA", 0, active_uv_name_ptr, 1, b"UVMap\0");
+        write_block(&mut out, b"DATA", 0, default_uv_name_ptr, 1, b"UVMap\0");
         write_block(&mut out, b"DATA", SDNA_IDX_ATTRIBUTE_ARRAY, array_uv_ptr, 1, &arr_uv);
         write_block(&mut out, b"DATA", 0,  raw_uv_ptr,   1, uv_data);
     }
@@ -1591,6 +1602,8 @@ struct MeshBlockData {
     name_uv_ptr: u64,
     array_uv_ptr: u64,
     raw_uv_ptr: u64,
+    active_uv_name_ptr: u64,
+    default_uv_name_ptr: u64,
     name_uv2_ptr: u64,
     array_uv2_ptr: u64,
     raw_uv2_ptr: u64,
@@ -2300,6 +2313,11 @@ fn allocate_mesh_block(
     } else {
         (0, 0, 0)
     };
+    let (active_uv_name_ptr, default_uv_name_ptr) = if mesh.uvs.is_some() {
+        (ptrs.alloc(), ptrs.alloc())
+    } else {
+        (0, 0)
+    };
     let (name_uv2_ptr, array_uv2_ptr, raw_uv2_ptr) = if mesh.secondary_uvs.is_some() {
         (ptrs.alloc(), ptrs.alloc(), ptrs.alloc())
     } else {
@@ -2413,6 +2431,8 @@ fn allocate_mesh_block(
         name_uv_ptr,
         array_uv_ptr,
         raw_uv_ptr,
+        active_uv_name_ptr,
+        default_uv_name_ptr,
         name_uv2_ptr,
         array_uv2_ptr,
         raw_uv2_ptr,
@@ -2468,7 +2488,7 @@ fn write_mesh_block(
         0,
     );
     patch_object_parent_transform(&mut object_data, parent_ptr, transform.0, transform.1, transform.2);
-    let mesh_data = build_mesh(
+    let mut mesh_data = build_mesh(
         &object.name,
         block.totvert,
         block.totedge,
@@ -2484,6 +2504,10 @@ fn write_mesh_block(
         block.cdl_ptr,
         block.num_attrs,
     );
+    if block.raw_uv.is_some() {
+        write_ptr(&mut mesh_data, 1584, block.active_uv_name_ptr);
+        write_ptr(&mut mesh_data, 1592, block.default_uv_name_ptr);
+    }
     let mesh_mat_array = build_mat_ptr_array_from_ptrs(&object_material_ptrs);
     let obj_mat_array = build_mat_ptr_array(mat_slots as usize);
     let obj_matbits = build_matbits(mat_slots as usize);
@@ -2510,6 +2534,8 @@ fn write_mesh_block(
     write_block(out, b"DATA", 0, block.raw_matidx_ptr, 1, &block.raw_material_index);
     if let Some(ref uv_data) = block.raw_uv {
         write_block(out, b"DATA", 0, block.name_uv_ptr, 1, b"UVMap\0");
+        write_block(out, b"DATA", 0, block.active_uv_name_ptr, 1, b"UVMap\0");
+        write_block(out, b"DATA", 0, block.default_uv_name_ptr, 1, b"UVMap\0");
         write_block(out, b"DATA", SDNA_IDX_ATTRIBUTE_ARRAY, block.array_uv_ptr, 1, &build_attribute_array(block.raw_uv_ptr, block.totloop as i64));
         write_block(out, b"DATA", 0, block.raw_uv_ptr, 1, uv_data);
     }
@@ -2834,6 +2860,8 @@ fn mesh_to_blend_hierarchy(
                     name_uv_ptr: block.name_uv_ptr,
                     array_uv_ptr: block.array_uv_ptr,
                     raw_uv_ptr: block.raw_uv_ptr,
+                    active_uv_name_ptr: block.active_uv_name_ptr,
+                    default_uv_name_ptr: block.default_uv_name_ptr,
                     name_uv2_ptr: block.name_uv2_ptr,
                     array_uv2_ptr: block.array_uv2_ptr,
                     raw_uv2_ptr: block.raw_uv2_ptr,

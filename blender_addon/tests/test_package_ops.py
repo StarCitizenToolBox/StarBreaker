@@ -58,6 +58,7 @@ class FakeSlot:
 class FakeUVLayer:
     def __init__(self, name: str):
         self.name = name
+        self.active_render = False
 
 
 class FakeUVLayers(list):
@@ -442,6 +443,7 @@ class PackageOpsTests(unittest.TestCase):
 
         self.assertEqual(applied, 1)
         self.assertEqual(mesh.data.uv_layers.active.name, "UVMap")
+        self.assertTrue(mesh.data.uv_layers.active.active_render)
         self.assertEqual(mesh.data.update_tags, [{"DATA"}])
         self.assertEqual(mesh.update_tags, [{"DATA"}])
         self.assertEqual(view_layer.update_count, 1)
