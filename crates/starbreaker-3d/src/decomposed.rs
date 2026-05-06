@@ -985,26 +985,38 @@ pub(crate) fn write_decomposed_export(
                 .lights
                 .iter()
                 .map(|light| {
-                    // Extract the projector (gobo) DDS from P4k into the
-                    // decomposed package so it is self-contained. We keep the
-                    // original block format (BC6H / BC7 / DXT) by re-emitting
-                    // the raw DDS — gobo textures are frequently HDR BC6H,
-                    // which our RGBA decoder does not support today.
+                    // Extract the projector (gobo) texture through the same
+                    // package PNG pipeline as material textures where possible.
+                    // Some gobos use BC6H/BC7 encoding which our decoder doesn't support;
+                    // for those, create a fallback white PNG so Blender can load it.
                     let projector_texture_export = light
                         .projector_texture
                         .as_deref()
                         .and_then(|src| {
-                            let normalized = normalize_source_path(p4k, src);
-                            let relative = replace_extension(&normalized, ".dds");
-                            let lookup_key = relative.to_ascii_lowercase();
-                            if existing_asset_paths
-                                .is_some_and(|paths| paths.contains(&lookup_key))
-                                || files.contains_key(&relative)
-                            {
-                                return Some(relative);
+                            // Try PNG export first
+                            if let Some(png_path) = export_texture_asset(
+                                &mut files,
+                                p4k,
+                                &mut png_cache,
+                                &mut texture_cache,
+                                src,
+                                TextureFlavor::Generic,
+                                opts.texture_mip,
+                                existing_asset_paths,
+                            ) {
+                                return Some(png_path);
                             }
-                            let bytes = crate::pipeline::load_raw_dds_file(p4k, src)?;
-                            Some(insert_binary_file(&mut files, relative, bytes))
+                            // Texture export failed. Log a warning and fall back to white PNG.
+                            log::warn!(
+                                "Failed to export projector texture '{}' (likely unsupported DDS format). Using white PNG fallback.",
+                                src
+                            );
+                            // PNG failed (likely BC6H/BC7 format). Create a white PNG fallback.
+                            // This allows Blender to load the image without errors or magenta display.
+                            let normalized = normalize_source_path(p4k, src);
+                            let fallback_path = replace_extension(&normalized, ".png");
+                            let fallback_png = create_white_png_fallback();
+                            Some(insert_binary_file(&mut files, fallback_path, fallback_png))
                         });
                     serde_json::json!({
                         "name": light.name,
@@ -2178,18 +2190,41 @@ fn normalize_requested_source_path(path: &str) -> String {
     crate::pipeline::datacore_path_to_p4k(path).replace('\\', "/")
 }
 
-fn normalize_source_path(p4k: &MappedP4k, path: &str) -> String {
+pub(crate) fn normalize_source_path(p4k: &MappedP4k, path: &str) -> String {
     let p4k_path = crate::pipeline::datacore_path_to_p4k(path);
     p4k.entry_case_insensitive(&p4k_path)
         .map(|entry| entry.name.replace('\\', "/"))
         .unwrap_or_else(|| normalize_requested_source_path(path))
 }
 
-fn replace_extension(path: &str, new_extension: &str) -> String {
+pub(crate) fn replace_extension(path: &str, new_extension: &str) -> String {
     let Some((stem, _)) = path.rsplit_once('.') else {
         return format!("{path}{new_extension}");
     };
     stem.to_string() + new_extension
+}
+
+fn create_white_png_fallback() -> Vec<u8> {
+    // Create a minimal 2x2 white PNG (1 byte per channel RGBA)
+    // This allows Blender to load the image without errors or magenta display.
+    // PNG signature + minimal IHDR + IDAT + IEND chunks.
+    vec![
+        // PNG signature
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+        // IHDR chunk: 2x2 8-bit RGBA
+        0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+        0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02,
+        0x08, 0x06, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
+        0xDE,
+        // IDAT chunk: white 2x2 image (zlib compressed, then CRC)
+        0x00, 0x00, 0x00, 0x1B, 0x49, 0x44, 0x41, 0x54,
+        0x78, 0x9C, 0x62, 0xF8, 0xFF, 0xFF, 0x3F, 0x03,
+        0x03, 0x03, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x09,
+        0x00, 0x01, 0xBE, 0xCE, 0x66, 0xA9,
+        // IEND chunk
+        0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44,
+        0xAE, 0x42, 0x60, 0x82,
+    ]
 }
 
 fn palette_id(palette: &TintPalette) -> String {

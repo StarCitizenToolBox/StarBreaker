@@ -7,6 +7,14 @@ from `Data.p4k`. The workspace includes the CLI (`cli/`, binary
 Blender addon (`blender_addon/`). Read `AGENTS.md` first for the full project
 rules; read `blender_addon/AGENTS.md` before editing addon code.
 
+The parent workspace also has root-level instructions at
+`../.github/copilot-instructions.md`. Read and follow those instructions too,
+especially the mandatory Visual Fix Loop (VFL) for Blender-visible behavior,
+addon/Tauri UI behavior, subjective visual fixes, and user-verified performance
+work. If this repo is opened directly and the parent file is not visible, apply
+the VFL rules from the workspace copy before committing visual or interactive
+fixes.
+
 ## Build, test, and lint commands
 
 Run commands from the StarBreaker git root, not the parent `scorg_tools/`

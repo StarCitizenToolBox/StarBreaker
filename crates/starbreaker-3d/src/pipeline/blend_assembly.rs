@@ -753,6 +753,45 @@ pub fn write_decomposed_export_blend(
     log::info!("[timing][blend] base_decomposed_export: {:.2}s", phase_start.elapsed().as_secs_f32());
     phase_start = Instant::now();
 
+    // Extract updated projector_texture paths from the generated scene.json
+    // This ensures scene.blend uses the PNG paths that decomposed export created
+    let mut light_projector_texture_map: HashMap<String, String> = HashMap::new();
+    if let Some(scene_json_file) = base_export.files.iter().find(|f| f.relative_path.ends_with("scene.json")) {
+        if let Ok(scene_data) = serde_json::from_slice::<serde_json::Value>(&scene_json_file.bytes) {
+            if let Some(interiors) = scene_data.get("interiors").and_then(|v| v.as_array()) {
+                for interior in interiors {
+                    if let Some(lights) = interior.get("lights").and_then(|v| v.as_array()) {
+                        for light in lights {
+                            if let (Some(name), Some(texture)) = (
+                                light.get("name").and_then(|v| v.as_str()),
+                                light.get("projector_texture").and_then(|v| v.as_str()),
+                            ) {
+                                if !texture.is_empty() {
+                                    // Store the normalized PNG path
+                                    light_projector_texture_map.insert(name.to_string(), texture.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Also check root-level lights for exterior lights
+            if let Some(lights) = scene_data.get("lights").and_then(|v| v.as_array()) {
+                for light in lights {
+                    if let (Some(name), Some(texture)) = (
+                        light.get("name").and_then(|v| v.as_str()),
+                        light.get("projector_texture").and_then(|v| v.as_str()),
+                    ) {
+                        if !texture.is_empty() {
+                            light_projector_texture_map.insert(name.to_string(), texture.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    log::info!("[blend-debug] Extracted {} light projector texture paths", light_projector_texture_map.len());
+
     // Phase 4: Collect vertex groups for all meshes BEFORE creating .blend files
     report_progress(progress, 0.45, "Collecting decal vertex groups from meshes");
     
@@ -980,6 +1019,7 @@ pub fn write_decomposed_export_blend(
         &scene_entity_name,
         &scene_mesh_instances,
         &extracted_lights,
+        &light_projector_texture_map,
     )?;
     log::info!("[blend-debug] scene.blend created, size: {} bytes", scene_blend_bytes.len());
     log::info!("[blend-debug] First 20 bytes of uncompressed: {:?}", &scene_blend_bytes[..20.min(scene_blend_bytes.len())]);
@@ -3058,7 +3098,7 @@ pub fn create_scene_blend_with_instances(
     mesh_instances_input: &[LinkedMeshInstance],
     lights: &[ExtractedLight],
 ) -> Result<Vec<u8>, Error> {
-    create_scene_blend_package_with_instances(entity_name, entity_name, mesh_instances_input, lights)
+    create_scene_blend_package_with_instances(entity_name, entity_name, mesh_instances_input, lights, &HashMap::new())
 }
 
 fn create_scene_blend_package_with_instances(
@@ -3066,6 +3106,7 @@ fn create_scene_blend_package_with_instances(
     root_entity_name: &str,
     mesh_instances_input: &[LinkedMeshInstance],
     lights: &[ExtractedLight],
+    light_projector_texture_map: &HashMap<String, String>,
 ) -> Result<Vec<u8>, Error> {
     let children_count = mesh_instances_input.len();
     // Build a minimal input structure for compatibility with internal logic
@@ -3660,7 +3701,12 @@ fn create_scene_blend_package_with_instances(
     for (lamp_ptr, _, _, _, idx) in &light_instances {
         let light = &lights[*idx];
         
-        let gobo_blocks = light.gobo_path.as_ref().map(|gobo_path| {
+        // Check if there's an updated PNG path in the map, otherwise use original gobo_path
+        let effective_gobo_path = light_projector_texture_map.get(&light.name)
+            .map(|s| s.as_str())
+            .or(light.gobo_path.as_deref());
+        
+        let gobo_blocks = effective_gobo_path.map(|gobo_path| {
             let node_tree_ptr = ptrs.alloc();
             let image_ptr = ptrs.alloc();
             let normalized_path = gobo_image_blend_filepath(gobo_path);
@@ -3669,7 +3715,7 @@ fn create_scene_blend_package_with_instances(
                 .rsplit('/')
                 .next()
                 .filter(|name| !name.is_empty())
-                .unwrap_or("light_gobo.dds")
+                .unwrap_or("light_gobo.png")
                 .to_string();
             let image_name = format!("{}_{}", light.name, image_filename);
             (node_tree_ptr, image_ptr, image_name, normalized_path)
@@ -3970,7 +4016,7 @@ fn lamp_type_for_light(light_type: &str, semantic_light_kind: &str) -> i16 {
 
 fn light_energy_to_blender(
     lamp_type: i16,
-    semantic_light_kind: &str,
+    _semantic_light_kind: &str,
     intensity_candela_proxy: f32,
     intensity_raw: f32,
 ) -> f32 {
@@ -3981,9 +4027,6 @@ fn light_energy_to_blender(
     match lamp_type {
         1 => intensity_candela_proxy / 683.0,
         4 => intensity_raw / LUMENS_PER_WATT_WHITE,
-        _ if semantic_light_kind.eq_ignore_ascii_case("ambient_proxy") => {
-            intensity_candela_proxy * LIGHT_CANDELA_TO_WATT
-        }
         _ => intensity_candela_proxy * LIGHT_CANDELA_TO_WATT * LIGHT_VISUAL_GAIN,
     }
 }

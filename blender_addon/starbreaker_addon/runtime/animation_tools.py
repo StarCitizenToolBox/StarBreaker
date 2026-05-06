@@ -6,9 +6,8 @@ active-object selection. They accept a *package-root object name*
 (string) instead of requiring the object to be selected in the viewport.
 
 All functions work by looking up the package-root object by name in
-``bpy.data.objects``, loading the ``PackageBundle`` from its
-``starbreaker_scene_path`` property, and delegating to existing
-addon internals.
+``bpy.data.objects``, loading the package via the same scene-path
+resolution as the UI operators, and delegating to existing addon internals.
 """
 
 from __future__ import annotations
@@ -17,8 +16,8 @@ import json
 import bpy
 from typing import TYPE_CHECKING, Any
 
-from starbreaker_addon.manifest import PackageBundle
 from starbreaker_addon.runtime.package_ops import (
+    _load_package_from_root,
     _find_animation_selection,
     _clip_bone_hashes,
     _fragment_reverse_playback,
@@ -38,6 +37,7 @@ from starbreaker_addon.runtime.package_ops import (
 
 if TYPE_CHECKING:
     from bpy.types import Object
+    from starbreaker_addon.manifest import PackageBundle
 
 
 # ------------------------------------------------------------------
@@ -72,7 +72,7 @@ def get_animation_list(
         return []
 
     try:
-        bundle = PackageBundle.load(_string_prop(obj, "starbreaker_scene_path"))
+        bundle = _load_package_from_root(obj)
     except Exception:
         return []
 
@@ -135,10 +135,7 @@ def resolve_animation_key(
         return None
 
     try:
-        scene_path = _string_prop(obj, "starbreaker_scene_path")
-        if scene_path is None:
-            return None
-        bundle = PackageBundle.load(scene_path)
+        bundle = _load_package_from_root(obj)
     except Exception:
         return None
 
@@ -251,10 +248,7 @@ def list_animation_instances(
     if obj is None:
         return []
     try:
-        scene_path = _string_prop(obj, "starbreaker_scene_path")
-        if scene_path is None:
-            return []
-        bundle = PackageBundle.load(scene_path)
+        bundle = _load_package_from_root(obj)
         return package_animation_instances(obj, bundle)
     except Exception:
         return []
@@ -272,10 +266,7 @@ def set_instance_start_frame(
     if obj is None:
         return {"status": "error", "message": f"Object '{package_root_name}' not found"}
     try:
-        scene_path = _string_prop(obj, "starbreaker_scene_path")
-        if scene_path is None:
-            return {"status": "error", "message": "Missing starbreaker_scene_path"}
-        bundle = PackageBundle.load(scene_path)
+        bundle = _load_package_from_root(obj)
         ok = update_animation_instance_start_frame(obj, instance_id, float(start_frame), package=bundle)
         if not ok:
             return {"status": "error", "message": "Animation instance not found"}
@@ -295,10 +286,7 @@ def delete_instance(
     if obj is None:
         return {"status": "error", "message": f"Object '{package_root_name}' not found"}
     try:
-        scene_path = _string_prop(obj, "starbreaker_scene_path")
-        if scene_path is None:
-            return {"status": "error", "message": "Missing starbreaker_scene_path"}
-        bundle = PackageBundle.load(scene_path)
+        bundle = _load_package_from_root(obj)
         ok = delete_animation_instance(obj, instance_id, package=bundle)
         if not ok:
             return {"status": "error", "message": "Animation instance not found"}
@@ -318,10 +306,7 @@ def toggle_instance_mute(
     if obj is None:
         return {"status": "error", "message": f"Object '{package_root_name}' not found"}
     try:
-        scene_path = _string_prop(obj, "starbreaker_scene_path")
-        if scene_path is None:
-            return {"status": "error", "message": "Missing starbreaker_scene_path"}
-        bundle = PackageBundle.load(scene_path)
+        bundle = _load_package_from_root(obj)
         muted = set_animation_instance_muted(obj, instance_id, None, package=bundle)
         if muted is None:
             return {"status": "error", "message": "Animation instance not found"}
@@ -345,10 +330,7 @@ def solo_instance(
     if obj is None:
         return {"status": "error", "message": f"Object '{package_root_name}' not found"}
     try:
-        scene_path = _string_prop(obj, "starbreaker_scene_path")
-        if scene_path is None:
-            return {"status": "error", "message": "Missing starbreaker_scene_path"}
-        bundle = PackageBundle.load(scene_path)
+        bundle = _load_package_from_root(obj)
         ok = solo_animation_instance(obj, instance_id, package=bundle)
         if not ok:
             return {"status": "error", "message": "Animation instance not found"}

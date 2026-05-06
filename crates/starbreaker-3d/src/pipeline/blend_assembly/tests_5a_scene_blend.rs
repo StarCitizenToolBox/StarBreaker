@@ -1092,6 +1092,12 @@ fn test_create_scene_blend_uses_instance_local_source_parent_before_global_name(
     let first_mesh = object_block_by_name(&blocks, "first_instance_mesh");
     let second_mesh = object_block_by_name(&blocks, "second_instance_mesh");
 
+    assert!(blend_bytes
+        .windows(b"starbreaker_source_node_name".len())
+        .any(|window| window == b"starbreaker_source_node_name"));
+    assert!(blend_bytes
+        .windows(b"shared_source_parent".len())
+        .any(|window| window == b"shared_source_parent"));
     assert_eq!(
         u64::from_le_bytes(first_mesh.data[496..504].try_into().unwrap()),
         first_parent.old_ptr,

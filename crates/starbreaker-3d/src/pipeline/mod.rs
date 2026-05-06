@@ -3,7 +3,7 @@
 //! Declares sub-modules and re-exports their public surfaces. Defines the primary
 //! export types (`ExportOptions`, `ExportResult`, `ExportKind`, `ExportFormat`,
 //! `MaterialMode`, `DecomposedExport`) and low-level utilities that are called from
-//! many sub-modules: `load_raw_dds_file`, `datacore_path_to_p4k`, `socpaks_to_glb`,
+//! many sub-modules: `datacore_path_to_p4k`, `socpaks_to_glb`,
 //! `dump_nmc_nodes`, `dump_hierarchy`.
 
 use std::collections::HashSet;
@@ -11,7 +11,7 @@ use std::str::FromStr;
 
 use starbreaker_datacore::database::Database;
 use starbreaker_datacore::types::Record;
-use starbreaker_dds::{DdsFile, ReadSibling};
+use starbreaker_dds::ReadSibling;
 use starbreaker_p4k::MappedP4k;
 
 use crate::error::Error;
@@ -256,24 +256,6 @@ impl ReadSibling for P4kSiblingReader<'_> {
             .entry_case_insensitive(&path)
             .and_then(|entry| self.p4k.read(entry).ok())
     }
-}
-
-/// Load a CryEngine split DDS (base + ``.1``, ``.2`` siblings) and reassemble
-/// it into a single standard DDS byte stream, preserving the original block
-/// format (including BC6H / BC7). Does **not** decode pixel data, so it works
-/// for formats the RGBA decoder does not yet support (e.g. gobo HDR masks).
-///
-/// Returns ``None`` if the base entry is missing or parsing fails.
-pub(crate) fn load_raw_dds_file(p4k: &MappedP4k, dds_path: &str) -> Option<Vec<u8>> {
-    let p4k_dds_path = datacore_path_to_p4k(dds_path);
-    let base_entry = p4k.entry_case_insensitive(&p4k_dds_path)?;
-    let base_bytes = p4k.read(base_entry).ok()?;
-    let sibling_reader = P4kSiblingReader {
-        p4k,
-        base_path: p4k_dds_path,
-    };
-    let dds = DdsFile::from_split(&base_bytes, &sibling_reader).ok()?;
-    Some(dds.to_dds())
 }
 
 /// Load all textures (diffuse + normal) for a material file.
