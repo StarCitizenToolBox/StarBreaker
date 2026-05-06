@@ -510,6 +510,12 @@ pub fn build_scene_with_motion_blur_curve_and_properties(
     data[5186] = 1; // unit.time_unit
     data[5187] = 1; // unit.temperature_unit
     write_i32(&mut data, 5304, 1); // physics_settings.flag = PHYS_GLOBAL_GRAVITY
+    write_cstr_fixed(&mut data, 5320, 64, "None"); // view_settings.look
+    write_cstr_fixed(&mut data, 5384, 64, "AgX"); // view_settings.view_transform
+    write_f32(&mut data, 5448, 0.0); // view_settings.exposure
+    write_f32(&mut data, 5452, 1.0); // view_settings.gamma
+    write_cstr_fixed(&mut data, 5480, 64, "sRGB"); // display_settings.display_device
+    write_cstr_fixed(&mut data, 5552, 64, "sRGB"); // sequencer_colorspace_settings.name
     write_f32(&mut data, 5672, 0.57735026); // display.light_direction[0]
     write_f32(&mut data, 5676, 0.57735026); // display.light_direction[1]
     write_f32(&mut data, 5680, 0.57735026); // display.light_direction[2]

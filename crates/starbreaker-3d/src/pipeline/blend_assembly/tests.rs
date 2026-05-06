@@ -168,19 +168,25 @@ fn test_lamp_type_mapping_sun() {
 fn test_energy_conversion() {
     // 200 candelas → ~73.6 W (200 * 4π / 683 * 20)
     let cd = 200.0;
-    let energy = light_energy_to_blender(0, cd, 1.0);
+    let energy = light_energy_to_blender(0, "point", cd, 1.0);
     assert!(energy > 73.0 && energy < 74.0, "Energy: {}", energy);
 }
 
 #[test]
+fn test_ambient_proxy_light_energy_uses_no_visual_gain() {
+    let energy = light_energy_to_blender(0, "ambient_proxy", 200.0, 1.0);
+    assert!((energy - (200.0 * 4.0 * std::f32::consts::PI / 683.0)).abs() < 0.0001);
+}
+
+#[test]
 fn test_area_light_energy_matches_addon_lumen_path() {
-    let energy = light_energy_to_blender(4, 200.0, 120.0);
+    let energy = light_energy_to_blender(4, "area", 200.0, 120.0);
     assert!((energy - 1.0).abs() < 0.0001, "Energy: {}", energy);
 }
 
 #[test]
 fn test_sun_light_energy_uses_candela_proxy_without_visual_gain() {
-    let energy = light_energy_to_blender(1, 683.0, 120.0);
+    let energy = light_energy_to_blender(1, "sun", 683.0, 120.0);
     assert!((energy - 1.0).abs() < 0.0001, "Energy: {}", energy);
 }
 

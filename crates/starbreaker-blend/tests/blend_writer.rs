@@ -217,6 +217,12 @@ fn scene_has_nonzero_blender_runtime_safe_defaults() {
     assert_eq!(i32::from_le_bytes(scene[5076..5080].try_into().unwrap()), -1);
     assert_eq!(f32::from_le_bytes(scene[5176..5180].try_into().unwrap()), 1.0);
     assert_eq!(scene[5180], 1);
+    assert_eq!(&scene[5320..5324], b"None");
+    assert_eq!(&scene[5384..5387], b"AgX");
+    assert_eq!(f32::from_le_bytes(scene[5448..5452].try_into().unwrap()), 0.0);
+    assert_eq!(f32::from_le_bytes(scene[5452..5456].try_into().unwrap()), 1.0);
+    assert_eq!(&scene[5480..5484], b"sRGB");
+    assert_eq!(&scene[5552..5556], b"sRGB");
     assert_eq!(u64::from_le_bytes(scene[568..576].try_into().unwrap()), 0x4000);
     assert_eq!(i32::from_le_bytes(scene[5664..5668].try_into().unwrap()), 1);
     assert_eq!(i32::from_le_bytes(scene[5668..5672].try_into().unwrap()), 250);
