@@ -47,11 +47,13 @@ Shared across every language in the repo:
   number)` style floors, fallback defaults, or try/except-pass around
   broken data. If the exporter is wrong, fix the exporter.
 - **Never hard-code workarounds for specific assets.** Do not gate
-  logic on a particular material name, ship name, texture path,
-  socpak, or item ID. If one asset misbehaves, find the generic
-  property of its category (shader family, blend mode flag, alpha
-  usage, etc.) and fix the rule for the whole category. Named-asset
-  branches rot the moment upstream renames or adds siblings.
+  logic on a particular object name, mesh name, material name, ship
+  name, texture path, socpak, item ID, or exact instance suffix. If one
+  asset misbehaves, find the generic property of its category (NMC node
+  metadata, transform basis, geometry flags, shader family, blend mode
+  flag, alpha usage, etc.) and fix the rule for the whole category.
+  Named-asset branches rot the moment upstream renames or adds
+  siblings, and they are not acceptable production fixes.
 - **Match existing conventions.** Read the neighbours before
   inventing a new pattern. Dataclass style in `manifest.py`, naming
   in `blender-material-contract-naming-rules.md`, error taxonomy in
@@ -209,10 +211,13 @@ When a bug is found or something behaves unexpectedly:
   try/except-pass. If the data is wrong, trace back to where it is
   written or parsed and fix it there.
 - **No hard-coding, no heuristics.** Do not gate logic on a
-  specific asset name, ship name, material path, or magic number.
-  Discover the structural property (shader family, blend mode flag,
-  alpha channel usage, chrparams event type, …) and fix the rule for
-  the whole category.
+  specific object name, mesh name, asset name, ship name, material
+  path, exact instance suffix, or magic number. Discover the structural
+  property (NMC node metadata, transform basis, geometry flags, shader
+  family, blend mode flag, alpha channel usage, chrparams event type,
+  ...) and fix the rule for the whole category. If the structural rule
+  is not known yet, stop and investigate it; do not commit a
+  name-matched workaround as a "temporary" fix.
 - **Ask: how does the game engine handle this?** Star Citizen runs on
   Star Engine, Cloud Imperium's fork of CryEngine / Lumberyard. It
   shares most CryEngine conventions but diverges in places. When the
@@ -338,4 +343,3 @@ the `//!` first line of each file in the module directory.
   reusable Blender material node templates.
 - `docs/blender-shader-family-inventory.json` — the canonical list of
   CryEngine shader families we know about.
-
