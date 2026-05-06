@@ -18,11 +18,12 @@ Before planning or editing, read the relevant instruction files in this order:
 Do not rely on memory when these files are available. Re-read them when changing
 component, starting a new phase, or resuming after a long interruption.
 
-## Context: Parent workspace and this repo
+## Context: This repo
 
-- The parent workspace root is at `../../` and contains `AGENTS.md`, `.github/copilot-instructions.md`, and documentation.
 - StarBreaker is the main git repository; work inside this folder.
-- Workspace-level guidance applies here too. Follow both this file and the parent workspace instructions.
+- The workspace root is at `../../` and contains workspace-level guidance, research
+  documentation, and generated/exported packages. Follow workspace root `AGENTS.md`
+  for broader context, but this file takes precedence for StarBreaker-specific work.
 
 ## Build, test, and lint commands
 
