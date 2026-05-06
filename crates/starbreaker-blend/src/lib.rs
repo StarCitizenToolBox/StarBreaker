@@ -60,6 +60,7 @@ pub const SDNA_IDX_BNODE_SOCKET: u32 = 466;
 pub const SDNA_IDX_BNODE_LINK: u32 = 470;
 pub const SDNA_IDX_NODE_TEX_IMAGE: u32 = 531;
 pub const SDNA_IDX_NODE_TEX_SKY: u32 = 530;
+pub const SDNA_IDX_NODE_TEX_ENVIRONMENT: u32 = 532;
 pub const SDNA_IDX_BNSV_RGBA: u32 = 479;
 pub const SDNA_IDX_BNSV_FLOAT: u32 = 475;
 pub const SDNA_IDX_BNSV_VECTOR: u32 = 477;
@@ -88,6 +89,7 @@ pub const BNODE_SOCKET_SIZE: usize = 464;
 pub const BNODE_LINK_SIZE: usize = 56;
 pub const NODE_TEX_IMAGE_SIZE: usize = 1024;
 pub const NODE_TEX_SKY_SIZE: usize = 1024;
+pub const NODE_TEX_ENVIRONMENT_SIZE: usize = 1024;
 pub const BNSV_RGBA_SIZE: usize = 16;
 pub const BNSV_FLOAT_SIZE: usize = 16;
 pub const BNSV_VECTOR_SIZE: usize = 32;
@@ -1736,30 +1738,30 @@ pub fn write_light_gobo_node_tree(
 ) {
     let tex_coord_ptr = ptrs.alloc();
     let mapping_ptr = ptrs.alloc();
-    let image_tex_ptr = ptrs.alloc();
+    let env_tex_ptr = ptrs.alloc();
     let emission_ptr = ptrs.alloc();
     let output_ptr = ptrs.alloc();
 
     let tex_uv_out_ptr = ptrs.alloc();
     let mapping_vector_in_ptr = ptrs.alloc();
     let mapping_vector_out_ptr = ptrs.alloc();
-    let image_vector_in_ptr = ptrs.alloc();
-    let image_color_out_ptr = ptrs.alloc();
+    let env_vector_in_ptr = ptrs.alloc();
+    let env_color_out_ptr = ptrs.alloc();
     let emission_color_in_ptr = ptrs.alloc();
     let emission_strength_in_ptr = ptrs.alloc();
     let emission_out_ptr = ptrs.alloc();
     let output_surface_in_ptr = ptrs.alloc();
 
     let mapping_vector_def_ptr = ptrs.alloc();
-    let image_vector_def_ptr = ptrs.alloc();
+    let env_vector_def_ptr = ptrs.alloc();
     let emission_color_def_ptr = ptrs.alloc();
     let emission_strength_def_ptr = ptrs.alloc();
-    let image_storage_ptr = ptrs.alloc();
+    let env_storage_ptr = ptrs.alloc();
     let image_tile_ptr = ptrs.alloc();
 
     let link_uv_mapping_ptr = ptrs.alloc();
-    let link_mapping_image_ptr = ptrs.alloc();
-    let link_image_emission_ptr = ptrs.alloc();
+    let link_mapping_env_ptr = ptrs.alloc();
+    let link_env_emission_ptr = ptrs.alloc();
     let link_emission_output_ptr = ptrs.alloc();
 
     {
@@ -1776,6 +1778,7 @@ pub fn write_light_gobo_node_tree(
         write_block(out, b"DATA", SDNA_IDX_BNODE_TREE, node_tree_ptr, 1, &d);
     }
 
+    // Texture Coordinate node
     write_shader_node(
         out,
         tex_coord_ptr,
@@ -1793,11 +1796,12 @@ pub fn write_light_gobo_node_tree(
         -800.0,
         0.0,
     );
+    // Mapping node
     write_shader_node(
         out,
         mapping_ptr,
         tex_coord_ptr,
-        image_tex_ptr,
+        env_tex_ptr,
         mapping_vector_in_ptr,
         mapping_vector_in_ptr,
         mapping_vector_out_ptr,
@@ -1810,27 +1814,29 @@ pub fn write_light_gobo_node_tree(
         -600.0,
         0.0,
     );
+    // Environment Texture node (using SDNA 532)
     write_shader_node(
         out,
-        image_tex_ptr,
+        env_tex_ptr,
         mapping_ptr,
         emission_ptr,
-        image_vector_in_ptr,
-        image_vector_in_ptr,
-        image_color_out_ptr,
-        image_color_out_ptr,
-        "Image Texture",
-        "ShaderNodeTexImage",
+        env_vector_in_ptr,
+        env_vector_in_ptr,
+        env_color_out_ptr,
+        env_color_out_ptr,
+        "Environment Texture",
+        "ShaderNodeTexEnvironment",
         143,
         image_ptr,
-        image_storage_ptr,
+        env_storage_ptr,
         -400.0,
         0.0,
     );
+    // Emission node
     write_shader_node(
         out,
         emission_ptr,
-        image_tex_ptr,
+        env_tex_ptr,
         output_ptr,
         emission_color_in_ptr,
         emission_strength_in_ptr,
@@ -1844,6 +1850,7 @@ pub fn write_light_gobo_node_tree(
         -100.0,
         0.0,
     );
+    // Light Output node
     write_shader_node(
         out,
         output_ptr,
@@ -1862,28 +1869,33 @@ pub fn write_light_gobo_node_tree(
         0.0,
     );
 
+    // Sockets and links
     write_vector_socket(out, tex_uv_out_ptr, 0, 0, "UV", 4095, 2, 0, link_uv_mapping_ptr);
     write_vector_socket(out, mapping_vector_in_ptr, 0, 0, "Vector", 1, 1, mapping_vector_def_ptr, link_uv_mapping_ptr);
-    write_vector_socket(out, mapping_vector_out_ptr, 0, 0, "Vector", 4095, 2, 0, link_mapping_image_ptr);
-    write_vector_socket(out, image_vector_in_ptr, 0, 0, "Vector", 1, 1, image_vector_def_ptr, link_mapping_image_ptr);
-    write_color_socket(out, image_color_out_ptr, 0, 0, "Color", 4095, 2, 0, link_image_emission_ptr);
-    write_color_socket(out, emission_color_in_ptr, emission_strength_in_ptr, 0, "Color", 1, 1, emission_color_def_ptr, link_image_emission_ptr);
+    write_vector_socket(out, mapping_vector_out_ptr, 0, 0, "Vector", 4095, 2, 0, link_mapping_env_ptr);
+    write_vector_socket(out, env_vector_in_ptr, 0, 0, "Vector", 1, 1, env_vector_def_ptr, link_mapping_env_ptr);
+    write_color_socket(out, env_color_out_ptr, 0, 0, "Color", 4095, 2, 0, link_env_emission_ptr);
+    write_color_socket(out, emission_color_in_ptr, emission_strength_in_ptr, 0, "Color", 1, 1, emission_color_def_ptr, link_env_emission_ptr);
     write_float_socket(out, emission_strength_in_ptr, 0, emission_color_in_ptr, "Strength", 1, 1, emission_strength_def_ptr, 0);
     write_shader_socket(out, emission_out_ptr, 0, 0, "Emission", 4095, 2, 0, link_emission_output_ptr);
     write_shader_socket(out, output_surface_in_ptr, 0, 0, "Surface", 1, 1, 0, link_emission_output_ptr);
 
+    // Default values
     write_vector_default(out, mapping_vector_def_ptr, [0.0, 0.0, 0.0]);
-    write_vector_default(out, image_vector_def_ptr, [0.0, 0.0, 0.0]);
+    write_vector_default(out, env_vector_def_ptr, [0.0, 0.0, 0.0]);
     write_color_default(out, emission_color_def_ptr, [1.0, 1.0, 1.0, 1.0]);
     write_float_default(out, emission_strength_def_ptr, 1.0);
 
-    write_block(out, b"DATA", SDNA_IDX_NODE_TEX_IMAGE, image_storage_ptr, 1, &vec![0u8; NODE_TEX_IMAGE_SIZE]);
+    // Environment Texture storage (using SDNA 532)
+    write_block(out, b"DATA", SDNA_IDX_NODE_TEX_ENVIRONMENT, env_storage_ptr, 1, &vec![0u8; NODE_TEX_ENVIRONMENT_SIZE]);
 
-    write_node_link(out, link_uv_mapping_ptr, 0, link_mapping_image_ptr, tex_coord_ptr, mapping_ptr, tex_uv_out_ptr, mapping_vector_in_ptr);
-    write_node_link(out, link_mapping_image_ptr, link_uv_mapping_ptr, link_image_emission_ptr, mapping_ptr, image_tex_ptr, mapping_vector_out_ptr, image_vector_in_ptr);
-    write_node_link(out, link_image_emission_ptr, link_mapping_image_ptr, link_emission_output_ptr, image_tex_ptr, emission_ptr, image_color_out_ptr, emission_color_in_ptr);
-    write_node_link(out, link_emission_output_ptr, link_image_emission_ptr, 0, emission_ptr, output_ptr, emission_out_ptr, output_surface_in_ptr);
+    // Node links
+    write_node_link(out, link_uv_mapping_ptr, 0, link_mapping_env_ptr, tex_coord_ptr, mapping_ptr, tex_uv_out_ptr, mapping_vector_in_ptr);
+    write_node_link(out, link_mapping_env_ptr, link_uv_mapping_ptr, link_env_emission_ptr, mapping_ptr, env_tex_ptr, mapping_vector_out_ptr, env_vector_in_ptr);
+    write_node_link(out, link_env_emission_ptr, link_mapping_env_ptr, link_emission_output_ptr, env_tex_ptr, emission_ptr, env_color_out_ptr, emission_color_in_ptr);
+    write_node_link(out, link_emission_output_ptr, link_env_emission_ptr, 0, emission_ptr, output_ptr, emission_out_ptr, output_surface_in_ptr);
 
+    // Image block
     write_block(
         out,
         b"IM\0\0",
