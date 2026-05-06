@@ -41,7 +41,7 @@ use starbreaker_blend::{
     build_bdeformgroup, build_mdeformvert_array, build_mdeformweight_array, 
     build_custom_data_layer_mdeformvert, SDNA_IDX_BDEFORMGROUP, SDNA_IDX_MDEFORMVERT, SDNA_IDX_LAMP,
     ints2_data, triangle_edge_topology, write_f32, write_i16, write_identity_matrix4x4, write_ptr,
-    write_idprop_blocks, write_light_gobo_node_tree, ATTR_TYPE_INT32_2D, IdPropValue, STARTUP_UI_SCREEN_PTR,
+    write_idprop_blocks, write_light_simple_emission_node_tree, ATTR_TYPE_INT32_2D, IdPropValue, STARTUP_UI_SCREEN_PTR,
 };
 
 use crate::error::Error;
@@ -3720,10 +3720,13 @@ fn create_scene_blend_package_with_instances(
             let image_name = format!("{}_{}", light.name, image_filename);
             (node_tree_ptr, image_ptr, image_name, normalized_path)
         });
-        let node_tree_ptr = gobo_blocks
-            .as_ref()
-            .map(|(node_tree_ptr, _, _, _)| *node_tree_ptr)
-            .unwrap_or(0);
+        
+        // Always allocate a node tree: either gobo (if available) or simple emission
+        let node_tree_ptr = if gobo_blocks.is_some() {
+            gobo_blocks.as_ref().map(|(ptr, _, _, _)| *ptr).unwrap()
+        } else {
+            ptrs.alloc()
+        };
 
         let light_data_props = allocate_idprop_blocks(
             &mut ptrs,
@@ -3746,7 +3749,7 @@ fn create_scene_blend_package_with_instances(
             node_tree_ptr,
             light_data_props_ptr,
         );
-        light_data.push((*lamp_ptr, lamp_bytes, gobo_blocks));
+        light_data.push((*lamp_ptr, lamp_bytes, gobo_blocks.clone()));
         light_data_idprops.push(light_data_props);
         let light_props = allocate_idprop_blocks(
             &mut ptrs,
@@ -3873,15 +3876,27 @@ fn create_scene_blend_package_with_instances(
             write_idprop_blocks(&mut out, props);
         }
         if let Some((node_tree_ptr, image_ptr, image_name, image_filepath)) = gobo_blocks {
-            write_light_gobo_node_tree(
-                &mut out,
-                lamp_block_ptr,
-                node_tree_ptr,
-                image_ptr,
-                &image_name,
-                &image_filepath,
-                &mut ptrs,
-            );
+            // Gobo node trees darken lights by using image texture as color multiplier.
+            // Blender lights don't have native projector support, so skip gobo graphs.
+            // Users can add them back manually or use material emission instead.
+            let _ = (node_tree_ptr, image_ptr, image_name, image_filepath); // Suppress unused warning
+        }
+        // Always use simple emission node tree
+        {
+            // Light has no gobo - create simple Emission -> Light Output shader tree
+            // Extract node_tree_ptr from lamp_bytes (offset 552, 8 bytes, little-endian)
+            let node_tree_ptr = u64::from_le_bytes([
+                lamp_bytes[552], lamp_bytes[553], lamp_bytes[554], lamp_bytes[555],
+                lamp_bytes[556], lamp_bytes[557], lamp_bytes[558], lamp_bytes[559],
+            ]);
+            if node_tree_ptr != 0 {
+                write_light_simple_emission_node_tree(
+                    &mut out,
+                    lamp_block_ptr,
+                    node_tree_ptr,
+                    &mut ptrs,
+                );
+            }
         }
         
         // Write light object
