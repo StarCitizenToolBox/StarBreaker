@@ -553,6 +553,9 @@ fn filter_nmc_hierarchy(
     let Some(nmc) = nmc else {
         return (mesh, None);
     };
+    if nmc.nodes.is_empty() {
+        return (mesh, None);
+    }
 
     let excluded_nodes = nmc
         .nodes
@@ -3356,6 +3359,61 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0, 1]
         );
+    }
+
+    #[test]
+    fn decomposed_material_view_preserves_materials_when_nmc_has_no_nodes() {
+        let mut hull = sample_submaterial();
+        hull.name = "hull".into();
+        let mut trim = sample_submaterial();
+        trim.name = "trim".into();
+
+        let materials = MtlFile {
+            materials: vec![hull, trim],
+            source_path: Some("Data/Objects/Ships/Test/interior.mtl".into()),
+            paint_override: None,
+            material_set: Default::default(),
+        };
+        let mesh = sample_mesh(vec![
+            crate::types::SubMesh {
+                material_name: Some("hull".into()),
+                material_id: 0,
+                source_material_id: None,
+                first_index: 0,
+                num_indices: 3,
+                first_vertex: 0,
+                num_vertices: 3,
+                node_parent_index: 0,
+            },
+            crate::types::SubMesh {
+                material_name: Some("trim".into()),
+                material_id: 1,
+                source_material_id: None,
+                first_index: 3,
+                num_indices: 3,
+                first_vertex: 0,
+                num_vertices: 3,
+                node_parent_index: 0,
+            },
+        ]);
+        let empty_nmc = NodeMeshCombo {
+            nodes: Vec::new(),
+            material_indices: Vec::new(),
+        };
+
+        let view =
+            build_decomposed_material_view(&mesh, Some(&materials), Some(&empty_nmc), false, true);
+
+        assert_eq!(view.mesh.submeshes.len(), 2);
+        assert_eq!(
+            view.mesh
+                .submeshes
+                .iter()
+                .map(|submesh| submesh.material_id)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert!(view.glb_nmc.is_none());
     }
 
     #[test]
