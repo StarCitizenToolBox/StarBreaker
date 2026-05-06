@@ -59,6 +59,7 @@ struct MeshDataEntry {
     mesh: Mesh,
     materials: Option<MtlFile>,
     nmc: Option<NodeMeshCombo>,
+    interior_placement_space: bool,
 }
 
 struct BlendAssetJob {
@@ -565,6 +566,7 @@ pub fn write_decomposed_export_blend(
         mesh: root_material_view.mesh,
         materials: root_material_view.glb_materials.or(root_material_view.sidecar_materials),
         nmc: root_material_view.glb_nmc,
+        interior_placement_space: false,
     });
     
     for child in &input.children {
@@ -580,6 +582,7 @@ pub fn write_decomposed_export_blend(
             mesh: child_material_view.mesh,
             materials: child_material_view.glb_materials.or(child_material_view.sidecar_materials),
             nmc: child_material_view.glb_nmc,
+            interior_placement_space: false,
         };
         
         mesh_data_map.insert(mesh_asset.to_ascii_lowercase(), entry);
@@ -623,6 +626,7 @@ pub fn write_decomposed_export_blend(
             mesh: material_view.mesh,
             materials: material_view.glb_materials.or(material_view.sidecar_materials),
             nmc: material_view.glb_nmc,
+            interior_placement_space: true,
         });
         Some(loaded)
     };
@@ -1774,12 +1778,23 @@ fn build_native_blend_asset(
             job.blend_path
         ))
     })?;
+    let mut placement_mesh;
+    let placement_name;
+    let (mesh_name, mesh, nmc) = if mesh_entry.interior_placement_space {
+        placement_name =
+            interior_placement_object_name(&job.mesh_name, &mesh_entry.mesh, mesh_entry.nmc.as_ref());
+        placement_mesh = mesh_entry.mesh.clone();
+        convert_mesh_geometry_to_scene_axes(&mut placement_mesh);
+        (placement_name.as_str(), &placement_mesh, None)
+    } else {
+        (job.mesh_name.as_str(), &mesh_entry.mesh, mesh_entry.nmc.as_ref())
+    };
     let vgroups = mesh_vertex_groups.get(&job.blend_key).cloned();
     let blend_bytes = mesh_to_blend(
-        &job.mesh_name,
-        &mesh_entry.mesh,
+        mesh_name,
+        mesh,
         &mesh_entry.materials,
-        mesh_entry.nmc.as_ref(),
+        nmc,
         vgroups.as_ref(),
     );
     let (mut linked_mesh_refs, source_nodes) = blend_link_data_from_bytes(&blend_bytes);
@@ -1875,6 +1890,69 @@ fn matrix_to_transform(matrix: [f32; 16]) -> ([f32; 3], [f32; 4], [f32; 3]) {
         [rotation.w, rotation.x, rotation.y, rotation.z],
         [scale.x, scale.y, scale.z],
     )
+}
+
+fn interior_placement_object_name(
+    default_name: &str,
+    mesh: &Mesh,
+    nmc: Option<&NodeMeshCombo>,
+) -> String {
+    if let Some(nmc) = nmc {
+        let referenced_nodes = mesh
+            .submeshes
+            .iter()
+            .filter_map(|submesh| {
+                let index = submesh.node_parent_index as usize;
+                (index < nmc.nodes.len()).then_some(index)
+            })
+            .collect::<HashSet<_>>();
+        if referenced_nodes.len() == 1 {
+            let index = *referenced_nodes.iter().next().unwrap();
+            let object_names = nmc_export_object_names(default_name, nmc);
+            if let Some(name) = object_names.get(index).filter(|name| !name.is_empty()) {
+                return name.clone();
+            }
+        }
+    }
+    strip_lod_suffix(default_name)
+}
+
+fn scene_axis_convert_vec3(value: [f32; 3]) -> [f32; 3] {
+    [value[0], -value[2], value[1]]
+}
+
+fn convert_mesh_geometry_to_scene_axes(mesh: &mut Mesh) {
+    for position in &mut mesh.positions {
+        *position = scene_axis_convert_vec3(*position);
+    }
+    if let Some(normals) = mesh.normals.as_mut() {
+        for normal in normals {
+            *normal = scene_axis_convert_vec3(*normal);
+        }
+    }
+    if let Some(tangents) = mesh.tangents.as_mut() {
+        for tangent in tangents {
+            let converted = scene_axis_convert_vec3([tangent[0], tangent[1], tangent[2]]);
+            tangent[0] = converted[0];
+            tangent[1] = converted[1];
+            tangent[2] = converted[2];
+        }
+    }
+
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    for position in &mesh.positions {
+        for axis in 0..3 {
+            min[axis] = min[axis].min(position[axis]);
+            max[axis] = max[axis].max(position[axis]);
+        }
+    }
+    if min.iter().all(|v| v.is_finite()) {
+        mesh.model_min = min;
+        mesh.model_max = max;
+        mesh.scaling_min = min;
+        mesh.scaling_max = max;
+    }
 }
 
 fn patch_object_parent_transform(
@@ -3664,6 +3742,94 @@ mod tests_5a_scene_blend {
             num_vertices: 3,
             node_parent_index: 0,
         }
+    }
+
+    #[test]
+    fn interior_placement_mesh_geometry_converts_to_scene_axes() {
+        let mut mesh = Mesh {
+            positions: vec![[1.0, 2.0, 3.0]],
+            indices: Vec::new(),
+            uvs: None,
+            secondary_uvs: None,
+            normals: Some(vec![[0.0, 1.0, 0.0]]),
+            tangents: Some(vec![[0.0, 0.0, 1.0, 1.0]]),
+            colors: None,
+            submeshes: Vec::new(),
+            model_min: [1.0, 2.0, 3.0],
+            model_max: [1.0, 2.0, 3.0],
+            scaling_min: [1.0, 2.0, 3.0],
+            scaling_max: [1.0, 2.0, 3.0],
+        };
+
+        convert_mesh_geometry_to_scene_axes(&mut mesh);
+
+        assert_eq!(mesh.positions[0], [1.0, -3.0, 2.0]);
+        assert_eq!(mesh.normals.as_ref().unwrap()[0], [0.0, -0.0, 1.0]);
+        assert_eq!(&mesh.tangents.as_ref().unwrap()[0][..3], &[0.0, -1.0, 0.0]);
+        assert_eq!(mesh.model_min, [1.0, -3.0, 2.0]);
+        assert_eq!(mesh.model_max, [1.0, -3.0, 2.0]);
+    }
+
+    #[test]
+    fn interior_placement_assets_flatten_source_hierarchy() {
+        let mesh = Mesh {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            indices: vec![0, 1, 2],
+            uvs: None,
+            secondary_uvs: None,
+            normals: None,
+            tangents: None,
+            colors: None,
+            submeshes: vec![test_submesh(0, "mat", 0)],
+            model_min: [0.0, 0.0, 0.0],
+            model_max: [1.0, 1.0, 0.0],
+            scaling_min: [0.0, 0.0, 0.0],
+            scaling_max: [1.0, 1.0, 0.0],
+        };
+        let nmc = NodeMeshCombo {
+            nodes: vec![crate::nmc::NmcNode {
+                name: "source_offset_node".to_string(),
+                parent_index: None,
+                world_to_bone: [
+                    [1.0, 0.0, 0.0, -5.0],
+                    [0.0, 1.0, 0.0, -6.0],
+                    [0.0, 0.0, 1.0, -7.0],
+                ],
+                bone_to_world: [
+                    [1.0, 0.0, 0.0, 5.0],
+                    [0.0, 1.0, 0.0, 6.0],
+                    [0.0, 0.0, 1.0, 7.0],
+                ],
+                scale: [1.0, 1.0, 1.0],
+                geometry_type: 0,
+                properties: HashMap::new(),
+            }],
+            material_indices: vec![0],
+        };
+        let mut mesh_data_map = HashMap::new();
+        mesh_data_map.insert("data/interior_asset.blend".to_string(), MeshDataEntry {
+            mesh,
+            materials: None,
+            nmc: Some(nmc),
+            interior_placement_space: true,
+        });
+        let job = BlendAssetJob {
+            blend_path: "Data/interior_asset.blend".to_string(),
+            mesh_name: "interior_asset".to_string(),
+            blend_key: "data/interior_asset.blend".to_string(),
+        };
+
+        let built = build_native_blend_asset(&job, &mesh_data_map, &HashMap::new()).unwrap();
+
+        assert!(
+            built.source_nodes.iter().all(|node| node.name != "source_offset_node"),
+            "interior placement assets should not preserve source NMC nodes that would be applied again in scene.blend"
+        );
+        assert_eq!(built.linked_mesh_refs.len(), 1);
+        assert_eq!(built.linked_mesh_refs[0].object_name, "source_offset_node");
+        assert_eq!(built.linked_mesh_refs[0].object_loc, [0.0, 0.0, 0.0]);
+        assert_eq!(built.linked_mesh_refs[0].object_quat, [1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(built.linked_mesh_refs[0].source_parent_name.as_deref(), Some(BLENDER_Y_UP_ROOT_NAME));
     }
 
     #[test]
