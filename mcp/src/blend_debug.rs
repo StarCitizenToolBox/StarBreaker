@@ -13,7 +13,8 @@ use std::path::PathBuf;
 /// Decompress a `.blend` file's raw bytes.
 ///
 /// Handles:
-/// - Zstd seekable-frame format (Blender 5.x): magic `BLND` prefix
+/// - Standard zstd format (magic `0x28 0xB5 0x2F 0xFD`): used by regular Blender-saved files
+/// - Zstd seekable-frame format (Blender 5.x Rust writer): magic `BLND` prefix
 /// - Uncompressed: magic `BLENDER` prefix
 ///
 /// Returns the decompressed bytes, or an error string.
@@ -22,8 +23,14 @@ pub fn decompress_blend(data: &[u8]) -> Result<Vec<u8>, String> {
         return Err("file too small to be a .blend".into());
     }
 
-    // Blender 5.x zstd-seekable-frame: starts with 'BLND' followed by the
-    // zstd seekable footer.  The zstd data starts at byte 0.
+    // Standard zstd magic: 0xFD2FB528 (little-endian = 28 B5 2F FD)
+    if data.len() >= 4 && &data[..4] == &[0x28, 0xB5, 0x2F, 0xFD] {
+        let decompressed = zstd::bulk::decompress(data, 512 * 1024 * 1024)
+            .map_err(|e| format!("zstd decompression failed: {e}"))?;
+        return Ok(decompressed);
+    }
+
+    // Blender 5.x zstd-seekable-frame (Rust writer): starts with 'BLND'
     if &data[..4] == b"BLND" {
         let decompressed = zstd::bulk::decompress(data, 512 * 1024 * 1024)
             .map_err(|e| format!("zstd decompression failed: {e}"))?;
@@ -69,9 +76,14 @@ impl BlendBlock {
 
 /// Parse all block headers from decompressed `.blend` data.
 ///
-/// The function reads the file header to determine pointer size (4 or 8 bytes)
-/// and endianness, then iterates blocks until `ENDB`.
-pub fn parse_blend_blocks(data: &[u8]) -> Result<Vec<BlendBlock>, String> {
+/// Handles both:
+/// - Old header (12 bytes): `BLENDER` + ptr_size (`_`/`-`) + endian (`v`/`V`) + 3-char version
+/// - New Blender 5.x header (17 bytes): `BLENDER17-01v` + 4-char version (e.g. `0501`)
+///   where byte[9] = ptr_size (`-`=8), byte[12] = endian (`v`=LE)
+///
+/// Returns `(ptr_size, blocks)`.
+/// Iterates blocks until `ENDB`.
+pub fn parse_blend_blocks(data: &[u8]) -> Result<(usize, Vec<BlendBlock>), String> {
     if data.len() < 12 {
         return Err("data too short for .blend header".into());
     }
@@ -82,15 +94,26 @@ pub fn parse_blend_blocks(data: &[u8]) -> Result<Vec<BlendBlock>, String> {
         ));
     }
 
-    let ptr_size: usize = match data[7] {
-        b'_' => 4,
-        b'-' => 8,
-        c => return Err(format!("unknown pointer-size indicator: {c:#x}")),
+    // Detect header format by byte[7]:
+    //   Old format: byte[7] = '_' (4-byte ptr) or '-' (8-byte ptr)
+    //   New Blender 5.x: byte[7] = '1' (part of "17"), ptr_size at byte[9], endian at byte[12]
+    let (ptr_size, little_endian, header_size) = if data[7] == b'_' || data[7] == b'-' {
+        // Old 12-byte header
+        let ps = if data[7] == b'_' { 4 } else { 8 };
+        let le = data[8] == b'v';
+        (ps, le, 12usize)
+    } else {
+        // New Blender 5.x 17-byte header: BLENDER17-01v0501
+        // byte[9] = '-' => 8-byte pointer; byte[12] = 'v' => little-endian
+        if data.len() < 17 {
+            return Err("data too short for Blender 5.x 17-byte header".into());
+        }
+        let ps = if data[9] == b'_' { 4 } else { 8 };
+        let le = data[12] == b'v';
+        (ps, le, 17usize)
     };
-    let little_endian = data[8] == b'v';
 
-    // Header is 12 bytes; blocks start immediately after.
-    let mut pos = 12usize;
+    let mut pos = header_size;
     let mut blocks = Vec::new();
 
     loop {
@@ -152,7 +175,7 @@ pub fn parse_blend_blocks(data: &[u8]) -> Result<Vec<BlendBlock>, String> {
         pos += data_len;
     }
 
-    Ok(blocks)
+    Ok((ptr_size, blocks))
 }
 
 fn read_u32(data: &[u8], offset: usize, little_endian: bool) -> u32 {

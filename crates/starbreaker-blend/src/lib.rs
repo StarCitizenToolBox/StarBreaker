@@ -1860,6 +1860,13 @@ pub fn write_light_gobo_node_tree(
     // Without these, iuser.frames=0 prevents Blender from associating the image
     // for the current frame during GPU shader evaluation, causing a black light.
     let mut image_storage = vec![0u8; NODE_TEX_IMAGE_SIZE];
+    // NodeTexBase.tex_mapping (TexMapping) is at offset 0.
+    // TexMapping layout: loc[3] (0..12) + rot[3] (12..24) + size[3] (24..36).
+    // Blender's default is size=(1,1,1); zeroed storage collapses UV to (0,0,0)
+    // which samples the edge/black region of the gobo texture → black light.
+    image_storage[24..28].copy_from_slice(&1.0f32.to_le_bytes());
+    image_storage[28..32].copy_from_slice(&1.0f32.to_le_bytes());
+    image_storage[32..36].copy_from_slice(&1.0f32.to_le_bytes());
     // iuser.frames = 100 at offset 972
     image_storage[972..976].copy_from_slice(&100u32.to_le_bytes());
     // iuser.sfra = 1 at offset 980

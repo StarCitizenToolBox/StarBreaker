@@ -936,13 +936,8 @@ impl StarBreakerMcp {
             Ok(d) => d,
             Err(e) => return format!("decompress failed: {e}"),
         };
-        let ptr_size: usize = match data.get(7) {
-            Some(b'_') => 4,
-            Some(b'-') => 8,
-            other => return format!("unknown pointer-size byte: {other:?}"),
-        };
-        let blocks = match parse_blend_blocks(&data) {
-            Ok(b) => b,
+        let (ptr_size, blocks) = match parse_blend_blocks(&data) {
+            Ok(r) => r,
             Err(e) => return format!("block parse failed: {e}"),
         };
         let dna1 = match blocks.iter().find(|b| &b.code == b"DNA1") {
@@ -1002,13 +997,8 @@ impl StarBreakerMcp {
             Ok(d) => d,
             Err(e) => return format!("decompress failed: {e}"),
         };
-        let ptr_size: usize = match data.get(7) {
-            Some(b'_') => 4,
-            Some(b'-') => 8,
-            _ => 8,
-        };
-        let blocks = match parse_blend_blocks(&data) {
-            Ok(b) => b,
+        let (ptr_size, blocks) = match parse_blend_blocks(&data) {
+            Ok(r) => r,
             Err(e) => return format!("block parse failed: {e}"),
         };
         let dna1 = blocks.iter().find(|b| &b.code == b"DNA1");
@@ -1228,15 +1218,14 @@ impl StarBreakerMcp {
         };
 
         // Parse both block layouts + SDNA for name resolution
-        let ptr_size: usize = match after_decomp.get(7) { Some(b'_') => 4, _ => 8 };
-        let after_blocks = parse_blend_blocks(&after_decomp).unwrap_or_default();
+        let (ptr_size, after_blocks) = parse_blend_blocks(&after_decomp).unwrap_or((8, vec![]));
         let sdna = after_blocks.iter().find(|b| &b.code == b"DNA1").and_then(|b| {
             let dna_data = &after_decomp[b.data_offset..b.data_offset + b.data_len];
             parse_sdna(dna_data, ptr_size).ok()
         });
 
         // Diff changed bytes across blocks
-        let before_blocks = parse_blend_blocks(&before_decomp).unwrap_or_default();
+        let (_before_ptr_size, before_blocks) = parse_blend_blocks(&before_decomp).unwrap_or((8, vec![]));
 
         let mut out = String::new();
         out.push_str(&format!(

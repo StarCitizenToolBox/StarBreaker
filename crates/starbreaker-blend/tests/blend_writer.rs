@@ -804,6 +804,34 @@ fn light_gobo_node_tree_has_two_links() {
 }
 
 #[test]
+fn light_gobo_node_tree_image_tex_texmapping_scale_is_one() {
+    // TexMapping.size (exposed as Python `.scale`) must be (1,1,1).
+    // NodeTexBase.tex_mapping (TexMapping) is at offset 0 of NodeTexImage storage.
+    // TexMapping layout: loc[3] (0..12) + rot[3] (12..24) + size[3] (24..36).
+    // Zeroed storage → size=(0,0,0) → all UV lookups collapse to edge pixel → black gobo.
+    let mut out = Vec::new();
+    let mut ptrs = PtrAlloc::new(0x2000);
+    write_light_gobo_node_tree(&mut out, 0x1000, 0x1010, 0x1020, "spot.png", "//spot.png", &mut ptrs);
+
+    const HDR: usize = 32;
+    let storage_pos = out
+        .windows(HDR)
+        .position(|h| {
+            &h[0..4] == b"DATA"
+            && u32::from_le_bytes([h[4], h[5], h[6], h[7]]) == 531
+        })
+        .expect("NodeTexImage DATA block (SDNA 531) not found");
+    let data_start = storage_pos + HDR;
+
+    let sx = f32::from_le_bytes(out[data_start + 24..data_start + 28].try_into().unwrap());
+    let sy = f32::from_le_bytes(out[data_start + 28..data_start + 32].try_into().unwrap());
+    let sz = f32::from_le_bytes(out[data_start + 32..data_start + 36].try_into().unwrap());
+    assert_eq!(sx, 1.0, "TexMapping.size.x must be 1.0, got {sx}");
+    assert_eq!(sy, 1.0, "TexMapping.size.y must be 1.0, got {sy}");
+    assert_eq!(sz, 1.0, "TexMapping.size.z must be 1.0, got {sz}");
+}
+
+#[test]
 fn light_gobo_node_tree_image_tex_iuser_frames_and_sfra() {
     // NodeTexImage.iuser must have frames=100 and sfra=1 (matching BKE_imageuser_default).
     // Without these, iuser.frames=0 causes Blender's GPU evaluator to skip the image,
