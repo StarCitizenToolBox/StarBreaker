@@ -1,8 +1,11 @@
-//! Utilities for inspecting Blender `.blend` files at the binary level.
+//! Utilities for inspecting Blender 5.x `.blend` files at the binary level.
+//!
+//! Only Blender 5.x format is supported: `BLENDER17-01v0501` magic (17-byte header),
+//! LargeBHead8 block headers, little-endian, 8-byte pointers, zstd compression.
 //!
 //! Provides:
-//! - `.blend` decompression (zstd seekable-frame and uncompressed)
-//! - Block-header parsing
+//! - `.blend` decompression (zstd or uncompressed)
+//! - Block-header parsing (LargeBHead8)
 //! - DNA1/SDNA struct-layout extraction
 //! - Headless Blender binary discovery
 
@@ -10,12 +13,12 @@ use std::path::PathBuf;
 
 // ─── Decompression ───────────────────────────────────────────────────────────
 
-/// Decompress a `.blend` file's raw bytes.
+/// Decompress a Blender 5.x `.blend` file's raw bytes.
 ///
 /// Handles:
-/// - Standard zstd format (magic `0x28 0xB5 0x2F 0xFD`): used by regular Blender-saved files
-/// - Zstd seekable-frame format (Blender 5.x Rust writer): magic `BLND` prefix
-/// - Uncompressed: magic `BLENDER` prefix
+/// - Zstd-compressed (magic `0x28 0xB5 0x2F 0xFD`): standard format used by Blender 5.x
+///   and our Rust writer.
+/// - Uncompressed (magic `BLENDER`): for test files that skip compression.
 ///
 /// Returns the decompressed bytes, or an error string.
 pub fn decompress_blend(data: &[u8]) -> Result<Vec<u8>, String> {
@@ -23,18 +26,10 @@ pub fn decompress_blend(data: &[u8]) -> Result<Vec<u8>, String> {
         return Err("file too small to be a .blend".into());
     }
 
-    // Standard zstd magic: 0xFD2FB528 (little-endian = 28 B5 2F FD)
-    if data.len() >= 4 && &data[..4] == &[0x28, 0xB5, 0x2F, 0xFD] {
-        let decompressed = zstd::bulk::decompress(data, 512 * 1024 * 1024)
-            .map_err(|e| format!("zstd decompression failed: {e}"))?;
-        return Ok(decompressed);
-    }
-
-    // Blender 5.x zstd-seekable-frame (Rust writer): starts with 'BLND'
-    if &data[..4] == b"BLND" {
-        let decompressed = zstd::bulk::decompress(data, 512 * 1024 * 1024)
-            .map_err(|e| format!("zstd decompression failed: {e}"))?;
-        return Ok(decompressed);
+    // Standard zstd magic: 0xFD2FB528 in little-endian = bytes [0x28, 0xB5, 0x2F, 0xFD]
+    if data.len() >= 4 && data[..4] == [0x28, 0xB5, 0x2F, 0xFD] {
+        return zstd::bulk::decompress(data, 512 * 1024 * 1024)
+            .map_err(|e| format!("zstd decompression failed: {e}"));
     }
 
     // Uncompressed .blend starts with 'BLENDER'
@@ -43,7 +38,7 @@ pub fn decompress_blend(data: &[u8]) -> Result<Vec<u8>, String> {
     }
 
     Err(format!(
-        "unrecognised .blend magic: {:?}",
+        "unrecognised .blend magic: {:?} — expected zstd (0x28 0xB5 0x2F 0xFD) or BLENDER",
         &data[..data.len().min(8)]
     ))
 }
@@ -74,18 +69,30 @@ impl BlendBlock {
     }
 }
 
-/// Parse all block headers from decompressed `.blend` data.
+/// Parse all block headers from decompressed Blender 5.x `.blend` data.
 ///
-/// Handles both:
-/// - Old header (12 bytes): `BLENDER` + ptr_size (`_`/`-`) + endian (`v`/`V`) + 3-char version
-/// - New Blender 5.x header (17 bytes): `BLENDER17-01v` + 4-char version (e.g. `0501`)
-///   where byte[9] = ptr_size (`-`=8), byte[12] = endian (`v`=LE)
+/// Only supports `BLENDER17-..` format (17-byte file header, little-endian, 8-byte pointers).
 ///
-/// Returns `(ptr_size, blocks)`.
-/// Iterates blocks until `ENDB`.
-pub fn parse_blend_blocks(data: &[u8]) -> Result<(usize, Vec<BlendBlock>), String> {
-    if data.len() < 12 {
-        return Err("data too short for .blend header".into());
+/// Block header layout — **LargeBHead8** (32 bytes):
+/// ```text
+/// code[4]    — block type (e.g. b"OB\0\0", b"DNA1", b"ENDB")
+/// SDNAnr[4]  — SDNA struct index (u32 LE)
+/// old[8]     — original memory pointer (u64 LE)
+/// len[8]     — data length in bytes (i64 LE; fits in u32 for all practical blocks)
+/// nr[8]      — element count (i64 LE; fits in u32)
+/// ```
+///
+/// Our Rust writer produces the same layout using `u32 + 0u32` padding for len/nr, which
+/// is byte-identical to LargeBHead8 when values fit in 32 bits.
+///
+/// Iterates until `ENDB` or end of data. Returns an error if the header magic is wrong
+/// or a block claims more bytes than remain in the buffer.
+pub fn parse_blend_blocks(data: &[u8]) -> Result<Vec<BlendBlock>, String> {
+    if data.len() < 17 {
+        return Err(format!(
+            "file too small ({} bytes) for Blender 5.x 17-byte header",
+            data.len()
+        ));
     }
     if &data[..7] != b"BLENDER" {
         return Err(format!(
@@ -93,27 +100,14 @@ pub fn parse_blend_blocks(data: &[u8]) -> Result<(usize, Vec<BlendBlock>), Strin
             &data[..7.min(data.len())]
         ));
     }
+    if data[7] != b'1' {
+        return Err(format!(
+            "only Blender 5.x (BLENDER17-...) is supported; got byte[7]={:?}",
+            data[7] as char
+        ));
+    }
 
-    // Detect header format by byte[7]:
-    //   Old format: byte[7] = '_' (4-byte ptr) or '-' (8-byte ptr)
-    //   New Blender 5.x: byte[7] = '1' (part of "17"), ptr_size at byte[9], endian at byte[12]
-    let (ptr_size, little_endian, header_size) = if data[7] == b'_' || data[7] == b'-' {
-        // Old 12-byte header
-        let ps = if data[7] == b'_' { 4 } else { 8 };
-        let le = data[8] == b'v';
-        (ps, le, 12usize)
-    } else {
-        // New Blender 5.x 17-byte header: BLENDER17-01v0501
-        // byte[9] = '-' => 8-byte pointer; byte[12] = 'v' => little-endian
-        if data.len() < 17 {
-            return Err("data too short for Blender 5.x 17-byte header".into());
-        }
-        let ps = if data[9] == b'_' { 4 } else { 8 };
-        let le = data[12] == b'v';
-        (ps, le, 17usize)
-    };
-
-    let mut pos = header_size;
+    let mut pos = 17usize; // skip 17-byte file header
     let mut blocks = Vec::new();
 
     loop {
@@ -121,79 +115,59 @@ pub fn parse_blend_blocks(data: &[u8]) -> Result<(usize, Vec<BlendBlock>), Strin
             break;
         }
         let code: [u8; 4] = data[pos..pos + 4].try_into().unwrap();
-        pos += 4;
 
         if &code == b"ENDB" {
             blocks.push(BlendBlock {
                 code,
                 sdna_index: 0,
                 old_ptr: 0,
-                data_offset: pos,
+                data_offset: pos + 32,
                 data_len: 0,
                 count: 0,
             });
             break;
         }
 
-        // Block header (after code):
-        //   data_len: u32 (4 bytes)
-        //   old_ptr:  ptr_size bytes
-        //   sdna_idx: u32 (4 bytes)
-        //   count:    u32 (4 bytes)
-        // Total (ptr_size=8): 4+8+4+4 = 20 bytes after code
-
-        if pos + 4 + ptr_size + 4 + 4 > data.len() {
+        // LargeBHead8: 32-byte header total
+        if pos + 32 > data.len() {
             break;
         }
 
-        let data_len = read_u32(data, pos, little_endian) as usize;
-        pos += 4;
+        let sdna_index = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap());
+        let old_ptr    = u64::from_le_bytes(data[pos + 8..pos + 16].try_into().unwrap());
+        let data_len   = i64::from_le_bytes(data[pos + 16..pos + 24].try_into().unwrap());
+        let count      = i64::from_le_bytes(data[pos + 24..pos + 32].try_into().unwrap());
 
-        let old_ptr = if ptr_size == 8 {
-            read_u64(data, pos, little_endian)
-        } else {
-            read_u32(data, pos, little_endian) as u64
-        };
-        pos += ptr_size;
+        if data_len < 0 {
+            return Err(format!(
+                "block {:?} at offset {pos} has negative length {data_len}",
+                String::from_utf8_lossy(&code)
+            ));
+        }
+        let data_len = data_len as usize;
+        let data_offset = pos + 32;
 
-        let sdna_index = read_u32(data, pos, little_endian);
-        pos += 4;
+        if data_offset + data_len > data.len() {
+            return Err(format!(
+                "block {:?} at offset {pos} claims {data_len} bytes but only {} remain",
+                String::from_utf8_lossy(&code),
+                data.len() - data_offset
+            ));
+        }
 
-        let count = read_u32(data, pos, little_endian);
-        pos += 4;
-
-        let data_offset = pos;
         blocks.push(BlendBlock {
             code,
             sdna_index,
             old_ptr,
             data_offset,
             data_len,
-            count,
+            count: count as u32,
         });
 
-        pos += data_len;
+        pos = data_offset + data_len;
     }
 
-    Ok((ptr_size, blocks))
-}
-
-fn read_u32(data: &[u8], offset: usize, little_endian: bool) -> u32 {
-    let b = &data[offset..offset + 4];
-    if little_endian {
-        u32::from_le_bytes(b.try_into().unwrap())
-    } else {
-        u32::from_be_bytes(b.try_into().unwrap())
-    }
-}
-
-fn read_u64(data: &[u8], offset: usize, little_endian: bool) -> u64 {
-    let b = &data[offset..offset + 8];
-    if little_endian {
-        u64::from_le_bytes(b.try_into().unwrap())
-    } else {
-        u64::from_be_bytes(b.try_into().unwrap())
-    }
+    Ok(blocks)
 }
 
 // ─── SDNA / DNA1 parsing ─────────────────────────────────────────────────────
@@ -248,7 +222,7 @@ impl SdnaIndex {
 /// Parse the SDNA index from a `DNA1` block.
 ///
 /// `block_data` is the raw bytes of the `DNA1` block (after the block header).
-/// `ptr_size` is the pointer size (4 or 8) from the file header.
+/// For Blender 5.x, `ptr_size` is always `8`; pass `8` directly.
 pub fn parse_sdna(block_data: &[u8], ptr_size: usize) -> Result<SdnaIndex, String> {
     let mut pos = 0usize;
 

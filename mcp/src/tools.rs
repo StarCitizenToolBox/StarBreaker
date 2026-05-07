@@ -162,6 +162,19 @@ pub struct BlendPythonDiffRequest {
     pub blender_bin: Option<String>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct BlendRunScriptRequest {
+    #[schemars(description = "Absolute filesystem path to a .blend file to open with Blender.")]
+    pub blend_path: String,
+    #[schemars(description = "Python script body to execute in headless Blender after opening the file. \
+        Wrap your output in print() calls. Output between __BLEND_SCRIPT_OUTPUT_START__ and \
+        __BLEND_SCRIPT_OUTPUT_END__ sentinels is returned; if sentinels are absent the full \
+        stdout+stderr is returned.")]
+    pub script: String,
+    #[schemars(description = "Override path to the Blender binary. Falls back to BLENDER_BIN env var, then PATH.")]
+    pub blender_bin: Option<String>,
+}
+
 
 pub struct StarBreakerMcp {
     p4k_path: Option<std::path::PathBuf>,
@@ -936,7 +949,7 @@ impl StarBreakerMcp {
             Ok(d) => d,
             Err(e) => return format!("decompress failed: {e}"),
         };
-        let (ptr_size, blocks) = match parse_blend_blocks(&data) {
+        let blocks = match parse_blend_blocks(&data) {
             Ok(r) => r,
             Err(e) => return format!("block parse failed: {e}"),
         };
@@ -945,7 +958,7 @@ impl StarBreakerMcp {
             None => return "No DNA1 block found in file".to_string(),
         };
         let dna_data = &data[dna1.data_offset..dna1.data_offset + dna1.data_len];
-        let sdna = match parse_sdna(dna_data, ptr_size) {
+        let sdna = match parse_sdna(dna_data, 8) {
             Ok(s) => s,
             Err(e) => return format!("SDNA parse failed: {e}"),
         };
@@ -975,8 +988,8 @@ impl StarBreakerMcp {
             }
         } else {
             let mut out = format!(
-                "{} structs, ptr_size={}\n\n",
-                sdna.structs.len(), ptr_size
+                "{} structs, ptr_size=8\n\n",
+                sdna.structs.len()
             );
             for (i, s) in sdna.structs.iter().enumerate() {
                 out.push_str(&format!("  [{i:4}] {} ({} bytes, {} fields)\n", s.name, s.size, s.fields.len()));
@@ -997,14 +1010,14 @@ impl StarBreakerMcp {
             Ok(d) => d,
             Err(e) => return format!("decompress failed: {e}"),
         };
-        let (ptr_size, blocks) = match parse_blend_blocks(&data) {
+        let blocks = match parse_blend_blocks(&data) {
             Ok(r) => r,
             Err(e) => return format!("block parse failed: {e}"),
         };
         let dna1 = blocks.iter().find(|b| &b.code == b"DNA1");
         let sdna = dna1.and_then(|b| {
             let dna_data = &data[b.data_offset..b.data_offset + b.data_len];
-            parse_sdna(dna_data, ptr_size).ok()
+            parse_sdna(dna_data, 8).ok()
         });
 
         let max_bytes = req.max_bytes.unwrap_or(256) as usize;
@@ -1218,14 +1231,14 @@ impl StarBreakerMcp {
         };
 
         // Parse both block layouts + SDNA for name resolution
-        let (ptr_size, after_blocks) = parse_blend_blocks(&after_decomp).unwrap_or((8, vec![]));
+        let after_blocks = parse_blend_blocks(&after_decomp).unwrap_or_default();
         let sdna = after_blocks.iter().find(|b| &b.code == b"DNA1").and_then(|b| {
             let dna_data = &after_decomp[b.data_offset..b.data_offset + b.data_len];
-            parse_sdna(dna_data, ptr_size).ok()
+            parse_sdna(dna_data, 8).ok()
         });
 
         // Diff changed bytes across blocks
-        let (_before_ptr_size, before_blocks) = parse_blend_blocks(&before_decomp).unwrap_or((8, vec![]));
+        let before_blocks = parse_blend_blocks(&before_decomp).unwrap_or_default();
 
         let mut out = String::new();
         out.push_str(&format!(
@@ -1316,8 +1329,93 @@ impl StarBreakerMcp {
         out
     }
 
-}
+    /// Run an arbitrary Python script against a `.blend` file in headless Blender.
+    ///
+    /// Opens `blend_path` with `blender --background --python <script>` and returns the
+    /// script's printed output.  If the script wraps output with `__BLEND_SCRIPT_OUTPUT_START__`
+    /// and `__BLEND_SCRIPT_OUTPUT_END__` sentinels, only the content between them is returned
+    /// (filtering Blender startup noise). If sentinels are absent, full stdout+stderr is returned.
+    /// `import bpy` is always available in Blender scripts — no need to import it explicitly.
+    #[tool(description = "Run an arbitrary Python script against a .blend file in headless Blender. \
+        Opens blend_path with `blender --background --python script` and returns printed output. \
+        Wrap important output with print('__BLEND_SCRIPT_OUTPUT_START__') / print('__BLEND_SCRIPT_OUTPUT_END__') \
+        sentinels to filter out Blender startup noise. If sentinels are absent, full stdout+stderr is returned. \
+        `import bpy` is always available — no need to import it explicitly in your script.")]
+    fn blend_run_script(&self, Parameters(req): Parameters<BlendRunScriptRequest>) -> String {
+        use crate::blend_debug::find_blender_bin;
+        use std::io::Write as _;
 
+        let blender_bin = match find_blender_bin(req.blender_bin.as_deref()) {
+            Ok(b) => b,
+            Err(e) => return format!("blender binary not found: {e}"),
+        };
+
+        let blend_path = std::path::Path::new(&req.blend_path);
+        if !blend_path.exists() {
+            return format!("blend file not found: {}", req.blend_path);
+        }
+
+        // Temp dir for the script file
+        let tmp = std::path::PathBuf::from(format!(
+            "/tmp/blend_run_script_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        ));
+        if let Err(e) = std::fs::create_dir_all(&tmp) {
+            return format!("failed to create temp dir: {e}");
+        }
+
+        let script_path = tmp.join("script.py");
+        if let Err(e) = std::fs::File::create(&script_path)
+            .and_then(|mut f| f.write_all(req.script.as_bytes()))
+        {
+            let _ = std::fs::remove_dir_all(&tmp);
+            return format!("failed to write script: {e}");
+        }
+
+        let output = std::process::Command::new(&blender_bin)
+            .args([
+                "--background",
+                &req.blend_path,
+                "--python",
+                script_path.to_str().unwrap_or(""),
+            ])
+            .output();
+
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let output = match output {
+            Ok(o) => o,
+            Err(e) => return format!("failed to run blender: {e}"),
+        };
+
+        let full = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // Extract between sentinels if present
+        const START: &str = "__BLEND_SCRIPT_OUTPUT_START__";
+        const END: &str = "__BLEND_SCRIPT_OUTPUT_END__";
+        if let (Some(start_pos), Some(end_pos)) = (full.find(START), full.rfind(END)) {
+            let content_start = start_pos + START.len();
+            if content_start < end_pos {
+                return full[content_start..end_pos].trim().to_string();
+            }
+        }
+
+        // Fallback: return everything (script likely errored)
+        if !output.status.success() {
+            format!("blender exited with status {}\n\n{full}", output.status)
+        } else {
+            full
+        }
+    }
+
+}
 #[rmcp::tool_handler]
 impl ServerHandler for StarBreakerMcp {
     fn get_info(&self) -> ServerInfo {

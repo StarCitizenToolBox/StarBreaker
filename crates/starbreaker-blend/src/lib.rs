@@ -2023,16 +2023,12 @@ fn build_bnode_socket(
 }
 
 
+/// Compress `.blend` bytes using Blender 5.x Zstandard format (alias of [`compress_blend_bytes`]).
 ///
-/// Scene.blend files must be Zstd-compressed; mesh .blend files are uncompressed.
+/// Blender 5.1 uses standard single-frame zstd compression (magic `0x28 0xB5 0x2F 0xFD`).
+/// The earlier "seekable frames" hypothesis was incorrect — Blender saves with standard zstd.
 pub fn compress_blend_bytes_zstd(raw_blend: &[u8]) -> Vec<u8> {
-    // Blender 5.1 requires special "seekable frames" format for zstd, not standard single-frame compression.
-    // For now, return uncompressed (Blender auto-detects and handles uncompressed files).
-    // TODO: Implement proper seekable frames format:
-    //   1. Split into 1MB chunks
-    //   2. Compress each with ZSTD_COMPRESSION_LEVEL = 3
-    //   3. Append seek table (magic 0x184D2A5E + frame table + footer magic 0x8F92EAB1)
-    raw_blend.to_vec()
+    compress_blend_bytes(raw_blend)
 }
 
 /// Build a Library block (LI) for linking to an external .blend file.

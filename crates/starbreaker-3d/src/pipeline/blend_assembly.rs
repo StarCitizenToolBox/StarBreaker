@@ -1024,8 +1024,8 @@ pub fn write_decomposed_export_blend(
     log::info!("[blend-debug] scene.blend created, size: {} bytes", scene_blend_bytes.len());
     log::info!("[blend-debug] First 20 bytes of uncompressed: {:?}", &scene_blend_bytes[..20.min(scene_blend_bytes.len())]);
     
-    // Compress scene.blend with Zstd (Blender 5.1 native format)
-    let compressed_scene = starbreaker_blend::compress_blend_bytes_zstd(&scene_blend_bytes);
+    // Compress scene.blend with standard Zstd (Blender 5.1 native format)
+    let compressed_scene = starbreaker_blend::compress_blend_bytes(&scene_blend_bytes);
     log::info!("[blend-debug] Compressed scene size: {} bytes", compressed_scene.len());
     log::info!("[blend-debug] First 20 bytes of compressed: {:?}", &compressed_scene[..20.min(compressed_scene.len())]);
     log::info!("[timing][blend] scene_blend_assembly: {:.2}s", phase_start.elapsed().as_secs_f32());
@@ -1975,6 +1975,7 @@ fn build_native_blend_asset(
         nmc,
         vgroups.as_ref(),
     );
+    // Extract link data from uncompressed bytes before compressing for storage
     let (mut linked_mesh_refs, source_nodes) = blend_link_data_from_bytes(&blend_bytes);
     if linked_mesh_refs.is_empty() {
         linked_mesh_refs.push(LinkedMeshRef {
@@ -1988,11 +1989,13 @@ fn build_native_blend_asset(
             ancestors: Vec::new(),
         });
     }
+    // Compress for storage (matching Blender 5.x standard zstd format)
+    let compressed = starbreaker_blend::compress_blend_bytes(&blend_bytes);
 
     Ok(BuiltBlendAsset {
         file: ExportedFile {
             relative_path: job.blend_path.clone(),
-            bytes: blend_bytes,
+            bytes: compressed,
             kind: ExportedFileKind::MeshAsset,
         },
         linked_mesh_refs,
