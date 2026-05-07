@@ -586,6 +586,7 @@ export function ExportView() {
                     onChange={() => {
                       setExportKind(opt.value);
                       if (opt.value === "bundled") setFormat("glb");
+                      if (opt.value === "decomposed") setFormat("blend");
                     }}
                     className="accent-accent w-3 h-3"
                   />
