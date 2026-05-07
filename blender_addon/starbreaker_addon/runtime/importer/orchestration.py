@@ -62,6 +62,7 @@ from .types import ImportedTemplate, _bake_bitangent_sign_attribute
 from .utils import (
     _canonical_material_sidecar_path,
     _canonical_source_name,
+    _gltf_matrix_to_blender_basis,
     _remapped_submaterial_for_slot,
     _scene_attachment_offset_to_blender,
     _scene_light_quaternion_to_blender,
@@ -549,6 +550,8 @@ class OrchestrationMixin:
         anchor.rotation_mode = "QUATERNION"
         if record.local_transform_sc is not None and record.source_transform_basis == "cryengine_z_up":
             anchor.matrix_basis = _scene_matrix_to_blender(record.local_transform_sc)
+        elif record.local_transform_sc is not None and record.source_transform_basis == "gltf_y_up":
+            anchor.matrix_basis = _gltf_matrix_to_blender_basis(record.local_transform_sc)
         else:
             parent_world_matrix = None
             if parent_node is not None:

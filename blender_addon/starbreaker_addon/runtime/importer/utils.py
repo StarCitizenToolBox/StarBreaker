@@ -243,6 +243,11 @@ def _scene_matrix_to_blender(matrix_rows: Any) -> Matrix:
     return SCENE_AXIS_CONVERSION @ matrix @ SCENE_AXIS_CONVERSION_INV
 
 
+def _gltf_matrix_to_blender_basis(matrix_rows: Any) -> Matrix:
+    """Interpret a glTF Y-up matrix payload directly as Blender basis."""
+    return Matrix(matrix_rows).transposed()
+
+
 def _scene_quaternion_to_blender(rotation: tuple[float, float, float, float]) -> Quaternion:
     if all(abs(component) <= 1e-8 for component in rotation):
         return Quaternion((1.0, 0.0, 0.0, 0.0))

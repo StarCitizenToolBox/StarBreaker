@@ -835,7 +835,7 @@ pub(crate) fn write_decomposed_export(
             palette_id,
             parent_node_name: Some(child.parent_node_name.clone()),
             parent_entity_name: Some(child.parent_entity_name.clone()),
-            source_transform_basis: Some("cryengine_z_up".to_string()),
+            source_transform_basis: Some("gltf_y_up".to_string()),
             local_transform_sc: Some(resolved_transform.local_transform_sc),
             resolved_no_rotation: resolved_transform.resolved_no_rotation,
             no_rotation: child.no_rotation,
@@ -1572,28 +1572,23 @@ fn canonical_sidecar_materials_from_source(
     fallback_indices: &[u32],
 ) -> (MtlFile, Vec<u32>) {
     let p4k_path = source_material_path.replace('/', "\\");
-    if let Some(entry) = p4k.entry_case_insensitive(&p4k_path) {
-        if let Ok(data) = p4k.read(entry) {
-            if let Ok(mut parsed) = crate::mtl::parse_mtl(&data) {
-                parsed.source_path = Some(p4k_path);
-                let mut original_indices = Vec::new();
-                let mut non_hidden = Vec::new();
-                for (idx, material) in parsed.materials.into_iter().enumerate() {
-                    if material.should_hide() {
-                        continue;
-                    }
-                    original_indices.push(idx as u32);
-                    non_hidden.push(material);
-                }
-                let canonical = MtlFile {
-                    materials: non_hidden,
-                    source_path: parsed.source_path,
-                    paint_override: parsed.paint_override,
-                    material_set: parsed.material_set,
-                };
-                return (canonical, original_indices);
+    if let Some(parsed) = crate::pipeline::try_load_mtl(p4k, &p4k_path) {
+        let mut original_indices = Vec::new();
+        let mut non_hidden = Vec::new();
+        for (idx, material) in parsed.materials.into_iter().enumerate() {
+            if material.should_hide() {
+                continue;
             }
+            original_indices.push(idx as u32);
+            non_hidden.push(material);
         }
+        let canonical = MtlFile {
+            materials: non_hidden,
+            source_path: parsed.source_path,
+            paint_override: parsed.paint_override,
+            material_set: parsed.material_set,
+        };
+        return (canonical, original_indices);
     }
 
     // Fallback path: preserve previous behaviour when we can't reload the source file.
@@ -3653,7 +3648,7 @@ mod tests {
             palette_id: Some("palette/test".into()),
             parent_node_name: Some("hardpoint_weapon_left".into()),
             parent_entity_name: Some("root".into()),
-            source_transform_basis: Some("cryengine_z_up".into()),
+            source_transform_basis: Some("gltf_y_up".into()),
             local_transform_sc: Some(crate::socpak::build_container_transform([1.0, 2.0, 3.0], [0.0, 90.0, 0.0])),
             resolved_no_rotation: false,
             no_rotation: false,
@@ -3705,7 +3700,7 @@ mod tests {
         assert_eq!(value["root_entity"]["mesh_asset"], serde_json::json!("Data/Objects/Ships/Test/root.glb"));
         assert_eq!(value["children"][0]["mesh_asset"], serde_json::json!("Data/Objects/Ships/Test/child.glb"));
         assert_eq!(value["children"][0]["parent_node_name"], serde_json::json!("hardpoint_weapon_left"));
-        assert_eq!(value["children"][0]["source_transform_basis"], serde_json::json!("cryengine_z_up"));
+        assert_eq!(value["children"][0]["source_transform_basis"], serde_json::json!("gltf_y_up"));
         assert!(value["children"][0]["local_transform_sc"].is_array());
         assert_eq!(value["children"][0]["resolved_no_rotation"], serde_json::json!(false));
         assert_eq!(value["interiors"][0]["placements"][0]["mesh_asset"], serde_json::json!("Data/Objects/Ships/Test/interior_panel.glb"));
