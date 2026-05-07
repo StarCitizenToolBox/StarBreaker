@@ -714,6 +714,124 @@ fn light_gobo_node_tree_writes_embedded_data_before_image_id() {
         .any(|window| window == b"//../../Data/Textures/lights/generic/spot_075.dds"));
 }
 
+#[test]
+fn light_gobo_node_tree_image_tex_node_type_is_143() {
+    // SH_NODE_TEX_IMAGE must be 143, not 108.  Written as little-endian i16 at
+    // BNode+0x0C0.  Locate "ShaderNodeTexImage" in the output and verify that
+    // the two bytes at relative offset -(0x78 - 0xC0) = +0x48 contain 143/0x8F.
+    let mut out = Vec::new();
+    let mut ptrs = PtrAlloc::new(0x2000);
+    write_light_gobo_node_tree(
+        &mut out,
+        0x1000,
+        0x1010,
+        0x1020,
+        "spot.dds",
+        "//spot.dds",
+        &mut ptrs,
+    );
+    let idname = b"ShaderNodeTexImage";
+    let pos = out
+        .windows(idname.len())
+        .position(|w| w == idname)
+        .expect("ShaderNodeTexImage not found in output");
+    // idname is at BNode+0x78; node_type is at BNode+0xC0 → offset delta = 0x48
+    let type_offset = pos + 0x48;
+    let node_type = i16::from_le_bytes(out[type_offset..type_offset + 2].try_into().unwrap());
+    assert_eq!(node_type, 143, "SH_NODE_TEX_IMAGE should be 143, got {node_type}");
+}
+
+#[test]
+fn light_gobo_node_tree_output_node_has_do_output_flag() {
+    // NODE_DO_OUTPUT = 1 << 6 = 0x40.  The Light Output BNode flags field is at
+    // BNode+0x74; idname "ShaderNodeOutputLight" is at BNode+0x78 (delta = +4 bytes).
+    let mut out = Vec::new();
+    let mut ptrs = PtrAlloc::new(0x2000);
+    write_light_gobo_node_tree(
+        &mut out,
+        0x1000,
+        0x1010,
+        0x1020,
+        "spot.dds",
+        "//spot.dds",
+        &mut ptrs,
+    );
+    let idname = b"ShaderNodeOutputLight";
+    let pos = out
+        .windows(idname.len())
+        .position(|w| w == idname)
+        .expect("ShaderNodeOutputLight not found in output");
+    // flags is 4 bytes before idname (BNode+0x74 vs BNode+0x78)
+    let flags_offset = pos - 4;
+    let flags = u32::from_le_bytes(out[flags_offset..flags_offset + 4].try_into().unwrap());
+    assert!(flags & 0x40 != 0, "NODE_DO_OUTPUT (0x40) must be set on Light Output node, flags={flags:#010x}");
+}
+
+#[test]
+fn light_gobo_node_tree_has_no_texcoord_or_mapping_nodes() {
+    // Reference gobo.blend uses only 3 nodes: Image Texture → Emission → Light Output.
+    // No Texture Coordinate or Mapping nodes should be present.
+    let mut out = Vec::new();
+    let mut ptrs = PtrAlloc::new(0x2000);
+    write_light_gobo_node_tree(&mut out, 0x1000, 0x1010, 0x1020, "spot.dds", "//spot.dds", &mut ptrs);
+    assert!(
+        !out.windows(b"ShaderNodeTexCoord".len()).any(|w| w == b"ShaderNodeTexCoord"),
+        "ShaderNodeTexCoord must NOT be present in gobo node tree"
+    );
+    assert!(
+        !out.windows(b"ShaderNodeMapping".len()).any(|w| w == b"ShaderNodeMapping"),
+        "ShaderNodeMapping must NOT be present in gobo node tree"
+    );
+}
+
+#[test]
+fn light_gobo_node_tree_has_two_links() {
+    // Simple 3-node chain has 2 links: ImageTex.Color→Emission.Color, Emission→LightOutput
+    let mut out = Vec::new();
+    let mut ptrs = PtrAlloc::new(0x2000);
+    write_light_gobo_node_tree(&mut out, 0x1000, 0x1010, 0x1020, "spot.dds", "//spot.dds", &mut ptrs);
+    // Block header layout: [code:4][sdna_idx:4][old_ptr:8][data_len:4][pad:4][count:4][pad:4] = 32 bytes
+    // SDNA index is at bytes 4-7 as u32 le; SDNA_IDX_BNODE_LINK = 470
+    const HDR: usize = 32;
+    let link_count = out
+        .windows(HDR)
+        .filter(|h| {
+            &h[0..4] == b"DATA"
+            && u32::from_le_bytes([h[4], h[5], h[6], h[7]]) == 470
+        })
+        .count();
+    assert_eq!(link_count, 2, "Expected 2 node links (SDNA 470), got {link_count}");
+}
+
+#[test]
+fn light_gobo_node_tree_image_tex_iuser_frames_and_sfra() {
+    // NodeTexImage.iuser must have frames=100 and sfra=1 (matching BKE_imageuser_default).
+    // Without these, iuser.frames=0 causes Blender's GPU evaluator to skip the image,
+    // producing a black gobo light.
+    // NodeTexImage layout: NodeTexBase(960 bytes) + ImageUser(40 bytes) + ...
+    // ImageUser: scene*(8) + framenr(4) + frames(4) + offset(4) + sfra(4) + ...
+    // iuser.frames at offset 960+12=972; iuser.sfra at offset 960+20=980.
+    let mut out = Vec::new();
+    let mut ptrs = PtrAlloc::new(0x2000);
+    write_light_gobo_node_tree(&mut out, 0x1000, 0x1010, 0x1020, "spot.dds", "//spot.dds", &mut ptrs);
+
+    // Find the NodeTexImage storage DATA block (SDNA_IDX_NODE_TEX_IMAGE = 531)
+    const HDR: usize = 32;
+    let storage_pos = out
+        .windows(HDR)
+        .position(|h| {
+            &h[0..4] == b"DATA"
+            && u32::from_le_bytes([h[4], h[5], h[6], h[7]]) == 531
+        })
+        .expect("NodeTexImage DATA block (SDNA 531) not found");
+    let data_start = storage_pos + HDR;
+
+    let frames = u32::from_le_bytes(out[data_start + 972..data_start + 976].try_into().unwrap());
+    let sfra   = u32::from_le_bytes(out[data_start + 980..data_start + 984].try_into().unwrap());
+    assert_eq!(frames, 100, "iuser.frames must be 100 (BKE_imageuser_default), got {frames}");
+    assert_eq!(sfra, 1, "iuser.sfra must be 1 (BKE_imageuser_default), got {sfra}");
+}
+
 // ── IDProperty field layout ───────────────────────────────────────────────────
 
 #[test]

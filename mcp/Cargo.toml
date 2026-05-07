@@ -20,6 +20,7 @@ base64 = "0.22"
 anyhow = "1"
 
 image = "0.25"
+zstd = "0.13"
 
 starbreaker-p4k = { path = "../crates/starbreaker-p4k" }
 starbreaker-datacore = { path = "../crates/starbreaker-datacore" }

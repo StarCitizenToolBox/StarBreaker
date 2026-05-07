@@ -1178,9 +1178,7 @@ pub fn build_image_with_tile(image_name: &str, filepath: &str, tile_ptr: u64) ->
     write_i16(&mut data, 1488, 1); // source = IMA_SRC_FILE
     write_i16(&mut data, 1490, 0); // type = IMA_TYPE_IMAGE
     write_i16(&mut data, 1496, 8); // seam_margin
-    write_i32(&mut data, 1540, 1024); // generated width fallback
-    write_i32(&mut data, 1544, 1024); // generated height fallback
-    data[1548] = 1; // gen_type = IMA_GENTYPE_GRID
+    // Don't set gen_type or generated fallback sizes - for file-backed images, let Blender read from disk
     write_f32(&mut data, 1568, 1.0); // aspx
     write_f32(&mut data, 1572, 1.0); // aspy
     write_cstr_fixed(&mut data, 1576, 64, "Linear Rec.709");
@@ -1724,9 +1722,9 @@ pub fn write_world_with_sky_shader(
 
 /// Write a file-backed projector/gobo shader graph for a Lamp.
 ///
-/// The graph is equivalent to the addon's runtime gobo group but avoids a
-/// custom node-group interface:
-/// `Texture Coordinate.UV -> Mapping -> Image Texture -> Emission -> Light Output`.
+/// Simple 3-node graph matching the reference: `Image Texture -> Emission -> Light Output`.
+/// The Image Texture node's `iuser` is initialized with Blender's defaults
+/// (`frames=100`, `sfra=1`) so the image is properly associated during GPU evaluation.
 pub fn write_light_gobo_node_tree(
     out: &mut Vec<u8>,
     lamp_ptr: u64,
@@ -1736,32 +1734,34 @@ pub fn write_light_gobo_node_tree(
     image_filepath: &str,
     ptrs: &mut PtrAlloc,
 ) {
-    let tex_coord_ptr = ptrs.alloc();
-    let mapping_ptr = ptrs.alloc();
-    let env_tex_ptr = ptrs.alloc();
+    // Node pointers: Image Texture → Emission → Light Output
+    let image_tex_ptr = ptrs.alloc();
     let emission_ptr = ptrs.alloc();
     let output_ptr = ptrs.alloc();
 
-    let tex_uv_out_ptr = ptrs.alloc();
-    let mapping_vector_in_ptr = ptrs.alloc();
-    let mapping_vector_out_ptr = ptrs.alloc();
-    let env_vector_in_ptr = ptrs.alloc();
-    let env_color_out_ptr = ptrs.alloc();
+    // Image Texture sockets
+    let image_vector_in_ptr = ptrs.alloc();
+    let image_color_out_ptr = ptrs.alloc();
+    let image_alpha_out_ptr = ptrs.alloc();
+
+    // Emission sockets
     let emission_color_in_ptr = ptrs.alloc();
     let emission_strength_in_ptr = ptrs.alloc();
     let emission_out_ptr = ptrs.alloc();
+
+    // Output socket
     let output_surface_in_ptr = ptrs.alloc();
 
-    let mapping_vector_def_ptr = ptrs.alloc();
-    let env_vector_def_ptr = ptrs.alloc();
+    // Default values
     let emission_color_def_ptr = ptrs.alloc();
     let emission_strength_def_ptr = ptrs.alloc();
-    let env_storage_ptr = ptrs.alloc();
-    let image_tile_ptr = ptrs.alloc();
+    let image_vector_def_ptr = ptrs.alloc();
 
-    let link_uv_mapping_ptr = ptrs.alloc();
-    let link_mapping_env_ptr = ptrs.alloc();
-    let link_env_emission_ptr = ptrs.alloc();
+    // Image Texture storage
+    let image_storage_ptr = ptrs.alloc();
+
+    // Links: ImageTex.Color → Emission.Color, Emission → LightOutput
+    let link_image_emission_ptr = ptrs.alloc();
     let link_emission_output_ptr = ptrs.alloc();
 
     {
@@ -1770,73 +1770,38 @@ pub fn write_light_gobo_node_tree(
         write_i16(&mut d, 298, 0x0400); // ID_FLAG_EMBEDDED_DATA
         write_ptr(&mut d, 416, lamp_ptr); // owner_id
         write_cstr_fixed(&mut d, 432, 64, "ShaderNodeTree");
-        write_ptr(&mut d, 520, tex_coord_ptr);
-        write_ptr(&mut d, 528, output_ptr);
-        write_ptr(&mut d, 536, link_uv_mapping_ptr);
-        write_ptr(&mut d, 544, link_emission_output_ptr);
+        write_ptr(&mut d, 520, image_tex_ptr);          // nodes.first
+        write_ptr(&mut d, 528, output_ptr);             // nodes.last
+        write_ptr(&mut d, 536, link_image_emission_ptr); // links.first
+        write_ptr(&mut d, 544, link_emission_output_ptr); // links.last
         write_i32(&mut d, 552, 0); // NTREE_SHADER
         write_block(out, b"DATA", SDNA_IDX_BNODE_TREE, node_tree_ptr, 1, &d);
     }
 
-    // Texture Coordinate node
+    // Image Texture node (SH_NODE_TEX_IMAGE = 143): 1 input (Vector), 2 outputs (Color, Alpha)
     write_shader_node(
         out,
-        tex_coord_ptr,
-        0,
-        mapping_ptr,
-        0,
-        0,
-        tex_uv_out_ptr,
-        tex_uv_out_ptr,
-        "Texture Coordinate",
-        "ShaderNodeTexCoord",
-        155,
-        0,
-        0,
-        -800.0,
-        0.0,
-    );
-    // Mapping node
-    write_shader_node(
-        out,
-        mapping_ptr,
-        tex_coord_ptr,
-        env_tex_ptr,
-        mapping_vector_in_ptr,
-        mapping_vector_in_ptr,
-        mapping_vector_out_ptr,
-        mapping_vector_out_ptr,
-        "Mapping",
-        "ShaderNodeMapping",
-        109,
-        0,
-        0,
-        -600.0,
-        0.0,
-    );
-    // Environment Texture node (using SDNA 532)
-    write_shader_node(
-        out,
-        env_tex_ptr,
-        mapping_ptr,
-        emission_ptr,
-        env_vector_in_ptr,
-        env_vector_in_ptr,
-        env_color_out_ptr,
-        env_color_out_ptr,
-        "Environment Texture",
-        "ShaderNodeTexEnvironment",
+        image_tex_ptr,
+        0,             // prev (first node)
+        emission_ptr,  // next
+        image_vector_in_ptr,
+        image_vector_in_ptr,
+        image_color_out_ptr,
+        image_alpha_out_ptr,
+        "Image Texture",
+        "ShaderNodeTexImage",
         143,
+        0x0001_0002,
         image_ptr,
-        env_storage_ptr,
-        -400.0,
+        image_storage_ptr,
+        -300.0,
         0.0,
     );
-    // Emission node
+    // Emission node (SH_NODE_EMISSION = 140)
     write_shader_node(
         out,
         emission_ptr,
-        env_tex_ptr,
+        image_tex_ptr,
         output_ptr,
         emission_color_in_ptr,
         emission_strength_in_ptr,
@@ -1845,12 +1810,13 @@ pub fn write_light_gobo_node_tree(
         "Emission",
         "ShaderNodeEmission",
         140,
+        0x0001_0002,
         0,
         0,
         -100.0,
         0.0,
     );
-    // Light Output node
+    // Light Output node (SH_NODE_OUTPUT_LIGHT = 126, NODE_DO_OUTPUT = 0x40)
     write_shader_node(
         out,
         output_ptr,
@@ -1863,37 +1829,46 @@ pub fn write_light_gobo_node_tree(
         "Light Output",
         "ShaderNodeOutputLight",
         126,
+        0x0001_0042,
         0,
         0,
         100.0,
         0.0,
     );
 
-    // Sockets and links
-    write_vector_socket(out, tex_uv_out_ptr, 0, 0, "UV", 4095, 2, 0, link_uv_mapping_ptr);
-    write_vector_socket(out, mapping_vector_in_ptr, 0, 0, "Vector", 1, 1, mapping_vector_def_ptr, link_uv_mapping_ptr);
-    write_vector_socket(out, mapping_vector_out_ptr, 0, 0, "Vector", 4095, 2, 0, link_mapping_env_ptr);
-    write_vector_socket(out, env_vector_in_ptr, 0, 0, "Vector", 1, 1, env_vector_def_ptr, link_mapping_env_ptr);
-    write_color_socket(out, env_color_out_ptr, 0, 0, "Color", 4095, 2, 0, link_env_emission_ptr);
-    write_color_socket(out, emission_color_in_ptr, emission_strength_in_ptr, 0, "Color", 1, 1, emission_color_def_ptr, link_env_emission_ptr);
+    // Image Texture sockets (Vector input is unlinked, matches reference)
+    write_vector_socket(out, image_vector_in_ptr, 0, 0, "Vector", 4095, 1, image_vector_def_ptr, 0);
+    write_color_socket(out, image_color_out_ptr, image_alpha_out_ptr, 0, "Color", 4095, 2, 0, link_image_emission_ptr);
+    write_float_socket(out, image_alpha_out_ptr, 0, image_color_out_ptr, "Alpha", 4095, 2, 0, 0);
+
+    // Emission sockets
+    write_color_socket(out, emission_color_in_ptr, emission_strength_in_ptr, 0, "Color", 1, 1, emission_color_def_ptr, link_image_emission_ptr);
     write_float_socket(out, emission_strength_in_ptr, 0, emission_color_in_ptr, "Strength", 1, 1, emission_strength_def_ptr, 0);
     write_shader_socket(out, emission_out_ptr, 0, 0, "Emission", 4095, 2, 0, link_emission_output_ptr);
+
+    // Light Output socket
     write_shader_socket(out, output_surface_in_ptr, 0, 0, "Surface", 1, 1, 0, link_emission_output_ptr);
 
     // Default values
-    write_vector_default(out, mapping_vector_def_ptr, [0.0, 0.0, 0.0]);
-    write_vector_default(out, env_vector_def_ptr, [0.0, 0.0, 0.0]);
     write_color_default(out, emission_color_def_ptr, [1.0, 1.0, 1.0, 1.0]);
     write_float_default(out, emission_strength_def_ptr, 1.0);
+    write_vector_default(out, image_vector_def_ptr, [0.0, 0.0, 0.0]);
 
-    // Environment Texture storage (using SDNA 532)
-    write_block(out, b"DATA", SDNA_IDX_NODE_TEX_ENVIRONMENT, env_storage_ptr, 1, &vec![0u8; NODE_TEX_ENVIRONMENT_SIZE]);
+    // Image Texture storage (1024 bytes).
+    // NodeTexImage.iuser (ImageUser) starts at offset 960.
+    // BKE_imageuser_default sets frames=100 (offset 972) and sfra=1 (offset 980).
+    // Without these, iuser.frames=0 prevents Blender from associating the image
+    // for the current frame during GPU shader evaluation, causing a black light.
+    let mut image_storage = vec![0u8; NODE_TEX_IMAGE_SIZE];
+    // iuser.frames = 100 at offset 972
+    image_storage[972..976].copy_from_slice(&100u32.to_le_bytes());
+    // iuser.sfra = 1 at offset 980
+    image_storage[980..984].copy_from_slice(&1u32.to_le_bytes());
+    write_block(out, b"DATA", SDNA_IDX_NODE_TEX_IMAGE, image_storage_ptr, 1, &image_storage);
 
-    // Node links
-    write_node_link(out, link_uv_mapping_ptr, 0, link_mapping_env_ptr, tex_coord_ptr, mapping_ptr, tex_uv_out_ptr, mapping_vector_in_ptr);
-    write_node_link(out, link_mapping_env_ptr, link_uv_mapping_ptr, link_env_emission_ptr, mapping_ptr, env_tex_ptr, mapping_vector_out_ptr, env_vector_in_ptr);
-    write_node_link(out, link_env_emission_ptr, link_mapping_env_ptr, link_emission_output_ptr, env_tex_ptr, emission_ptr, env_color_out_ptr, emission_color_in_ptr);
-    write_node_link(out, link_emission_output_ptr, link_env_emission_ptr, 0, emission_ptr, output_ptr, emission_out_ptr, output_surface_in_ptr);
+    // Node links: ImageTex.Color → Emission.Color, Emission → LightOutput
+    write_node_link(out, link_image_emission_ptr, 0, link_emission_output_ptr, image_tex_ptr, emission_ptr, image_color_out_ptr, emission_color_in_ptr);
+    write_node_link(out, link_emission_output_ptr, link_image_emission_ptr, 0, emission_ptr, output_ptr, emission_out_ptr, output_surface_in_ptr);
 
     // Image block
     write_block(
@@ -1902,9 +1877,9 @@ pub fn write_light_gobo_node_tree(
         SDNA_IDX_IMAGE,
         image_ptr,
         1,
-        &build_image_with_tile(image_name, image_filepath, image_tile_ptr),
+        &build_image_with_tile(image_name, image_filepath, 0),
     );
-    write_block(out, b"DATA", SDNA_IDX_IMAGE_TILE, image_tile_ptr, 1, &build_image_tile());
+    // Don't write IMAGE_TILE - let Blender handle tiling when loading from file
 }
 
 fn write_shader_node(
@@ -1919,6 +1894,7 @@ fn write_shader_node(
     name: &str,
     idname: &str,
     node_type: i16,
+    flags: u32,
     id_ptr: u64,
     storage_ptr: u64,
     x: f32,
@@ -1932,7 +1908,7 @@ fn write_shader_node(
     write_ptr(&mut d, 0x020, outputs_first);
     write_ptr(&mut d, 0x028, outputs_last);
     write_cstr_fixed(&mut d, 0x030, 64, name);
-    write_i32(&mut d, 0x074, 0x0001_0002u32 as i32);
+    write_i32(&mut d, 0x074, flags as i32);
     write_cstr_fixed(&mut d, 0x078, 64, idname);
     write_i16(&mut d, 0x0c0, node_type);
     write_ptr(&mut d, 0x0d8, id_ptr);
