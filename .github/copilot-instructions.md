@@ -230,6 +230,11 @@ Enter VFL when any one of these is true:
 When VFL applies, explicitly follow the VFL loop. Do not silently switch to a
 normal code-only workflow.
 
+**MANDATORY**: If ANY of the entry conditions are met, VFL is **required**, not
+optional. Implementing code changes without VFL validation for Blender-visible
+fixes is a protocol violation. Always enter VFL and stay in the loop until the
+user confirms the fix or instructs you to stop.
+
 ### Core rules
 
 1. **MCP first**
