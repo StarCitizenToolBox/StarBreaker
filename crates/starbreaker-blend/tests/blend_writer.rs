@@ -829,6 +829,29 @@ fn light_gobo_node_tree_image_tex_texmapping_scale_is_one() {
     assert_eq!(sx, 1.0, "TexMapping.size.x must be 1.0, got {sx}");
     assert_eq!(sy, 1.0, "TexMapping.size.y must be 1.0, got {sy}");
     assert_eq!(sz, 1.0, "TexMapping.size.z must be 1.0, got {sz}");
+
+    // projx/projy/projz (chars at offsets 40/41/42) must be X/Y/Z (1/2/3).
+    // With projx=NONE(0) Blender maps every ray to UV(0,0) → single corner pixel → dark gobo.
+    let projx = out[data_start + 40];
+    let projy = out[data_start + 41];
+    let projz = out[data_start + 42];
+    assert_eq!(projx, 1, "TexMapping.projx must be TEXMAP_PROJ_X=1, got {projx}");
+    assert_eq!(projy, 2, "TexMapping.projy must be TEXMAP_PROJ_Y=2, got {projy}");
+    assert_eq!(projz, 3, "TexMapping.projz must be TEXMAP_PROJ_Z=3, got {projz}");
+
+    // mat[4][4] identity diagonal: offsets 48, 68, 88, 108 must be 1.0.
+    for (i, diag_off) in [48usize, 68, 88, 108].iter().enumerate() {
+        let v = f32::from_le_bytes(out[data_start + diag_off..data_start + diag_off + 4].try_into().unwrap());
+        assert_eq!(v, 1.0, "TexMapping.mat[{i}][{i}] must be 1.0 (identity), got {v}");
+    }
+
+    // max[3]=(1,1,1) at offsets 124-135 — BKE_texture_mapping_init default.
+    let mx = f32::from_le_bytes(out[data_start + 124..data_start + 128].try_into().unwrap());
+    let my = f32::from_le_bytes(out[data_start + 128..data_start + 132].try_into().unwrap());
+    let mz = f32::from_le_bytes(out[data_start + 132..data_start + 136].try_into().unwrap());
+    assert_eq!(mx, 1.0, "TexMapping.max.x must be 1.0, got {mx}");
+    assert_eq!(my, 1.0, "TexMapping.max.y must be 1.0, got {my}");
+    assert_eq!(mz, 1.0, "TexMapping.max.z must be 1.0, got {mz}");
 }
 
 #[test]
@@ -858,6 +881,56 @@ fn light_gobo_node_tree_image_tex_iuser_frames_and_sfra() {
     let sfra   = u32::from_le_bytes(out[data_start + 980..data_start + 984].try_into().unwrap());
     assert_eq!(frames, 100, "iuser.frames must be 100 (BKE_imageuser_default), got {frames}");
     assert_eq!(sfra, 1, "iuser.sfra must be 1 (BKE_imageuser_default), got {sfra}");
+}
+
+#[test]
+fn light_gobo_node_tree_image_has_tile_block() {
+    // Blender 5.x requires at least one ImageTile (UDIM 1001) in Image.tiles for
+    // IMA_SRC_FILE images.  Without a tile, Image.tiles ListBase is null, has_data
+    // stays false, and the gobo renders as magenta.
+    const SDNA_IMAGE_TILE: u32 = 241;
+    const HDR: usize = 32;
+    let mut out = Vec::new();
+    let mut ptrs = PtrAlloc::new(0x2000);
+    write_light_gobo_node_tree(&mut out, 0x1000, 0x1010, 0x1020, "gobo.png", "//gobo.png", &mut ptrs);
+
+    let tile_block_pos = out.windows(HDR).position(|h| {
+        &h[0..4] == b"DATA"
+            && u32::from_le_bytes([h[4], h[5], h[6], h[7]]) == SDNA_IMAGE_TILE
+    });
+    assert!(tile_block_pos.is_some(), "ImageTile DATA block (SDNA 241) not found");
+
+    let tile_start = tile_block_pos.unwrap() + HDR;
+    let tile_number = u32::from_le_bytes(out[tile_start + 40..tile_start + 44].try_into().unwrap());
+    assert_eq!(tile_number, 1001, "ImageTile.tile_number must be 1001, got {tile_number}");
+}
+
+#[test]
+fn light_gobo_node_tree_image_tile_ptr_in_image_block() {
+    // The Image datablock's tiles ListBase (first/last at offsets 1648/1656) must
+    // point at the ImageTile block so Blender can walk the tile linked list.
+    // Also verifies the colorspace is Linear Rec.709, matching the reference gobo.blend.
+    const SDNA_IMAGE: u32 = 242;
+    const HDR: usize = 32;
+    let mut out = Vec::new();
+    let mut ptrs = PtrAlloc::new(0x2000);
+    write_light_gobo_node_tree(&mut out, 0x1000, 0x1010, 0x1020, "gobo.png", "//gobo.png", &mut ptrs);
+
+    let image_pos = out.windows(HDR).position(|h| {
+        &h[0..4] == b"IM\0\0"
+            && u32::from_le_bytes([h[4], h[5], h[6], h[7]]) == SDNA_IMAGE
+    }).expect("IM Image block not found");
+    let image_data = image_pos + HDR;
+
+    let tiles_first = u64::from_le_bytes(out[image_data + 1648..image_data + 1656].try_into().unwrap());
+    let tiles_last  = u64::from_le_bytes(out[image_data + 1656..image_data + 1664].try_into().unwrap());
+    assert_ne!(tiles_first, 0, "Image.tiles.first must be nonzero");
+    assert_eq!(tiles_first, tiles_last, "Image.tiles.first must equal tiles.last for a single tile");
+
+    // colorspace_settings.name at offset 1576 (64 bytes) — must match reference gobo.blend
+    let cs_raw = &out[image_data + 1576..image_data + 1640];
+    let cs = cs_raw.split(|&c| c == 0).next().unwrap();
+    assert_eq!(cs, b"Linear Rec.709", "gobo image colorspace must be Linear Rec.709, got {:?}", std::str::from_utf8(cs));
 }
 
 // ── IDProperty field layout ───────────────────────────────────────────────────

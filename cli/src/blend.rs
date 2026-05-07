@@ -205,7 +205,7 @@ pub(crate) fn mesh_to_blend(name: &str, mesh: &Mesh) -> Vec<u8> {
         name, totvert, totedge, totpoly, totloop,
         poly_offs_ptr, attrs_ptr,
         mesh_mat_ptr, mat_slots,
-        0, 0, 0, 0,
+        0, 0, 0,
         num_attrs,
     );
     let mesh_mat_array = build_mat_ptr_array_from_ptrs(&material_ptrs);

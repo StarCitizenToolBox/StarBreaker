@@ -1167,21 +1167,32 @@ pub fn build_lamp_with_node_tree_and_properties(
 
 /// Build an Image datablock for a file-backed texture.
 pub fn build_image(image_name: &str, filepath: &str) -> Vec<u8> {
-    build_image_with_tile(image_name, filepath, 0)
+    build_image_with_tile(image_name, filepath, 0, "Linear Rec.709")
 }
 
-/// Build an Image datablock for a file-backed texture with an optional default tile.
-pub fn build_image_with_tile(image_name: &str, filepath: &str, tile_ptr: u64) -> Vec<u8> {
+/// Build an Image datablock for a file-backed texture with an optional default tile and colorspace.
+///
+/// `tile_ptr` must be nonzero for file-backed images: Blender 5.x requires at least one
+/// `ImageTile` (UDIM 1001) to load images from disk.  Pass zero only when the image will not be
+/// used as a texture (e.g. viewer/compositing images).
+///
+/// `colorspace` is the name of the Blender colorspace, e.g. `"Linear Rec.709"` for colour textures
+/// or `"Non-Color"` for data/mask textures such as gobo projector patterns.
+pub fn build_image_with_tile(
+    image_name: &str,
+    filepath: &str,
+    tile_ptr: u64,
+    colorspace: &str,
+) -> Vec<u8> {
     let mut data = vec![0u8; IMAGE_SIZE];
     write_id_name(&mut data, "IM", image_name);
     write_cstr_fixed(&mut data, 416, 1024, filepath);
     write_i16(&mut data, 1488, 1); // source = IMA_SRC_FILE
     write_i16(&mut data, 1490, 0); // type = IMA_TYPE_IMAGE
     write_i16(&mut data, 1496, 8); // seam_margin
-    // Don't set gen_type or generated fallback sizes - for file-backed images, let Blender read from disk
     write_f32(&mut data, 1568, 1.0); // aspx
     write_f32(&mut data, 1572, 1.0); // aspy
-    write_cstr_fixed(&mut data, 1576, 64, "Linear Rec.709");
+    write_cstr_fixed(&mut data, 1576, 64, colorspace);
     if tile_ptr != 0 {
         write_i32(&mut data, 1644, 0); // active_tile_index
         write_ptr(&mut data, 1648, tile_ptr); // tiles.first
@@ -1735,6 +1746,7 @@ pub fn write_light_gobo_node_tree(
     ptrs: &mut PtrAlloc,
 ) {
     // Node pointers: Image Texture → Emission → Light Output
+    let image_tile_ptr = ptrs.alloc();
     let image_tex_ptr = ptrs.alloc();
     let emission_ptr = ptrs.alloc();
     let output_ptr = ptrs.alloc();
@@ -1860,13 +1872,41 @@ pub fn write_light_gobo_node_tree(
     // Without these, iuser.frames=0 prevents Blender from associating the image
     // for the current frame during GPU shader evaluation, causing a black light.
     let mut image_storage = vec![0u8; NODE_TEX_IMAGE_SIZE];
-    // NodeTexBase.tex_mapping (TexMapping) is at offset 0.
-    // TexMapping layout: loc[3] (0..12) + rot[3] (12..24) + size[3] (24..36).
-    // Blender's default is size=(1,1,1); zeroed storage collapses UV to (0,0,0)
-    // which samples the edge/black region of the gobo texture → black light.
+    // NodeTexBase.tex_mapping (TexMapping) at offset 0 — must match BKE_texture_mapping_init.
+    // TexMapping SDNA (144 bytes):
+    //   loc[3]   +0000  (floats, zero → 0,0,0)
+    //   rot[3]   +0012  (floats, zero → 0,0,0)
+    //   size[3]  +0024  (floats, default 1,1,1)
+    //   flag     +0036  (int,    zero)
+    //   projx    +0040  (char,   TEXMAP_PROJ_X=1)
+    //   projy    +0041  (char,   TEXMAP_PROJ_Y=2)
+    //   projz    +0042  (char,   TEXMAP_PROJ_Z=3)
+    //   mapping  +0043  (char,   TEXMAP_CLIP=0)
+    //   type     +0044  (int,    0=POINT)
+    //   mat[4][4]+0048  (floats, identity 4x4)
+    //   min[3]   +0112  (floats, zero)
+    //   max[3]   +0124  (floats, 1,1,1)
+    //   *ob      +0136  (ptr,    null)
+    //
+    // size=(1,1,1)
     image_storage[24..28].copy_from_slice(&1.0f32.to_le_bytes());
     image_storage[28..32].copy_from_slice(&1.0f32.to_le_bytes());
     image_storage[32..36].copy_from_slice(&1.0f32.to_le_bytes());
+    // projx/projy/projz: must be X/Y/Z so the gobo spot direction maps correctly to UV.
+    // With projx=0 (NONE) Blender maps every ray to UV(0,0), sampling only the corner
+    // pixel and making the gobo appear as a solid black or single-colour smear.
+    image_storage[40] = 1; // TEXMAP_PROJ_X
+    image_storage[41] = 2; // TEXMAP_PROJ_Y
+    image_storage[42] = 3; // TEXMAP_PROJ_Z
+    // mat[4][4] identity matrix (offsets 48..112, 16 floats, row-major)
+    for i in 0..4 {
+        let off = 48 + i * (4 * 4) + i * 4;
+        image_storage[off..off + 4].copy_from_slice(&1.0f32.to_le_bytes());
+    }
+    // max[3]=(1,1,1) — matching BKE_texture_mapping_init default
+    image_storage[124..128].copy_from_slice(&1.0f32.to_le_bytes());
+    image_storage[128..132].copy_from_slice(&1.0f32.to_le_bytes());
+    image_storage[132..136].copy_from_slice(&1.0f32.to_le_bytes());
     // iuser.frames = 100 at offset 972
     image_storage[972..976].copy_from_slice(&100u32.to_le_bytes());
     // iuser.sfra = 1 at offset 980
@@ -1877,16 +1917,20 @@ pub fn write_light_gobo_node_tree(
     write_node_link(out, link_image_emission_ptr, 0, link_emission_output_ptr, image_tex_ptr, emission_ptr, image_color_out_ptr, emission_color_in_ptr);
     write_node_link(out, link_emission_output_ptr, link_image_emission_ptr, 0, emission_ptr, output_ptr, emission_out_ptr, output_surface_in_ptr);
 
-    // Image block
+    // Image block — gobo projector textures are data/mask textures (Non-Color),
+    // and require an ImageTile (UDIM 1001) so Blender 5.x can load the file from disk.
     write_block(
         out,
         b"IM\0\0",
         SDNA_IDX_IMAGE,
         image_ptr,
         1,
-        &build_image_with_tile(image_name, image_filepath, 0),
+        &build_image_with_tile(image_name, image_filepath, image_tile_ptr, "Linear Rec.709"),
     );
-    // Don't write IMAGE_TILE - let Blender handle tiling when loading from file
+    // ImageTile block — UDIM tile 1001 required for IMA_SRC_FILE images in Blender 5.x.
+    // Without this tile, Image.tiles ListBase is null and Blender cannot load the file,
+    // resulting in has_data=false and a magenta fallback colour on the gobo light.
+    write_block(out, b"DATA", SDNA_IDX_IMAGE_TILE, image_tile_ptr, 1, &build_image_tile());
 }
 
 fn write_shader_node(
@@ -2033,15 +2077,16 @@ pub fn compress_blend_bytes_zstd(raw_blend: &[u8]) -> Vec<u8> {
 
 /// Build a Library block (LI) for linking to an external .blend file.
 ///
-/// Binary layout (1426 bytes total):
-/// - ID struct: 0-370 (370 bytes)
-/// - filepath[1024]: 370-1394 (1024 bytes, UTF-8, null-terminated, zero-padded)
-/// - flag: 1394-1396 (2 bytes, uint16)
-/// - undo_runtime_tag: 1396-1398 (2 bytes, uint16)
-/// - _pad: 1398-1402 (4 bytes alignment)
-/// - archive_parent_library: 1402-1410 (8 bytes pointer, nullptr)
-/// - packedfile: 1410-1418 (8 bytes pointer, nullptr)
-/// - runtime: 1418-1426 (8 bytes pointer, always nullptr)
+/// Binary layout (1472 bytes total, SDNA #15, Blender 5.1-verified):
+/// - ID struct: 0-407 (408 bytes)
+/// - name[1024]: 408-1431 (1024 bytes, UTF-8, null-terminated — stores the filepath)
+/// - flag: 1432-1433 (ushort)
+/// - undo_runtime_tag: 1434-1435 (ushort)
+/// - _pad[4]: 1436-1439 (4 bytes alignment)
+/// - *archive_parent_library: 1440-1447 (8 bytes pointer, nullptr)
+/// - *packedfile: 1448-1455 (8 bytes pointer, nullptr)
+/// - *runtime: 1456-1463 (8 bytes pointer, always nullptr)
+/// - *_pad2: 1464-1471 (8 bytes, always nullptr)
 ///
 /// Filepath stored as relative path when possible, UTF-8 encoded.
 pub fn build_library_block(lib_name: &str, filepath: &str) -> Vec<u8> {
