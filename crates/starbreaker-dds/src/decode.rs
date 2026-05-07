@@ -186,9 +186,10 @@ fn decode_bc6h_to_rgba8(
     let bw = (w + 3) / 4;
     let bh = (h + 3) / 4;
     let block_size = 16; // BC6H uses 16 bytes per block
-    let pitch = 4 * 4; // 4 pixels × 4 bytes (RGBA)
+    // bcdec_rs::bc6h_float writes 32-bit RGB floats with pitch in floats/row.
+    let pitch = 4 * 3; // 4 pixels × 3 float channels (RGB)
     let mut out = vec![0u8; w * h * 4];
-    let mut block_buf_float = vec![0.0f32; 4 * 4 * 4]; // 4×4 × RGBA (float)
+    let mut block_buf_float = vec![0.0f32; 4 * 4 * 3]; // 4×4 × RGB (float)
     
     // Calculate mean luminance while decoding for gobo compensation
     let mut luminance_sum = 0.0f32;
@@ -201,7 +202,7 @@ fn decode_bc6h_to_rgba8(
                 break;
             }
             
-            // Decode using bc6h_float (returns 4-channel float output)
+            // Decode using bc6h_float (returns 3-channel float output)
             // BC6H gobos are typically unsigned (is_signed = false)
             bcdec_rs::bc6h_float(&data[offset..], &mut block_buf_float, pitch, false);
             
@@ -214,11 +215,10 @@ fn decode_bc6h_to_rgba8(
                         continue;
                     }
                     
-                    let src_idx = (py * 4 + px) * 4;
+                    let src_idx = (py * 4 + px) * 3;
                     let r = block_buf_float[src_idx];
                     let g = block_buf_float[src_idx + 1];
                     let b = block_buf_float[src_idx + 2];
-                    let a = block_buf_float[src_idx + 3];
                     
                     // Calculate perceived luminance (standard weighted average)
                     let lum = r * 0.299 + g * 0.587 + b * 0.114;
@@ -229,14 +229,13 @@ fn decode_bc6h_to_rgba8(
                     let r_mapped = if r > 1.0 { r / (1.0 + r) } else { r };
                     let g_mapped = if g > 1.0 { g / (1.0 + g) } else { g };
                     let b_mapped = if b > 1.0 { b / (1.0 + b) } else { b };
-                    let a_mapped = if a > 1.0 { a / (1.0 + a) } else { a };
-                    
+
                     // Convert to u8
                     let dst = (y * w + x) * 4;
                     out[dst] = (r_mapped.max(0.0).min(1.0) * 255.0) as u8;
                     out[dst + 1] = (g_mapped.max(0.0).min(1.0) * 255.0) as u8;
                     out[dst + 2] = (b_mapped.max(0.0).min(1.0) * 255.0) as u8;
-                    out[dst + 3] = (a_mapped.max(0.0).min(1.0) * 255.0) as u8;
+                    out[dst + 3] = 255;
                 }
             }
         }

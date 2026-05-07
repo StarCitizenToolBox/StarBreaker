@@ -81,11 +81,12 @@ class OrchestrationMixin:
         package: PackageBundle,
         package_root: bpy.types.Object | None = None,
         progress_callback: Callable[[float, str], None] | None = None,
+        create_template_collection: bool = True,
     ) -> None:
         self.context = context
         self.package = package
         self.collection = self._ensure_collection(package.package_name)
-        self.template_collection = self._ensure_template_collection()
+        self.template_collection = self._ensure_template_collection() if create_template_collection else None
         self.package_root = package_root
         self.exterior_material_sidecars = _exterior_material_sidecars(package)
         self.template_cache: dict[str, ImportedTemplate] = {}
@@ -240,36 +241,39 @@ class OrchestrationMixin:
             inherited_palette_id or self.package.scene.root_entity.palette_id,
         )
 
-    # Material sidecar path fragments that identify an "interior
-    # subsystem" entity (seats, dashboards, cabin trim). Child
-    # entities with palette_id=None whose material path contains one
-    # of these markers should inherit the package's interior palette
-    # rather than the root exterior palette — this mirrors the
-    # in-game behaviour where interior geometry picks up the cabin
-    # palette regardless of where the entity lives in the scene tree.
-    _INTERIOR_MATERIAL_PATTERNS = ("_int_master", "/interior/", "/Interior/")
-
-    def _interior_palette_id(self) -> str | None:
-        for interior in self.package.scene.interiors:
-            pid = getattr(interior, "palette_id", None)
-            if pid:
-                return pid
-        return None
-
     def _palette_id_for_instance(self, record: SceneInstanceRecord) -> str | None:
         """Return the effective palette_id request for a
-        ``SceneInstanceRecord``, preferring the explicit per-instance
-        ``palette_id`` and otherwise routing interior-subsystem
-        children to the package's interior palette.
+        ``SceneInstanceRecord``, preferring explicit per-instance
+        ``palette_id`` and falling back to sidecar-authored
+        ``DefaultPalette`` metadata when available.
         """
         if record.palette_id:
             return record.palette_id
-        material_path = record.material_path or record.material_sidecar or ""
-        if any(marker in material_path for marker in self._INTERIOR_MATERIAL_PATTERNS):
-            interior_pid = self._interior_palette_id()
-            if interior_pid:
-                return interior_pid
-        return record.palette_id
+        if record.material_sidecar:
+            return self._sidecar_default_palette_id(record.material_sidecar)
+        return None
+
+    def _sidecar_default_palette_id(self, sidecar_path: str) -> str | None:
+        load_sidecar = getattr(self.package, "load_material_sidecar", None)
+        if not callable(load_sidecar):
+            return None
+        sidecar = load_sidecar(sidecar_path)
+        if sidecar is None:
+            return None
+        attributes = (
+            getattr(sidecar, "raw", {})
+            .get("authored_material_set", {})
+            .get("attributes", [])
+        )
+        for attribute in attributes:
+            name = str(attribute.get("name", ""))
+            if name.lower() != "defaultpalette":
+                continue
+            value = str(attribute.get("value", "")).replace("\\", "/").strip()
+            source_name = value.rsplit("/", 1)[-1].strip().lower()
+            if source_name:
+                return f"palette/{source_name}"
+        return None
 
     def import_scene(self, prefer_cycles: bool = True, palette_id: str | None = None) -> bpy.types.Object:
         total_steps = (
@@ -738,9 +742,36 @@ class OrchestrationMixin:
         light_object.parent = parent
         light_object.location = _scene_position_to_blender(light.position)
         light_object.rotation_mode = "QUATERNION"
-        light_object.rotation_quaternion = _scene_light_quaternion_to_blender(light.rotation)
+        direction_quaternion = None
+        if blender_light_type in {"SPOT", "SUN"}:
+            direction_quaternion = self._scene_light_direction_to_blender(getattr(light, "direction_sc", None))
+        light_object.rotation_quaternion = direction_quaternion or _scene_light_quaternion_to_blender(light.rotation)
         self.collection.objects.link(light_object)
         return light_object
+
+    def _scene_light_direction_to_blender(
+        self,
+        direction_sc: tuple[float, float, float] | None,
+    ) -> mathutils.Quaternion | None:
+        if direction_sc is None:
+            return None
+        dx, dy, dz = _scene_position_to_blender(direction_sc)
+        length = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if length <= 1e-8:
+            return None
+        target = (dx / length, dy / length, dz / length)
+        source = (0.0, 0.0, -1.0)
+        dot = source[0] * target[0] + source[1] * target[1] + source[2] * target[2]
+        if dot > 0.999999:
+            return mathutils.Quaternion((1.0, 0.0, 0.0, 0.0))
+        if dot < -0.999999:
+            return mathutils.Quaternion((0.0, 0.0, 1.0, 0.0))
+        cross = (
+            source[1] * target[2] - source[2] * target[1],
+            source[2] * target[0] - source[0] * target[2],
+            source[0] * target[1] - source[1] * target[0],
+        )
+        return mathutils.Quaternion((1.0 + dot, cross[0], cross[1], cross[2])).normalized()
 
     def _wire_light_gobo(self, light_data: bpy.types.Light, light: Any) -> None:
         """Enable and author a gobo shader graph on ``light_data`` if ``light``
@@ -847,6 +878,8 @@ class OrchestrationMixin:
         for obj in imported:
             for collection in list(obj.users_collection):
                 collection.objects.unlink(obj)
+            if self.template_collection is None:
+                raise RuntimeError("Template collection was not created; cannot import mesh templates during materials-only refresh")
             self.template_collection.objects.link(obj)
             obj.hide_set(True)
             obj.hide_render = True

@@ -254,6 +254,29 @@ def _scene_light_quaternion_to_blender(rotation: tuple[float, float, float, floa
     return (_scene_quaternion_to_blender(rotation) @ GLTF_LIGHT_BASIS_CORRECTION).normalized()
 
 
+def _scene_light_direction_to_blender(direction_sc: tuple[float, float, float] | None) -> Quaternion | None:
+    if direction_sc is None:
+        return None
+    dx, dy, dz = _scene_position_to_blender(direction_sc)
+    length = math.sqrt(dx * dx + dy * dy + dz * dz)
+    if length <= 1e-8:
+        return None
+    target = (dx / length, dy / length, dz / length)
+    source = (0.0, 0.0, -1.0)  # Blender spot/sun lights emit along local -Z.
+    dot = source[0] * target[0] + source[1] * target[1] + source[2] * target[2]
+    if dot > 0.999999:
+        return Quaternion((1.0, 0.0, 0.0, 0.0))
+    if dot < -0.999999:
+        return Quaternion((0.0, 0.0, 1.0, 0.0))
+    cross = (
+        source[1] * target[2] - source[2] * target[1],
+        source[2] * target[0] - source[0] * target[2],
+        source[0] * target[1] - source[1] * target[0],
+    )
+    quat = Quaternion((1.0 + dot, cross[0], cross[1], cross[2]))
+    return quat.normalized()
+
+
 def _blender_light_type(light: Any) -> str:
     semantic_kind = str(getattr(light, "semantic_light_kind", "") or "").strip().lower()
     if semantic_kind == "sun":

@@ -3145,15 +3145,13 @@ fn create_scene_blend_package_with_instances(
     let layer_collection_ptr = ptrs.alloc();
     
     // Addon-style collections: an empty default collection, package collection,
-    // package Interior child collection, and hidden template cache placeholder.
+    // and package Interior child collection.
     let default_collection_ptr = ptrs.alloc();
     let default_layer_coll_ptr = ptrs.alloc();
     let package_collection_ptr = ptrs.alloc();
     let package_layer_coll_ptr = ptrs.alloc();
     let interior_collection_ptr = ptrs.alloc();
     let interior_layer_coll_ptr = ptrs.alloc();
-    let template_cache_collection_ptr = ptrs.alloc();
-    let template_cache_layer_coll_ptr = ptrs.alloc();
     
     // Addon-style local scene anchors. Linked library object parent chains are
     // owned by their asset files, but local lights and scene metadata live here.
@@ -3461,7 +3459,6 @@ fn create_scene_blend_package_with_instances(
     // CollectionChild structs for the addon-style collection tree.
     let default_coll_child_ptr = ptrs.alloc();
     let package_coll_child_ptr = ptrs.alloc();
-    let template_cache_coll_child_ptr = ptrs.alloc();
     let interior_coll_child_ptr = ptrs.alloc();
     
     // Build scene datablocks
@@ -3502,7 +3499,7 @@ fn create_scene_blend_package_with_instances(
         0,
         0,
         default_coll_child_ptr,
-        template_cache_coll_child_ptr,
+        package_coll_child_ptr,
     );
     let default_collection_data = build_collection("Collection", 0, 0, 0, 0);
     let package_collection_data = build_collection(
@@ -3519,16 +3516,13 @@ fn create_scene_blend_package_with_instances(
         0,
         0,
     );
-    let template_cache_collection_data = build_collection("StarBreaker Template Cache", 0, 0, 0, 0);
     let default_coll_child_data =
         build_collection_object_linked(default_collection_ptr, 0, package_coll_child_ptr);
     let package_coll_child_data = build_collection_object_linked(
         package_collection_ptr,
         default_coll_child_ptr,
-        template_cache_coll_child_ptr,
+        0,
     );
-    let template_cache_coll_child_data =
-        build_collection_object_linked(template_cache_collection_ptr, package_coll_child_ptr, 0);
     let interior_coll_child_data =
         build_collection_object_linked(interior_collection_ptr, 0, 0);
 
@@ -3537,7 +3531,7 @@ fn create_scene_blend_package_with_instances(
         0,                    // prev = NULL (root has no siblings)
         0,                    // next = NULL (root has no siblings)
         default_layer_coll_ptr,
-        template_cache_layer_coll_ptr,
+        package_layer_coll_ptr,
     );
     let default_layer_coll_data = build_layer_collection_linked(
         default_collection_ptr,
@@ -3549,7 +3543,7 @@ fn create_scene_blend_package_with_instances(
     let package_layer_coll_data = build_layer_collection_linked(
         package_collection_ptr,
         default_layer_coll_ptr,
-        template_cache_layer_coll_ptr,
+        0,
         interior_layer_coll_ptr,
         interior_layer_coll_ptr,
     );
@@ -3560,14 +3554,7 @@ fn create_scene_blend_package_with_instances(
         0,
         0,
     );
-    let template_cache_layer_coll_data = build_layer_collection_linked(
-        template_cache_collection_ptr,
-        package_layer_coll_ptr,
-        0,
-        0,
-        0,
-    );
-    
+
     // Build addon-style package and entity root empties at origin.
     let package_root_data = build_empty_object_with_properties(
         &format!("StarBreaker {package_name}"),
@@ -3803,11 +3790,9 @@ fn create_scene_blend_package_with_instances(
     write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, default_layer_coll_ptr, 1, &default_layer_coll_data);
     write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, package_layer_coll_ptr, 1, &package_layer_coll_data);
     write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, interior_layer_coll_ptr, 1, &interior_layer_coll_data);
-    write_block(&mut out, b"DATA", SDNA_IDX_LAYER_COLLECTION, template_cache_layer_coll_ptr, 1, &template_cache_layer_coll_data);
     write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION, root_collection_ptr, 1, &root_collection_data);  // embedded master_collection
     write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_CHILD, default_coll_child_ptr, 1, &default_coll_child_data);
     write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_CHILD, package_coll_child_ptr, 1, &package_coll_child_data);
-    write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_CHILD, template_cache_coll_child_ptr, 1, &template_cache_coll_child_data);
     // End of SC DATA sequence — sub-collection GR blocks follow with their own DATA sub-blocks:
     write_world_with_sky_shader(&mut out, "World", world_ptr, world_node_tree_ptr, &mut ptrs);
 
@@ -3822,8 +3807,7 @@ fn create_scene_blend_package_with_instances(
     for (coll_obj_ptr, coll_obj_data) in &interior_coll_obj_data_list {
         write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, *coll_obj_ptr, 1, coll_obj_data);
     }
-    write_block(&mut out, b"GR\0\0", SDNA_IDX_COLLECTION, template_cache_collection_ptr, 1, &template_cache_collection_data);
-    
+
     // Write package/entity root empty objects + properties/material arrays.
     write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, package_root_ptr, 1, &package_root_data);
     if let Some(props) = &package_root_idprops {

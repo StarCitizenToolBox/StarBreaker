@@ -50,9 +50,31 @@ pub(crate) fn load_child_mesh(
 
     result
         .ok()
-        .map(|(mesh, mtl, _tex, nmc, palette, geometry_path, material_path, bones, skeleton_source_path)| {
-        (mesh, mtl, nmc, palette, bones, geometry_path, material_path, skeleton_source_path)
-    })
+        .map(
+            |(
+                mesh,
+                mtl,
+                _tex,
+                nmc,
+                palette,
+                geometry_path,
+                material_path,
+                bones,
+                skeleton_source_path,
+            )| {
+                let resolved_palette = palette.or_else(|| query_tint_palette(db, &child.record));
+                (
+                    mesh,
+                    mtl,
+                    nmc,
+                    resolved_palette,
+                    bones,
+                    geometry_path,
+                    material_path,
+                    skeleton_source_path,
+                )
+            },
+        )
 }
 
 pub(crate) struct ChildPayloadSpec {

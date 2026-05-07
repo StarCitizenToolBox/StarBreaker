@@ -421,7 +421,8 @@ fn process_entity_children(
             || entity_class == "LightGroup"
             || entity_class == "LightGroupPoweredItem"
         {
-            let parsed_lights = parse_light_entities(xml, entity, &attrs, &pos, &rot, entity_class);
+            let parsed_lights =
+                parse_light_entities(xml, entity, &attrs, &pos, &rot, &scale, entity_class);
             lights.extend(parsed_lights);
             continue;
         }
@@ -498,6 +499,7 @@ fn parse_light_entities(
     attrs: &HashMap<&str, &str>,
     pos: &[f64],
     rot: &[f64],
+    scale: &[f64],
     entity_class: &str,
 ) -> Vec<LightInfo> {
     let base_name = attrs.get("Name").unwrap_or(&"Light").to_string();
@@ -512,11 +514,16 @@ fn parse_light_entities(
         rot.get(2).copied().unwrap_or(0.0),
         rot.get(3).copied().unwrap_or(0.0),
     ];
+    let base_scale = [
+        scale.first().copied().unwrap_or(1.0),
+        scale.get(1).copied().unwrap_or(1.0),
+        scale.get(2).copied().unwrap_or(1.0),
+    ];
 
-    if entity_class == "LightGroup" {
+    if entity_class == "LightGroup" || has_light_group_component(xml, entity) {
         // LightGroup: EntityComponentLightGroup > BakedInLights > Light[]
         // Each Light child has its own EntityComponentLight
-        return parse_light_group(xml, entity, &base_name, &base_pos, &base_rot);
+        return parse_light_group(xml, entity, &base_name, &base_pos, &base_rot, &base_scale);
     }
 
     // Single Light: PropertiesDataCore > EntityComponentLight
@@ -556,6 +563,22 @@ fn parse_light_entities(
     }]
 }
 
+fn has_light_group_component(xml: &CryXml, entity: &starbreaker_cryxml::CryXmlNode) -> bool {
+    for child in xml.node_children(entity) {
+        if xml.node_tag(child) == "EntityComponentLightGroup" {
+            return true;
+        }
+        if xml.node_tag(child) == "PropertiesDataCore"
+            && xml
+                .node_children(child)
+                .any(|component| xml.node_tag(component) == "EntityComponentLightGroup")
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Find PropertiesDataCore > EntityComponentLight in a CryXML entity.
 fn find_entity_component_light<'a>(
     xml: &'a CryXml,
@@ -581,6 +604,7 @@ fn parse_light_group(
     base_name: &str,
     base_pos: &[f64; 3],
     base_rot: &[f64; 4],
+    base_scale: &[f64; 3],
 ) -> Vec<LightInfo> {
     let mut lights = Vec::new();
 
@@ -616,10 +640,15 @@ fn parse_light_group(
 
                 // Each baked-in Light node has a RelativeXForm child with
                 // per-light translation/rotation offsets relative to the group.
-                let (rel_translation, rel_rotation) =
+                let (rel_translation, rel_rotation, rel_scale) =
                     extract_relative_xform(xml, light_node);
+                let rel_translation_scaled = [
+                    rel_translation[0] * base_scale[0] * rel_scale[0],
+                    rel_translation[1] * base_scale[1] * rel_scale[1],
+                    rel_translation[2] * base_scale[2] * rel_scale[2],
+                ];
                 let rel_translation_world =
-                    quat_rotate_vec(base_rot, &rel_translation);
+                    quat_rotate_vec(base_rot, &rel_translation_scaled);
 
                 // Combine group position with per-light offset
                 let light_pos = [
@@ -932,11 +961,11 @@ fn kelvin_to_rgb(kelvin: f32) -> [f32; 3] {
 }
 
 /// Extract translation and rotation from a baked-in Light node's RelativeXForm child.
-/// Returns `([tx,ty,tz], [qw,qx,qy,qz])` — identity if absent.
+/// Returns `([tx,ty,tz], [qw,qx,qy,qz], [sx,sy,sz])` — identity if absent.
 fn extract_relative_xform(
     xml: &CryXml,
     light_node: &starbreaker_cryxml::CryXmlNode,
-) -> ([f64; 3], [f64; 4]) {
+) -> ([f64; 3], [f64; 4], [f64; 3]) {
     for child in xml.node_children(light_node) {
         if xml.node_tag(child) != "RelativeXForm" {
             continue;
@@ -944,6 +973,7 @@ fn extract_relative_xform(
         let attrs: HashMap<&str, &str> = xml.node_attributes(child).collect();
         let translation = parse_csv_f64(attrs.get("translation").copied().unwrap_or("0,0,0"));
         let rotation = parse_csv_f64(attrs.get("rotation").copied().unwrap_or("1,0,0,0"));
+        let scale = parse_csv_f64(attrs.get("scale").copied().unwrap_or("1,1,1"));
         return (
             [
                 translation.first().copied().unwrap_or(0.0),
@@ -956,9 +986,14 @@ fn extract_relative_xform(
                 rotation.get(2).copied().unwrap_or(0.0),
                 rotation.get(3).copied().unwrap_or(0.0),
             ],
+            [
+                scale.first().copied().unwrap_or(1.0),
+                scale.get(1).copied().unwrap_or(1.0),
+                scale.get(2).copied().unwrap_or(1.0),
+            ],
         );
     }
-    ([0.0; 3], [1.0, 0.0, 0.0, 0.0])
+    ([0.0; 3], [1.0, 0.0, 0.0, 0.0], [1.0; 3])
 }
 
 // ── Math helpers ────────────────────────────────────────────────────────────

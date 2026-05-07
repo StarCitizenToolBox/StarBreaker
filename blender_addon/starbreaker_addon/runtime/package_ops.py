@@ -220,7 +220,7 @@ def refresh_materials_for_package_root(
     from .importer import PackageImporter
 
     package = _load_package_from_root(package_root)
-    importer = PackageImporter(context, package, package_root=package_root)
+    importer = PackageImporter(context, package, package_root=package_root, create_template_collection=False)
     applied = 0
     needs_view_layer_update = False
     with _suspend_heavy_viewports(context), _temporary_object_mode(context):
@@ -396,7 +396,7 @@ def apply_palette_to_package_root(context: bpy.types.Context, package_root: bpy.
     from .importer import PackageImporter
 
     package = _load_package_from_root(package_root)
-    importer = PackageImporter(context, package, package_root=package_root)
+    importer = PackageImporter(context, package, package_root=package_root, create_template_collection=False)
     with _suspend_heavy_viewports(context), _temporary_object_mode(context):
         return importer.apply_palette_to_package_root(package_root, palette_id)
 
@@ -427,7 +427,7 @@ def apply_paint_to_package_root(context: bpy.types.Context, package_root: bpy.ty
     base_exterior = _exterior_material_sidecars(package)
     check_sidecars = effective_exterior or base_exterior
 
-    importer = PackageImporter(context, package, package_root=package_root)
+    importer = PackageImporter(context, package, package_root=package_root, create_template_collection=False)
     applied = 0
     with _suspend_heavy_viewports(context), _temporary_object_mode(context):
         for obj in _iter_package_objects(package_root):
@@ -460,7 +460,7 @@ def apply_livery_to_package_root(context: bpy.types.Context, package_root: bpy.t
     from .importer import PackageImporter
 
     package = _load_package_from_root(package_root)
-    importer = PackageImporter(context, package, package_root=package_root)
+    importer = PackageImporter(context, package, package_root=package_root, create_template_collection=False)
     applied = 0
     with _suspend_heavy_viewports(context), _temporary_object_mode(context):
         for obj in _iter_package_objects(package_root):
