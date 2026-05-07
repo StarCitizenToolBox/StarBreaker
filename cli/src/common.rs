@@ -88,7 +88,13 @@ impl From<&ExportOpts> for starbreaker_3d::ExportOptions {
                 starbreaker_3d::MaterialMode::Textures
             }
         };
-        let format = match opts.format.to_lowercase().as_str() {
+        // For decomposed exports, default format to blend (unless explicitly overridden)
+        let format_str = if opts.kind.to_lowercase() == "decomposed" && opts.format.to_lowercase() == "glb" {
+            "blend"
+        } else {
+            opts.format.as_str()
+        };
+        let format = match format_str.to_lowercase().as_str() {
             "stl" => starbreaker_3d::ExportFormat::Stl,
             "blend" => starbreaker_3d::ExportFormat::Blend,
             _ => starbreaker_3d::ExportFormat::Glb,
