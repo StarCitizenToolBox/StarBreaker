@@ -129,7 +129,7 @@ Before a sub-agent claims "done", it must **run its own code review** against a 
 □ Regressions: All existing tests still pass; no previously-working code was broken
 □ Performance: No gratuitous allocations, redundant loops, or O(n²) bugs introduced
 □ Documentation: Function signatures have /// doc comments; public API is clear
-□ Commit message: Clear, references phase number, includes Co-authored-by trailer
+□ Commit message: Clear, references phase number, do not include a Co-authored-by trailer
 □ Final check: `cargo build --release` succeeds, `cargo test --workspace` all green
 ```
 
