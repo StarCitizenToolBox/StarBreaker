@@ -60,7 +60,7 @@ pub const SDNA_IDX_BNODE_SOCKET: u32 = 466;
 pub const SDNA_IDX_BNODE_LINK: u32 = 470;
 pub const SDNA_IDX_NODE_TEX_IMAGE: u32 = 531;
 pub const SDNA_IDX_NODE_TEX_SKY: u32 = 530;
-pub const SDNA_IDX_NODE_TEX_ENVIRONMENT: u32 = 532;
+pub const SDNA_IDX_NODE_TEX_ENVIRONMENT: u32 = 534;
 pub const SDNA_IDX_BNSV_RGBA: u32 = 479;
 pub const SDNA_IDX_BNSV_FLOAT: u32 = 475;
 pub const SDNA_IDX_BNSV_VECTOR: u32 = 477;
@@ -89,7 +89,7 @@ pub const BNODE_SOCKET_SIZE: usize = 464;
 pub const BNODE_LINK_SIZE: usize = 56;
 pub const NODE_TEX_IMAGE_SIZE: usize = 1024;
 pub const NODE_TEX_SKY_SIZE: usize = 1024;
-pub const NODE_TEX_ENVIRONMENT_SIZE: usize = 1024;
+pub const NODE_TEX_ENVIRONMENT_SIZE: usize = 1016;
 pub const BNSV_RGBA_SIZE: usize = 16;
 pub const BNSV_FLOAT_SIZE: usize = 16;
 pub const BNSV_VECTOR_SIZE: usize = 32;
@@ -1213,7 +1213,6 @@ pub fn build_mesh(
     material_slots: i16,
     vgroup_first_ptr: u64,
     vgroup_last_ptr: u64,
-    vgroup_count: u64,
     cdl_ptr: u64,
     num_attributes: u32,
 ) -> Vec<u8> {
@@ -1232,9 +1231,10 @@ pub fn build_mesh(
     write_ptr(&mut data, 456, attributes_ptr);
     write_i32(&mut data, 464, num_attributes as i32);
     write_i16(&mut data, 1618, material_slots);
+    // vertex_group_names ListBase (first/last pointers); vertex_group_active_index at
+    // +1488 and attributes_active_index at +1492 are left as 0 (Blender defaults).
     write_ptr(&mut data, 1472, vgroup_first_ptr);
     write_ptr(&mut data, 1480, vgroup_last_ptr);
-    data[1488..1496].copy_from_slice(&vgroup_count.to_le_bytes());
     if cdl_ptr != 0 {
         write_ptr(&mut data, 480, cdl_ptr);
         write_i32(&mut data, 488 + 2 * 4, 0); // typemap[CD_MDEFORMVERT=2] = 0

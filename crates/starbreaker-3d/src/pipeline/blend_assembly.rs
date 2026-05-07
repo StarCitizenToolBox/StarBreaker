@@ -1223,7 +1223,7 @@ fn mesh_to_blend_flat(
     };
 
     // Vertex group structures (Phase 5D)
-    let (vgroup_first_ptr, vgroup_last_ptr, vgroup_count, cdl_ptr, vgroup_ptrs, mdeformvert_ptrs, mdeformweight_ptrs) = 
+    let (vgroup_first_ptr, vgroup_last_ptr, _vgroup_count, cdl_ptr, vgroup_ptrs, mdeformvert_ptrs, mdeformweight_ptrs) = 
         if let Some(vgroups) = vertex_groups {
             let mut v_ptrs = Vec::new();
             let mut mdv_ptrs = Vec::new();
@@ -1387,7 +1387,7 @@ fn mesh_to_blend_flat(
         name, totvert, totedge, totpoly, totloop,
         poly_offs_ptr, attrs_ptr,
         mesh_mat_ptr, mat_slots,
-        vgroup_first_ptr, vgroup_last_ptr, vgroup_count, cdl_ptr,
+        vgroup_first_ptr, vgroup_last_ptr, cdl_ptr,
         num_attrs,
     );
     if raw_uv.is_some() {
@@ -2543,7 +2543,6 @@ fn write_mesh_block(
         mat_slots,
         block.vgroup_first_ptr,
         block.vgroup_last_ptr,
-        block.vgroup_count,
         block.cdl_ptr,
         block.num_attrs,
     );
