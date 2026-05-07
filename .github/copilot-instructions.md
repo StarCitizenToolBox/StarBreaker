@@ -241,6 +241,10 @@ user confirms the fix or instructs you to stop.
    - Blender MCP is the only live validation path.
    - If a fix can be tested or approximated in the current Blender instance,
      test or prototype it there before modifying Rust.
+   - For transform/material/UI issues that can be manipulated live (for example:
+     rotating empties/objects, adjusting node inputs, trying alternate matrix
+     application), first prove the candidate behavior in Blender MCP and ask the
+     user to confirm before writing persistent exporter/addon code.
    - Do not trigger Rust rebuilds or full re-exports until they are necessary to
      make the fix persistent or to test behavior that cannot be exercised live.
 
@@ -249,11 +253,13 @@ user confirms the fix or instructs you to stop.
    - Research the issue. Use sub-agents when the investigation can be safely
      parallelized.
    - Write or update the plan.
-   - Implement one focused fix.
+   - Work one scoped item at a time (do not batch a full multi-item implementation).
+   - Implement one focused fix for the current item only.
    - Test in the current Blender instance with MCP if possible.
    - If MCP-only validation is impossible, rebuild/re-export/reload and then
      test.
-   - Ask the user to verify using the question tool.
+   - Ask the user to verify that single item using the question tool before moving
+     to the next item.
 
 3. **User verification required**
    - Every attempted visual or interactive fix is a hypothesis.
