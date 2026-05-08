@@ -3710,20 +3710,26 @@ fn create_scene_blend_package_with_instances(
             .map(|s| s.as_str())
             .or(light.gobo_path.as_deref());
         
-        let gobo_blocks = effective_gobo_path.map(|gobo_path| {
-            let node_tree_ptr = ptrs.alloc();
-            let image_ptr = ptrs.alloc();
-            let normalized_path = gobo_image_blend_filepath(gobo_path);
-            let image_filename = gobo_path
-                .replace('\\', "/")
-                .rsplit('/')
-                .next()
-                .filter(|name| !name.is_empty())
-                .unwrap_or("light_gobo.png")
-                .to_string();
-            let image_name = format!("{}_{}", light.name, image_filename);
-            (node_tree_ptr, image_ptr, image_name, normalized_path)
-        });
+        // ONLY create gobo nodes for SPOT lights (lamp_type == 2).
+        // Point lights (Omni, SoftOmni) should NEVER have projector textures.
+        let gobo_blocks = if light.lamp_type == 2 {
+            effective_gobo_path.map(|gobo_path| {
+                let node_tree_ptr = ptrs.alloc();
+                let image_ptr = ptrs.alloc();
+                let normalized_path = gobo_image_blend_filepath(gobo_path);
+                let image_filename = gobo_path
+                    .replace('\\', "/")
+                    .rsplit('/')
+                    .next()
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or("light_gobo.png")
+                    .to_string();
+                let image_name = format!("{}_{}", light.name, image_filename);
+                (node_tree_ptr, image_ptr, image_name, normalized_path)
+            })
+        } else {
+            None
+        };
         let node_tree_ptr = gobo_blocks
             .as_ref()
             .map(|(node_tree_ptr, _, _, _)| *node_tree_ptr)
