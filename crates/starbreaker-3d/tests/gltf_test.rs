@@ -190,6 +190,23 @@ fn parse_skin_from_real_file() {
 
 #[test]
 #[ignore = "requires extracted game data on disk"]
+fn parse_skin_swizzles_vertex_colors_to_rgba() {
+    let Some(data) = read_if_exists(
+        "D:/StarCitizen/P4k-470/Data/Objects/Spaceships/Ships/DRAK/clipper/interior/upper_engineering/drak_clipper_upper_eng_engine_01.cgfm",
+    ) else {
+        return;
+    };
+
+    let mesh = parse_skin(&data).expect("parse_skin failed");
+    let colors = mesh.colors.expect("expected vertex colors");
+    assert!(
+        colors.contains(&[255, 82, 0, 127]),
+        "expected BGRA source bytes to be swizzled into RGBA"
+    );
+}
+
+#[test]
+#[ignore = "requires extracted game data on disk"]
 fn skin_to_glb_from_real_file() {
     let Some(data) = read_if_exists(
         "D:/StarCitizen/P4k-470/Data/Objects/Characters/Human/male_v7/body/male_v7_body.skin",

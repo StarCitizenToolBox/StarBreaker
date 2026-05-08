@@ -240,6 +240,21 @@ Contract note:
 - `MeshDecal` needs explicit support for RTT, stencil tint, POM height, and breakup maps.
 - `Decal_Glow_Unlinked` also carries `%VERTCOLORS%`; its base decal color should be multiplied by mesh `COLOR_0` data when present.
 
+## Vertex color finding
+
+Clipper glow meshes exposed a separate color-layout issue during live Blender validation:
+
+- `drak_clipper_upper_eng_engine_01.cgfm` stores the vertex color stream as BGRA on disk.
+- The parser had been preserving those bytes as if they were RGBA, which flipped the authored orange glow into blue in Blender.
+- Swizzling the stream to RGBA at parse time restored the expected result in both the exported `.blend` and the live Blender scene.
+
+Observed example:
+
+- source bytes: `[0, 82, 255, 127]`
+- parsed RGBA: `[255, 82, 0, 127]`
+
+This should stay a structural parser rule, not a mesh-name workaround.
+
 ## UIMesh
 
 Verified examples:

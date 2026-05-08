@@ -38,7 +38,7 @@ struct RawSubMeshDescriptor {
     _unknown1: u32,
 }
 
-/// Quantized vertex: SNorm i16×3 + pad + RGBA + UV half×2 (16 bytes).
+/// Quantized vertex: SNorm i16×3 + pad + BGRA + UV half×2 (16 bytes).
 #[derive(Clone, Copy, FromBytes, KnownLayout, Immutable)]
 #[repr(C, packed)]
 struct RawQuantizedVertex {
@@ -48,7 +48,7 @@ struct RawQuantizedVertex {
     uv: [u16; 2],
 }
 
-/// Float vertex: f32×3 + RGBA + UV half×2 (20 bytes).
+/// Float vertex: f32×3 + BGRA + UV half×2 (20 bytes).
 #[derive(Clone, Copy, FromBytes, KnownLayout, Immutable)]
 #[repr(C, packed)]
 struct RawFloatVertex {
@@ -346,19 +346,20 @@ impl SkinMesh {
                     // element_size determines layout:
                     // 16 = SNorm i16×3 positions + pad(2) + RGBA(4) + UV half×2(4)
                     // 20 = float f32×3 positions + RGBA(4) + UV half×2(4)
+                    // The on-disk color bytes are stored as BGRA.
                     if element_size == 16 {
                         let verts = reader.read_slice::<RawQuantizedVertex>(num_verts)?;
                         positions = Some(PositionData::Quantized(
                             verts.iter().map(|v| v.pos).collect(),
                         ));
-                        colors = Some(verts.iter().map(|v| v.color).collect());
+                        colors = Some(verts.iter().map(|v| bgra_to_rgba(v.color)).collect());
                         uvs = Some(verts.iter().map(|v| v.uv).collect());
                     } else if element_size == 20 {
                         let verts = reader.read_slice::<RawFloatVertex>(num_verts)?;
                         positions = Some(PositionData::Float(
                             verts.iter().map(|v| v.pos).collect(),
                         ));
-                        colors = Some(verts.iter().map(|v| v.color).collect());
+                        colors = Some(verts.iter().map(|v| bgra_to_rgba(v.color)).collect());
                         uvs = Some(verts.iter().map(|v| v.uv).collect());
                     } else {
                         return Err(Error::UnexpectedElementSize {
@@ -466,5 +467,19 @@ impl SkinMesh {
             tangents,
             normals,
         })
+    }
+}
+
+fn bgra_to_rgba(color: [u8; 4]) -> [u8; 4] {
+    [color[2], color[1], color[0], color[3]]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bgra_to_rgba;
+
+    #[test]
+    fn bgra_swizzles_to_rgba() {
+        assert_eq!(bgra_to_rgba([0, 82, 255, 127]), [255, 82, 0, 127]);
     }
 }
