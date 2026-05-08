@@ -41,9 +41,15 @@ pub(crate) fn resolve_material(
 ) -> Option<mtl::MtlFile> {
     // 1. Try DataCore material path first
     if !datacore_material_path.is_empty() {
-        let p4k_path = datacore_path_to_p4k(datacore_material_path);
-        if let Some(mtl) = try_load_mtl(p4k, &p4k_path) {
-            return Some(mtl);
+        let base_path = datacore_path_to_p4k(datacore_material_path);
+        let mut candidates = vec![base_path.clone()];
+        if !base_path.to_ascii_lowercase().ends_with(".mtl") {
+            candidates.push(format!("{base_path}.mtl"));
+        }
+        for candidate in candidates {
+            if let Some(mtl) = try_load_mtl(p4k, &candidate) {
+                return Some(mtl);
+            }
         }
     }
 

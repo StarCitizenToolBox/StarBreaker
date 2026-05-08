@@ -377,8 +377,14 @@ pub(crate) fn build_decomposed_material_view(
 
     let mut material_id_map = Vec::with_capacity(materials.materials.len());
     let mut filtered_materials = Vec::with_capacity(materials.materials.len());
-    for material in &materials.materials {
+    for (orig_idx, material) in materials.materials.iter().enumerate() {
         if material.should_hide() {
+            log::debug!(
+                "[material-map] filtering out mat_id={} ({}), reason={}",
+                orig_idx,
+                material.name,
+                if material.is_nodraw { "NoDraw" } else { "opacity" }
+            );
             material_id_map.push(None);
         } else {
             material_id_map.push(Some(filtered_materials.len() as u32));
@@ -407,34 +413,97 @@ pub(crate) fn build_decomposed_material_view(
 
     let mut dropped_out_of_range = false;
     let mut filtered_mesh = mesh.clone();
-    filtered_mesh.submeshes = mesh
+    
+    // Collect surviving submeshes first
+    let surviving_submeshes: Vec<(usize, crate::types::SubMesh)> = mesh
         .submeshes
         .iter()
-        .filter_map(|submesh| {
+        .enumerate()
+        .filter_map(|(orig_idx, submesh)| {
             if submesh_is_excluded_helper(submesh, nmc, include_nodraw, include_shields) {
                 return None;
             }
 
-            let Some(mapped) = material_id_map.get(submesh.material_id as usize) else {
+            let source_material_id = submesh.source_material_id.unwrap_or(submesh.material_id);
+            let Some(mapped) = material_id_map.get(source_material_id as usize) else {
                 dropped_out_of_range = true;
+                log::debug!(
+                    "[submesh-filter] out-of-range: submesh mat_id={}, material_id_map.len={}",
+                    source_material_id,
+                    material_id_map.len()
+                );
                 return None;
             };
             let Some(new_material_id) = *mapped else {
+                log::debug!(
+                    "[submesh-filter] mat_id={} maps to None (material was hidden)",
+                    source_material_id
+                );
                 return None;
             };
 
             let mut filtered = submesh.clone();
             // Preserve the original source material index before any remapping so the
             // GLB extras `submaterial_index` stays aligned with the sidecar index.
-            filtered.source_material_id = Some(submesh.material_id);
+            filtered.source_material_id = Some(source_material_id);
             filtered.material_id = new_material_id;
             if let Some(material) = filtered_materials.get(new_material_id as usize) {
                 filtered.material_name = Some(material.name.clone());
             }
-            Some(filtered)
+            log::debug!(
+                "[submesh-kept] source_mat={} -> remapped_mat={} ({}), num_indices={}, first_index={}, num_vertices={}",
+                source_material_id,
+                new_material_id,
+                filtered.material_name.as_deref().unwrap_or("?"),
+                submesh.num_indices,
+                submesh.first_index,
+                submesh.num_vertices
+            );
+            Some((orig_idx, filtered))
         })
         .collect();
-
+    
+    // Rebuild the mesh to actually remove the geometry from filtered submeshes
+    if surviving_submeshes.len() < mesh.submeshes.len() {
+        // Some submeshes were filtered out - rebuild indices
+        let mut new_indices = Vec::new();
+        let mut index_offset = 0u32;
+        
+        let mut new_submeshes = Vec::new();
+        for (orig_idx, mut submesh) in surviving_submeshes {
+            let orig_range_start = mesh.submeshes[orig_idx].first_index as usize;
+            let orig_range_end = orig_range_start + mesh.submeshes[orig_idx].num_indices as usize;
+            
+            // Copy this submesh's indices
+            new_indices.extend_from_slice(&mesh.indices[orig_range_start..orig_range_end]);
+            
+            // Update submesh to point to new index location
+            submesh.first_index = index_offset;
+            index_offset += submesh.num_indices;
+            
+            new_submeshes.push(submesh);
+        }
+        
+        filtered_mesh.indices = new_indices;
+        filtered_mesh.submeshes = new_submeshes;
+        
+        log::debug!(
+            "[mesh-rebuild] indices: {} -> {} (removed {} bytes of orphaned geometry)",
+            mesh.indices.len(),
+            filtered_mesh.indices.len(),
+            mesh.indices.len() - filtered_mesh.indices.len()
+        );
+    } else {
+        // No submeshes were filtered, just remap material IDs
+        filtered_mesh.submeshes = surviving_submeshes.into_iter().map(|(_, sm)| sm).collect();
+    }
+    
+    log::debug!(
+        "[mesh-filtering-result] submeshes: {} before -> {} after filtering",
+        mesh.submeshes.len(),
+        filtered_mesh.submeshes.len()
+    );
+    
     // Keep sidecar + GLB material indices aligned with the surviving primitive
     // set by removing materials no remaining submesh references.
     let used_material_ids: BTreeSet<u32> = filtered_mesh
@@ -528,13 +597,19 @@ fn filter_mesh_geometry(
         .iter()
         .filter(|submesh| {
             if let Some(materials) = materials {
-                if materials
-                    .materials
-                    .get(submesh.material_id as usize)
-                    .is_some_and(crate::mtl::SubMaterial::should_hide)
-                    && !include_nodraw
-                {
-                    return false;
+                let source_material_id = submesh.source_material_id.unwrap_or(submesh.material_id);
+                if let Some(material) = materials.materials.get(source_material_id as usize) {
+                    if material.should_hide() && !include_nodraw {
+                        log::debug!(
+                            "[geometry-filter] dropping submesh {}: num_indices={}, source_mat_id={} ({}), reason={}",
+                            submesh.material_id,
+                            submesh.num_indices,
+                            source_material_id,
+                            material.name,
+                            if material.is_nodraw { "NoDraw" } else { "opacity" }
+                        );
+                        return false;
+                    }
                 }
             }
             !submesh_is_excluded_helper(submesh, nmc, include_nodraw, include_shields)
@@ -898,6 +973,12 @@ pub(crate) fn write_decomposed_export(
                     None,
                     opts.include_nodraw,
                     opts.include_shields,
+                );
+                log::debug!(
+                    "[interior-asset] {} submeshes: {} before -> {} after filtering",
+                    entry.name,
+                    mesh.submeshes.len(),
+                    interior_material_view.mesh.submeshes.len()
                 );
                 let requested_mesh_asset = mesh_asset_relative_path(p4k, &entry.cgf_path, &entry.name, opts.lod_level);
                 let requested_material_sidecar = interior_material_view.sidecar_materials.as_ref().map(|materials| {
