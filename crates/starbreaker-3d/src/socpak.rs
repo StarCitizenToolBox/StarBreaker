@@ -15,6 +15,8 @@ use starbreaker_p4k::{MappedP4k, P4kArchive};
 use crate::error::Error;
 use crate::types::{InteriorMesh, InteriorPayload, LightInfo, LightStateInfo};
 
+const LIGHT_AUTHORED_INTENSITY_SCALE: f32 = 1000.0;
+
 // ── DataCore query ──────────────────────────────────────────────────────────
 
 /// Container reference from DataCore VehicleComponentParams.objectContainers[].
@@ -66,6 +68,10 @@ fn parse_container_ref(val: &Value) -> Option<ObjectContainerRef> {
         offset_position,
         offset_rotation,
     })
+}
+
+fn authored_light_intensity_to_candela(intensity_raw: f32) -> f32 {
+    intensity_raw * LIGHT_AUTHORED_INTENSITY_SCALE
 }
 
 fn extract_offset(offset_val: Option<&&Value>) -> ([f32; 3], [f32; 3]) {
@@ -551,8 +557,8 @@ fn parse_light_entities(
         semantic_light_kind: "point".to_string(),
         intensity_raw: 1.0,
         intensity_unit: "cryengine_authored_intensity".to_string(),
-        intensity_candela_proxy: 200.0,
-        intensity: 200.0,
+        intensity_candela_proxy: authored_light_intensity_to_candela(1.0),
+        intensity: authored_light_intensity_to_candela(1.0),
         radius,
         radius_m: radius,
         inner_angle: None,
@@ -691,8 +697,8 @@ fn parse_light_group(
             semantic_light_kind: "point".to_string(),
             intensity_raw: 1.0,
             intensity_unit: "cryengine_authored_intensity".to_string(),
-            intensity_candela_proxy: 200.0,
-            intensity: 200.0,
+            intensity_candela_proxy: authored_light_intensity_to_candela(1.0),
+            intensity: authored_light_intensity_to_candela(1.0),
             radius: 5.0,
             radius_m: 5.0,
             inner_angle: None,
@@ -801,8 +807,8 @@ fn build_light_info_from_component(
         Some(LightStateInfo {
             intensity_raw,
             intensity_unit: "cryengine_authored_intensity".to_string(),
-            intensity_cd: intensity_raw * 200.0,
-            intensity_candela_proxy: intensity_raw * 200.0,
+            intensity_cd: authored_light_intensity_to_candela(intensity_raw),
+            intensity_candela_proxy: authored_light_intensity_to_candela(intensity_raw),
             temperature,
             use_temperature,
             color: [cr, cg, cb],
@@ -883,8 +889,8 @@ fn build_light_info_from_component(
         (None, None)
     };
 
-    // CryEngine intensity → glTF candela.
-    let candela = intensity_raw * 200.0;
+    // CryEngine authored intensity → exported candela proxy.
+    let candela = authored_light_intensity_to_candela(intensity_raw);
     let semantic_light_kind = semantic_light_kind_for_light(&light_type, inner_angle, outer_angle);
     let direction_sc = quat_rotate_vec(rot, &[1.0, 0.0, 0.0]);
 
@@ -1108,5 +1114,11 @@ mod tests {
     #[test]
     fn semantic_light_kind_maps_unknown_angled_light_to_spot() {
         assert_eq!(semantic_light_kind_for_light("Unknown", Some(1.0), Some(2.0)), "spot");
+    }
+
+    #[test]
+    fn authored_light_intensity_matches_max_script_scale() {
+        assert_eq!(super::authored_light_intensity_to_candela(1.0), 1000.0);
+        assert_eq!(super::authored_light_intensity_to_candela(2.5), 2500.0);
     }
 }

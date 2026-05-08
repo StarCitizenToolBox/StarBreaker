@@ -13,6 +13,8 @@ starbreaker-dds = { path = "../starbreaker-dds" }
 starbreaker-blend = { path = "../starbreaker-blend" }
 gltf-json = { version = "1", features = ["names", "extras", "KHR_lights_punctual", "KHR_materials_transmission", "KHR_materials_ior", "KHR_materials_emissive_strength", "KHR_materials_volume", "KHR_texture_transform"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+exr = "1.74"
+smallvec = "1"
 serde_json = "1"
 half = "2"
 zerocopy = { version = "0.8", features = ["derive"] }

@@ -250,3 +250,54 @@ fn decode_bc6h_to_rgba8(
     
     Ok(out)
 }
+
+/// Decode BC6H (HDR float format) to raw float RGB preserving HDR values.
+///
+/// This is used specifically for gobo (projector texture) export to EXR format.
+/// Unlike `decode_bc6h_to_rgba8`, this does NOT tone-map or clamp values,
+/// so all floating-point values including those >1.0 are preserved.
+pub fn decode_bc6h_to_float_rgb(
+    data: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<Vec<f32>, DdsError> {
+    let w = width as usize;
+    let h = height as usize;
+    let bw = (w + 3) / 4;
+    let bh = (h + 3) / 4;
+    let block_size = 16; // BC6H uses 16 bytes per block
+    let pitch = 4 * 3; // 4 pixels × 3 float channels (RGB)
+    let mut out = vec![0.0f32; w * h * 3]; // Only RGB, no alpha
+    let mut block_buf_float = vec![0.0f32; 4 * 4 * 3]; // 4×4 × RGB (float)
+    
+    for by in 0..bh {
+        for bx in 0..bw {
+            let offset = (by * bw + bx) * block_size;
+            if offset + block_size > data.len() {
+                break;
+            }
+            
+            // Decode using bc6h_float; preserves all float values including >1.0
+            bcdec_rs::bc6h_float(&data[offset..], &mut block_buf_float, pitch, false);
+            
+            // Copy float RGB directly without tone mapping
+            for py in 0..4 {
+                for px in 0..4 {
+                    let x = bx * 4 + px;
+                    let y = by * 4 + py;
+                    if x >= w || y >= h {
+                        continue;
+                    }
+                    
+                    let src_idx = (py * 4 + px) * 3;
+                    let dst_idx = (y * w + x) * 3;
+                    out[dst_idx] = block_buf_float[src_idx];
+                    out[dst_idx + 1] = block_buf_float[src_idx + 1];
+                    out[dst_idx + 2] = block_buf_float[src_idx + 2];
+                }
+            }
+        }
+    }
+    
+    Ok(out)
+}

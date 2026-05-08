@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use gltf_json as json;
 use starbreaker_common::progress::{report as report_progress, Progress};
+use starbreaker_dds;
 use starbreaker_p4k::MappedP4k;
 
 use crate::error::Error;
@@ -1066,15 +1067,21 @@ pub(crate) fn write_decomposed_export(
                 .lights
                 .iter()
                 .map(|light| {
-                    // Extract the projector (gobo) texture through the same
-                    // package PNG pipeline as material textures where possible.
-                    // Some gobos use BC6H/BC7 encoding which our decoder doesn't support;
-                    // for those, create a fallback white PNG so Blender can load it.
+                    // Extract the projector (gobo) texture.
+                    // Priority: EXR (for HDR formats like BC6H) -> PNG (for SDR formats) -> white PNG fallback
+                    // EXR preserves float values >1.0, allowing Blender to sample full HDR energy.
                     let projector_texture_export = light
                         .projector_texture
                         .as_deref()
                         .and_then(|src| {
-                            // Try PNG export first
+                            // Try HDR EXR export first (for BC6H gobos with values >1.0)
+                            if let Some(exr_data) = export_gobo_as_exr(p4k, src, opts.texture_mip) {
+                                let normalized = normalize_source_path(p4k, src);
+                                let exr_path = replace_extension(&normalized, ".exr");
+                                return Some(insert_binary_file(&mut files, exr_path, exr_data));
+                            }
+                            
+                            // Fall back to standard PNG export (for SDR or unsupported formats)
                             if let Some(png_path) = export_texture_asset(
                                 &mut files,
                                 p4k,
@@ -1087,13 +1094,12 @@ pub(crate) fn write_decomposed_export(
                             ) {
                                 return Some(png_path);
                             }
-                            // Texture export failed. Log a warning and fall back to white PNG.
+                            
+                            // Both EXR and PNG failed. Log a warning and use white PNG fallback.
                             log::warn!(
-                                "Failed to export projector texture '{}' (likely unsupported DDS format). Using white PNG fallback.",
+                                "Failed to export projector texture '{}' (EXR and PNG both failed). Using white PNG fallback.",
                                 src
                             );
-                            // PNG failed (likely BC6H/BC7 format). Create a white PNG fallback.
-                            // This allows Blender to load the image without errors or magenta display.
                             let normalized = normalize_source_path(p4k, src);
                             let fallback_path = replace_extension(&normalized, ".png");
                             let fallback_png = create_white_png_fallback();
@@ -2301,6 +2307,73 @@ fn create_white_png_fallback() -> Vec<u8> {
         0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44,
         0xAE, 0x42, 0x60, 0x82,
     ]
+}
+
+fn export_gobo_as_exr(
+    p4k: &MappedP4k,
+    source_path: &str,
+    texture_mip: u32,
+) -> Option<Vec<u8>> {
+    // Attempt to load and decode the DDS source texture as HDR (BC6H).
+    // If successful, export to EXR format so Blender can sample values >1.0.
+    // This preserves light energy for gobos that use HDR formats.
+    
+    // Look up the entry first
+    let entry = p4k.entry_case_insensitive(source_path)?;
+    let bytes = p4k.read(&entry).ok()?;
+    
+    // Parse DDS and check if it's BC6H
+    let dds = starbreaker_dds::DdsFile::from_bytes(&bytes).ok()?;
+    
+    // Attempt BC6H float decode
+    let (width, height, float_rgb) = match dds.decode_bc6h_to_float_rgb(texture_mip as usize) {
+        Ok(Some(result)) => result,
+        _ => return None, // Not BC6H or decode failed
+    };
+    
+    if width == 0 || height == 0 {
+        return None;
+    }
+    
+    // Build EXR image from float RGB data using the exr crate API.
+    use exr::prelude::*;
+    use std::io::Cursor;
+    
+    // Split the interleaved float RGB data into per-channel vectors
+    let mut r_channel = Vec::with_capacity((width as usize) * (height as usize));
+    let mut g_channel = Vec::with_capacity((width as usize) * (height as usize));
+    let mut b_channel = Vec::with_capacity((width as usize) * (height as usize));
+    
+    for chunk in float_rgb.chunks_exact(3) {
+        r_channel.push(chunk[0]);
+        g_channel.push(chunk[1]);
+        b_channel.push(chunk[2]);
+    }
+    
+    let channels: AnyChannels<FlatSamples> = AnyChannels::sort(vec![
+        AnyChannel::new("R", FlatSamples::F32(r_channel)),
+        AnyChannel::new("G", FlatSamples::F32(g_channel)),
+        AnyChannel::new("B", FlatSamples::F32(b_channel)),
+    ].into());
+    
+    let layer = Layer::new(
+        Vec2(width as usize, height as usize),
+        LayerAttributes::default(),
+        Encoding::FAST_LOSSLESS,
+        channels,
+    );
+    
+    let image = Image::from_layer(layer);
+    
+    let buffer = Vec::new();
+    let mut cursor = Cursor::new(buffer);
+    match image.write().to_buffered(&mut cursor) {
+        Ok(_) => Some(cursor.into_inner()),
+        Err(e) => {
+            log::warn!("Failed to encode gobo as EXR: {}", e);
+            None
+        }
+    }
 }
 
 fn palette_id(palette: &TintPalette) -> String {
