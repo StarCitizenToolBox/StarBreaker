@@ -657,6 +657,7 @@ pub fn write_decomposed_export_blend(
     // Key by the exact final .blend mesh asset path; loose entity-name matching is not
     // stable enough for similarly named ship parts.
     let mut mesh_data_map: HashMap<String, MeshDataEntry> = HashMap::new();
+    let mut child_mesh_data_map: HashMap<String, MeshDataEntry> = HashMap::new();
     
     let root_mesh_asset = blend_mesh_asset_relative_path(p4k, &input.geometry_path, &input.entity_name, opts.lod_level);
     let root_material_view = crate::decomposed::build_decomposed_material_view(
@@ -689,7 +690,9 @@ pub fn write_decomposed_export_blend(
             interior_placement_space: false,
         };
         
-        mesh_data_map.insert(mesh_asset.to_ascii_lowercase(), entry);
+        let mesh_key = mesh_asset.to_ascii_lowercase();
+        child_mesh_data_map.insert(mesh_key.clone(), entry.clone());
+        mesh_data_map.insert(mesh_key, entry);
     }
     log::info!("[timing][blend] precollect_mesh_data: {:.2}s", phase_start.elapsed().as_secs_f32());
     phase_start = Instant::now();
@@ -726,12 +729,13 @@ pub fn write_decomposed_export_blend(
             opts.include_nodraw,
             opts.include_shields,
         );
-        mesh_data_map.insert(mesh_asset.to_ascii_lowercase(), MeshDataEntry {
+        let interior_entry = MeshDataEntry {
             mesh: material_view.mesh,
             materials: material_view.glb_materials.or(material_view.sidecar_materials),
             nmc: material_view.glb_nmc,
             interior_placement_space: true,
-        });
+        };
+        mesh_data_map.insert(mesh_asset.to_ascii_lowercase(), interior_entry);
         Some(loaded)
     };
 
@@ -870,6 +874,83 @@ pub fn write_decomposed_export_blend(
     }
     log::info!("[timing][blend] classify_base_files: {:.2}s", phase_start.elapsed().as_secs_f32());
     phase_start = Instant::now();
+
+    let preview_instances = scene_manifest_instances(&manifest_files);
+    let interior_assets = preview_instances
+        .iter()
+        .filter(|instance| instance.is_interior)
+        .map(|instance| instance.mesh_asset.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    let mut child_override_by_original = HashMap::new();
+    for instance in preview_instances
+        .iter()
+        .filter(|instance| !instance.is_interior && instance.parent_node_name.is_some())
+    {
+        let original_key = instance.mesh_asset.to_ascii_lowercase();
+        if !interior_assets.contains(&original_key) {
+            continue;
+        }
+        if child_override_by_original.contains_key(&original_key) {
+            continue;
+        }
+        let Some(child_entry) = child_mesh_data_map.get(&original_key).cloned() else {
+            continue;
+        };
+        let override_path = instance
+            .mesh_asset
+            .strip_suffix(".blend")
+            .map(|stem| format!("{stem}__child.blend"))
+            .unwrap_or_else(|| format!("{}__child.blend", instance.mesh_asset));
+        let override_key = override_path.to_ascii_lowercase();
+        if !mesh_data_map.contains_key(&override_key) {
+            mesh_data_map.insert(override_key.clone(), child_entry);
+            let mesh_name = override_path
+                .split('/')
+                .last()
+                .unwrap_or("mesh")
+                .trim_end_matches(".blend")
+                .to_string();
+            blend_asset_jobs.push(BlendAssetJob {
+                blend_path: override_path.clone(),
+                mesh_name,
+                blend_key: override_key.clone(),
+            });
+        }
+        child_override_by_original.insert(original_key, override_path);
+    }
+    if !child_override_by_original.is_empty() {
+        for file in &mut manifest_files {
+            if !file.relative_path.ends_with("scene.json") {
+                continue;
+            }
+            let Ok(mut scene_data) = serde_json::from_slice::<serde_json::Value>(&file.bytes) else {
+                continue;
+            };
+            if let Some(children) = scene_data.get_mut("children").and_then(|value| value.as_array_mut()) {
+                for child in children {
+                    if child
+                        .get("parent_node_name")
+                        .and_then(|value| value.as_str())
+                        .is_none()
+                    {
+                        continue;
+                    }
+                    let Some(mesh_asset) = child.get("mesh_asset").and_then(|value| value.as_str()) else {
+                        continue;
+                    };
+                    if let Some(override_path) =
+                        child_override_by_original.get(&mesh_asset.to_ascii_lowercase())
+                    {
+                        child["mesh_asset"] = serde_json::Value::String(override_path.clone());
+                    }
+                }
+            }
+            if let Ok(bytes) = serde_json::to_vec(&scene_data) {
+                file.bytes = bytes;
+            }
+        }
+    }
+
     for built_asset in build_native_blend_assets(
         &blend_asset_jobs,
         &mesh_data_map,
@@ -953,6 +1034,21 @@ pub fn write_decomposed_export_blend(
             if let Some(linked_mesh_refs) = refs_by_asset.get(&manifest_instance.mesh_asset) {
                 for (mesh_ref_idx, linked_mesh_ref) in linked_mesh_refs.iter().enumerate() {
                     let name = unique_scene_object_name(&linked_mesh_ref.object_name, &mut used_scene_object_names);
+                    let use_source_hierarchy = !manifest_instance.is_interior;
+                    let use_source_mesh_transform = !manifest_instance.is_interior;
+                    let instance_source_nodes = if use_source_hierarchy && mesh_ref_idx == 0 {
+                        source_nodes_by_asset
+                            .get(&manifest_instance.mesh_asset)
+                            .cloned()
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    let instance_source_ancestors = if use_source_hierarchy {
+                        linked_mesh_ref.ancestors.clone()
+                    } else {
+                        Vec::new()
+                    };
                     scene_mesh_instances.push(LinkedMeshInstance {
                         scene_instance_id,
                         entity_name: manifest_instance.entity_name.clone(),
@@ -968,19 +1064,28 @@ pub fn write_decomposed_export_blend(
                         material_names: linked_mesh_ref.material_names.clone(),
                         material_sidecar: manifest_instance.material_sidecar.clone(),
                         palette_id: manifest_instance.palette_id.clone(),
-                        source_nodes: if mesh_ref_idx == 0 {
-                            source_nodes_by_asset
-                                .get(&manifest_instance.mesh_asset)
-                                .cloned()
-                                .unwrap_or_default()
+                        source_nodes: instance_source_nodes,
+                        source_ancestors: instance_source_ancestors,
+                        source_parent_name: if use_source_hierarchy {
+                            linked_mesh_ref.source_parent_name.clone()
                         } else {
-                            Vec::new()
+                            None
                         },
-                        source_ancestors: linked_mesh_ref.ancestors.clone(),
-                        source_parent_name: linked_mesh_ref.source_parent_name.clone(),
-                        source_loc: linked_mesh_ref.object_loc,
-                        source_quat: linked_mesh_ref.object_quat,
-                        source_scale: linked_mesh_ref.object_scale,
+                        source_loc: if use_source_mesh_transform {
+                            linked_mesh_ref.object_loc
+                        } else {
+                            [0.0, 0.0, 0.0]
+                        },
+                        source_quat: if use_source_mesh_transform {
+                            linked_mesh_ref.object_quat
+                        } else {
+                            [1.0, 0.0, 0.0, 0.0]
+                        },
+                        source_scale: if use_source_mesh_transform {
+                            linked_mesh_ref.object_scale
+                        } else {
+                            [1.0, 1.0, 1.0]
+                        },
                         parent_node_name: manifest_instance.parent_node_name.clone(),
                         blend_path: format!("//../../{}", manifest_instance.mesh_asset),
                         mesh_asset: manifest_instance.mesh_asset.clone(),
