@@ -923,9 +923,13 @@ pub fn write_decomposed_export_blend(
             if !file.relative_path.ends_with("scene.json") {
                 continue;
             }
-            let Ok(mut scene_data) = serde_json::from_slice::<serde_json::Value>(&file.bytes) else {
-                continue;
-            };
+            let mut scene_data = serde_json::from_slice::<serde_json::Value>(&file.bytes)
+                .map_err(|error| {
+                    Error::Other(format!(
+                        "failed to parse package manifest {} as JSON: {error}",
+                        file.relative_path
+                    ))
+                })?;
             if let Some(children) = scene_data.get_mut("children").and_then(|value| value.as_array_mut()) {
                 for child in children {
                     if child
@@ -945,9 +949,12 @@ pub fn write_decomposed_export_blend(
                     }
                 }
             }
-            if let Ok(bytes) = serde_json::to_vec(&scene_data) {
-                file.bytes = bytes;
-            }
+            file.bytes = serde_json::to_vec(&scene_data).map_err(|error| {
+                Error::Other(format!(
+                    "failed to serialize package manifest {} JSON: {error}",
+                    file.relative_path
+                ))
+            })?;
         }
     }
 
@@ -1034,18 +1041,11 @@ pub fn write_decomposed_export_blend(
             if let Some(linked_mesh_refs) = refs_by_asset.get(&manifest_instance.mesh_asset) {
                 for (mesh_ref_idx, linked_mesh_ref) in linked_mesh_refs.iter().enumerate() {
                     let name = unique_scene_object_name(&linked_mesh_ref.object_name, &mut used_scene_object_names);
-                    let use_source_hierarchy = !manifest_instance.is_interior;
-                    let use_source_mesh_transform = !manifest_instance.is_interior;
-                    let instance_source_nodes = if use_source_hierarchy && mesh_ref_idx == 0 {
+                    let instance_source_nodes = if mesh_ref_idx == 0 {
                         source_nodes_by_asset
                             .get(&manifest_instance.mesh_asset)
                             .cloned()
                             .unwrap_or_default()
-                    } else {
-                        Vec::new()
-                    };
-                    let instance_source_ancestors = if use_source_hierarchy {
-                        linked_mesh_ref.ancestors.clone()
                     } else {
                         Vec::new()
                     };
@@ -1065,27 +1065,11 @@ pub fn write_decomposed_export_blend(
                         material_sidecar: manifest_instance.material_sidecar.clone(),
                         palette_id: manifest_instance.palette_id.clone(),
                         source_nodes: instance_source_nodes,
-                        source_ancestors: instance_source_ancestors,
-                        source_parent_name: if use_source_hierarchy {
-                            linked_mesh_ref.source_parent_name.clone()
-                        } else {
-                            None
-                        },
-                        source_loc: if use_source_mesh_transform {
-                            linked_mesh_ref.object_loc
-                        } else {
-                            [0.0, 0.0, 0.0]
-                        },
-                        source_quat: if use_source_mesh_transform {
-                            linked_mesh_ref.object_quat
-                        } else {
-                            [1.0, 0.0, 0.0, 0.0]
-                        },
-                        source_scale: if use_source_mesh_transform {
-                            linked_mesh_ref.object_scale
-                        } else {
-                            [1.0, 1.0, 1.0]
-                        },
+                        source_ancestors: linked_mesh_ref.ancestors.clone(),
+                        source_parent_name: linked_mesh_ref.source_parent_name.clone(),
+                        source_loc: linked_mesh_ref.object_loc,
+                        source_quat: linked_mesh_ref.object_quat,
+                        source_scale: linked_mesh_ref.object_scale,
                         parent_node_name: manifest_instance.parent_node_name.clone(),
                         blend_path: format!("//../../{}", manifest_instance.mesh_asset),
                         mesh_asset: manifest_instance.mesh_asset.clone(),
