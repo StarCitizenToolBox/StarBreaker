@@ -15,7 +15,7 @@ use starbreaker_p4k::{MappedP4k, P4kArchive};
 use crate::error::Error;
 use crate::types::{InteriorMesh, InteriorPayload, LightInfo, LightStateInfo};
 
-const LIGHT_AUTHORED_INTENSITY_SCALE: f32 = 1000.0;
+const LIGHT_AUTHORED_INTENSITY_SCALE: f32 = 1500.0;
 
 // ── DataCore query ──────────────────────────────────────────────────────────
 
@@ -1118,7 +1118,7 @@ mod tests {
 
     #[test]
     fn authored_light_intensity_matches_max_script_scale() {
-        assert_eq!(super::authored_light_intensity_to_candela(1.0), 1000.0);
-        assert_eq!(super::authored_light_intensity_to_candela(2.5), 2500.0);
+        assert_eq!(super::authored_light_intensity_to_candela(1.0), 1500.0);
+        assert_eq!(super::authored_light_intensity_to_candela(2.5), 3750.0);
     }
 }
