@@ -202,9 +202,6 @@ fn scene_anchor_name(instance_name: &str) -> String {
     format!("{instance_name}_anchor")
 }
 
-fn is_coordinate_conversion_node(name: &str) -> bool {
-    name.ends_with("StarBreaker_Y_up") || name.ends_with("CryEngine_Z_up")
-}
 
 fn scene_source_empty_name(instance_name: &str, ancestor_index: usize, ancestor_name: &str) -> String {
     format!("{instance_name}_{ancestor_index}_{ancestor_name}")
@@ -1152,9 +1149,6 @@ fn mesh_to_blend_flat(
 
     let _screen_ptr    = ptrs.alloc();
     let _wm_ptr        = ptrs.alloc();
-    let orientation_root_ptr = ptrs.alloc();
-    let orientation_root_mat_ptr = ptrs.alloc();
-    let orientation_root_matbits_ptr = ptrs.alloc();
     let object_ptr     = ptrs.alloc();
     let mesh_ptr       = ptrs.alloc();
     let mesh_mat_ptr   = ptrs.alloc();
@@ -1174,7 +1168,6 @@ fn mesh_to_blend_flat(
     let world_node_tree_ptr = ptrs.alloc();
     let base_ptr       = ptrs.alloc();
     let collection_ptr = ptrs.alloc();
-    let orientation_collection_object_ptr = ptrs.alloc();
     let collection_object_ptr = ptrs.alloc();
     let layer_collection_ptr = ptrs.alloc();
     let poly_offs_ptr  = ptrs.alloc();
@@ -1344,24 +1337,15 @@ fn mesh_to_blend_flat(
 
     // ── Datablocks ────────────────────────────────────────────────────────────
 
-    let orientation_root_data = build_empty_object(
-        BLENDER_Y_UP_ROOT_NAME,
-        [0.0, 0.0, 0.0],
-        BLENDER_Y_UP_ROOT_QUAT,
-        [1.0, 1.0, 1.0],
-        0,
-    );
-    let orientation_root_mat_array = build_mat_ptr_array(0);
-    let orientation_root_matbits = build_matbits(0);
     let mut object_data = build_object(
         name, mesh_ptr, obj_mat_ptr, obj_matbits_ptr, mat_slots as i32, 0,
     );
     patch_object_parent_transform(
         &mut object_data,
-        orientation_root_ptr,
+        0,
         [0.0, 0.0, 0.0],
-        [1.0, 0.0, 0.0, 0.0],
-        [1.0, 1.0, 1.0],
+        BLENDER_BAKED_ROOT_QUAT,
+        BLENDER_BAKED_ROOT_SCALE,
     );
     let scene_data = build_scene_with_motion_blur_curve_and_properties(
         name,
@@ -1376,12 +1360,10 @@ fn mesh_to_blend_flat(
     let motion_blur_curve_points_data = build_motion_blur_shutter_curve_points();
     let tool_settings_data = build_tool_settings();
     let view_layer_data = build_view_layer("ViewLayer", base_ptr, layer_collection_ptr);
-    let base_data = build_base(orientation_root_ptr);
-    let collection_data = build_master_collection(orientation_collection_object_ptr, collection_object_ptr, 0, 0);
-    let _orientation_collection_object_data =
-        build_collection_object_linked(orientation_root_ptr, 0, collection_object_ptr);
+    let base_data = build_base(object_ptr);
+    let collection_data = build_master_collection(collection_object_ptr, collection_object_ptr, 0, 0);
     let collection_object_data =
-        build_collection_object_linked(object_ptr, orientation_collection_object_ptr, 0);
+        build_collection_object_linked(object_ptr, 0, 0);
     let layer_collection_data = build_layer_collection(collection_ptr);
     let mut mesh_data = build_mesh(
         name, totvert, totedge, totpoly, totloop,
@@ -1426,10 +1408,6 @@ fn mesh_to_blend_flat(
     write_block(&mut out, b"DATA", SDNA_IDX_COLLECTION_OBJECT, collection_object_ptr, 1, &collection_object_data);
     write_block(&mut out, b"DATA", SDNA_IDX_BASE, base_ptr, 1, &base_data);
     write_world_with_sky_shader(&mut out, "World", world_ptr, world_node_tree_ptr, &mut ptrs);
-
-    write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, orientation_root_ptr, 1, &orientation_root_data);
-    write_block(&mut out, b"DATA", 0, orientation_root_mat_ptr, 1, &orientation_root_mat_array);
-    write_block(&mut out, b"DATA", 0, orientation_root_matbits_ptr, 1, &orientation_root_matbits);
 
     // OB block + DATA blocks (gap=1 rule: mat** and matbits must immediately follow OB)
     write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, object_ptr, 1, &object_data);
@@ -2033,7 +2011,6 @@ fn build_native_blend_assets(
 fn nmc_export_object_names(mesh_name: &str, nmc: &NodeMeshCombo) -> Vec<String> {
     let wrapper_name = strip_lod_suffix(mesh_name);
     let mut used = HashSet::new();
-    used.insert("CryEngine_Z_up".to_string());
     used.insert(wrapper_name.clone());
 
     nmc.nodes
@@ -2676,12 +2653,6 @@ fn mesh_to_blend_hierarchy(
     let mut ptrs = PtrAlloc::new(0x1000);
     let _screen_ptr = ptrs.alloc();
     let _wm_ptr = ptrs.alloc();
-    let orientation_root_ptr = ptrs.alloc();
-    let orientation_root_mat_ptr = ptrs.alloc();
-    let orientation_root_matbits_ptr = ptrs.alloc();
-    let coord_root_ptr = ptrs.alloc();
-    let coord_root_mat_ptr = ptrs.alloc();
-    let coord_root_matbits_ptr = ptrs.alloc();
     let wrapper_ptr = ptrs.alloc();
     let wrapper_mat_ptr = ptrs.alloc();
     let wrapper_matbits_ptr = ptrs.alloc();
@@ -2746,7 +2717,7 @@ fn mesh_to_blend_hierarchy(
     let base_ptr = ptrs.alloc();
     let collection_ptr = ptrs.alloc();
     let layer_collection_ptr = ptrs.alloc();
-    let object_count = 3
+    let object_count = 1
         + usize::from(fallback_anchor.is_some())
         + nmc.nodes.len()
         - usize::from(collapsed_wrapper_node.is_some());
@@ -2765,7 +2736,7 @@ fn mesh_to_blend_hierarchy(
     let motion_blur_curve_points_data = build_motion_blur_shutter_curve_points();
     let tool_settings_data = build_tool_settings();
     let view_layer_data = build_view_layer("ViewLayer", base_ptr, layer_collection_ptr);
-    let base_data = build_base(orientation_root_ptr);
+    let base_data = build_base(wrapper_ptr);
     let collection_data = build_master_collection(
         collection_object_ptrs.first().copied().unwrap_or(0),
         collection_object_ptrs.last().copied().unwrap_or(0),
@@ -2773,9 +2744,7 @@ fn mesh_to_blend_hierarchy(
         0,
     );
     let layer_collection_data = build_layer_collection(collection_ptr);
-    let object_ptr_sequence = std::iter::once(orientation_root_ptr)
-        .chain(std::iter::once(coord_root_ptr))
-        .chain(std::iter::once(wrapper_ptr))
+    let object_ptr_sequence = std::iter::once(wrapper_ptr)
         .chain(fallback_anchor.as_ref().map(|(_, block)| block.object_ptr))
         .chain(
             nmc_object_ptrs
@@ -2811,38 +2780,12 @@ fn mesh_to_blend_hierarchy(
     }
     write_block(&mut out, b"DATA", SDNA_IDX_BASE, base_ptr, 1, &base_data);
     write_world_with_sky_shader(&mut out, "World", world_ptr, world_node_tree_ptr, &mut ptrs);
-
-
-
-    let coord_matrix = [
-        1.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, -1.0, 0.0,
-        0.0, 1.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 1.0,
-    ];
-    let (coord_loc, coord_quat, coord_scale) = matrix_to_transform(coord_matrix);
-    let orientation_root_data = build_empty_object(
-        BLENDER_Y_UP_ROOT_NAME,
-        [0.0, 0.0, 0.0],
-        BLENDER_Y_UP_ROOT_QUAT,
-        [1.0, 1.0, 1.0],
-        0,
-    );
-    write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, orientation_root_ptr, 1, &orientation_root_data);
-    write_block(&mut out, b"DATA", 0, orientation_root_mat_ptr, 1, &build_mat_ptr_array(0));
-    write_block(&mut out, b"DATA", 0, orientation_root_matbits_ptr, 1, &build_matbits(0));
-
-    let coord_root_data = build_empty_object("CryEngine_Z_up", coord_loc, coord_quat, coord_scale, orientation_root_ptr);
-    write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, coord_root_ptr, 1, &coord_root_data);
-    write_block(&mut out, b"DATA", 0, coord_root_mat_ptr, 1, &build_mat_ptr_array(0));
-    write_block(&mut out, b"DATA", 0, coord_root_matbits_ptr, 1, &build_matbits(0));
-
     let wrapper_data = build_empty_object(
         &wrapper_name,
         [0.0, 0.0, 0.0],
-        [1.0, 0.0, 0.0, 0.0],
-        [1.0, 1.0, 1.0],
-        coord_root_ptr,
+        BLENDER_BAKED_ROOT_QUAT,
+        BLENDER_BAKED_ROOT_SCALE,
+        0,
     );
     write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, wrapper_ptr, 1, &wrapper_data);
     write_block(&mut out, b"DATA", 0, wrapper_mat_ptr, 1, &build_mat_ptr_array(0));
@@ -3013,13 +2956,8 @@ pub struct LinkedMeshInstance {
     pub scale: [f32; 3],
 }
 
-const BLENDER_Y_UP_ROOT_NAME: &str = "StarBreaker_Y_up";
-const BLENDER_Y_UP_ROOT_QUAT: [f32; 4] = [
-    std::f32::consts::FRAC_1_SQRT_2,
-    std::f32::consts::FRAC_1_SQRT_2,
-    0.0,
-    0.0,
-];
+const BLENDER_BAKED_ROOT_QUAT: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
+const BLENDER_BAKED_ROOT_SCALE: [f32; 3] = [1.0, 1.0, 1.0];
 
 /// Create a scene.blend file that links together all individual mesh .blend files.
 ///
@@ -3218,9 +3156,6 @@ fn create_scene_blend_package_with_instances(
         let mut local_source_node_ptrs = HashMap::new();
         let mut local_source_node_entries = Vec::new();
         for (node_index, source_node) in instance.source_nodes.iter().enumerate() {
-            if instance.is_interior && is_coordinate_conversion_node(&source_node.name) {
-                continue;
-            }
             let empty_ptr = ptrs.alloc();
             let empty_coll_obj_ptr = ptrs.alloc();
             local_source_node_ptrs.insert(source_node.name.clone(), empty_ptr);
@@ -3236,35 +3171,26 @@ fn create_scene_blend_package_with_instances(
         }
         for (node_index, empty_ptr, _) in &local_source_node_entries {
             let source_node = &instance.source_nodes[*node_index];
-            let parent_ptr = if instance.is_interior
-                && source_node
-                    .parent_name
-                    .as_deref()
-                    .is_some_and(is_coordinate_conversion_node)
-            {
-                anchor_ptr
-            } else {
-                source_node
-                    .parent_name
-                    .as_ref()
-                    .and_then(|name| {
-                        local_source_node_ptrs
-                            .get(name)
-                            .or_else(|| {
-                                source_node_ptrs_by_scene_instance
-                                    .get(&instance.scene_instance_id)
-                                    .and_then(|nodes| nodes.get(name))
-                            })
-                            .or_else(|| {
-                                source_object_ptrs_by_scene_instance
-                                    .get(&instance.scene_instance_id)
-                                    .and_then(|objects| objects.get(name))
-                            })
-                            .or_else(|| source_object_ptr_by_name.get(name))
-                    })
-                    .copied()
-                    .unwrap_or(anchor_ptr)
-            };
+            let parent_ptr = source_node
+                .parent_name
+                .as_ref()
+                .and_then(|name| {
+                    local_source_node_ptrs
+                        .get(name)
+                        .or_else(|| {
+                            source_node_ptrs_by_scene_instance
+                                .get(&instance.scene_instance_id)
+                                .and_then(|nodes| nodes.get(name))
+                        })
+                        .or_else(|| {
+                            source_object_ptrs_by_scene_instance
+                                .get(&instance.scene_instance_id)
+                                .and_then(|objects| objects.get(name))
+                        })
+                        .or_else(|| source_object_ptr_by_name.get(name))
+                })
+                .copied()
+                .unwrap_or(anchor_ptr);
             scene_source_node_entries.push((*empty_ptr, idx, *node_index, parent_ptr));
         }
         if !local_source_node_ptrs.is_empty() {
@@ -3342,9 +3268,6 @@ fn create_scene_blend_package_with_instances(
             .source_parent_name
             .as_ref()
             .and_then(|name| {
-                if instance.is_interior && is_coordinate_conversion_node(name) {
-                    return None;
-                }
                 local_source_node_ptrs_by_instance[idx]
                     .get(name)
                     .or_else(|| {
@@ -3366,10 +3289,7 @@ fn create_scene_blend_package_with_instances(
                     .source_ancestors
                     .iter()
                     .enumerate()
-                    .filter_map(|(ancestor_index, ancestor)| {
-                        (!instance.is_interior || !is_coordinate_conversion_node(&ancestor.name))
-                            .then_some(ancestor_index)
-                    })
+                    .filter_map(|(ancestor_index, _ancestor)| Some(ancestor_index))
                     .collect::<Vec<_>>();
                 let mut ancestor_ptrs = Vec::new();
                 for ancestor_index in ancestor_indices {
@@ -3567,8 +3487,8 @@ fn create_scene_blend_package_with_instances(
     let entity_root_data = build_empty_object_with_properties(
         root_entity_name,
         [0.0, 0.0, 0.0],
-        [1.0, 0.0, 0.0, 0.0],
-        [1.0, 1.0, 1.0],
+        BLENDER_BAKED_ROOT_QUAT,
+        BLENDER_BAKED_ROOT_SCALE,
         package_root_ptr,
         entity_root_idprops.as_ref().map(|props| props.root_ptr).unwrap_or(0),
     );
@@ -3577,16 +3497,12 @@ fn create_scene_blend_package_with_instances(
     let entity_root_mat_array = build_mat_ptr_array(0);
     let entity_root_matbits = build_matbits(0);
 
-    let root_conversion_ptr = source_node_ptr_by_name
-        .get("CryEngine_Z_up")
-        .copied()
-        .unwrap_or(entity_root_ptr);
     let parent_empty_data = parent_empty_entries
         .iter()
         .map(|(empty_ptr, _, name, loc, quat, scale, _)| {
             (
                 *empty_ptr,
-                build_empty_object(name, *loc, *quat, *scale, root_conversion_ptr),
+                build_empty_object(name, *loc, *quat, *scale, entity_root_ptr),
             )
         })
         .collect::<Vec<_>>();

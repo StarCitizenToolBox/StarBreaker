@@ -144,6 +144,58 @@ fn mesh_to_blend_exports_secondary_uv_map() {
 }
 
 #[test]
+fn flat_mesh_assets_bake_root_rotation_without_wrappers() {
+    let mesh = Mesh {
+        positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        indices: vec![0, 1, 2],
+        uvs: None,
+        secondary_uvs: None,
+        normals: None,
+        tangents: None,
+        colors: None,
+        submeshes: vec![test_submesh(0, "mat", 0)],
+        model_min: [0.0, 0.0, 0.0],
+        model_max: [1.0, 1.0, 0.0],
+        scaling_min: [0.0, 0.0, 0.0],
+        scaling_max: [1.0, 1.0, 0.0],
+    };
+
+    let blend_bytes = mesh_to_blend("flat_asset", &mesh, &None, None, None);
+    let blocks = parse_blend_blocks(&blend_bytes);
+    let object = object_block_by_name(&blocks, "flat_asset");
+
+    assert!(
+        blocks.iter().all(|block| {
+            if block.code != b"OB\0\0" {
+                return true;
+            }
+            let raw = &block.data[42..300];
+            let end = raw.iter().position(|&byte| byte == 0).unwrap_or(raw.len());
+            !matches!(&raw[..end], b"StarBreaker_Y_up" | b"CryEngine_Z_up")
+        }),
+        "flat mesh export should not emit root wrapper empties",
+    );
+
+    let quat = [
+        f32::from_le_bytes(object.data[820..824].try_into().unwrap()),
+        f32::from_le_bytes(object.data[824..828].try_into().unwrap()),
+        f32::from_le_bytes(object.data[828..832].try_into().unwrap()),
+        f32::from_le_bytes(object.data[832..836].try_into().unwrap()),
+    ];
+    assert_eq!(
+        quat,
+        [1.0, 0.0, 0.0, 0.0,]
+    );
+
+    let scale = [
+        f32::from_le_bytes(object.data[760..764].try_into().unwrap()),
+        f32::from_le_bytes(object.data[764..768].try_into().unwrap()),
+        f32::from_le_bytes(object.data[768..772].try_into().unwrap()),
+    ];
+    assert_eq!(scale, [1.0, 1.0, 1.0]);
+}
+
+#[test]
 fn scene_manifest_instances_inherit_interior_palette_for_placements() {
     let scene = br#"{
         "interiors": [
@@ -300,8 +352,11 @@ fn interior_placement_assets_flatten_source_hierarchy() {
     assert_eq!(built.linked_mesh_refs.len(), 1);
     assert_eq!(built.linked_mesh_refs[0].object_name, "source_offset_node");
     assert_eq!(built.linked_mesh_refs[0].object_loc, [0.0, 0.0, 0.0]);
-    assert_eq!(built.linked_mesh_refs[0].object_quat, [1.0, 0.0, 0.0, 0.0]);
-    assert_eq!(built.linked_mesh_refs[0].source_parent_name.as_deref(), Some(BLENDER_Y_UP_ROOT_NAME));
+    assert_eq!(
+        built.linked_mesh_refs[0].object_quat,
+        [1.0, 0.0, 0.0, 0.0,]
+    );
+    assert_eq!(built.linked_mesh_refs[0].source_parent_name.as_deref(), None);
 }
 
 #[test]
@@ -418,8 +473,8 @@ fn test_mesh_blend_with_nmc_writes_hierarchy_objects() {
         })
         .collect::<Vec<_>>();
 
-    assert!(object_names.contains(&"CryEngine_Z_up".to_string()));
-    assert!(object_names.contains(&BLENDER_Y_UP_ROOT_NAME.to_string()));
+    assert!(!object_names.contains(&"CryEngine_Z_up".to_string()));
+    assert!(!object_names.contains(&"StarBreaker_Y_up".to_string()));
     assert!(object_names.contains(&"asset".to_string()));
     assert!(object_names.contains(&"asset_root".to_string()));
     assert!(object_names.contains(&"geo_left".to_string()));
@@ -455,20 +510,12 @@ fn test_mesh_blend_with_nmc_writes_hierarchy_objects() {
         object_names.len() > 1,
         "NMC export must not be a single flat mesh object"
     );
-    let object_blocks = blocks
-        .iter()
-        .filter(|block| block.code == b"OB\0\0")
-        .map(|block| {
-            let raw = &block.data[42..300];
-            let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
-            (String::from_utf8_lossy(&raw[..end]).to_string(), block)
-        })
-        .collect::<HashMap<_, _>>();
-    let orientation = object_blocks[BLENDER_Y_UP_ROOT_NAME];
-    let cry_root = object_blocks["CryEngine_Z_up"];
-    assert_eq!(u64::from_le_bytes(cry_root.data[496..504].try_into().unwrap()), orientation.old_ptr);
-    assert!((f32::from_le_bytes(orientation.data[820..824].try_into().unwrap()) - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.0001);
-    assert!((f32::from_le_bytes(orientation.data[824..828].try_into().unwrap()) - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.0001);
+    assert!(!object_names.contains(&"CryEngine_Z_up".to_string()));
+    assert!(!object_names.contains(&"StarBreaker_Y_up".to_string()));
+    assert!(object_names.contains(&"asset_root".to_string()));
+    assert!(object_names.contains(&"asset".to_string()));
+    assert!(object_names.contains(&"geo_left".to_string()));
+    assert!(object_names.contains(&"geo_right".to_string()));
 }
 
 #[test]
@@ -723,6 +770,24 @@ fn test_create_scene_blend_writes_addon_style_scene_anchors() {
         "entity wrapper should be parented to package root"
     );
     assert_eq!(
+        [
+            f32::from_le_bytes(entity_root.data[820..824].try_into().unwrap()),
+            f32::from_le_bytes(entity_root.data[824..828].try_into().unwrap()),
+            f32::from_le_bytes(entity_root.data[828..832].try_into().unwrap()),
+            f32::from_le_bytes(entity_root.data[832..836].try_into().unwrap()),
+        ],
+        [1.0, 0.0, 0.0, 0.0,],
+        "entity wrapper should carry the baked root rotation",
+    );
+    assert_eq!(
+        [
+            f32::from_le_bytes(entity_root.data[760..764].try_into().unwrap()),
+            f32::from_le_bytes(entity_root.data[764..768].try_into().unwrap()),
+            f32::from_le_bytes(entity_root.data[768..772].try_into().unwrap()),
+        ],
+        [1.0, 1.0, 1.0],
+    );
+    assert_eq!(
         u64::from_le_bytes(anchor.data[496..504].try_into().unwrap()),
         entity_root.old_ptr,
         "scene instance anchor should be parented to entity wrapper"
@@ -757,6 +822,9 @@ fn test_create_scene_blend_writes_addon_style_scene_anchors() {
 
 #[test]
 fn test_interior_meshes_do_not_parent_to_global_coordinate_nodes() {
+    // Exterior mesh has a StarBreaker_Y_up source node (legacy or explicit in input data).
+    // Interior mesh has NO such node — only regular source helpers.
+    // The interior mesh must NOT accidentally parent to the exterior's StarBreaker_Y_up node.
     let exterior = LinkedMeshInstance {
         scene_instance_id: 0,
         entity_name: "geo_body".to_string(),
@@ -806,32 +874,18 @@ fn test_interior_meshes_do_not_parent_to_global_coordinate_nodes() {
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
-        source_nodes: vec![
-            LinkedSourceNode {
-                name: "StarBreaker_Y_up".to_string(),
-                parent_name: None,
-                loc: [0.0, 0.0, 0.0],
-                quat: [1.0, 0.0, 0.0, 0.0],
-                scale: [1.0, 1.0, 1.0],
-            },
-            LinkedSourceNode {
-                name: "interior_helper".to_string(),
-                parent_name: Some("StarBreaker_Y_up".to_string()),
-                loc: [1.0, 2.0, 3.0],
-                quat: [1.0, 0.0, 0.0, 0.0],
-                scale: [1.0, 1.0, 1.0],
-            },
-        ],
-        source_ancestors: vec![LinkedSourceAncestor {
-            name: "StarBreaker_Y_up".to_string(),
-            loc: [0.0, 0.0, 0.0],
+        source_nodes: vec![LinkedSourceNode {
+            name: "interior_helper".to_string(),
+            parent_name: None,
+            loc: [1.0, 2.0, 3.0],
             quat: [1.0, 0.0, 0.0, 0.0],
             scale: [1.0, 1.0, 1.0],
         }],
+        source_ancestors: Vec::new(),
         source_loc: [0.0, 0.0, 0.0],
         source_quat: [1.0, 0.0, 0.0, 0.0],
         source_scale: [1.0, 1.0, 1.0],
-        source_parent_name: Some("StarBreaker_Y_up".to_string()),
+        source_parent_name: Some("interior_helper".to_string()),
         parent_node_name: None,
         blend_path: "//../../Data/Objects/Ships/interior_panel.blend".to_string(),
         mesh_asset: "Data/Objects/Ships/interior_panel.blend".to_string(),
@@ -844,22 +898,23 @@ fn test_interior_meshes_do_not_parent_to_global_coordinate_nodes() {
 
     let exterior_y_up = object_block_by_name(&blocks, "geo_body_0_StarBreaker_Y_up");
     let interior_anchor = object_block_by_name(&blocks, "interior_panel_anchor");
-    let interior_helper = object_block_by_name(&blocks, "interior_panel_1_interior_helper");
+    let interior_helper = object_block_by_name(&blocks, "interior_panel_0_interior_helper");
     let interior_mesh = object_block_by_name(&blocks, "interior_panel");
 
     assert_eq!(
         u64::from_le_bytes(interior_helper.data[496..504].try_into().unwrap()),
         interior_anchor.old_ptr,
-        "interior source nodes whose parent conversion node was skipped should stay under the scene anchor"
+        "interior source node with no parent should fall back to the scene anchor"
     );
     assert_eq!(
         u64::from_le_bytes(interior_mesh.data[496..504].try_into().unwrap()),
-        interior_anchor.old_ptr,
-        "interior meshes should not fall back to an exterior/global StarBreaker_Y_up parent"
+        interior_helper.old_ptr,
+        "interior mesh should parent to its interior_helper source node"
     );
     assert_ne!(
         u64::from_le_bytes(interior_mesh.data[496..504].try_into().unwrap()),
-        exterior_y_up.old_ptr
+        exterior_y_up.old_ptr,
+        "interior mesh must not accidentally parent to the exterior StarBreaker_Y_up"
     );
 }
 
@@ -1092,9 +1147,6 @@ fn test_create_scene_blend_uses_instance_local_source_parent_before_global_name(
     let first_mesh = object_block_by_name(&blocks, "first_instance_mesh");
     let second_mesh = object_block_by_name(&blocks, "second_instance_mesh");
 
-    assert!(blend_bytes
-        .windows(b"starbreaker_source_node_name".len())
-        .any(|window| window == b"starbreaker_source_node_name"));
     assert!(blend_bytes
         .windows(b"shared_source_parent".len())
         .any(|window| window == b"shared_source_parent"));
