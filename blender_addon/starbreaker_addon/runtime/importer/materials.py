@@ -57,6 +57,7 @@ from ..record_utils import (
     _float_authored_attribute,
     _layer_texture_reference,
     _matching_texture_reference,
+    _mean_triplet,
     _is_virtual_tint_palette_stencil_decal,
     _routes_virtual_tint_palette_decal_alpha_to_decal_source,
     _routes_virtual_tint_palette_decal_to_decal_source,
@@ -96,6 +97,16 @@ class MaterialsMixin:
             reusable = self._local_editable_material(reusable, cache_key)
             existing_identity = reusable.get(PROP_MATERIAL_IDENTITY)
             existing_template_key = reusable.get(PROP_TEMPLATE_KEY)
+            if (
+                isinstance(existing_identity, str)
+                and existing_identity == cache_key
+                and existing_template_key == expected_template_key
+                and self._material_needs_mesh_decal_emission_refresh(reusable, submaterial)
+            ):
+                self._build_managed_material(reusable, sidecar_path, sidecar, submaterial, palette, cache_key)
+                self.material_cache[cache_key] = reusable
+                self.material_identity_index[cache_key] = reusable
+                return reusable
             if (
                 isinstance(existing_identity, str)
                 and existing_identity == cache_key
@@ -144,6 +155,50 @@ class MaterialsMixin:
         local_material[PROP_MATERIAL_IDENTITY] = material_identity
         self.material_identity_index[material_identity] = local_material
         return local_material
+
+
+
+    def _material_needs_mesh_decal_emission_refresh(
+        self,
+        material: bpy.types.Material,
+        submaterial: SubmaterialRecord,
+    ) -> bool:
+        group_contract = self._group_contract_for_submaterial(submaterial)
+        if group_contract is None or group_contract.name != "SB_MeshDecal_v1":
+            return False
+
+        node_tree = getattr(material, "node_tree", None)
+        if node_tree is None:
+            return True
+
+        if (
+            submaterial.decoded_feature_flags.has_vertex_colors
+            and not any(node.bl_idname == "ShaderNodeVertexColor" for node in node_tree.nodes)
+        ):
+            return True
+
+        if any(node.bl_idname in {"ShaderNodeAddShader", "ShaderNodeEmission"} for node in node_tree.nodes):
+            return True
+
+        for node in node_tree.nodes:
+            if node.bl_idname != "ShaderNodeGroup":
+                continue
+            group_tree = getattr(node, "node_tree", None)
+            if group_tree is None or group_tree.name != "SB_MeshDecal_v1":
+                continue
+            if group_tree.get("starbreaker_mesh_decal_emission_patch_version") != 3:
+                return True
+            if _input_socket(node, "Emission Strength") is None:
+                return True
+            use_vert_col_socket = _input_socket(node, "Use Vert Col")
+            if use_vert_col_socket is None:
+                return True
+            if bool(getattr(use_vert_col_socket, "default_value", False)) != bool(
+                submaterial.decoded_feature_flags.has_vertex_colors
+            ):
+                return True
+            return False
+        return True
 
 
 
@@ -615,8 +670,10 @@ class MaterialsMixin:
                 image_node = self._image_node(nodes, image_path, x=x, y=y, is_color=True)
                 if image_node is None:
                     return None
-                return image_node.outputs[0]
-            return self._color_source_socket(nodes, submaterial, palette, image_path, x=x, y=y)
+                color_socket = image_node.outputs[0]
+            else:
+                color_socket = self._color_source_socket(nodes, submaterial, palette, image_path, x=x, y=y)
+            return color_socket
         image_node = self._image_node(nodes, image_path, x=x, y=y, is_color=False)
         if image_node is None:
             return None
@@ -663,6 +720,28 @@ class MaterialsMixin:
 
     def _smoothness_texture_reference(self, submaterial: SubmaterialRecord) -> TextureReference | None:
         return smoothness_texture_reference(submaterial)
+
+
+
+    def _authored_emissive_triplet(self, submaterial: SubmaterialRecord) -> tuple[float, float, float] | None:
+        for attribute in submaterial.raw.get("authored_attributes", []):
+            if attribute.get("name") != "Emissive":
+                continue
+            value = attribute.get("value")
+            if isinstance(value, (list, tuple)) and len(value) >= 3:
+                try:
+                    return (float(value[0]), float(value[1]), float(value[2]))
+                except (TypeError, ValueError):
+                    return None
+            if isinstance(value, str):
+                parts = [part.strip() for part in value.split(",")]
+                if len(parts) >= 3:
+                    try:
+                        return (float(parts[0]), float(parts[1]), float(parts[2]))
+                    except (TypeError, ValueError):
+                        return None
+            return None
+        return None
 
 
 
@@ -799,6 +878,11 @@ class MaterialsMixin:
 
 
     def _illum_emission_strength(self, submaterial: SubmaterialRecord) -> float:
+        emissive = self._authored_emissive_triplet(submaterial)
+        emissive_mean = _mean_triplet(emissive) if emissive is not None else None
+        if emissive_mean is not None and emissive_mean > 0.0:
+            return emissive_mean
+
         glow_value = _float_authored_attribute(submaterial, "Glow")
         if glow_value > 0.0:
             return glow_value
@@ -813,6 +897,18 @@ class MaterialsMixin:
         )
         if "glow" in material_name or "emissive" in material_name:
             return 0.35
+        return 0.0
+
+
+
+    def _mesh_decal_emission_strength(self, submaterial: SubmaterialRecord) -> float:
+        glow_value = _float_authored_attribute(submaterial, "Glow")
+        if glow_value > 0.0:
+            return glow_value
+
+        emissive = self._authored_emissive_triplet(submaterial)
+        if emissive is not None and _mean_triplet(emissive) > 0.0:
+            return 1.0
         return 0.0
 
 
@@ -848,8 +944,6 @@ class MaterialsMixin:
         self._link_color_output(image_node.outputs[0], mix.inputs[1])
         self._link_color_output(palette_socket, mix.inputs[2])
         return mix.outputs[0]
-
-
 
     def _image_node(
         self,

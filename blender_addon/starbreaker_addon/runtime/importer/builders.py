@@ -55,6 +55,7 @@ from ..record_utils import (
     _resolved_submaterial_palette_color,
     _routes_virtual_tint_palette_decal_alpha_to_decal_source,
     _routes_virtual_tint_palette_decal_to_decal_source,
+    _triplet_from_any,
     _submaterial_texture_reference,
     _suppresses_virtual_tint_palette_stencil_input,
     _uses_virtual_tint_palette_decal,
@@ -79,6 +80,14 @@ def _canonical_material_sidecar_path(sidecar_path: str, sidecar: MaterialSidecar
 def _safe_identifier(value: str) -> str:
     safe = "".join(character if character.isalnum() else "_" for character in value)
     return safe.strip("_") or "value"
+
+
+def _authored_emissive_triplet(submaterial: SubmaterialRecord) -> tuple[float, float, float] | None:
+    for attribute in submaterial.raw.get("authored_attributes", []):
+        if attribute.get("name") != "Emissive":
+            continue
+        return _triplet_from_any(attribute.get("value"))
+    return None
 
 
 class BuildersMixin:
@@ -375,6 +384,8 @@ class BuildersMixin:
             group = bpy.data.node_groups.get(group_contract.name)
         if group is not None and group_contract.name == "SB_GlassPBR_v1":
             self._patch_glass_template_lightpath(group)
+        if group is not None and group_contract.name == "SB_MeshDecal_v1":
+            self._patch_mesh_decal_template_emission(group)
         return group
 
     @staticmethod
@@ -435,6 +446,103 @@ class BuildersMixin:
         group["starbreaker_glass_lightpath_patched"] = 1
         group["starbreaker_glass_lightpath_patch_version"] = 2
 
+    @staticmethod
+    def _patch_mesh_decal_template_emission(group: bpy.types.ShaderNodeTree) -> None:
+        """Route MeshDecal emissive data into Principled emission."""
+        if group.get("starbreaker_mesh_decal_emission_patch_version") == 3:
+            return
+
+        nodes = group.nodes
+        links = group.links
+        group_input = next((node for node in nodes if node.bl_idname == "NodeGroupInput"), None)
+        principled = nodes.get("Principled BSDF")
+        if group_input is None or principled is None:
+            return
+
+        emission_strength_socket = _output_socket(group_input, "Emission Strength")
+        if emission_strength_socket is None:
+            try:
+                group.interface.new_socket(
+                    name="Emission Strength",
+                    in_out="INPUT",
+                    socket_type="NodeSocketFloat",
+                )
+                emission_strength_socket = _output_socket(group_input, "Emission Strength")
+            except Exception:
+                emission_strength_socket = None
+
+        use_vert_col_socket = _output_socket(group_input, "Use Vert Col")
+        if use_vert_col_socket is None:
+            try:
+                group.interface.new_socket(
+                    name="Use Vert Col",
+                    in_out="INPUT",
+                    socket_type="NodeSocketBool",
+                )
+                use_vert_col_socket = _output_socket(group_input, "Use Vert Col")
+            except Exception:
+                use_vert_col_socket = None
+
+        decal_source_socket = _output_socket(group_input, "TexSlot1_DecalSource")
+        apply_vc_tint = nodes.get("Apply VC Tint")
+        emission_color_input = _input_socket(principled, "Emission Color", "Emission")
+        emission_strength_input = _input_socket(principled, "Emission Strength")
+        if (
+            decal_source_socket is None
+            or emission_color_input is None
+            or emission_strength_socket is None
+            or emission_strength_input is None
+        ):
+            return
+
+        apply_vc_tint_factor = _input_socket(apply_vc_tint, "Factor") if apply_vc_tint is not None else None
+        apply_vc_tint_result = _output_socket(apply_vc_tint, "Result") if apply_vc_tint is not None else None
+        if use_vert_col_socket is not None and apply_vc_tint_factor is not None:
+            for link in list(apply_vc_tint_factor.links):
+                if link.from_socket is use_vert_col_socket:
+                    continue
+                links.remove(link)
+            if not any(link.from_socket is use_vert_col_socket and link.to_socket is apply_vc_tint_factor for link in links):
+                links.new(use_vert_col_socket, apply_vc_tint_factor)
+        if apply_vc_tint_result is not None:
+            for link in list(emission_color_input.links):
+                if link.from_socket is apply_vc_tint_result:
+                    continue
+                links.remove(link)
+            if not any(link.from_socket is apply_vc_tint_result and link.to_socket is emission_color_input for link in links):
+                links.new(apply_vc_tint_result, emission_color_input)
+        else:
+            for link in list(emission_color_input.links):
+                if link.from_socket is decal_source_socket:
+                    continue
+                links.remove(link)
+            if not any(link.from_socket is decal_source_socket and link.to_socket is emission_color_input for link in links):
+                links.new(decal_source_socket, emission_color_input)
+
+        for link in list(emission_strength_input.links):
+            if link.from_socket.name == "Value":
+                continue
+            links.remove(link)
+
+        multiplier = nodes.get("Emission Strength x10")
+        if multiplier is None or multiplier.bl_idname != "ShaderNodeMath":
+            multiplier = nodes.new("ShaderNodeMath")
+            multiplier.name = "Emission Strength x10"
+            multiplier.label = "Emission Strength x10"
+            multiplier.location = (principled.location.x - 240, principled.location.y - 220)
+            multiplier.operation = "MULTIPLY"
+            multiplier.inputs[1].default_value = 10.0
+        if not any(link.from_socket is emission_strength_socket and link.to_socket is multiplier.inputs[0] for link in links):
+            for link in list(multiplier.inputs[0].links):
+                links.remove(link)
+            links.new(emission_strength_socket, multiplier.inputs[0])
+        if not any(link.from_socket is multiplier.outputs[0] and link.to_socket is emission_strength_input for link in links):
+            for link in list(emission_strength_input.links):
+                links.remove(link)
+            links.new(multiplier.outputs[0], emission_strength_input)
+
+        group["starbreaker_mesh_decal_emission_patch_version"] = 3
+
     def _build_contract_group_material(
         self,
         material: bpy.types.Material,
@@ -473,7 +581,13 @@ class BuildersMixin:
                     target_socket.default_value = bool(self._plan_casts_no_shadows(plan, submaterial))
                 source_socket = None
             elif semantic == "emission_strength" and hasattr(target_socket, "default_value"):
-                target_socket.default_value = self._illum_emission_strength(submaterial)
+                if group_contract.name == "SB_MeshDecal_v1":
+                    target_socket.default_value = self._mesh_decal_emission_strength(submaterial)
+                else:
+                    target_socket.default_value = self._illum_emission_strength(submaterial)
+                source_socket = None
+            elif semantic == "use_vertex_colors" and hasattr(target_socket, "default_value"):
+                target_socket.default_value = bool(submaterial.decoded_feature_flags.has_vertex_colors)
                 source_socket = None
             elif semantic.startswith("public_param_"):
                 # Generic authored-param default: the group input's semantic
@@ -568,6 +682,12 @@ class BuildersMixin:
             for contract_input in group_contract.inputs
         )
 
+        group_handles_emission = any(
+            (contract_input.semantic or contract_input.name).lower() in {"emission_strength", "emission_color"}
+            or "emission" in (contract_input.semantic or contract_input.name).lower()
+            for contract_input in group_contract.inputs
+        )
+
         if plan.uses_alpha and not group_handles_alpha:
             alpha_source = self._alpha_source_socket(
                 nodes,
@@ -585,6 +705,35 @@ class BuildersMixin:
                 links.new(transparent.outputs[0], mix.inputs[1])
                 links.new(surface_shader, mix.inputs[2])
                 surface_shader = mix.outputs[0]
+
+        emissive_triplet = _authored_emissive_triplet(submaterial)
+        emissive_strength = max(
+            _mean_triplet(emissive_triplet) or 0.0,
+            _float_authored_attribute(submaterial, "Glow"),
+        )
+        if emissive_strength > 0.0 and not group_handles_emission:
+            emissive_color_path = self._texture_export_path(submaterial, "emissive") or representative_textures(
+                submaterial
+            ).get("base_color")
+            emissive_color_node = self._image_node(nodes, emissive_color_path, x=-220, y=y, is_color=True)
+            emissive_color_output = emissive_color_node.outputs[0] if emissive_color_node is not None else None
+            if emissive_color_output is None and emissive_triplet is not None:
+                emissive_color_output = self._value_color_socket(
+                    nodes,
+                    (*emissive_triplet, 1.0),
+                    x=-220,
+                    y=y,
+                )
+            if emissive_color_output is not None:
+                emission = nodes.new("ShaderNodeEmission")
+                emission.location = (400, -300)
+                self._link_color_output(emissive_color_output, emission.inputs["Color"])
+                emission.inputs["Strength"].default_value = emissive_strength
+                add_shader = nodes.new("ShaderNodeAddShader")
+                add_shader.location = (560, -40)
+                links.new(surface_shader, add_shader.inputs[0])
+                links.new(emission.outputs[0], add_shader.inputs[1])
+                surface_shader = add_shader.outputs[0]
 
         links.new(surface_shader, output.inputs[0])
 

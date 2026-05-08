@@ -238,6 +238,7 @@ Observed slot map:
 Contract note:
 
 - `MeshDecal` needs explicit support for RTT, stencil tint, POM height, and breakup maps.
+- `Decal_Glow_Unlinked` also carries `%VERTCOLORS%`; its base decal color should be multiplied by mesh `COLOR_0` data when present.
 
 ## UIMesh
 
