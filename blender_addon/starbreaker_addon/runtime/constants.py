@@ -91,10 +91,12 @@ LUMENS_PER_WATT_WHITE = 120.0
 # radiant-flux Watts. SC intensities are treated as KHR_lights_punctual-style
 # candela values (matching Blender's own glTF importer behaviour): total
 # luminous flux = intensity * 4π, which divided by 683 lm/W gives Watts.
+# Updated to 1000.0 to match Rust exporter's LIGHT_AUTHORED_INTENSITY_SCALE
+# (Phase 36+: aligns with Max script's PowerModifier = 1000x).
 # See ``docs/StarBreaker/lights-research.md``.
 import math as _math
 
-SC_LIGHT_CANDELA_SCALE = 200.0
+SC_LIGHT_CANDELA_SCALE = 1000.0
 LIGHT_CANDELA_TO_WATT = (4.0 * _math.pi) / GLTF_PBR_WATTS_TO_LUMENS
 HEADLIGHT_GOBO_THROW_GAIN = 10.0
 # Empirical visual-brightness multiplier. Star Citizen's in-engine light

@@ -1068,43 +1068,48 @@ pub(crate) fn write_decomposed_export(
                 .iter()
                 .map(|light| {
                     // Extract the projector (gobo) texture.
+                    // ONLY for Projector lights (spot lights). Point lights (Omni) should never have gobos.
                     // Priority: EXR (for HDR formats like BC6H) -> PNG (for SDR formats) -> white PNG fallback
                     // EXR preserves float values >1.0, allowing Blender to sample full HDR energy.
-                    let projector_texture_export = light
-                        .projector_texture
-                        .as_deref()
-                        .and_then(|src| {
-                            // Try HDR EXR export first (for BC6H gobos with values >1.0)
-                            if let Some(exr_data) = export_gobo_as_exr(p4k, src, opts.texture_mip) {
+                    let projector_texture_export = if light.light_type == "Projector" {
+                        light
+                            .projector_texture
+                            .as_deref()
+                            .and_then(|src| {
+                                // Try HDR EXR export first (for BC6H gobos with values >1.0)
+                                if let Some(exr_data) = export_gobo_as_exr(p4k, src, opts.texture_mip) {
+                                    let normalized = normalize_source_path(p4k, src);
+                                    let exr_path = replace_extension(&normalized, ".exr");
+                                    return Some(insert_binary_file(&mut files, exr_path, exr_data));
+                                }
+                                
+                                // Fall back to standard PNG export (for SDR or unsupported formats)
+                                if let Some(png_path) = export_texture_asset(
+                                    &mut files,
+                                    p4k,
+                                    &mut png_cache,
+                                    &mut texture_cache,
+                                    src,
+                                    TextureFlavor::Generic,
+                                    opts.texture_mip,
+                                    existing_asset_paths,
+                                ) {
+                                    return Some(png_path);
+                                }
+                                
+                                // Both EXR and PNG failed. Log a warning and use white PNG fallback.
+                                log::warn!(
+                                    "Failed to export projector texture '{}' (EXR and PNG both failed). Using white PNG fallback.",
+                                    src
+                                );
                                 let normalized = normalize_source_path(p4k, src);
-                                let exr_path = replace_extension(&normalized, ".exr");
-                                return Some(insert_binary_file(&mut files, exr_path, exr_data));
-                            }
-                            
-                            // Fall back to standard PNG export (for SDR or unsupported formats)
-                            if let Some(png_path) = export_texture_asset(
-                                &mut files,
-                                p4k,
-                                &mut png_cache,
-                                &mut texture_cache,
-                                src,
-                                TextureFlavor::Generic,
-                                opts.texture_mip,
-                                existing_asset_paths,
-                            ) {
-                                return Some(png_path);
-                            }
-                            
-                            // Both EXR and PNG failed. Log a warning and use white PNG fallback.
-                            log::warn!(
-                                "Failed to export projector texture '{}' (EXR and PNG both failed). Using white PNG fallback.",
-                                src
-                            );
-                            let normalized = normalize_source_path(p4k, src);
-                            let fallback_path = replace_extension(&normalized, ".png");
-                            let fallback_png = create_white_png_fallback();
-                            Some(insert_binary_file(&mut files, fallback_path, fallback_png))
-                        });
+                                let fallback_path = replace_extension(&normalized, ".png");
+                                let fallback_png = create_white_png_fallback();
+                                Some(insert_binary_file(&mut files, fallback_path, fallback_png))
+                            })
+                    } else {
+                        None
+                    };
                     serde_json::json!({
                         "name": light.name,
                         "position": light.position,
