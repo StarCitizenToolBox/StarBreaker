@@ -570,6 +570,84 @@ fn empty_only_nmc_asset_writes_linkable_anchor_mesh() {
 }
 
 #[test]
+fn collapsed_wrapper_node_preserves_non_identity_root_transform() {
+    let mesh = Mesh {
+        positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        indices: vec![0, 1, 2],
+        uvs: None,
+        secondary_uvs: None,
+        normals: None,
+        tangents: None,
+        colors: None,
+        submeshes: vec![SubMesh {
+            material_name: Some("Hull".to_string()),
+            material_id: 0,
+            source_material_id: None,
+            first_index: 0,
+            num_indices: 3,
+            first_vertex: 0,
+            num_vertices: 3,
+            node_parent_index: 1,
+        }],
+        model_min: [0.0, 0.0, 0.0],
+        model_max: [1.0, 1.0, 0.0],
+        scaling_min: [0.0, 0.0, 0.0],
+        scaling_max: [1.0, 1.0, 0.0],
+    };
+    let identity = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+    ];
+    let root_rot_180_z = [
+        [-1.0, 0.0, 0.0, 0.0],
+        [0.0, -1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+    ];
+    let nmc = NodeMeshCombo {
+        nodes: vec![
+            crate::nmc::NmcNode {
+                name: "asset".to_string(),
+                parent_index: None,
+                world_to_bone: root_rot_180_z,
+                bone_to_world: root_rot_180_z,
+                scale: [1.0; 3],
+                geometry_type: 3,
+                properties: HashMap::new(),
+            },
+            crate::nmc::NmcNode {
+                name: "geo".to_string(),
+                parent_index: Some(0),
+                world_to_bone: identity,
+                bone_to_world: identity,
+                scale: [1.0; 3],
+                geometry_type: 0,
+                properties: HashMap::new(),
+            },
+        ],
+        material_indices: Vec::new(),
+    };
+
+    let blend_bytes = mesh_to_blend("asset_LOD0", &mesh, &None, Some(&nmc), None);
+    let blocks = parse_blend_blocks(&blend_bytes);
+    let wrapper = object_block_by_name(&blocks, "asset");
+    let quat = [
+        f32::from_le_bytes(wrapper.data[820..824].try_into().unwrap()),
+        f32::from_le_bytes(wrapper.data[824..828].try_into().unwrap()),
+        f32::from_le_bytes(wrapper.data[828..832].try_into().unwrap()),
+        f32::from_le_bytes(wrapper.data[832..836].try_into().unwrap()),
+    ];
+
+    assert!(quat[0].abs() < 1e-5, "expected 180-degree root rotation (w ~= 0), got {quat:?}");
+    assert!(quat[1].abs() < 1e-5, "expected 180-degree root rotation around Z, got {quat:?}");
+    assert!(quat[2].abs() < 1e-5, "expected 180-degree root rotation around Z, got {quat:?}");
+    assert!(
+        (quat[3].abs() - 1.0).abs() < 1e-5,
+        "expected 180-degree root rotation around Z (|z| ~= 1), got {quat:?}"
+    );
+}
+
+#[test]
 fn linked_scene_object_names_use_geometry_nodes_for_nmc_assets() {
     let mesh = Mesh {
         positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],

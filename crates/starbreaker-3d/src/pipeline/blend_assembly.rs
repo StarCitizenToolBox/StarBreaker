@@ -2780,11 +2780,21 @@ fn mesh_to_blend_hierarchy(
     }
     write_block(&mut out, b"DATA", SDNA_IDX_BASE, base_ptr, 1, &base_data);
     write_world_with_sky_shader(&mut out, "World", world_ptr, world_node_tree_ptr, &mut ptrs);
+    let wrapper_transform = collapsed_wrapper_node
+        .and_then(|node_index| nmc.nodes.get(node_index))
+        .map(|node| {
+            if crate::gltf::is_identity_or_zero(&node.bone_to_world) {
+                ([0.0, 0.0, 0.0], BLENDER_BAKED_ROOT_QUAT, BLENDER_BAKED_ROOT_SCALE)
+            } else {
+                matrix_to_transform(crate::gltf::mat3x4_to_gltf(&node.bone_to_world))
+            }
+        })
+        .unwrap_or(([0.0, 0.0, 0.0], BLENDER_BAKED_ROOT_QUAT, BLENDER_BAKED_ROOT_SCALE));
     let wrapper_data = build_empty_object(
         &wrapper_name,
-        [0.0, 0.0, 0.0],
-        BLENDER_BAKED_ROOT_QUAT,
-        BLENDER_BAKED_ROOT_SCALE,
+        wrapper_transform.0,
+        wrapper_transform.1,
+        wrapper_transform.2,
         0,
     );
     write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, wrapper_ptr, 1, &wrapper_data);
