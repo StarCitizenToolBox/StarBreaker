@@ -1637,8 +1637,8 @@ pub fn write_world_with_sky_shader(
             0, 0x0040, 1, 1, "NodeSocketFloat", bg_strength_def_ptr, 0));
     {
         let mut d = vec![0u8; BNSV_FLOAT_SIZE];
-        // subtype=0, value=0.1, min=0.0, max=1_000_000.0
-        write_f32(&mut d, 4, 0.1);
+        // subtype=0, value=0.5, min=0.0, max=1_000_000.0
+        write_f32(&mut d, 4, 0.5);
         write_f32(&mut d, 12, 1_000_000.0_f32);
         write_block(out, b"DATA", SDNA_IDX_BNSV_FLOAT, bg_strength_def_ptr, 1, &d);
     }
