@@ -305,6 +305,10 @@ export interface AudioSoundResult {
   path_description: string;
 }
 
+export interface AudioExportInfo {
+  extension: string;
+}
+
 // ── Audio commands ──
 
 /** Build ATL index from P4k. Called once, cached. */
@@ -354,6 +358,23 @@ export async function audioDecodeWem(
   bankName: string,
 ): Promise<number[]> {
   return invoke<number[]>("audio_decode_wem", { mediaId, sourceType, bankName });
+}
+
+export async function audioExportInfo(
+  mediaId: number,
+  sourceType: string,
+  bankName: string,
+): Promise<AudioExportInfo> {
+  return invoke<AudioExportInfo>("audio_export_info", { mediaId, sourceType, bankName });
+}
+
+export async function audioExportMedia(
+  mediaId: number,
+  sourceType: string,
+  bankName: string,
+  outputPath: string,
+): Promise<void> {
+  return invoke<void>("audio_export_media", { mediaId, sourceType, bankName, outputPath });
 }
 
 export interface FolderExtractProgress {

@@ -55,6 +55,11 @@ pub struct SoundResult {
     pub path_description: String,
 }
 
+#[derive(Serialize)]
+pub struct AudioExportInfo {
+    pub extension: String,
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 fn ensure_atl(state: &AppState) -> Result<(), AppError> {
@@ -162,6 +167,23 @@ fn read_embedded_wem(
     Ok(entry_data.to_vec())
 }
 
+fn load_media_bytes(
+    p4k: &MappedP4k,
+    media_id: u32,
+    source_type: &str,
+    bank_name: &str,
+    wwise_paths: &HashMap<String, String>,
+) -> Result<Vec<u8>, AppError> {
+    match source_type {
+        "Stream" | "PrefetchStream" => read_streamed_wem(p4k, media_id, wwise_paths),
+        "Embedded" => match read_embedded_wem(p4k, media_id, bank_name, wwise_paths) {
+            Ok(bytes) => Ok(bytes),
+            Err(_) => read_streamed_wem(p4k, media_id, wwise_paths),
+        },
+        other => Err(AppError::Internal(format!("unknown source type: {other}"))),
+    }
+}
+
 // ── Commands ─────────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -178,7 +200,9 @@ pub fn audio_init(state: State<'_, AppState>) -> Result<AudioInitResult, AppErro
     }
 
     let atl_guard = state.atl_index.lock();
-    let atl = atl_guard.as_ref().ok_or_else(|| AppError::Internal("audio not initialized".into()))?;
+    let atl = atl_guard
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("audio not initialized".into()))?;
     Ok(AudioInitResult {
         trigger_count: atl.len(),
         bank_count: atl.bank_names().len(),
@@ -198,8 +222,7 @@ pub fn audio_search_entities(
 
     let db = starbreaker_datacore::database::Database::from_bytes(&dcb_bytes)?;
 
-    let entities =
-        starbreaker_wwise::datacore_audio::search_entities_with_audio(&db, &query);
+    let entities = starbreaker_wwise::datacore_audio::search_entities_with_audio(&db, &query);
 
     Ok(entities
         .into_iter()
@@ -219,7 +242,9 @@ pub fn audio_search_triggers(
 ) -> Result<Vec<TriggerResult>, AppError> {
     ensure_atl(&state)?;
     let atl_guard = state.atl_index.lock();
-    let atl = atl_guard.as_ref().ok_or_else(|| AppError::Internal("audio not initialized".into()))?;
+    let atl = atl_guard
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("audio not initialized".into()))?;
 
     Ok(atl
         .search(&query)
@@ -238,7 +263,9 @@ pub fn audio_search_triggers(
 pub fn audio_list_banks(state: State<'_, AppState>) -> Result<Vec<BankResult>, AppError> {
     ensure_atl(&state)?;
     let atl_guard = state.atl_index.lock();
-    let atl = atl_guard.as_ref().ok_or_else(|| AppError::Internal("audio not initialized".into()))?;
+    let atl = atl_guard
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("audio not initialized".into()))?;
 
     let mut banks: Vec<BankResult> = atl
         .bank_names()
@@ -259,7 +286,9 @@ pub fn audio_bank_triggers(
 ) -> Result<Vec<TriggerDetail>, AppError> {
     ensure_atl(&state)?;
     let atl_guard = state.atl_index.lock();
-    let atl = atl_guard.as_ref().ok_or_else(|| AppError::Internal("audio not initialized".into()))?;
+    let atl = atl_guard
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("audio not initialized".into()))?;
 
     let trigger_names = atl.triggers_for_bank(&bank_name);
     let p4k = get_p4k(&state)?;
@@ -369,7 +398,9 @@ pub fn audio_bank_media(
                             if seen.insert(s.media_id) {
                                 let source_type = match s.source {
                                     starbreaker_wwise::SoundSource::Embedded => "Embedded",
-                                    starbreaker_wwise::SoundSource::PrefetchStream => "PrefetchStream",
+                                    starbreaker_wwise::SoundSource::PrefetchStream => {
+                                        "PrefetchStream"
+                                    }
                                     starbreaker_wwise::SoundSource::Stream => "Stream",
                                 };
                                 results.push(SoundResult {
@@ -415,8 +446,7 @@ pub fn audio_entity_triggers(
         .ok_or_else(|| AppError::Internal("DataCore not loaded".into()))?;
     let db = starbreaker_datacore::database::Database::from_bytes(&dcb_bytes)?;
 
-    let entities =
-        starbreaker_wwise::datacore_audio::search_entities_with_audio(&db, &entity_name);
+    let entities = starbreaker_wwise::datacore_audio::search_entities_with_audio(&db, &entity_name);
 
     let entity = entities
         .iter()
@@ -425,7 +455,9 @@ pub fn audio_entity_triggers(
 
     ensure_atl(&state)?;
     let atl_guard = state.atl_index.lock();
-    let atl = atl_guard.as_ref().ok_or_else(|| AppError::Internal("audio not initialized".into()))?;
+    let atl = atl_guard
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("audio not initialized".into()))?;
 
     let p4k = get_p4k(&state)?;
     let mut cache_guard = state.bank_cache.lock();
@@ -466,7 +498,9 @@ pub fn audio_resolve_trigger(
 ) -> Result<Vec<SoundResult>, AppError> {
     ensure_atl(&state)?;
     let atl_guard = state.atl_index.lock();
-    let atl = atl_guard.as_ref().ok_or_else(|| AppError::Internal("audio not initialized".into()))?;
+    let atl = atl_guard
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("audio not initialized".into()))?;
 
     let trigger = atl
         .get_trigger(&trigger_name)
@@ -520,19 +554,7 @@ pub fn audio_decode_wem(
 ) -> Result<Vec<u8>, AppError> {
     let p4k = get_p4k(&state)?;
     let wp = state.wwise_paths.lock().clone();
-
-    let wem_bytes = match source_type.as_str() {
-        "Stream" | "PrefetchStream" => read_streamed_wem(&p4k, media_id, &wp)?,
-        "Embedded" => {
-            // Try extracting from bank DIDX first; fall back to streamed file
-            // (some banks have HIRC-only with media stored externally)
-            match read_embedded_wem(&p4k, media_id, &bank_name, &wp) {
-                Ok(bytes) => bytes,
-                Err(_) => read_streamed_wem(&p4k, media_id, &wp)?,
-            }
-        }
-        other => return Err(AppError::Internal(format!("unknown source type: {other}"))),
-    };
+    let wem_bytes = load_media_bytes(&p4k, media_id, &source_type, &bank_name, &wp)?;
 
     let wem = starbreaker_wem::WemFile::parse(&wem_bytes)?;
 
@@ -540,6 +562,57 @@ pub fn audio_decode_wem(
         starbreaker_wem::WemCodec::Vorbis => {
             Ok(starbreaker_wem::decode::vorbis_to_ogg(&wem_bytes)?)
         }
-        other => Err(AppError::Internal(format!("codec {other} not supported for playback"))),
+        other => Err(AppError::Internal(format!(
+            "codec {other} not supported for playback"
+        ))),
     }
+}
+
+#[tauri::command]
+pub fn audio_export_info(
+    state: State<'_, AppState>,
+    media_id: u32,
+    source_type: String,
+    bank_name: String,
+) -> Result<AudioExportInfo, AppError> {
+    let p4k = get_p4k(&state)?;
+    let wp = state.wwise_paths.lock().clone();
+    let wem_bytes = load_media_bytes(&p4k, media_id, &source_type, &bank_name, &wp)?;
+    let wem = starbreaker_wem::WemFile::parse(&wem_bytes)?;
+
+    let extension = match wem.codec_type() {
+        starbreaker_wem::WemCodec::Vorbis => "ogg",
+        _ => "wem",
+    };
+
+    Ok(AudioExportInfo {
+        extension: extension.to_string(),
+    })
+}
+
+#[tauri::command]
+pub fn audio_export_media(
+    state: State<'_, AppState>,
+    media_id: u32,
+    source_type: String,
+    bank_name: String,
+    output_path: String,
+) -> Result<(), AppError> {
+    let p4k = get_p4k(&state)?;
+    let wp = state.wwise_paths.lock().clone();
+    let wem_bytes = load_media_bytes(&p4k, media_id, &source_type, &bank_name, &wp)?;
+
+    let wem = starbreaker_wem::WemFile::parse(&wem_bytes)?;
+    let bytes = match wem.codec_type() {
+        starbreaker_wem::WemCodec::Vorbis => starbreaker_wem::decode::vorbis_to_ogg(&wem_bytes)?,
+        _ => wem_bytes,
+    };
+
+    let out = std::path::Path::new(&output_path);
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(out, &bytes)?;
+
+    Ok(())
 }
