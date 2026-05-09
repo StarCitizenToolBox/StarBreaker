@@ -236,6 +236,8 @@ fn main() {
             audio_commands::audio_entity_triggers,
             audio_commands::audio_resolve_trigger,
             audio_commands::audio_decode_wem,
+            audio_commands::audio_export_info,
+            audio_commands::audio_export_media,
             commands::preview_geometry,
             commands::preview_xml,
             commands::preview_dds,

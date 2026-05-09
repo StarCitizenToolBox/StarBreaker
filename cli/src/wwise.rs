@@ -6,10 +6,15 @@ use clap::Subcommand;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use starbreaker_wem::WemFile;
-use starbreaker_wwise::{BnkFile, Hierarchy};
+use starbreaker_wwise::{BnkFile, Hierarchy, SoundSource};
 
 use crate::common::load_p4k;
 use crate::error::{CliError, Result};
+
+struct LoadedBank {
+    data: Vec<u8>,
+    p4k: Option<starbreaker_p4k::MappedP4k>,
+}
 
 #[derive(Subcommand)]
 pub enum WwiseCommand {
@@ -21,7 +26,7 @@ pub enum WwiseCommand {
         #[arg(long, env = "SC_DATA_P4K")]
         p4k: Option<PathBuf>,
     },
-    /// List all embedded WEM entries in a soundbank
+    /// List WEM media referenced or embedded in a soundbank
     List {
         /// Input .bnk file path (filesystem or P4k path)
         input: String,
@@ -108,14 +113,91 @@ impl WwiseCommand {
 }
 
 fn load_bnk_bytes(input: &str, p4k_path: Option<&Path>) -> Result<Vec<u8>> {
+    Ok(load_bank(input, p4k_path, false)?.data)
+}
+
+fn load_bank(input: &str, p4k_path: Option<&Path>, keep_p4k: bool) -> Result<LoadedBank> {
     let path = Path::new(input);
     if path.exists() {
-        return Ok(fs::read(path)
-            .map_err(|e| CliError::IoPath { source: e, path: path.display().to_string() })?);
+        let data = fs::read(path).map_err(|e| CliError::IoPath {
+            source: e,
+            path: path.display().to_string(),
+        })?;
+        let p4k = if keep_p4k && p4k_path.is_some() {
+            Some(load_p4k(p4k_path)?)
+        } else {
+            None
+        };
+        return Ok(LoadedBank { data, p4k });
     }
-    // Try P4k path
+
     let p4k = load_p4k(p4k_path)?;
-    Ok(p4k.read_file(input)?)
+    let p4k_entry_path = resolve_wwise_p4k_path(&p4k, input)?;
+    let data = p4k.read_file(&p4k_entry_path)?;
+    Ok(LoadedBank {
+        data,
+        p4k: keep_p4k.then_some(p4k),
+    })
+}
+
+fn resolve_wwise_p4k_path(p4k: &starbreaker_p4k::MappedP4k, input: &str) -> Result<String> {
+    let mut candidates = Vec::new();
+    candidates.push(input.to_string());
+
+    if !input
+        .to_ascii_lowercase()
+        .starts_with("data\\sounds\\wwise\\")
+    {
+        candidates.push(format!("Data\\Sounds\\wwise\\{input}"));
+    }
+
+    for candidate in &candidates {
+        if let Some(entry) = p4k.entry_case_insensitive(candidate) {
+            return Ok(entry.name.clone());
+        }
+    }
+
+    if !input.contains('\\') && !input.contains('/') {
+        let needle = input.to_ascii_lowercase();
+        let mut matches: Vec<_> = p4k
+            .entries()
+            .iter()
+            .filter(|entry| {
+                entry
+                    .name
+                    .to_ascii_lowercase()
+                    .starts_with("data\\sounds\\wwise\\")
+                    && entry
+                        .name
+                        .rsplit('\\')
+                        .next()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(&needle))
+            })
+            .map(|entry| entry.name.clone())
+            .collect();
+        matches.sort();
+        matches.dedup();
+
+        match matches.as_slice() {
+            [single] => return Ok(single.clone()),
+            [] => {}
+            _ => {
+                let shown = matches
+                    .iter()
+                    .take(10)
+                    .map(|p| format!("  {p}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Err(CliError::NotFound(format!(
+                    "ambiguous Wwise bank name '{input}' in P4k; use a full path. Matches:\n{shown}"
+                )));
+            }
+        }
+    }
+
+    Err(CliError::NotFound(format!(
+        "entry not found in P4k: {input}"
+    )))
 }
 
 fn info(input: &str, p4k_path: Option<&Path>) -> Result<()> {
@@ -158,88 +240,227 @@ fn info(input: &str, p4k_path: Option<&Path>) -> Result<()> {
 }
 
 fn list(input: &str, p4k_path: Option<&Path>) -> Result<()> {
-    let data = load_bnk_bytes(input, p4k_path)?;
-    let bnk = BnkFile::parse(&data)?;
+    let bank = load_bank(input, p4k_path, true)?;
+    let bnk = BnkFile::parse(&bank.data)?;
 
-    if bnk.data_index.is_empty() {
-        return Ok(());
-    }
-
-    println!(
-        "{:<12} {:<10} {:<10} {:<12} {}",
-        "WEM ID", "Offset", "Size", "Codec", "Duration"
-    );
-    println!("{}", "-".repeat(60));
+    let mut rows = Vec::new();
+    let mut seen = HashSet::new();
 
     for entry in &bnk.data_index {
-        // Copy packed fields to locals to avoid misaligned reference errors.
         let id = entry.id;
         let offset = entry.offset;
         let size = entry.size;
 
         let wem_data = bnk.wem_data(entry)?;
-        let (codec_str, duration_str) = match WemFile::parse(wem_data) {
-            Ok(wem) => {
-                let dur = wem
-                    .estimated_duration_secs()
-                    .map(|d| format!("{d:.2}s"))
-                    .unwrap_or_else(|| "?".into());
-                (wem.codec_type().to_string(), dur)
-            }
-            Err(_) => ("(parse err)".into(), "?".into()),
-        };
+        let (codec, duration) = wem_summary(wem_data);
 
+        rows.push(MediaRow {
+            id,
+            source: "Embedded".to_string(),
+            offset: Some(offset),
+            size: Some(size),
+            codec,
+            duration,
+        });
+        seen.insert(id);
+    }
+
+    if let Some(ref hirc) = bnk.hirc {
+        let hierarchy = Hierarchy::from_section(hirc);
+        for media in hierarchy.all_media() {
+            if seen.insert(media.media_id) {
+                let external_summary = bank
+                    .p4k
+                    .as_ref()
+                    .and_then(|p4k| external_wem_summary(p4k, media.media_id));
+                let (source, size, codec, duration) = match external_summary {
+                    Some(summary) => (
+                        "MediaFile".to_string(),
+                        Some(summary.size),
+                        summary.codec,
+                        summary.duration,
+                    ),
+                    None => (
+                        source_name(media.source).to_string(),
+                        None,
+                        "?".to_string(),
+                        "?".to_string(),
+                    ),
+                };
+                rows.push(MediaRow {
+                    id: media.media_id,
+                    source,
+                    offset: None,
+                    size,
+                    codec,
+                    duration,
+                });
+            }
+        }
+    }
+
+    rows.sort_by_key(|row| row.id);
+
+    if rows.is_empty() {
+        println!("No embedded or referenced WEM media found.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<12} {:<15} {:<10} {:<10} {:<12} {}",
+        "WEM ID", "Source", "Offset", "Size", "Codec", "Duration"
+    );
+    println!("{}", "-".repeat(76));
+
+    for row in rows {
         println!(
-            "{:<12} {:<10} {:<10} {:<12} {}",
-            id, offset, size, codec_str, duration_str
+            "{:<12} {:<15} {:<10} {:<10} {:<12} {}",
+            row.id,
+            row.source,
+            row.offset
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            row.size
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            row.codec,
+            row.duration
         );
     }
 
     Ok(())
 }
 
-fn extract(input: &str, output: &Path, decode: bool, p4k_path: Option<&Path>) -> Result<()> {
-    let data = load_bnk_bytes(input, p4k_path)?;
-    let bnk = BnkFile::parse(&data)?;
+struct MediaRow {
+    id: u32,
+    source: String,
+    offset: Option<u32>,
+    size: Option<u32>,
+    codec: String,
+    duration: String,
+}
 
-    if bnk.data_index.is_empty() {
-        eprintln!("No embedded WEM entries to extract.");
+struct WemSummary {
+    size: u32,
+    codec: String,
+    duration: String,
+}
+
+fn wem_summary(wem_data: &[u8]) -> (String, String) {
+    match WemFile::parse(wem_data) {
+        Ok(wem) => {
+            let duration = wem
+                .estimated_duration_secs()
+                .map(|d| format!("{d:.2}s"))
+                .unwrap_or_else(|| "?".to_string());
+            (wem.codec_type().to_string(), duration)
+        }
+        Err(_) => ("(parse err)".to_string(), "?".to_string()),
+    }
+}
+
+fn external_wem_summary(p4k: &starbreaker_p4k::MappedP4k, media_id: u32) -> Option<WemSummary> {
+    let data = read_external_wem(p4k, media_id).ok()?;
+    let (codec, duration) = wem_summary(&data);
+    Some(WemSummary {
+        size: u32::try_from(data.len()).ok()?,
+        codec,
+        duration,
+    })
+}
+
+fn external_wem_exists(p4k: &starbreaker_p4k::MappedP4k, media_id: u32) -> bool {
+    let path = format!("Data\\Sounds\\wwise\\Media\\{media_id}.wem");
+    p4k.entry_case_insensitive(&path).is_some()
+}
+
+fn read_external_wem(p4k: &starbreaker_p4k::MappedP4k, media_id: u32) -> Result<Vec<u8>> {
+    let path = format!("Data\\Sounds\\wwise\\Media\\{media_id}.wem");
+    Ok(p4k.read_file(&path)?)
+}
+
+fn source_name(source: SoundSource) -> &'static str {
+    match source {
+        SoundSource::Embedded => "Embedded",
+        SoundSource::PrefetchStream => "PrefetchStream",
+        SoundSource::Stream => "Stream",
+    }
+}
+
+fn extract(input: &str, output: &Path, decode: bool, p4k_path: Option<&Path>) -> Result<()> {
+    let bank = load_bank(input, p4k_path, true)?;
+    let bnk = BnkFile::parse(&bank.data)?;
+
+    let mut entries = Vec::new();
+    let mut seen = HashSet::new();
+
+    for entry in &bnk.data_index {
+        let id = entry.id;
+        if seen.insert(id) {
+            entries.push(ExtractEntry::Embedded { id, entry: *entry });
+        }
+    }
+
+    if let (Some(hirc), Some(p4k)) = (&bnk.hirc, bank.p4k.as_ref()) {
+        let hierarchy = Hierarchy::from_section(hirc);
+        for media in hierarchy.all_media() {
+            if seen.insert(media.media_id) && external_wem_exists(p4k, media.media_id) {
+                entries.push(ExtractEntry::MediaFile { id: media.media_id });
+            }
+        }
+    }
+
+    if entries.is_empty() {
+        eprintln!("No embedded or external WEM media found to extract.");
         return Ok(());
     }
 
     fs::create_dir_all(output)?;
 
-    let pb = ProgressBar::new(bnk.data_index.len() as u64);
+    let pb = ProgressBar::new(entries.len() as u64);
     pb.set_style(
-        ProgressStyle::default_bar()
-            .template("[{bar:40}] {pos}/{len} ({elapsed}, ETA {eta})")?,
+        ProgressStyle::default_bar().template("[{bar:40}] {pos}/{len} ({elapsed}, ETA {eta})")?,
     );
 
-    for entry in &bnk.data_index {
-        // Copy packed field to local to avoid misaligned reference errors.
-        let id = entry.id;
-        let wem_bytes = bnk.wem_data(entry)?;
+    for entry in &entries {
+        let (id, wem_bytes) = match entry {
+            ExtractEntry::Embedded { id, entry } => (*id, bnk.wem_data(entry)?.to_vec()),
+            ExtractEntry::MediaFile { id } => {
+                let p4k = bank.p4k.as_ref().ok_or_else(|| {
+                    CliError::MissingRequirement(
+                        "P4k is required to extract external WEM media".into(),
+                    )
+                })?;
+                (*id, read_external_wem(p4k, *id)?)
+            }
+        };
 
         if decode {
-            match decode_and_write(id, wem_bytes, output) {
+            match decode_and_write(id, &wem_bytes, output) {
                 Ok(()) => {}
                 Err(e) => eprintln!("Error decoding WEM {id}: {e}"),
             }
         } else {
             let path = output.join(format!("{id}.wem"));
-            fs::write(&path, wem_bytes)?;
+            fs::write(&path, &wem_bytes)?;
         }
 
         pb.inc(1);
     }
 
     pb.finish_and_clear();
-    eprintln!(
-        "Extracted {} files to {}",
-        bnk.data_index.len(),
-        output.display()
-    );
+    eprintln!("Extracted {} files to {}", entries.len(), output.display());
     Ok(())
+}
+
+enum ExtractEntry {
+    Embedded {
+        id: u32,
+        entry: starbreaker_wwise::DataIndexEntry,
+    },
+    MediaFile {
+        id: u32,
+    },
 }
 
 fn decode_and_write(id: u32, wem_bytes: &[u8], output: &Path) -> Result<()> {
@@ -253,9 +474,7 @@ fn decode_and_write(id: u32, wem_bytes: &[u8], output: &Path) -> Result<()> {
         }
         other => {
             // Unsupported codec — fall back to raw WEM
-            eprintln!(
-                "  WEM {id}: codec {other} not yet supported for decode, writing raw .wem"
-            );
+            eprintln!("  WEM {id}: codec {other} not yet supported for decode, writing raw .wem");
             let path = output.join(format!("{id}.wem"));
             fs::write(&path, wem_bytes)?;
         }
@@ -412,8 +631,7 @@ fn search_by_entity(p4k: &starbreaker_p4k::MappedP4k, entity_query: &str) -> Res
 
     // Find entities with audio triggers
     eprintln!("Searching for entities matching '{entity_query}'...");
-    let entities =
-        starbreaker_wwise::datacore_audio::search_entities_with_audio(&db, entity_query);
+    let entities = starbreaker_wwise::datacore_audio::search_entities_with_audio(&db, entity_query);
 
     if entities.is_empty() {
         return Err(CliError::NotFound(format!("no entities with audio triggers matching '{entity_query}'")));
@@ -443,28 +661,28 @@ fn search_by_entity(p4k: &starbreaker_p4k::MappedP4k, entity_query: &str) -> Res
                 Some(trigger) => {
                     banks_used.insert(trigger.bank_name.clone());
 
-                    let hierarchy = bank_cache
-                        .entry(trigger.bank_name.clone())
-                        .or_insert_with(|| {
-                            let path =
-                                format!("Data\\Sounds\\wwise\\{}", trigger.bank_name);
-                            let data = match p4k.read_file(&path) {
-                                Ok(d) => d,
-                                Err(e) => {
-                                    log::debug!("failed to read {path}: {e}");
-                                    return None;
-                                }
-                            };
-                            let bnk = match BnkFile::parse(&data) {
-                                Ok(b) => b,
-                                Err(e) => {
-                                    log::debug!("failed to parse {path}: {e}");
-                                    return None;
-                                }
-                            };
-                            let hirc = bnk.hirc.as_ref()?;
-                            Some(Hierarchy::from_section(hirc))
-                        });
+                    let hierarchy =
+                        bank_cache
+                            .entry(trigger.bank_name.clone())
+                            .or_insert_with(|| {
+                                let path = format!("Data\\Sounds\\wwise\\{}", trigger.bank_name);
+                                let data = match p4k.read_file(&path) {
+                                    Ok(d) => d,
+                                    Err(e) => {
+                                        log::debug!("failed to read {path}: {e}");
+                                        return None;
+                                    }
+                                };
+                                let bnk = match BnkFile::parse(&data) {
+                                    Ok(b) => b,
+                                    Err(e) => {
+                                        log::debug!("failed to parse {path}: {e}");
+                                        return None;
+                                    }
+                                };
+                                let hirc = bnk.hirc.as_ref()?;
+                                Some(Hierarchy::from_section(hirc))
+                            });
 
                     let count = hierarchy
                         .as_ref()
