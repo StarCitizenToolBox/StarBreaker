@@ -741,6 +741,8 @@ class OrchestrationMixin:
                         "temperature": s.temperature,
                         "use_temperature": s.use_temperature,
                         "color": list(s.color),
+                        "light_style": int(getattr(s, "light_style", 0) or 0),
+                        "preset_tag": getattr(s, "preset_tag", None),
                     }
                     for name, s in states.items()
                 }

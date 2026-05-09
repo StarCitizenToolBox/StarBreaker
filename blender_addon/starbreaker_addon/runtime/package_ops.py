@@ -699,7 +699,18 @@ def available_light_state_names() -> list[str]:
     return ordered
 
 
-def _apply_state_to_light(light: bpy.types.Light, state_name: str) -> bool:
+def _is_strobe_state_payload(state: dict[str, Any]) -> bool:
+    light_style = int(state.get("light_style") or 0)
+    preset_tag = str(state.get("preset_tag") or "").strip().lower()
+    return light_style in {4, 28} or preset_tag == "fast"
+
+
+def _apply_state_to_light(
+    light: bpy.types.Light,
+    state_name: str,
+    *,
+    include_strobe: bool = True,
+) -> bool:
     """Apply the ``state_name`` snapshot to ``light`` in-place. Returns True
     if the light had the named state and was updated, False otherwise."""
     import json as _json
@@ -717,6 +728,11 @@ def _apply_state_to_light(light: bpy.types.Light, state_name: str) -> bool:
     state = payload.get(state_name)
     if not isinstance(state, dict):
         return False
+
+    if state_name == "emergencyState" and not include_strobe and _is_strobe_state_payload(state):
+        light.energy = 0.0
+        light[PROP_LIGHT_ACTIVE_STATE] = state_name
+        return True
 
     intensity_candela_proxy = state.get("intensity_candela_proxy")
     if intensity_candela_proxy is None:
@@ -751,13 +767,13 @@ def _apply_state_to_light(light: bpy.types.Light, state_name: str) -> bool:
     return True
 
 
-def apply_light_state(state_name: str) -> int:
+def apply_light_state(state_name: str, *, include_strobe: bool = True) -> int:
     """Switch every StarBreaker light in the current .blend to the named
     state. Lights that lack the requested state keep their current values.
     Returns the number of lights that were updated."""
     updated = 0
     for light in _iter_starbreaker_lights():
-        if _apply_state_to_light(light, state_name):
+        if _apply_state_to_light(light, state_name, include_strobe=include_strobe):
             updated += 1
     return updated
 

@@ -4230,6 +4230,8 @@ pub fn extract_lights_from_interiors(
                             "temperature": state.temperature,
                             "use_temperature": state.use_temperature,
                             "color": state.color,
+                            "light_style": state.light_style,
+                            "preset_tag": state.preset_tag,
                         }),
                     );
                 }

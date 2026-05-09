@@ -591,6 +591,10 @@ pub struct LightStateInfo {
     /// Authored linear RGB triple (0..1) from the `<color>` child. When
     /// `use_temperature` is true this is usually `[1,1,1]`.
     pub color: [f32; 3],
+    /// CryEngine authored light style id (e.g. strobe patterns).
+    pub light_style: i32,
+    /// Optional authored preset tag (e.g. ``fast`` / ``slow``).
+    pub preset_tag: String,
 }
 
 /// A geometry placement from a .soc interior container.

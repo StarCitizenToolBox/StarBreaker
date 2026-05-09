@@ -438,6 +438,8 @@ class LightState:
     temperature: float
     use_temperature: bool
     color: Color3
+    light_style: int
+    preset_tag: str | None
 
     @classmethod
     def from_value(cls, value: Any) -> LightState:
@@ -450,6 +452,8 @@ class LightState:
             temperature=_as_float(data.get("temperature")),
             use_temperature=bool(data.get("use_temperature", False)),
             color=_float_tuple(data.get("color"), 3),  # type: ignore[arg-type]
+            light_style=int(data.get("light_style", 0) or 0),
+            preset_tag=_as_str(data.get("preset_tag")),
         )
 
 

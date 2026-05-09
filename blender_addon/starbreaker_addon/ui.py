@@ -956,13 +956,14 @@ class STARBREAKER_OT_switch_light_state(Operator):
     )
 
     state_name: StringProperty(name="State")  # type: ignore[assignment]
+    include_strobe: BoolProperty(name="Include Strobe", default=True)  # type: ignore[assignment]
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         name = (self.state_name or "").strip()
         if not name:
             self.report({"ERROR"}, "No state name provided")
             return {"CANCELLED"}
-        count = apply_light_state(name)
+        count = apply_light_state(name, include_strobe=bool(self.include_strobe))
         self.report({"INFO"}, f"Applied '{name}' to {count} light(s)")
         return {"FINISHED"}
 
@@ -1324,11 +1325,26 @@ class STARBREAKER_PT_tools(Panel):
                 "offState": "Off",
             }
             for name in state_names:
-                op = row.operator(
-                    STARBREAKER_OT_switch_light_state.bl_idname,
-                    text=_SHORT.get(name, name),
-                )
-                op.state_name = name
+                if name == "emergencyState":
+                    op = row.operator(
+                        STARBREAKER_OT_switch_light_state.bl_idname,
+                        text="Emergency",
+                    )
+                    op.state_name = name
+                    op.include_strobe = False
+                    op_strobe = row.operator(
+                        STARBREAKER_OT_switch_light_state.bl_idname,
+                        text="Emergency + Strobe",
+                    )
+                    op_strobe.state_name = name
+                    op_strobe.include_strobe = True
+                else:
+                    op = row.operator(
+                        STARBREAKER_OT_switch_light_state.bl_idname,
+                        text=_SHORT.get(name, name),
+                    )
+                    op.state_name = name
+                    op.include_strobe = True
 
         if package is not None:
             animation_items = available_package_animation_items(package)

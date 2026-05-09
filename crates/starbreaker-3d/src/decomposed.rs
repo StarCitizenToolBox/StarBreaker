@@ -1143,6 +1143,8 @@ pub(crate) fn write_decomposed_export(
                                         "temperature": s.temperature,
                                         "use_temperature": s.use_temperature,
                                         "color": s.color,
+                                        "light_style": s.light_style,
+                                        "preset_tag": s.preset_tag,
                                     }),
                                 )
                             })

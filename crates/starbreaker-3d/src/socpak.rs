@@ -788,6 +788,11 @@ fn build_light_info_from_component(
             .get("temperature")
             .and_then(|s| s.parse::<f32>().ok())
             .unwrap_or(6500.0);
+        let light_style = a
+            .get("lightStyle")
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(0);
+        let preset_tag = a.get("presetTag").copied().unwrap_or("").to_string();
         let (cr, cg, cb) = xml
             .node_children(node)
             .find(|c| xml.node_tag(c) == "color")
@@ -821,6 +826,8 @@ fn build_light_info_from_component(
             temperature,
             use_temperature,
             color: [cr, cg, cb],
+            light_style,
+            preset_tag,
         })
     };
 
