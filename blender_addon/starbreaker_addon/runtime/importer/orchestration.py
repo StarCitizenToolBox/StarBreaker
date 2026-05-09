@@ -735,7 +735,9 @@ class OrchestrationMixin:
             light_data[PROP_LIGHT_STATES_JSON] = _json.dumps(
                 {
                     name: {
+                        "intensity_raw": s.intensity_raw,
                         "intensity_cd": s.intensity_cd,
+                        "intensity_candela_proxy": s.intensity_candela_proxy,
                         "temperature": s.temperature,
                         "use_temperature": s.use_temperature,
                         "color": list(s.color),

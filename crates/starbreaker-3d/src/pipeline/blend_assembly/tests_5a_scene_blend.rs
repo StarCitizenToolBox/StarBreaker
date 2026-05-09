@@ -1531,6 +1531,7 @@ fn test_create_scene_blend_parents_lights_to_entity_wrapper_with_properties() {
         gobo_path: None,
         active_state: "default".to_string(),
             states_json: None,
+            semantic_light_kind: "point".to_string(),
     };
     let blend_bytes = create_scene_blend("LightEntity", 0, "Data/Objects", &[light]).unwrap();
     let blocks = parse_blend_blocks(&blend_bytes);
@@ -1755,6 +1756,7 @@ fn test_create_scene_blend_objects_do_not_parent_to_collections() {
         gobo_path: None,
         active_state: "default".to_string(),
             states_json: None,
+            semantic_light_kind: "point".to_string(),
     };
     let blend_bytes = create_scene_blend("ParentCheck", 2, "Data/Objects", &[light]).unwrap();
     let blocks = parse_blend_blocks(&blend_bytes);

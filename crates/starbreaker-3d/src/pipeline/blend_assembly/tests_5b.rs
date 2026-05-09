@@ -26,6 +26,7 @@ fn test_create_scene_blend_with_single_light() {
         gobo_path: None,
         active_state: "default".to_string(),
             states_json: None,
+            semantic_light_kind: "point".to_string(),
     };
     let result = create_scene_blend("TestWithLight", 1, "Data/Objects", &[light]);
     assert!(result.is_ok(), "Should create scene with light");
@@ -56,6 +57,7 @@ fn test_create_scene_blend_with_multiple_lights() {
             gobo_path: None,
             active_state: "default".to_string(),
             states_json: None,
+            semantic_light_kind: "point".to_string(),
         },
         ExtractedLight {
             name: "Sun".to_string(),
@@ -79,6 +81,7 @@ fn test_create_scene_blend_with_multiple_lights() {
             gobo_path: None,
             active_state: "default".to_string(),
             states_json: None,
+            semantic_light_kind: "point".to_string(),
         },
     ];
     let result = create_scene_blend("MultiLight", 1, "Data/Objects", &lights);
@@ -109,6 +112,7 @@ fn test_create_scene_blend_lights_in_file() {
         gobo_path: None,
         active_state: "default".to_string(),
             states_json: None,
+            semantic_light_kind: "point".to_string(),
     };
     let result = create_scene_blend("FileTest", 1, "Data/Objects", &[light]);
     assert!(result.is_ok());

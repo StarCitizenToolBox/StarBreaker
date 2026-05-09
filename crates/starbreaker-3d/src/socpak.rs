@@ -16,7 +16,7 @@ use crate::error::Error;
 use crate::types::{InteriorMesh, InteriorPayload, LightInfo, LightStateInfo};
 
 const LIGHT_AUTHORED_INTENSITY_SCALE: f32 = 1500.0;
-const AMBIENT_PROXY_DIRECT_FACTOR: f32 = 0.5;
+const AMBIENT_PROXY_DIRECT_FACTOR: f32 = 0.25;
 
 // ── DataCore query ──────────────────────────────────────────────────────────
 
@@ -1139,6 +1139,6 @@ mod tests {
     fn ambient_proxy_intensity_applies_glow_and_proxy_factor() {
         let candela =
             super::authored_light_intensity_to_candela_semantic(10.0, "ambient_proxy", 0.2);
-        assert_eq!(candela, 1500.0);
+        assert_eq!(candela, 750.0);
     }
 }

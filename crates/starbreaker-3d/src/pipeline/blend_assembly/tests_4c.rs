@@ -37,6 +37,7 @@ fn test_validate_lights_extraction_single_ambient() {
             gobo_path: None,
             active_state: "defaultState".to_string(),
             states_json: None,
+            semantic_light_kind: "point".to_string(),
         },
     ];
     
@@ -71,6 +72,7 @@ fn test_validate_lights_extraction_categorization() {
             gobo_path: None,
             active_state: "defaultState".to_string(),
             states_json: None,
+            semantic_light_kind: "point".to_string(),
         },
         ExtractedLight {
             name: "Projector".to_string(),
@@ -94,6 +96,7 @@ fn test_validate_lights_extraction_categorization() {
             gobo_path: None,
             active_state: "defaultState".to_string(),
             states_json: None,
+            semantic_light_kind: "point".to_string(),
         },
     ];
     
@@ -179,6 +182,7 @@ fn test_validate_complete_phase_3_4_export_full() {
             gobo_path: None,
             active_state: "defaultState".to_string(),
             states_json: None,
+            semantic_light_kind: "point".to_string(),
         },
     ];
     
@@ -242,6 +246,7 @@ fn test_extracted_light_has_use_temperature_field() {
         gobo_path: None,
         active_state: "defaultState".to_string(),
             states_json: None,
+            semantic_light_kind: "point".to_string(),
     };
     
     assert_eq!(light.temperature_k, 6500.0);
@@ -273,6 +278,7 @@ fn test_extracted_light_temperature_false() {
         gobo_path: None,
         active_state: "defaultState".to_string(),
             states_json: None,
+            semantic_light_kind: "point".to_string(),
     };
     
     assert_eq!(light.temperature_k, 3000.0);
@@ -314,6 +320,7 @@ fn test_temperature_values_range() {
             gobo_path: None,
             active_state: "defaultState".to_string(),
             states_json: None,
+            semantic_light_kind: "point".to_string(),
         };
         
         assert_eq!(light.temperature_k, temp, "Failed for {}: {}", temp, desc);

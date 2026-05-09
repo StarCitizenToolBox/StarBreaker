@@ -527,6 +527,7 @@ fn light_object_properties(
 fn light_data_properties(
     active_state: &str,
     states_json: Option<&str>,
+    semantic_light_kind: &str,
 ) -> Vec<(String, IdPropValue)> {
     let mut props = Vec::new();
     if let Some(states_json) = states_json.filter(|value| !value.is_empty()) {
@@ -539,6 +540,12 @@ fn light_data_properties(
         props.push((
             "starbreaker_light_active_state".to_string(),
             IdPropValue::String(active_state.to_string()),
+        ));
+    }
+    if !semantic_light_kind.is_empty() {
+        props.push((
+            "starbreaker_light_semantic_kind".to_string(),
+            IdPropValue::String(semantic_light_kind.to_string()),
         ));
     }
     props
@@ -3737,7 +3744,11 @@ fn create_scene_blend_package_with_instances(
 
         let light_data_props = allocate_idprop_blocks(
             &mut ptrs,
-            light_data_properties(&light.active_state, light.states_json.as_deref()),
+            light_data_properties(
+                &light.active_state,
+                light.states_json.as_deref(),
+                &light.semantic_light_kind,
+            ),
         );
         let light_data_props_ptr = light_data_props.as_ref().map(|props| props.root_ptr).unwrap_or(0);
 
@@ -3992,6 +4003,8 @@ pub struct ExtractedLight {
     pub active_state: String,
     /// Authored light states serialized for the Blender addon's state switcher.
     pub states_json: Option<String>,
+    /// Semantic mapping hint used by addon state switcher.
+    pub semantic_light_kind: String,
 }
 
 /// Convert CryEngine position to Blender coordinates.
@@ -4251,6 +4264,7 @@ pub fn extract_lights_from_interiors(
                 gobo_path: light_info.projector_texture.clone(),
                 active_state: light_info.active_state.clone(),
                 states_json,
+                semantic_light_kind: light_info.semantic_light_kind.clone(),
             });
         }
     }

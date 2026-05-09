@@ -70,6 +70,7 @@ fn test_organize_lights_creates_type_collections() {
             gobo_path: None,
             active_state: "defaultState".to_string(),
             states_json: None,
+            semantic_light_kind: "point".to_string(),
         },
         ExtractedLight {
             name: "Projector1".to_string(),
@@ -93,6 +94,7 @@ fn test_organize_lights_creates_type_collections() {
             gobo_path: Some("path/to/gobo.dds".to_string()),
             active_state: "defaultState".to_string(),
             states_json: None,
+            semantic_light_kind: "point".to_string(),
         },
     ];
 
