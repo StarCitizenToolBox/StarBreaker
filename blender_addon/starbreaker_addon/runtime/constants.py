@@ -48,6 +48,7 @@ PROP_HAS_POM = "starbreaker_has_pom"
 # same datablock so we can restore values when the user toggles states.
 PROP_LIGHT_STATES_JSON = "starbreaker_light_states"
 PROP_LIGHT_ACTIVE_STATE = "starbreaker_light_active_state"
+PROP_LIGHT_SEMANTIC_KIND = "starbreaker_light_semantic_kind"
 SCENE_POM_DETAIL_PROP = "starbreaker_pom_detail"
 SCENE_WEAR_STRENGTH_PROP = "starbreaker_wear_strength"
 SURFACE_SHADER_MODE_PRINCIPLED = "principled_first"

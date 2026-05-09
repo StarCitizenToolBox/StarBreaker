@@ -4023,7 +4023,7 @@ fn lamp_type_for_light(light_type: &str, semantic_light_kind: &str) -> i16 {
 
 fn light_energy_to_blender(
     lamp_type: i16,
-    _semantic_light_kind: &str,
+    semantic_light_kind: &str,
     intensity_candela_proxy: f32,
     intensity_raw: f32,
 ) -> f32 {
@@ -4034,8 +4034,18 @@ fn light_energy_to_blender(
     match lamp_type {
         1 => intensity_candela_proxy / 683.0,
         4 => intensity_raw / LUMENS_PER_WATT_WHITE,
-        _ => intensity_candela_proxy * LIGHT_CANDELA_TO_WATT * LIGHT_VISUAL_GAIN,
+        _ => {
+            if semantic_light_kind.eq_ignore_ascii_case("ambient_proxy") {
+                intensity_candela_proxy * LIGHT_CANDELA_TO_WATT
+            } else {
+                intensity_candela_proxy * LIGHT_CANDELA_TO_WATT * LIGHT_VISUAL_GAIN
+            }
+        }
     }
+}
+
+fn soft_shadow_radius_from_source(light_radius: f32) -> f32 {
+    (light_radius * 0.05).clamp(0.01, 0.5)
 }
 
 fn gobo_image_blend_filepath(gobo_path: &str) -> String {
@@ -4214,7 +4224,7 @@ pub fn extract_lights_from_interiors(
             };
             
             let blender_radius = if matches!(lamp_type, 0 | 2) {
-                0.02
+                soft_shadow_radius_from_source(light_info.radius)
             } else {
                 light_info.radius
             };

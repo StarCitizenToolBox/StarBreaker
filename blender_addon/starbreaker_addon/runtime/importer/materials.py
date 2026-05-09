@@ -906,8 +906,22 @@ class MaterialsMixin:
         if glow_value > 0.0:
             return glow_value
 
+        # MeshDecal frequently carries Emissive=1,1,1 as a neutral authoring
+        # baseline even when the decal is not a light-emitting surface (for
+        # example host-primary POM decals). Gate emission on explicit channels.
+        if self._texture_export_path(submaterial, "emissive"):
+            return 1.0
+
         emissive = self._authored_emissive_triplet(submaterial)
-        if emissive is not None and _mean_triplet(emissive) > 0.0:
+        emissive_mean = _mean_triplet(emissive) if emissive is not None else 0.0
+        if emissive_mean <= 0.0:
+            return 0.0
+
+        if submaterial.decoded_feature_flags.has_parallax_occlusion_mapping:
+            return 0.0
+
+        base_color = (self._texture_export_path(submaterial, "base_color") or "").replace("\\", "/").lower()
+        if "/glows/" in base_color or "_glow" in base_color:
             return 1.0
         return 0.0
 

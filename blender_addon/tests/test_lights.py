@@ -168,6 +168,13 @@ class LightMappingTests(unittest.TestCase):
             places=6,
         )
 
+    def test_energy_ambient_proxy_skips_visual_gain(self):
+        self.assertAlmostEqual(
+            self.utils._light_energy_to_blender(400.0, "POINT", semantic_light_kind="ambient_proxy"),
+            400.0 * self.constants.LIGHT_CANDELA_TO_WATT,
+            places=6,
+        )
+
     def test_energy_sun_uses_photopic_peak(self):
         self.assertAlmostEqual(
             self.utils._light_energy_to_blender(683.0, "SUN"),

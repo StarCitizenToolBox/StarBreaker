@@ -688,6 +688,7 @@ class OrchestrationMixin:
             getattr(active_state, "intensity_candela_proxy", None) if active_state is not None else None
         )
         light_intensity_candela_proxy = getattr(light, "intensity_candela_proxy", None)
+        semantic_light_kind = str(getattr(light, "semantic_light_kind", "") or "").strip().lower()
         light_data = bpy.data.lights.new(name=light.name or "StarBreaker Light", type=blender_light_type)
         light_data.energy = _light_energy_to_blender(
             active_intensity_candela_proxy
@@ -697,8 +698,10 @@ class OrchestrationMixin:
             else 0.0,
             blender_light_type,
             intensity_raw=active_intensity_raw,
+            semantic_light_kind=semantic_light_kind,
         )
         light_data.color = light.color
+        light_data["starbreaker_light_semantic_kind"] = semantic_light_kind
         if blender_light_type != "SUN" and hasattr(light_data, "cutoff_distance"):
             light_data.cutoff_distance = light.radius
         if blender_light_type == "AREA":
@@ -715,10 +718,11 @@ class OrchestrationMixin:
             inner_ratio = min(max(inner_angle / outer_angle, 0.0), 1.0)
             light_data.spot_blend = 1.0 - inner_ratio
         # Phase 25: give point/spot lights a non-zero shadow soft size so
-        # shadow edges aren't pin-sharp. Star Citizen doesn't publish a
-        # dedicated emitter radius, so fall back to a small floor.
+        # shadow edges aren't pin-sharp. Map from authored attenuation
+        # radius to avoid a fixed constant across all fixtures.
         if blender_light_type in {"POINT", "SPOT"} and hasattr(light_data, "shadow_soft_size"):
-            light_data.shadow_soft_size = max(float(getattr(light_data, "shadow_soft_size", 0.0) or 0.0), 0.02)
+            light_data.shadow_soft_size = (max(float(light.radius or 0.0), 0.0) * 0.05)
+            light_data.shadow_soft_size = min(max(light_data.shadow_soft_size, 0.01), 0.5)
 
         self._wire_light_gobo(light_data, light)
 

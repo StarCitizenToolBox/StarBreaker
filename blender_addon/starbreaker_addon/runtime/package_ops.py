@@ -25,6 +25,7 @@ from ..palette import palette_id_for_livery_instance, resolved_palette_id
 from .constants import (
     PROP_INSTANCE_JSON,
     PROP_LIGHT_ACTIVE_STATE,
+    PROP_LIGHT_SEMANTIC_KIND,
     PROP_LIGHT_STATES_JSON,
     PROP_MATERIAL_IDENTITY,
     PROP_MATERIAL_SIDECAR,
@@ -731,6 +732,7 @@ def _apply_state_to_light(light: bpy.types.Light, state_name: str) -> bool:
         float(intensity_candela_proxy) if intensity_candela_proxy is not None else 0.0,
         light.type,
         intensity_raw=float(intensity_raw) if intensity_raw is not None else None,
+        semantic_light_kind=_string_prop(light, PROP_LIGHT_SEMANTIC_KIND),
     )
 
     if use_temperature:

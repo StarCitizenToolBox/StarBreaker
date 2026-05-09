@@ -327,6 +327,7 @@ def _light_energy_to_blender(
     blender_light_type: str,
     *,
     intensity_raw: float | None = None,
+    semantic_light_kind: str | None = None,
 ) -> float:
     """Convert a Star Citizen light intensity to Blender light energy.
 
@@ -340,11 +341,14 @@ def _light_energy_to_blender(
     See ``docs/StarBreaker/lights-research.md``.
     """
     intensity_candela_proxy = max(float(intensity_candela_proxy), 0.0)
+    semantic = str(semantic_light_kind or "").strip().lower()
     if blender_light_type == "SUN":
         return intensity_candela_proxy / GLTF_PBR_WATTS_TO_LUMENS
     if blender_light_type == "AREA":
         lumens = float(intensity_raw) if intensity_raw is not None else intensity_candela_proxy / SC_LIGHT_CANDELA_SCALE
         return max(lumens, 0.0) / LUMENS_PER_WATT_WHITE
+    if semantic == "ambient_proxy":
+        return intensity_candela_proxy * LIGHT_CANDELA_TO_WATT
     return intensity_candela_proxy * LIGHT_CANDELA_TO_WATT * LIGHT_VISUAL_GAIN
 
 

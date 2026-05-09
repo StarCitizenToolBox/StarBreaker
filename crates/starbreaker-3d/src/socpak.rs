@@ -16,6 +16,7 @@ use crate::error::Error;
 use crate::types::{InteriorMesh, InteriorPayload, LightInfo, LightStateInfo};
 
 const LIGHT_AUTHORED_INTENSITY_SCALE: f32 = 1500.0;
+const AMBIENT_PROXY_DIRECT_FACTOR: f32 = 0.5;
 
 // ── DataCore query ──────────────────────────────────────────────────────────
 
@@ -72,6 +73,18 @@ fn parse_container_ref(val: &Value) -> Option<ObjectContainerRef> {
 
 fn authored_light_intensity_to_candela(intensity_raw: f32) -> f32 {
     intensity_raw * LIGHT_AUTHORED_INTENSITY_SCALE
+}
+
+fn authored_light_intensity_to_candela_semantic(
+    intensity_raw: f32,
+    semantic_light_kind: &str,
+    glow_multiplier: f32,
+) -> f32 {
+    let base = authored_light_intensity_to_candela(intensity_raw);
+    if semantic_light_kind.eq_ignore_ascii_case("ambient_proxy") {
+        return base * glow_multiplier.max(0.0) * AMBIENT_PROXY_DIRECT_FACTOR;
+    }
+    base
 }
 
 fn extract_offset(offset_val: Option<&&Value>) -> ([f32; 3], [f32; 3]) {
@@ -541,32 +554,9 @@ fn parse_light_entities(
         }
     }
 
-    // Fallback: basic light with entity-level Radius
-    let radius = attrs
-        .get("Radius")
-        .and_then(|s| s.parse::<f32>().ok())
-        .unwrap_or(5.0);
-    vec![LightInfo {
-        name: base_name,
-        position: base_pos,
-        transform_basis: "cryengine_z_up".to_string(),
-        rotation: base_rot,
-        direction_sc: [1.0, 0.0, 0.0],
-        color: [1.0, 0.95, 0.9],
-        light_type: "Omni".to_string(),
-        semantic_light_kind: "point".to_string(),
-        intensity_raw: 1.0,
-        intensity_unit: "cryengine_authored_intensity".to_string(),
-        intensity_candela_proxy: authored_light_intensity_to_candela(1.0),
-        intensity: authored_light_intensity_to_candela(1.0),
-        radius,
-        radius_m: radius,
-        inner_angle: None,
-        outer_angle: None,
-        projector_texture: None,
-        active_state: String::new(),
-        states: std::collections::BTreeMap::new(),
-    }]
+    // No light component/group payload means this entity is not an authored
+    // runtime light source for export.
+    Vec::new()
 }
 
 fn has_light_group_component(xml: &CryXml, entity: &starbreaker_cryxml::CryXmlNode) -> bool {
@@ -749,6 +739,7 @@ fn build_light_info_from_component(
         .copied()
         .unwrap_or("Omni")
         .to_string();
+    let semantic_light_kind = semantic_light_kind_for_light(&light_type, None, None);
 
     // CryEngine light components expose several runtime states
     // (`offState` / `defaultState` / `auxiliaryState` / `emergencyState` /
@@ -770,6 +761,16 @@ fn build_light_info_from_component(
         "emergencyState",
         "cinematicState",
     ];
+
+    let glow_multiplier = xml
+        .node_children(component)
+        .find(|c| xml.node_tag(c) == "miscParams")
+        .and_then(|misc| {
+            xml.node_attributes(misc)
+                .find(|(k, _)| *k == "glowMultiplier")
+                .and_then(|(_, v)| v.parse::<f32>().ok())
+        })
+        .unwrap_or(1.0);
 
     let read_state = |tag: &str| -> Option<LightStateInfo> {
         let node = xml
@@ -807,8 +808,16 @@ fn build_light_info_from_component(
         Some(LightStateInfo {
             intensity_raw,
             intensity_unit: "cryengine_authored_intensity".to_string(),
-            intensity_cd: authored_light_intensity_to_candela(intensity_raw),
-            intensity_candela_proxy: authored_light_intensity_to_candela(intensity_raw),
+            intensity_cd: authored_light_intensity_to_candela_semantic(
+                intensity_raw,
+                semantic_light_kind,
+                glow_multiplier,
+            ),
+            intensity_candela_proxy: authored_light_intensity_to_candela_semantic(
+                intensity_raw,
+                semantic_light_kind,
+                glow_multiplier,
+            ),
             temperature,
             use_temperature,
             color: [cr, cg, cb],
@@ -890,8 +899,12 @@ fn build_light_info_from_component(
     };
 
     // CryEngine authored intensity → exported candela proxy.
-    let candela = authored_light_intensity_to_candela(intensity_raw);
     let semantic_light_kind = semantic_light_kind_for_light(&light_type, inner_angle, outer_angle);
+    let candela = authored_light_intensity_to_candela_semantic(
+        intensity_raw,
+        semantic_light_kind,
+        glow_multiplier,
+    );
     let direction_sc = quat_rotate_vec(rot, &[1.0, 0.0, 0.0]);
 
     log::debug!(
@@ -1120,5 +1133,12 @@ mod tests {
     fn authored_light_intensity_matches_max_script_scale() {
         assert_eq!(super::authored_light_intensity_to_candela(1.0), 1500.0);
         assert_eq!(super::authored_light_intensity_to_candela(2.5), 3750.0);
+    }
+
+    #[test]
+    fn ambient_proxy_intensity_applies_glow_and_proxy_factor() {
+        let candela =
+            super::authored_light_intensity_to_candela_semantic(10.0, "ambient_proxy", 0.2);
+        assert_eq!(candela, 1500.0);
     }
 }
