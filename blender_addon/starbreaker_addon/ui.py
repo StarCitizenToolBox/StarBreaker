@@ -880,10 +880,15 @@ class STARBREAKER_OT_apply_paint(Operator):
             current_palette_id = package_root.get(PROP_PALETTE_ID, "") if package_root is not None else ""
             item_ids = _paint_items(self, context)
             valid_ids = {item_id for item_id, _, _ in item_ids if item_id}
+            selected_paint_id = ""
             if isinstance(current_palette_id, str) and current_palette_id in valid_ids:
-                self.paint_id = current_palette_id
+                selected_paint_id = current_palette_id
             else:
-                self.paint_id = _first_valid_item_id(item_ids)
+                selected_paint_id = _first_valid_item_id(item_ids)
+            if not selected_paint_id:
+                self.report({"ERROR"}, "No paint options are available for this package")
+                return {"CANCELLED"}
+            self.paint_id = selected_paint_id
         return context.window_manager.invoke_props_dialog(self)
 
 
@@ -1316,7 +1321,6 @@ class STARBREAKER_PT_tools(Panel):
         if state_names:
             light_box = layout.box()
             light_box.label(text="Light States")
-            row = light_box.row(align=True)
             _SHORT = {
                 "defaultState": "Default",
                 "auxiliaryState": "Auxiliary",
@@ -1324,27 +1328,33 @@ class STARBREAKER_PT_tools(Panel):
                 "cinematicState": "Cinematic",
                 "offState": "Off",
             }
+            _ICONS = {
+                "defaultState": "CHECKMARK",
+                "auxiliaryState": "LIGHT",
+                "emergencyState": "ERROR",
+                "cinematicState": "RESTRICT_RENDER_OFF",
+                "offState": "HIDE_ON",
+                "emergencyState_strobe": "LIGHT_SUN",
+            }
+            button_specs: list[tuple[str, str, bool, str]] = []
             for name in state_names:
                 if name == "emergencyState":
-                    op = row.operator(
-                        STARBREAKER_OT_switch_light_state.bl_idname,
-                        text="Emergency",
-                    )
-                    op.state_name = name
-                    op.include_strobe = False
-                    op_strobe = row.operator(
-                        STARBREAKER_OT_switch_light_state.bl_idname,
-                        text="Emergency + Strobe",
-                    )
-                    op_strobe.state_name = name
-                    op_strobe.include_strobe = True
+                    button_specs.append(("Emergency", name, False, _ICONS["emergencyState"]))
+                    button_specs.append(("Emergency + Strobe", name, True, _ICONS["emergencyState_strobe"]))
                 else:
-                    op = row.operator(
-                        STARBREAKER_OT_switch_light_state.bl_idname,
-                        text=_SHORT.get(name, name),
-                    )
-                    op.state_name = name
-                    op.include_strobe = True
+                    button_specs.append((_SHORT.get(name, name), name, True, _ICONS.get(name, "NONE")))
+
+            split = (len(button_specs) + 1) // 2
+            top_row = light_box.row(align=True)
+            bottom_row = light_box.row(align=True)
+            for index, (label, state_name, include_strobe, icon_name) in enumerate(button_specs):
+                row = top_row if index < split else bottom_row
+                kwargs = {"text": label}
+                if icon_name != "NONE":
+                    kwargs["icon"] = icon_name
+                op = row.operator(STARBREAKER_OT_switch_light_state.bl_idname, **kwargs)
+                op.state_name = state_name
+                op.include_strobe = include_strobe
 
         if package is not None:
             animation_items = available_package_animation_items(package)
