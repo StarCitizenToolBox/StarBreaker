@@ -58,6 +58,7 @@ from ..record_utils import (
     _triplet_from_any,
     _submaterial_texture_reference,
     _suppresses_virtual_tint_palette_stencil_input,
+    _uses_vertex_color_tint,
     _uses_virtual_tint_palette_decal,
 )
 from ...manifest import LayerManifestEntry, MaterialSidecar, PaletteRecord, SubmaterialRecord, TextureReference
@@ -587,7 +588,7 @@ class BuildersMixin:
                     target_socket.default_value = self._illum_emission_strength(submaterial)
                 source_socket = None
             elif semantic == "use_vertex_colors" and hasattr(target_socket, "default_value"):
-                target_socket.default_value = bool(submaterial.decoded_feature_flags.has_vertex_colors)
+                target_socket.default_value = _uses_vertex_color_tint(submaterial)
                 source_socket = None
             elif semantic.startswith("public_param_"):
                 # Generic authored-param default: the group input's semantic

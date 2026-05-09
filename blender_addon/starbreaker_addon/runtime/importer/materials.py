@@ -55,6 +55,7 @@ from ..constants import (
 from ..node_utils import _input_socket, _output_socket, _refresh_group_node_sockets
 from ..record_utils import (
     _float_authored_attribute,
+    _uses_vertex_color_tint,
     _layer_texture_reference,
     _matching_texture_reference,
     _mean_triplet,
@@ -171,10 +172,8 @@ class MaterialsMixin:
         if node_tree is None:
             return True
 
-        if (
-            submaterial.decoded_feature_flags.has_vertex_colors
-            and not any(node.bl_idname == "ShaderNodeVertexColor" for node in node_tree.nodes)
-        ):
+        expected_use_vertex_colors = _uses_vertex_color_tint(submaterial)
+        if expected_use_vertex_colors and not any(node.bl_idname == "ShaderNodeVertexColor" for node in node_tree.nodes):
             return True
 
         if any(node.bl_idname in {"ShaderNodeAddShader", "ShaderNodeEmission"} for node in node_tree.nodes):
@@ -193,9 +192,7 @@ class MaterialsMixin:
             use_vert_col_socket = _input_socket(node, "Use Vert Col")
             if use_vert_col_socket is None:
                 return True
-            if bool(getattr(use_vert_col_socket, "default_value", False)) != bool(
-                submaterial.decoded_feature_flags.has_vertex_colors
-            ):
+            if bool(getattr(use_vert_col_socket, "default_value", False)) != expected_use_vertex_colors:
                 return True
             return False
         return True

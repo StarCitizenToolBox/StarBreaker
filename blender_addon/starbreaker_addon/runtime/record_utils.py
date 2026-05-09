@@ -171,6 +171,28 @@ def _is_virtual_tint_palette_stencil_decal(submaterial: SubmaterialRecord) -> bo
     return "_stencil" in lowered_name or "branding" in lowered_name
 
 
+def _uses_vertex_color_tint(submaterial: SubmaterialRecord) -> bool:
+    """Return whether vertex colors should tint this submaterial."""
+    if not submaterial.decoded_feature_flags.has_vertex_colors:
+        return False
+    if submaterial.shader_family != "MeshDecal":
+        return True
+    # Virtual tint-palette stencil decals carry their tint from the palette
+    # decal source, so applying mesh vertex colors here double-tints/blue-shifts.
+    string_gen_mask = (_authored_attribute_string(submaterial, "StringGenMask") or "").upper()
+    has_stencil_semantics = (
+        "STENCIL_MAP" in string_gen_mask
+        or submaterial.decoded_feature_flags.has_stencil_map
+        or any(
+            name in submaterial.public_params
+            for name in ("StencilOpacity", "StencilDiffuseBreakup", "StencilTiling", "StencilTintOverride")
+        )
+    )
+    if _uses_virtual_tint_palette_decal(submaterial) and has_stencil_semantics:
+        return False
+    return True
+
+
 def _routes_virtual_tint_palette_decal_to_decal_source(
     submaterial: SubmaterialRecord,
     contract_input: ContractInput,
