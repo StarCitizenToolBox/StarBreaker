@@ -1,6 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Download } from "lucide-react";
-import { listDir, extractP4kFolder, extractP4kFile, type DirEntry } from "../lib/commands";
+import {
+  listDir,
+  p4kSearch,
+  extractP4kFolder,
+  extractP4kFile,
+  type DirEntry,
+  type P4kSearchResult,
+} from "../lib/commands";
 import { ExtractProgress } from "../components/extract-progress";
 import { useAppStore } from "../stores/app-store";
 import { ResizeHandle } from "../components/resize-handle";
@@ -248,12 +255,75 @@ function entriesToNodes(parentPath: string, entries: DirEntry[]): TreeNode[] {
   return [...dirs, ...files];
 }
 
+function p4kSearchResultsToNodes(results: P4kSearchResult[]): TreeNode[] {
+  const root: TreeNode[] = [];
+
+  for (const result of results) {
+    const segments = result.path.split("\\").filter(Boolean);
+    let siblings = root;
+    let currentPath = "";
+
+    segments.forEach((segment, index) => {
+      const isFile = index === segments.length - 1;
+      currentPath = currentPath ? `${currentPath}\\${segment}` : segment;
+
+      if (isFile) {
+        siblings.push({
+          name: segment,
+          path: currentPath,
+          isDir: false,
+          size: result.uncompressed_size,
+          loaded: true,
+          expanded: false,
+          loading: false,
+        });
+        return;
+      }
+
+      let folder = siblings.find((node) => node.isDir && node.path === currentPath);
+      if (!folder) {
+        folder = {
+          name: segment,
+          path: currentPath,
+          isDir: true,
+          loaded: true,
+          expanded: true,
+          loading: false,
+          children: [],
+        };
+        siblings.push(folder);
+      }
+
+      folder.children ??= [];
+      siblings = folder.children;
+    });
+  }
+
+  const sortNodes = (nodes: TreeNode[]) => {
+    nodes.sort((a, b) => {
+      if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+    for (const node of nodes) {
+      if (node.children) sortNodes(node.children);
+    }
+  };
+
+  sortNodes(root);
+  return root;
+}
+
 export function P4kBrowser() {
   const hasData = useAppStore((s) => s.hasData);
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [selectedPath, setSelectedPath] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<P4kSearchResult[]>([]);
+  const [searching, setSearching] = useState(false);
   const [treeWidth, setTreeWidth] = useState(360);
+  const [extracting, setExtracting] = useState(false);
+  const [extractFilter, setExtractFilter] = useState("");
+  const searchSeqRef = useRef(0);
 
   // Load root entries on mount
   useEffect(() => {
@@ -262,6 +332,68 @@ export function P4kBrowser() {
       setTree(entriesToNodes("", entries));
     });
   }, [hasData]);
+
+  useEffect(() => {
+    const query = searchQuery.trim();
+    searchSeqRef.current += 1;
+    const seq = searchSeqRef.current;
+    setCollapsedSearchPaths(new Set());
+
+    if (!hasData || query.length === 0) {
+      setSearchResults([]);
+      setSearching(false);
+      return;
+    }
+
+    setSearching(true);
+    const timeout = setTimeout(() => {
+      p4kSearch(query)
+        .then((results) => {
+          if (searchSeqRef.current === seq) {
+            setSearchResults(results);
+            setSearching(false);
+          }
+        })
+        .catch((err) => {
+          if (searchSeqRef.current === seq) {
+            console.error("P4k search failed:", err);
+            setSearchResults([]);
+            setSearching(false);
+          }
+        });
+    }, 150);
+
+    return () => clearTimeout(timeout);
+  }, [hasData, searchQuery]);
+
+  const searchTree = useMemo(
+    () => p4kSearchResultsToNodes(searchResults),
+    [searchResults],
+  );
+  const [collapsedSearchPaths, setCollapsedSearchPaths] = useState<Set<string>>(new Set());
+  const hasSearch = searchQuery.trim().length > 0;
+  const displayedTree = useMemo(() => {
+    if (!hasSearch) return tree;
+    const applyCollapsed = (nodes: TreeNode[]): TreeNode[] =>
+      nodes.map((node) => ({
+        ...node,
+        expanded: node.isDir ? !collapsedSearchPaths.has(node.path) : node.expanded,
+        ...(node.children ? { children: applyCollapsed(node.children) } : {}),
+      }));
+    return applyCollapsed(searchTree);
+  }, [hasSearch, tree, searchTree, collapsedSearchPaths]);
+
+  const handleSearchToggle = useCallback((path: string) => {
+    setCollapsedSearchPaths((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      return next;
+    });
+  }, []);
 
   const handleToggle = useCallback(
     async (path: string) => {
@@ -328,9 +460,6 @@ export function P4kBrowser() {
     );
   }
 
-  const [extracting, setExtracting] = useState(false);
-  const [extractFilter, setExtractFilter] = useState("");
-
   return (
     <div className="flex-1 flex flex-col overflow-hidden relative">
       <ExtractProgress active={extracting} onDone={() => setExtracting(false)} />
@@ -343,6 +472,11 @@ export function P4kBrowser() {
           onChange={(e) => setSearchQuery(e.target.value)}
           className="flex-1 bg-surface rounded-md px-3 py-1.5 text-sm text-text placeholder:text-text-faint outline-none focus:ring-1 focus:ring-ring"
         />
+        {hasSearch && (
+          <span className="text-xs text-text-dim shrink-0">
+            {searching ? "Searching..." : `${searchResults.length} results`}
+          </span>
+        )}
         <input
           type="text"
           placeholder="Extract filter (e.g. mtl,xml)"
@@ -357,12 +491,12 @@ export function P4kBrowser() {
       {/* Tree panel */}
       <div className="border-r border-border overflow-y-auto shrink-0" style={{ width: treeWidth }}>
         <div className="py-1">
-          {tree.map((node) => (
+          {displayedTree.map((node) => (
             <TreeItem
               key={node.path}
               node={node}
               depth={0}
-              onToggle={handleToggle}
+              onToggle={hasSearch ? handleSearchToggle : handleToggle}
               selectedPath={selectedPath}
               onSelect={setSelectedPath}
               extractFilter={extractFilter}

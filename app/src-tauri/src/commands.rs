@@ -35,6 +35,13 @@ pub enum DirEntryDto {
     Directory { name: String },
 }
 
+/// A matching file returned by P4k path search.
+#[derive(Serialize)]
+pub struct P4kSearchResultDto {
+    pub path: String,
+    pub uncompressed_size: u64,
+}
+
 /// Info returned after opening a P4k.
 #[derive(Serialize)]
 pub struct P4kInfo {
@@ -208,6 +215,38 @@ pub fn list_dir(state: State<'_, AppState>, path: String) -> Result<Vec<DirEntry
         .collect();
 
     Ok(dtos)
+}
+
+/// Search file paths from the loaded P4k archive.
+#[tauri::command]
+pub fn p4k_search(
+    state: State<'_, AppState>,
+    query: String,
+) -> Result<Vec<P4kSearchResultDto>, AppError> {
+    let guard = state.p4k.lock();
+    let p4k = guard
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("P4k not loaded".into()))?;
+
+    let query = query.trim().to_ascii_lowercase();
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut results: Vec<_> = p4k
+        .entries()
+        .iter()
+        .filter(|entry| entry.name.to_ascii_lowercase().contains(&query))
+        .map(|entry| P4kSearchResultDto {
+            path: entry.name.clone(),
+            uncompressed_size: entry.uncompressed_size,
+        })
+        .collect();
+
+    results.sort_by(|a, b| a.path.len().cmp(&b.path.len()).then_with(|| a.path.cmp(&b.path)));
+    results.truncate(500);
+
+    Ok(results)
 }
 
 // ── DataCore / Export DTOs ──────────────────────────────────────────

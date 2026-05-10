@@ -20,6 +20,11 @@ export interface DirectoryDirEntry {
 
 export type DirEntry = FileDirEntry | DirectoryDirEntry;
 
+export interface P4kSearchResult {
+  path: string;
+  uncompressed_size: number;
+}
+
 export interface LoadProgress {
   fraction: number;
   message: string;
@@ -67,6 +72,11 @@ export async function openP4k(path: string): Promise<P4kInfo> {
 /** List directory contents from the loaded P4k. */
 export async function listDir(path: string): Promise<DirEntry[]> {
   return invoke<DirEntry[]>("list_dir", { path });
+}
+
+/** Search file paths from the loaded P4k. */
+export async function p4kSearch(query: string): Promise<P4kSearchResult[]> {
+  return invoke<P4kSearchResult[]>("p4k_search", { query });
 }
 
 /** List only subdirectory names under a path (fast). */

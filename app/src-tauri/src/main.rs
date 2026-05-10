@@ -216,6 +216,7 @@ fn main() {
             commands::discover_p4k,
             commands::open_p4k,
             commands::list_dir,
+            commands::p4k_search,
             commands::list_subdirs,
             commands::scan_categories,
             commands::start_export,

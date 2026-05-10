@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Download } from "lucide-react";
 import { useDataCoreStore } from "../stores/datacore-store";
 import { ResizeHandle } from "../components/resize-handle";
@@ -59,21 +59,100 @@ function NavPanel({ width, onExtractStart, onExtractEnd }: {
   const hasSearch = searchQuery.trim().length > 0;
 
   return (
-    <div className="flex flex-col border-r border-border overflow-hidden shrink-0" style={{ width }}>
-      {hasSearch ? <SearchResults /> : <TreePanel onExtractStart={onExtractStart} onExtractEnd={onExtractEnd} />}
+    <div className="flex flex-col border-r border-border overflow-hidden shrink-0 min-h-0" style={{ width }}>
+      <div className={hasSearch ? "hidden" : "flex-1 min-h-0 overflow-hidden"}>
+        <TreePanel onExtractStart={onExtractStart} onExtractEnd={onExtractEnd} />
+      </div>
+      {hasSearch && <SearchResults onExtractStart={onExtractStart} onExtractEnd={onExtractEnd} />}
     </div>
   );
 }
 
-// ── Search results (flat list when typing) ──────────────────────────────────
+// ── Search results (hierarchical while typing) ───────────────────────────────
 
-function SearchResults() {
+interface SearchTreeFolder {
+  kind: "folder";
+  name: string;
+  path: string;
+  children: SearchTreeNode[];
+}
+
+interface SearchTreeRecord {
+  kind: "record";
+  name: string;
+  path: string;
+  structType: string;
+  id: string;
+}
+
+type SearchTreeNode = SearchTreeFolder | SearchTreeRecord;
+
+function searchResultsToTree(results: SearchResultDto[]): SearchTreeNode[] {
+  const root: SearchTreeNode[] = [];
+
+  for (const result of results) {
+    const segments = result.path.split("/").filter(Boolean);
+    const folderSegments = segments.length > 1 ? segments.slice(0, -1) : [];
+    let siblings = root;
+    let currentPath = "";
+
+    for (const segment of folderSegments) {
+      currentPath = currentPath ? `${currentPath}/${segment}` : segment;
+      let folder = siblings.find(
+        (node): node is SearchTreeFolder =>
+          node.kind === "folder" && node.path === currentPath,
+      );
+
+      if (!folder) {
+        folder = {
+          kind: "folder",
+          name: segment,
+          path: currentPath,
+          children: [],
+        };
+        siblings.push(folder);
+      }
+
+      siblings = folder.children;
+    }
+
+    siblings.push({
+      kind: "record",
+      name: result.name,
+      path: result.path,
+      structType: result.struct_type,
+      id: result.id,
+    });
+  }
+
+  const sortNodes = (nodes: SearchTreeNode[]) => {
+    nodes.sort((a, b) => {
+      if (a.kind !== b.kind) return a.kind === "folder" ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+    for (const node of nodes) {
+      if (node.kind === "folder") sortNodes(node.children);
+    }
+  };
+
+  sortNodes(root);
+  return root;
+}
+
+function SearchResults({ onExtractStart, onExtractEnd }: {
+  onExtractStart: () => void;
+  onExtractEnd: () => void;
+}) {
   const searchQuery = useDataCoreStore((s) => s.searchQuery);
   const searchResults = useDataCoreStore((s) => s.searchResults);
   const setSearchResults = useDataCoreStore((s) => s.setSearchResults);
   const searching = useDataCoreStore((s) => s.searching);
   const setSearching = useDataCoreStore((s) => s.setSearching);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(null);
+  const searchTree = useMemo(
+    () => searchResultsToTree(searchResults),
+    [searchResults],
+  );
 
   const doSearch = useCallback(
     (query: string) => {
@@ -95,33 +174,68 @@ function SearchResults() {
   }, [searchQuery, doSearch]);
 
   return (
-    <>
+    <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
       <div className="px-2.5 py-1 text-[11px] text-text-dim">
         {searching ? "Searching..." : `${searchResults.length} results`}
       </div>
-      <div className="flex-1 overflow-y-auto">
-        {searchResults.map((result) => (
-          <SearchResultRow key={result.id} result={result} />
+      <div className="flex-1 min-h-0 overflow-y-auto">
+        {searchTree.map((node) => (
+          <SearchTreeItem
+            key={node.kind === "folder" ? `f:${node.path}` : `r:${node.id}`}
+            node={node}
+            depth={0}
+            onExtractStart={onExtractStart}
+            onExtractEnd={onExtractEnd}
+          />
         ))}
       </div>
-    </>
+    </div>
   );
 }
 
-function SearchResultRow({ result }: { result: SearchResultDto }) {
+function SearchTreeItem({ node, depth, onExtractStart, onExtractEnd }: {
+  node: SearchTreeNode;
+  depth: number;
+  onExtractStart: () => void;
+  onExtractEnd: () => void;
+}) {
   const selectRecord = useSelectRecord();
+  const [expanded, setExpanded] = useState(true);
+
+  if (node.kind === "folder") {
+    return (
+      <div>
+        <FolderRow
+          name={node.name}
+          path={node.path}
+          depth={depth}
+          expanded={expanded}
+          onToggle={() => setExpanded((e) => !e)}
+          onExtractStart={onExtractStart}
+          onExtractEnd={onExtractEnd}
+        />
+        {expanded && node.children.map((child) => (
+          <SearchTreeItem
+            key={child.kind === "folder" ? `f:${child.path}` : `r:${child.id}`}
+            node={child}
+            depth={depth + 1}
+            onExtractStart={onExtractStart}
+            onExtractEnd={onExtractEnd}
+          />
+        ))}
+      </div>
+    );
+  }
 
   return (
     <button
       type="button"
-      onClick={() => selectRecord(result.id)}
-      className="w-full text-left px-2.5 py-1 hover:bg-surface transition-colors"
+      onClick={() => selectRecord(node.id)}
+      className="w-full text-left flex items-center h-6 hover:bg-surface transition-colors group"
+      style={{ paddingLeft: depth * 16 + 22 }}
     >
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-[13px] text-text truncate">{result.name}</span>
-        <span className="text-[10px] text-primary shrink-0">{result.struct_type}</span>
-      </div>
-      <div className="text-[11px] text-text-dim truncate">{result.path}</div>
+      <span className="text-[13px] text-text-sub truncate flex-1">{node.name}</span>
+      <span className="text-[10px] text-text-faint pr-2 shrink-0">{node.structType}</span>
     </button>
   );
 }
@@ -133,7 +247,7 @@ function TreePanel({ onExtractStart, onExtractEnd }: {
   onExtractEnd: () => void;
 }) {
   return (
-    <div className="flex-1 overflow-y-auto">
+    <div className="h-full min-h-0 overflow-y-auto">
       <TreeLevel path="" depth={0} onExtractStart={onExtractStart} onExtractEnd={onExtractEnd} />
     </div>
   );
