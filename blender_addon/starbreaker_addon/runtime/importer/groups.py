@@ -2257,7 +2257,34 @@ class GroupsMixin:
         cached = bpy.data.node_groups.get(cached_name)
         current_mode = self._current_pom_detail_mode()
         _configure_runtime_pom_detail_group(current_mode)
+
+        def _configure_pom_sampler_nodes(root_tree: bpy.types.ShaderNodeTree) -> None:
+            """Bind the cached height image and enforce repeat wrap mode.
+
+            The authored POM library ships with CLIP extension on its internal
+            height samplers. CLIP clamps UVs to [0,1], which makes parallax
+            appear only on islands that stay in-range while the material's
+            surface samplers are repeating. We mirror surface-sampler behavior by
+            forcing REPEAT on all POM-internal image samplers.
+            """
+
+            seen: set[int] = set()
+            stack: list[bpy.types.ShaderNodeTree] = [root_tree]
+            while stack:
+                tree = stack.pop()
+                pointer = tree.as_pointer()
+                if pointer in seen:
+                    continue
+                seen.add(pointer)
+                for node in tree.nodes:
+                    if node.bl_idname == "ShaderNodeTexImage":
+                        node.image = height_image
+                        node.extension = "REPEAT"
+                    elif node.bl_idname == "ShaderNodeGroup" and node.node_tree is not None:
+                        stack.append(node.node_tree)
+
         if cached is not None:
+            _configure_pom_sampler_nodes(cached)
             _ensure_pom_detail_control_on_tree(cached, current_mode)
             return cached
 
@@ -2292,16 +2319,8 @@ class GroupsMixin:
                     bpy.data.node_groups.remove(g, do_unlink=True)
             return None
 
-        # Patch every ``ShaderNodeTexImage`` inside the appended group
-        # chain to point at ``height_image``. ``POM_disp`` and
-        # ``HeightMap`` are the only groups in the reference pipeline
-        # that carry samplers, but we walk the full appended set so a
-        # future library refactor doesn't silently leave stale images
-        # behind.
-        for g in added:
-            for n in g.nodes:
-                if n.bl_idname == "ShaderNodeTexImage":
-                    n.image = height_image
+        # Patch every internal sampler in the newly-appended chain.
+        _configure_pom_sampler_nodes(pom_vector_new)
 
         # Phase 17 — share samplerless, reference-less helpers across
         # every POM instance. Blender shader groups cannot accept an

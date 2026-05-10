@@ -1062,11 +1062,16 @@ class BuildersMixin:
                                 continue
                             if node is layer_height_node:
                                 continue
-                            if bpy.path.abspath(
-                                node.image.filepath, library=node.image.library
-                            ) == resolved_str:
+                            if (
+                                bpy.path.abspath(
+                                    node.image.filepath, library=node.image.library
+                                )
+                                == resolved_str
+                                and node not in layer_targets
+                            ):
+                                # Collect every sampler that resolves to this layer
+                                # texture path (both primary + wear layer copies).
                                 layer_targets.append(node)
-                                break
                     if layer_targets:
                         self._wire_runtime_parallax(
                             material,
