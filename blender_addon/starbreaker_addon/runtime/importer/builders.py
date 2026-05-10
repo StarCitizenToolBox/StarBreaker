@@ -2277,12 +2277,17 @@ class BuildersMixin:
     _LOADOUT_DECAL_OFFSET_STRENGTH = 0.001
 
     def _decal_offset_strength_for_object(self, obj: bpy.types.Object) -> float:
+        # Prefer the authoritative value written by the Rust exporter.
+        rust_strength = obj.get("starbreaker_decal_offset_strength")
+        if rust_strength is not None:
+            return float(rust_strength)
+        # Fallback heuristic for objects from older exports that lack the property.
         material_sidecar = (_string_prop(obj, PROP_MATERIAL_SIDECAR) or "").lower()
         if not material_sidecar:
             return self._DECAL_OFFSET_STRENGTH
         if "/interior/" in material_sidecar or "_int_master" in material_sidecar:
-            return self._DECAL_OFFSET_STRENGTH
-        if "/ships/" in material_sidecar:
+            return self._LOADOUT_DECAL_OFFSET_STRENGTH
+        if "/ships/" in material_sidecar and "_int_" not in material_sidecar:
             return self._DECAL_OFFSET_STRENGTH
         return self._LOADOUT_DECAL_OFFSET_STRENGTH
 
