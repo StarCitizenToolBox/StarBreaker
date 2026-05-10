@@ -132,7 +132,7 @@ fn collect_existing_decomposed_assets(output_root: &Path) -> Result<HashSet<Stri
             let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
                 continue;
             };
-            if !matches!(extension, "glb" | "png") {
+            if !matches!(extension, "blend" | "png") {
                 continue;
             }
 
@@ -220,9 +220,8 @@ fn export(
     dump_hierarchy: bool,
     opts: ExportOpts,
 ) -> Result<()> {
-    // Route blend format or decomposed exports to dedicated blend code path
-    // Decomposed exports now generate scene.blend with linked mesh instances (Phase 5A)
-    if opts.format.to_lowercase() == "blend" || opts.kind.to_lowercase() == "decomposed" {
+    // Decomposed exports generate scene.blend with linked mesh instances.
+    if opts.kind.to_lowercase() == "decomposed" {
         return export_blend(name, output, p4k_path, opts);
     }
 
@@ -374,7 +373,6 @@ fn export_blend(
         let tree = resolve_loadout_indexed(&idx, record);
         let mut export_opts = starbreaker_3d::ExportOptions::from(&opts);
         export_opts.kind = starbreaker_3d::ExportKind::Decomposed;
-        // Don't force format - respect user's choice (glb or blend)
 
         let output_dir = output.unwrap_or_else(|| PathBuf::from(&name));
         let package_name = format!(
@@ -421,18 +419,6 @@ fn export_blend(
                 "decomposed scene manifest missing after export: {}",
                 scene_json_path.display()
             )));
-        }
-
-        // Skip Blender subprocess for Blend format - Rust code already generated scene.blend
-        // For GLB format only: optionally assemble scene.blend via subprocess (not currently used)
-        if false {  // Disabled for now - use only Rust-generated files
-            let master_path = output_dir.join("Packages").join(&package_name).join("scene.blend");
-            assemble_master_blend_from_scene_json(
-                &output_dir,
-                &scene_json_path,
-                &master_path,
-                &export_name,
-            )?;
         }
 
         eprintln!("Written to {}", output_dir.display());
@@ -505,6 +491,7 @@ fn export_blend(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn assemble_master_blend_from_scene_json(
     export_root: &Path,
     scene_json_path: &Path,

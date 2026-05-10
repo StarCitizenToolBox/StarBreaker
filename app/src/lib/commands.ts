@@ -117,7 +117,6 @@ export interface ExportRequest {
   mip: number;
   export_kind: string;
   material_mode: string;
-  format: string;
   include_attachments: boolean;
   include_interior: boolean;
   include_lights: boolean;
@@ -388,6 +387,7 @@ export async function audioDecodeWem(
   return invoke<number[]>("audio_decode_wem", { mediaId, sourceType, bankName });
 }
 
+/** Get recommended export extension for a media file (ogg for Vorbis, else wem). */
 export async function audioExportInfo(
   mediaId: number,
   sourceType: string,
@@ -396,6 +396,7 @@ export async function audioExportInfo(
   return invoke<AudioExportInfo>("audio_export_info", { mediaId, sourceType, bankName });
 }
 
+/** Export a media file to disk, decoding Vorbis to OGG when applicable. */
 export async function audioExportMedia(
   mediaId: number,
   sourceType: string,

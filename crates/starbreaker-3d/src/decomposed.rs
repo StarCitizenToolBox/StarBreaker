@@ -8,11 +8,11 @@ use starbreaker_dds;
 use starbreaker_p4k::MappedP4k;
 
 use crate::error::Error;
-use crate::gltf::{offset_to_gltf_matrix, GlbBuilder, GlbInput, GlbLoaders, GlbMetadata, GlbOptions, PackedMeshInfo};
+use crate::gltf::{offset_to_gltf_matrix, GlbBuilder, PackedMeshInfo};
 use crate::mtl::{MtlFile, SemanticTextureBinding, SubMaterial, TextureSemanticRole, TintPalette};
 use crate::nmc::NodeMeshCombo;
 use crate::pipeline::{
-    DecomposedExport, ExportFormat, ExportOptions, ExportedFile, ExportedFileKind, InteriorCgfEntry,
+    DecomposedExport, ExportOptions, ExportedFile, ExportedFileKind, InteriorCgfEntry,
     LoadedInteriors, MaterialMode,
     PngCache,
 };
@@ -741,7 +741,6 @@ pub(crate) fn write_decomposed_export(
     let scene_manifest_path = package_relative_path(&package_name, "scene.json");
     let palettes_manifest_path = package_relative_path(&package_name, "palettes.json");
     let liveries_manifest_path = package_relative_path(&package_name, "liveries.json");
-    let write_mesh_payloads = opts.format != ExportFormat::Blend;
     let total_start = Instant::now();
     let mut phase_start = Instant::now();
     report_progress(progress, 0.05, "Writing root assets");
@@ -768,7 +767,6 @@ pub(crate) fn write_decomposed_export(
         &input.root_bones,
         opts.lod_level,
         existing_asset_paths,
-        write_mesh_payloads,
     )?;
     let root_material_sidecar = root_material_view.sidecar_materials.as_ref().map(|materials| {
         write_material_sidecar(
@@ -871,7 +869,6 @@ pub(crate) fn write_decomposed_export(
             &child.bones,
             opts.lod_level,
             existing_asset_paths,
-            write_mesh_payloads,
         )?;
         let material_sidecar = child_material_view.sidecar_materials.as_ref().map(|materials| {
             write_material_sidecar(
@@ -1029,7 +1026,6 @@ pub(crate) fn write_decomposed_export(
                         &[],
                         opts.lod_level,
                         existing_asset_paths,
-                        write_mesh_payloads,
                     )?
                 };
                 interior_asset_cache.insert(cache_key, (mesh_asset.clone(), material_sidecar.clone()));
@@ -1538,74 +1534,20 @@ fn write_mesh_asset(
     p4k: &MappedP4k,
     fallback_name: &str,
     geometry_path: &str,
-    mesh: &Mesh,
-    materials: Option<&MtlFile>,
-    nmc: Option<&NodeMeshCombo>,
-    bones: &[Bone],
+    _mesh: &Mesh,
+    _materials: Option<&MtlFile>,
+    _nmc: Option<&NodeMeshCombo>,
+    _bones: &[Bone],
     lod_level: u32,
     existing_asset_paths: Option<&HashSet<String>>,
-    write_payload: bool,
 ) -> Result<String, Error> {
-    fn no_textures(
-        _: Option<&crate::mtl::MtlFile>,
-        _: Option<&crate::mtl::TintPalette>,
-    ) -> Option<crate::types::MaterialTextures> {
-        None
-    }
-
-    fn no_interiors(
-        _: &crate::pipeline::InteriorCgfEntry,
-    ) -> Option<(Mesh, Option<MtlFile>, Option<NodeMeshCombo>)> {
-        None
-    }
-
-    let mut no_textures_fn = no_textures;
-    let mut no_interiors_fn = no_interiors;
     let requested_path = mesh_asset_relative_path(p4k, geometry_path, fallback_name, lod_level);
     if existing_asset_paths
         .is_some_and(|paths| paths.contains(&requested_path.to_ascii_lowercase()))
     {
         return Ok(requested_path);
     }
-    if !write_payload {
-        return Ok(insert_binary_file(files, requested_path, Vec::new()));
-    }
-    let glb = crate::gltf::write_glb(
-        GlbInput {
-            root_mesh: Some(mesh.clone()),
-            root_materials: materials.cloned(),
-            root_textures: None,
-            root_nmc: nmc.cloned(),
-            root_palette: None,
-            skeleton_bones: bones.to_vec(),
-            children: Vec::new(),
-            interiors: LoadedInteriors::default(),
-        },
-        &mut GlbLoaders {
-            load_textures: &mut no_textures_fn,
-            load_interior_mesh: &mut no_interiors_fn,
-        },
-        &GlbOptions {
-            material_mode: MaterialMode::None,
-            preserve_textureless_decal_primitives: true,
-            metadata: GlbMetadata {
-                entity_name: Some(fallback_name.to_string()),
-                geometry_path: (!geometry_path.is_empty()).then_some(geometry_path.to_string()),
-                material_path: None,
-                export_options: crate::gltf::ExportOptionsMetadata {
-                    kind: "Decomposed".to_string(),
-                    material_mode: "None".to_string(),
-                    format: "Glb".to_string(),
-                    lod_level: 0,
-                    texture_mip: 0,
-                    include_attachments: false,
-                    include_interior: false,
-                },
-            },
-            fallback_palette: None,
-        },
-    )?;
-    Ok(insert_binary_file(files, requested_path, glb))
+    Ok(insert_binary_file(files, requested_path, Vec::new()))
 }
 
 fn write_material_sidecar(

@@ -41,7 +41,6 @@ export function ExportView() {
   const mip = useExportStore((s) => s.mip);
   const exportKind = useExportStore((s) => s.exportKind);
   const materialMode = useExportStore((s) => s.materialMode);
-  const format = useExportStore((s) => s.format);
   const includeAttachments = useExportStore((s) => s.includeAttachments);
   const includeInterior = useExportStore((s) => s.includeInterior);
   const includeLights = useExportStore((s) => s.includeLights);
@@ -54,7 +53,6 @@ export function ExportView() {
   const setMip = useExportStore((s) => s.setMip);
   const setExportKind = useExportStore((s) => s.setExportKind);
   const setMaterialMode = useExportStore((s) => s.setMaterialMode);
-  const setFormat = useExportStore((s) => s.setFormat);
   const setIncludeAttachments = useExportStore((s) => s.setIncludeAttachments);
   const setIncludeInterior = useExportStore((s) => s.setIncludeInterior);
   const setIncludeLights = useExportStore((s) => s.setIncludeLights);
@@ -182,7 +180,6 @@ export function ExportView() {
       mip,
       export_kind: exportKind,
       material_mode: materialMode,
-      format: format,
       include_attachments: includeAttachments,
       include_interior: includeInterior,
       include_lights: includeLights,
@@ -571,7 +568,7 @@ export function ExportView() {
             <div className="flex flex-col gap-1">
               {([
                 { value: "bundled", label: "Bundled - single .glb", tip: "Single-file export for direct viewing in stock tools." },
-                { value: "decomposed", label: "Structured package", tip: "Reusable mesh assets, canonical textures, and JSON sidecars for Blender reconstruction." },
+                { value: "decomposed", label: "Structured package - .blend files", tip: "Reusable native Blender mesh assets, canonical textures, and JSON sidecars for Blender reconstruction." },
               ] as const).map((opt) => (
                 <label
                   key={opt.value}
@@ -583,11 +580,7 @@ export function ExportView() {
                     name="exportKind"
                     value={opt.value}
                     checked={exportKind === opt.value}
-                    onChange={() => {
-                      setExportKind(opt.value);
-                      if (opt.value === "bundled") setFormat("glb");
-                      if (opt.value === "decomposed") setFormat("blend");
-                    }}
+                    onChange={() => setExportKind(opt.value)}
                     className="accent-accent w-3 h-3"
                   />
                   <span className="text-xs text-text-sub group-hover:text-text transition-colors">
@@ -600,34 +593,6 @@ export function ExportView() {
 
           {exportKind === "decomposed" && (
             <div className="flex flex-col gap-3">
-              <div className="flex flex-col gap-1.5">
-                <span className="text-xs text-text-sub">Output format</span>
-                <div className="flex flex-col gap-1">
-                  {([
-                    { value: "glb", label: ".glb assets", tip: "Structured package with GLB mesh assets." },
-                    { value: "blend", label: ".blend assets", tip: "Structured package with native Blender mesh assets and scene.blend." },
-                  ] as const).map((opt) => (
-                    <label
-                      key={opt.value}
-                      className="flex items-center gap-2 cursor-pointer group"
-                      title={opt.tip}
-                    >
-                      <input
-                        type="radio"
-                        name="format"
-                        value={opt.value}
-                        checked={format === opt.value}
-                        onChange={() => setFormat(opt.value)}
-                        className="accent-accent w-3 h-3"
-                      />
-                      <span className="text-xs text-text-sub group-hover:text-text transition-colors">
-                        {opt.label}
-                      </span>
-                    </label>
-                  ))}
-                </div>
-              </div>
-
               <label className="flex items-center gap-2.5 cursor-pointer group">
                 <input
                   type="checkbox"
@@ -640,7 +605,7 @@ export function ExportView() {
                 </span>
               </label>
               <p className="text-[10px] text-text-faint leading-relaxed pl-6">
-                When disabled, existing Data/... .glb and .png assets are left in place.
+                When disabled, existing Data/... .blend and .png assets are left in place.
               </p>
 
               <label className="flex items-center gap-2.5 cursor-pointer group">

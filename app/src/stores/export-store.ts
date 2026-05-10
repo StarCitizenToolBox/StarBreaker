@@ -29,7 +29,6 @@ interface ExportState {
   mip: number;
   exportKind: string;
   materialMode: string;
-  format: string;
   includeAttachments: boolean;
   includeInterior: boolean;
   includeLights: boolean;
@@ -42,7 +41,6 @@ interface ExportState {
   setMip: (v: number) => void;
   setExportKind: (v: string) => void;
   setMaterialMode: (v: string) => void;
-  setFormat: (v: string) => void;
   setIncludeAttachments: (v: boolean) => void;
   setIncludeInterior: (v: boolean) => void;
   setIncludeLights: (v: boolean) => void;
@@ -74,7 +72,6 @@ type PersistedExportState = Pick<
   | "mip"
   | "exportKind"
   | "materialMode"
-  | "format"
   | "includeAttachments"
   | "includeInterior"
   | "includeLights"
@@ -126,7 +123,6 @@ export const useExportStore = create<ExportState>()(
   mip: 2,
   exportKind: "bundled",
   materialMode: "textures",
-  format: "glb",
   includeAttachments: true,
   includeInterior: true,
   includeLights: true,
@@ -139,7 +135,6 @@ export const useExportStore = create<ExportState>()(
   setMip: (v) => set({ mip: v }),
   setExportKind: (v) => set({ exportKind: v }),
   setMaterialMode: (v) => set({ materialMode: v }),
-  setFormat: (v) => set({ format: v }),
   setIncludeAttachments: (v) => set({ includeAttachments: v }),
   setIncludeInterior: (v) => set({ includeInterior: v }),
   setIncludeLights: (v) => set({ includeLights: v }),
@@ -198,7 +193,6 @@ export const useExportStore = create<ExportState>()(
         mip: s.mip,
         exportKind: s.exportKind,
         materialMode: s.materialMode,
-        format: s.format,
         includeAttachments: s.includeAttachments,
         includeInterior: s.includeInterior,
         includeLights: s.includeLights,

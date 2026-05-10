@@ -40,9 +40,6 @@ pub struct ExportOpts {
     /// Material detail: none, colors, textures, all
     #[arg(long, default_value = "textures")]
     pub materials: String,
-    /// Output format: glb, stl, or blend
-    #[arg(long, default_value = "glb")]
-    pub format: String,
     /// Texture mip level (0=full, 2=1/4 res, 4=1/16 res)
     #[arg(long, default_value = "2")]
     pub mip: u32,
@@ -88,16 +85,9 @@ impl From<&ExportOpts> for starbreaker_3d::ExportOptions {
                 starbreaker_3d::MaterialMode::Textures
             }
         };
-        // For decomposed exports, default format to blend (unless explicitly overridden)
-        let format_str = if opts.kind.to_lowercase() == "decomposed" && opts.format.to_lowercase() == "glb" {
-            "blend"
-        } else {
-            opts.format.as_str()
-        };
-        let format = match format_str.to_lowercase().as_str() {
-            "stl" => starbreaker_3d::ExportFormat::Stl,
-            "blend" => starbreaker_3d::ExportFormat::Blend,
-            _ => starbreaker_3d::ExportFormat::Glb,
+        let format = match kind {
+            starbreaker_3d::ExportKind::Decomposed => starbreaker_3d::ExportFormat::Blend,
+            starbreaker_3d::ExportKind::Bundled => starbreaker_3d::ExportFormat::Glb,
         };
         starbreaker_3d::ExportOptions {
             kind,

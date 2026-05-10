@@ -1281,7 +1281,6 @@ class STARBREAKER_PT_tools(Panel):
 
     def draw(self, context: bpy.types.Context) -> None:
         layout = self.layout
-        layout.operator(STARBREAKER_OT_import_decomposed_package.bl_idname, icon="IMPORT")
 
         obj = context.active_object
         package_root = _package_root_from_context(context)
@@ -1527,8 +1526,6 @@ def _starbreaker_load_post(_dummy: object) -> None:
 
 CLASSES = [
     STARBREAKER_AP_preferences,
-    STARBREAKER_OT_import_decomposed_package,
-    STARBREAKER_OT_import_progress_popup,
     STARBREAKER_OT_refresh_materials,
     STARBREAKER_OT_apply_paint,
     STARBREAKER_OT_apply_palette,
@@ -1546,17 +1543,6 @@ CLASSES = [
 
 
 def register() -> None:
-    setattr(bpy.types.WindowManager, _IMPORT_PROGRESS_ACTIVE_PROP, BoolProperty(default=False))
-    setattr(
-        bpy.types.WindowManager,
-        _IMPORT_PROGRESS_VALUE_PROP,
-        FloatProperty(default=0.0, min=0.0, max=1.0),
-    )
-    setattr(
-        bpy.types.WindowManager,
-        _IMPORT_PROGRESS_DESCRIPTION_PROP,
-        StringProperty(default="Preparing import"),
-    )
     setattr(
         bpy.types.Scene,
         SCENE_POM_DETAIL_PROP,
@@ -1612,7 +1598,6 @@ def register() -> None:
 
 
 def unregister() -> None:
-    _remove_import_progress_overlay()
     if _starbreaker_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_starbreaker_load_post)
     for cls in reversed(CLASSES):
@@ -1620,13 +1605,6 @@ def unregister() -> None:
             bpy.utils.unregister_class(cls)
         except RuntimeError:
             pass
-    for prop_name in (
-        _IMPORT_PROGRESS_ACTIVE_PROP,
-        _IMPORT_PROGRESS_VALUE_PROP,
-        _IMPORT_PROGRESS_DESCRIPTION_PROP,
-    ):
-        if hasattr(bpy.types.WindowManager, prop_name):
-            delattr(bpy.types.WindowManager, prop_name)
     if hasattr(bpy.types.Scene, SCENE_POM_DETAIL_PROP):
         delattr(bpy.types.Scene, SCENE_POM_DETAIL_PROP)
     if hasattr(bpy.types.Scene, SCENE_WEAR_STRENGTH_PROP):

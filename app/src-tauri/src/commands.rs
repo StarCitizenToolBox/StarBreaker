@@ -1055,8 +1055,6 @@ pub struct ExportRequest {
     pub export_kind: String,
     /// "none", "colors", "textures", "all"
     pub material_mode: String,
-    /// "glb", "stl", or "blend"
-    pub format: String,
     pub include_attachments: bool,
     pub include_interior: bool,
     pub include_lights: bool,
@@ -1214,7 +1212,7 @@ fn collect_existing_decomposed_assets(output_root: &Path) -> Result<HashSet<Stri
             let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
                 continue;
             };
-            if !matches!(extension, "glb" | "png") {
+            if !matches!(extension, "blend" | "png") {
                 continue;
             }
 
@@ -1303,10 +1301,9 @@ pub async fn start_export(
         "decomposed" => starbreaker_3d::ExportKind::Decomposed,
         _ => starbreaker_3d::ExportKind::Bundled,
     };
-    let format = match request.format.to_lowercase().as_str() {
-        "stl" => starbreaker_3d::ExportFormat::Stl,
-        "blend" => starbreaker_3d::ExportFormat::Blend,
-        _ => starbreaker_3d::ExportFormat::Glb,
+    let format = match kind {
+        starbreaker_3d::ExportKind::Decomposed => starbreaker_3d::ExportFormat::Blend,
+        starbreaker_3d::ExportKind::Bundled => starbreaker_3d::ExportFormat::Glb,
     };
     let existing_asset_paths = if kind == starbreaker_3d::ExportKind::Decomposed
         && !request.overwrite_existing_assets
