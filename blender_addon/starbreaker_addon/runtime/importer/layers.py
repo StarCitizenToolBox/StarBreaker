@@ -120,6 +120,8 @@ class LayersMixin:
         if layer is None:
             return LayerSurfaceSockets()
 
+        uv_tile = layer.uv_tiling if layer.uv_tiling is not None else 1.0
+
         base_texture = _layer_texture_reference(
             layer, slots=("TexSlot1",), roles=("base_color", "diffuse")
         )
@@ -130,12 +132,14 @@ class LayersMixin:
             y=y,
             is_color=True,
         )
+        self._apply_uv_tiling(nodes, links, base_node, uv_tile, x=x - 320, y=y)
         detail_ref = _layer_texture_reference(layer, slots=detail_slots)
         detail_channels = self._detail_texture_channels(
             nodes,
             detail_ref.export_path if detail_ref is not None else None,
             x=x,
             y=y - 420,
+            uv_tiling=uv_tile,
         )
         normal_ref = _layer_texture_reference(
             layer, roles=("normal_gloss",), alpha_semantic="smoothness"
@@ -147,6 +151,7 @@ class LayersMixin:
             y=y - 560,
             is_color=False,
         )
+        self._apply_uv_tiling(nodes, links, normal_node, uv_tile, x=x - 320, y=y - 560)
         roughness, roughness_is_smoothness = self._roughness_socket_for_texture_reference(
             nodes, normal_ref, x=x + 180, y=y - 560
         )
@@ -379,10 +384,13 @@ class LayersMixin:
         *,
         x: int,
         y: int,
+        uv_tiling: float = 1.0,
     ) -> dict[str, Any] | None:
         image_node = self._image_node(nodes, image_path, x=x, y=y, is_color=False)
         if image_node is None:
             return None
+        links = image_node.id_data.links
+        self._apply_uv_tiling(nodes, links, image_node, uv_tiling, x=x - 320, y=y)
         group_node = nodes.new("ShaderNodeGroup")
         group_node.location = (x + 180, y)
         group_node.node_tree = self._ensure_runtime_channel_split_group()
