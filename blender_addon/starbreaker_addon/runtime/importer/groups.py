@@ -250,6 +250,145 @@ def _ensure_pom_detail_control_on_tree(
     return changed
 
 
+def _ensure_uv_scale_on_pom_tree(
+    group_tree: bpy.types.ShaderNodeTree,
+) -> bool:
+    """Add UV Scale X / UV Scale Y inputs to a POM root group and interpose
+    internal scale nodes on both the starting UV and the delta_coordinates.
+
+    The POM ray march reads UVs entirely from its internal ``Texture
+    Coordinate`` node and computes delta_coordinates from the tangent-space
+    view ray.  When UV tiling != 1.0 *both* the starting UV and the delta
+    must be scaled by the same factor S so the march operates consistently
+    in tiled UV space:
+
+    - ``UV Scale Vector`` (CombineXYZ): assembles ``(UV_Scale_X, UV_Scale_Y, 1.0)``
+    - ``UV Scale UV`` (VectorMath MULTIPLY): ``TexCoord.UV * scale_vec``
+      → ``Group.001.Vector``
+    - ``UV Scale Delta`` (VectorMath MULTIPLY): ``Vector Math.002 * scale_vec``
+      → ``Group.001.delta coordinates``
+
+    With default values ``UV Scale X = UV Scale Y = 1.0`` the nodes are
+    identity operations and existing behaviour is unchanged.  Called from
+    ``_ensure_runtime_parallax_group`` on both the cached and newly-appended
+    code paths; fully idempotent.
+    """
+    if (
+        group_tree is None
+        or not group_tree.name.startswith("StarBreaker POM [")
+        or " / " in group_tree.name
+    ):
+        return False
+
+    nodes = group_tree.nodes
+    links = group_tree.links
+    changed = False
+
+    # -- 1. Add interface inputs if missing --
+    existing_input_names = {
+        item.name
+        for item in group_tree.interface.items_tree
+        if getattr(item, "item_type", None) == "SOCKET"
+        and getattr(item, "in_out", None) == "INPUT"
+    }
+    for axis in ("UV Scale X", "UV Scale Y"):
+        if axis not in existing_input_names:
+            sock = group_tree.interface.new_socket(
+                name=axis, in_out="INPUT", socket_type="NodeSocketFloat"
+            )
+            if hasattr(sock, "default_value"):
+                sock.default_value = 1.0
+            if hasattr(sock, "min_value"):
+                sock.min_value = 0.001
+            changed = True
+
+    # -- 2. Guard: if scale nodes are already present, skip node creation --
+    existing_scale_uv = nodes.get("UV Scale UV")
+    if (
+        existing_scale_uv is not None
+        and existing_scale_uv.bl_idname == "ShaderNodeVectorMath"
+    ):
+        return changed
+
+    # -- 3. Locate required source nodes --
+    tex_coord = nodes.get("Texture Coordinate")
+    vector_math_002 = nodes.get("Vector Math.002")
+    group_001 = nodes.get("Group.001")
+    if tex_coord is None or vector_math_002 is None or group_001 is None:
+        return changed
+
+    # -- 4. Find a GroupInput node that now exposes UV Scale X/Y --
+    gi_node = None
+    for node in nodes:
+        if node.bl_idname == "NodeGroupInput":
+            out = _output_socket(node, "UV Scale X")
+            if out is not None:
+                gi_node = node
+                break
+    if gi_node is None:
+        gi_node = nodes.new("NodeGroupInput")
+        gi_node.name = "Group Input.UV Scale"
+        gi_node.location = (-1200, -300)
+        changed = True
+
+    # -- 5. Add CombineXYZ to assemble the (X, Y, 1.0) scale vector --
+    combine = nodes.new("ShaderNodeCombineXYZ")
+    combine.name = "UV Scale Vector"
+    combine.label = "UV Scale"
+    combine.location = (-960, -300)
+    combine.inputs["Z"].default_value = 1.0
+    changed = True
+
+    # -- 6. Add VectorMath MULTIPLY for starting UV --
+    scale_uv = nodes.new("ShaderNodeVectorMath")
+    scale_uv.name = "UV Scale UV"
+    scale_uv.label = "UV Scale UV"
+    scale_uv.operation = "MULTIPLY"
+    scale_uv.location = (-720, -200)
+    changed = True
+
+    # -- 7. Add VectorMath MULTIPLY for delta coordinates --
+    scale_delta = nodes.new("ShaderNodeVectorMath")
+    scale_delta.name = "UV Scale Delta"
+    scale_delta.label = "UV Scale Delta"
+    scale_delta.operation = "MULTIPLY"
+    scale_delta.location = (-720, -400)
+    changed = True
+
+    def _ensure_direct_link(output_socket, input_socket) -> None:
+        nonlocal changed
+        if output_socket is None or input_socket is None:
+            return
+        for link in list(input_socket.links):
+            if (
+                link.from_socket.as_pointer() == output_socket.as_pointer()
+                and link.to_socket.as_pointer() == input_socket.as_pointer()
+            ):
+                return
+            links.remove(link)
+            changed = True
+        links.new(output_socket, input_socket)
+        changed = True
+
+    # -- 8. Wire GroupInput.UV Scale X/Y → CombineXYZ X/Y --
+    _ensure_direct_link(_output_socket(gi_node, "UV Scale X"), combine.inputs["X"])
+    _ensure_direct_link(_output_socket(gi_node, "UV Scale Y"), combine.inputs["Y"])
+
+    # -- 9. Wire UV Scale UV: TexCoord.UV → input[0], scale_vec → input[1] --
+    _ensure_direct_link(_output_socket(tex_coord, "UV"), scale_uv.inputs[0])
+    _ensure_direct_link(combine.outputs[0], scale_uv.inputs[1])
+
+    # -- 10. Wire UV Scale Delta: VectorMath.002 → input[0], scale_vec → input[1] --
+    _ensure_direct_link(vector_math_002.outputs[0], scale_delta.inputs[0])
+    _ensure_direct_link(combine.outputs[0], scale_delta.inputs[1])
+
+    # -- 11. Rewire Group.001 inputs from the scaled nodes --
+    _ensure_direct_link(scale_uv.outputs[0], _input_socket(group_001, "Vector"))
+    _ensure_direct_link(scale_delta.outputs[0], _input_socket(group_001, "delta coordinates"))
+
+    return changed
+
+
 def apply_pom_detail_mode(mode: str) -> int:
     # Keep the shared detail group datablock around for back-compat / deletion
     # of its runtime signature, but do not wire it into any material.
@@ -2286,6 +2425,7 @@ class GroupsMixin:
         if cached is not None:
             _configure_pom_sampler_nodes(cached)
             _ensure_pom_detail_control_on_tree(cached, current_mode)
+            _ensure_uv_scale_on_pom_tree(cached)
             return cached
 
         library_path = _POM_LIBRARY_PATH
@@ -2410,6 +2550,7 @@ class GroupsMixin:
             g.use_fake_user = False
 
         _ensure_pom_detail_control_on_tree(pom_vector_new, current_mode)
+        _ensure_uv_scale_on_pom_tree(pom_vector_new)
 
         return pom_vector_new
 

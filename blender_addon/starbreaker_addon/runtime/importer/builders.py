@@ -186,6 +186,7 @@ class BuildersMixin:
         scale_value: float,
         bias_value: float = 0.5,
         location: tuple[float, float] = (-1280, 720),
+        uv_tile: float = 1.0,
     ) -> bpy.types.Node | None:
         """Insert the bundled ``POM_Vector`` production POM pipeline
         (30-step ray-march, authored in ``docs/StarBreaker/POM-test.blend``
@@ -205,9 +206,7 @@ class BuildersMixin:
         ``_build_contract_group_material`` (MeshDecal POM path). Returns
         the newly-created parallax group node, or ``None`` if the
         material has no node tree, no height image is available, or the
-        POM library could not be appended. Target nodes whose ``Vector``
-        socket is already linked are skipped so an existing per-sampler
-        tiling chain (see ``_apply_uv_tiling``) is not clobbered.
+        POM library could not be appended.
 
         ``scale_value`` is the authored ``PomDisplacement`` public param
         (typically 0.02–0.1 in CryEngine's units). It is scaled up to
@@ -215,6 +214,15 @@ class BuildersMixin:
         reads as ≈1.5 POM scale — the reference file's hand-tuned
         default. ``Layers`` is fixed at 40 and ``Bias`` defaults to 0.5,
         but authored height-bias overrides are preserved when available.
+
+        ``uv_tile`` is the layer's UVTiling factor (default 1.0 = no
+        tiling).  The POM group incorporates the scale internally via its
+        ``UV Scale X`` / ``UV Scale Y`` inputs so that both the starting
+        UV and the ray-march delta are scaled consistently.  Callers must
+        NOT also call ``_apply_uv_tiling`` on the same target nodes; any
+        pre-existing Mapping chain on a target's Vector socket is removed
+        before POM wiring so the orphaned nodes can be swept later by
+        ``_sweep_unreachable_nodes``.
         """
         node_tree = material.node_tree
         if node_tree is None or height_node is None:
@@ -235,14 +243,17 @@ class BuildersMixin:
         parallax_node.label = "StarBreaker POM"
 
         # POM_Vector inputs: Scale (Float), Bias (Float), Non-planar
-        # (Bool). Layer count is controlled inside the runtime POM
-        # root group based on the active scene profile. Drive Scale from
-        # the authored PomDisplacement
+        # (Bool), UV Scale X/Y (Float). Layer count is controlled inside
+        # the runtime POM root group based on the active scene profile.
+        # Drive Scale from the authored PomDisplacement
         # (CryEngine-space ≈0.02–0.1) rescaled into POM-test's default
         # range (≈1.5 for 0.05 input) by multiplying by 30.
         self._set_socket_default(_input_socket(parallax_node, "Scale"), max(0.3, min(3.0, scale_value * 30.0)))
         self._set_socket_default(_input_socket(parallax_node, "Bias"), max(0.0, min(1.0, bias_value)))
         self._set_socket_default(_input_socket(parallax_node, "Non-planar"), True)
+        clamped_tile = max(0.001, uv_tile)
+        self._set_socket_default(_input_socket(parallax_node, "UV Scale X"), clamped_tile)
+        self._set_socket_default(_input_socket(parallax_node, "UV Scale Y"), clamped_tile)
 
         offset_vec = _output_socket(parallax_node, "Vector")
         if offset_vec is None:
@@ -251,9 +262,15 @@ class BuildersMixin:
             if tex_node is None:
                 continue
             vector_input = tex_node.inputs.get("Vector")
-            if vector_input is None or vector_input.is_linked:
-                # Preserve existing per-sampler tiling / mapping chains.
+            if vector_input is None:
                 continue
+            # Remove any existing link on the Vector socket (e.g. from
+            # _apply_uv_tiling) so POM can take over.  UV scaling is
+            # incorporated by the POM group internally via UV Scale X/Y;
+            # orphaned Mapping nodes are swept by _sweep_unreachable_nodes.
+            for existing_link in list(links):
+                if existing_link.to_socket == vector_input:
+                    links.remove(existing_link)
             links.new(offset_vec, vector_input)
         return parallax_node
 
@@ -1079,6 +1096,7 @@ class BuildersMixin:
                             target_image_nodes=layer_targets,
                             scale_value=pom_displacement,
                             bias_value=self._parallax_bias_value(submaterial),
+                            uv_tile=primary_layer.uv_tiling if primary_layer.uv_tiling is not None else 1.0,
                         )
         self._set_socket_default(_input_socket(shader_group, "Emission Color"), (0.0, 0.0, 0.0, 1.0))
         self._set_socket_default(_input_socket(shader_group, "Emission Strength"), 0.0)
