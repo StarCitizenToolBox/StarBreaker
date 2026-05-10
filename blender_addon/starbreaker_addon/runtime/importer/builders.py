@@ -630,7 +630,16 @@ class BuildersMixin:
                 is_pom_decal = bool(
                     submaterial.decoded_feature_flags.has_parallax_occlusion_mapping
                 )
-                if palette is not None and hasattr(self, "_palette_group_node") and not is_pom_decal:
+                has_palette_routing = (
+                    submaterial.palette_routing is not None
+                    and submaterial.palette_routing.material_channel is not None
+                )
+                if (
+                    palette is not None
+                    and hasattr(self, "_palette_group_node")
+                    and not is_pom_decal
+                    and has_palette_routing
+                ):
                     try:
                         palette_node = self._palette_group_node(nodes, links, palette, x=-420, y=y)
                     except Exception:
