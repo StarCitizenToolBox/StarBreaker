@@ -248,7 +248,7 @@ class BuildersMixin:
         # Drive Scale from the authored PomDisplacement
         # (CryEngine-space ≈0.02–0.1) rescaled into POM-test's default
         # range (≈1.5 for 0.05 input) by multiplying by 30.
-        self._set_socket_default(_input_socket(parallax_node, "Scale"), max(0.3, min(3.0, scale_value * 30.0)))
+        self._set_socket_default(_input_socket(parallax_node, "Scale"), min(3.0, scale_value * 30.0))
         self._set_socket_default(_input_socket(parallax_node, "Bias"), max(0.0, min(1.0, bias_value)))
         self._set_socket_default(_input_socket(parallax_node, "Non-planar"), True)
         clamped_tile = max(0.001, uv_tile)
@@ -794,7 +794,7 @@ class BuildersMixin:
                 )
                 if pom_scale is None or pom_scale <= 0.0:
                     pom_scale = 0.05
-                pom_scale = max(0.005, min(0.2, pom_scale))
+                pom_scale = min(0.2, pom_scale)
                 self._wire_runtime_parallax(
                     material,
                     height_node=height_node,
@@ -995,10 +995,10 @@ class BuildersMixin:
             )
             if pom_displacement is None or pom_displacement <= 0.0:
                 pom_displacement = 0.08
-            # Match the illum-path clamp (see _build_illum_material): keep
-            # a 0.03 floor so POM stays visible and a 0.2 ceiling so it
-            # never blows out the geometry.
-            pom_displacement = max(0.03, min(0.2, pom_displacement))
+            # A 0.2 ceiling prevents blowing out the geometry; no artificial floor
+            # so very low authored values (e.g. 0.005 for subtle rubber tile) are
+            # preserved rather than overridden.
+            pom_displacement = min(0.2, pom_displacement)
         else:
             pom_displacement = 0.05
         self._set_socket_default(_input_socket(shader_group, "Displacement Strength"), pom_displacement)
@@ -1355,7 +1355,7 @@ class BuildersMixin:
             self._link_group_input(links, height_secondary, shader_group, "Secondary Height")
             self._set_socket_default(
                 _input_socket(shader_group, "POM Strength"),
-                max(0.03, min(0.2, _float_public_param(submaterial, "PomDisplacement", "HeightBias") or 0.08)),
+                max(0.0, min(0.2, _float_public_param(submaterial, "PomDisplacement", "HeightBias") or 0.08)),
             )
 
         surface_shader = _output_socket(shader_group, "Shader")
@@ -1399,7 +1399,7 @@ class BuildersMixin:
                     )
                     if illum_pom_scale is None or illum_pom_scale <= 0.0:
                         illum_pom_scale = 0.08
-                    illum_pom_scale = max(0.03, min(0.2, illum_pom_scale))
+                    illum_pom_scale = min(0.2, illum_pom_scale)
                     self._wire_runtime_parallax(
                         material,
                         height_node=height_image_node,
