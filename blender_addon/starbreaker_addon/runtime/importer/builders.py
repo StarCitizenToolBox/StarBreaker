@@ -72,6 +72,7 @@ from ...material_contract import (
 from ...palette import palette_color, palette_finish_glossiness, palette_finish_specular
 from ...templates import has_virtual_input, material_palette_channels, representative_textures, template_plan_for_submaterial
 from ..palette_utils import _hard_surface_palette_iridescence_channel
+from .types import LayerSurfaceSockets
 
 
 def _canonical_material_sidecar_path(sidecar_path: str, sidecar: MaterialSidecar) -> str:
@@ -1079,13 +1080,14 @@ class BuildersMixin:
         self._link_group_input(links, primary.specular_tint, shader_group, "Primary Specular Tint")
         self._link_group_input(links, primary.metallic, shader_group, "Primary Metallic")
         self._link_group_input(links, primary.normal, shader_group, "Primary Normal")
-        self._link_group_input(links, secondary.color, shader_group, "Secondary Color")
-        self._link_group_input(links, secondary.alpha, shader_group, "Secondary Alpha")
-        self._link_group_input(links, secondary.roughness, shader_group, "Secondary Roughness")
-        self._link_group_input(links, secondary.specular, shader_group, "Secondary Specular")
-        self._link_group_input(links, secondary.specular_tint, shader_group, "Secondary Specular Tint")
-        self._link_group_input(links, secondary.metallic, shader_group, "Secondary Metallic")
-        self._link_group_input(links, secondary.normal, shader_group, "Secondary Normal")
+        if secondary_layer is not None:
+            self._link_group_input(links, secondary.color, shader_group, "Secondary Color")
+            self._link_group_input(links, secondary.alpha, shader_group, "Secondary Alpha")
+            self._link_group_input(links, secondary.roughness, shader_group, "Secondary Roughness")
+            self._link_group_input(links, secondary.specular, shader_group, "Secondary Specular")
+            self._link_group_input(links, secondary.specular_tint, shader_group, "Secondary Specular Tint")
+            self._link_group_input(links, secondary.metallic, shader_group, "Secondary Metallic")
+            self._link_group_input(links, secondary.normal, shader_group, "Secondary Normal")
         self._link_group_input(links, wear_factor, shader_group, "Wear Factor")
         self._link_group_input(links, damage_factor, shader_group, "Damage Factor")
         self._link_group_input(links, stencil.color, shader_group, "Stencil Color")
@@ -1218,55 +1220,66 @@ class BuildersMixin:
             y=220,
             label="Primary Layer",
         )
+        
+        if material_channel is None:
+            for node in reversed(nodes):
+                if node.type == 'GROUP' and 'LayerSurface' in node.node_tree.name:
+                    palette_socket = _input_socket(node, "Palette Color")
+                    if palette_socket is not None:
+                        palette_socket.default_value = (0.0, 0.0, 0.0, 1.0)
+                    break
 
         secondary_color_ref = _submaterial_texture_reference(submaterial, slots=("TexSlot9",), roles=("alternate_base_color", "base_color", "diffuse"))
-        secondary_color_node = self._image_node(
-            nodes,
-            secondary_color_ref.export_path if secondary_color_ref is not None else None,
-            x=-720,
-            y=20,
-            is_color=True,
-        )
-        secondary_normal_ref = _submaterial_texture_reference(submaterial, slots=("TexSlot3",), roles=("normal_gloss",))
-        secondary_normal_node = self._image_node(
-            nodes,
-            secondary_normal_ref.export_path if secondary_normal_ref is not None else None,
-            x=-720,
-            y=-700,
-            is_color=False,
-        )
-        secondary_detail = self._detail_texture_channels(nodes, self._texture_path_for_slot(submaterial, "TexSlot13"), x=-720, y=-980)
-        secondary_roughness, secondary_roughness_is_smoothness = self._roughness_socket_for_texture_reference(nodes, secondary_normal_ref, x=-460, y=-700)
-        secondary_specular = self._specular_socket_for_texture_path(nodes, self._texture_path_for_slot(submaterial, "TexSlot10"), x=-720, y=980)
-        secondary = self._connect_layer_surface_group(
-            nodes,
-            links,
-            base_color_socket=secondary_color_node.outputs[0] if secondary_color_node is not None else None,
-            base_alpha_socket=(
-                _output_socket(secondary_color_node, "Alpha")
-                if (secondary_color_node is not None and plan.uses_alpha)
-                else None
-            ),
-            normal_color_socket=secondary_normal_node.outputs[0] if secondary_normal_node is not None else None,
-            roughness_socket=secondary_roughness,
-            roughness_source_is_smoothness=secondary_roughness_is_smoothness,
-            detail_channels=secondary_detail,
-            detail_diffuse_strength=0.35,
-            detail_gloss_strength=0.35,
-            detail_bump_strength=0.15,
-            tint_color=None,
-            palette=palette,
-            palette_channel_name=material_channel,
-            palette_finish_channel_name=material_channel,
-            palette_glossiness=palette_finish_glossiness(palette, material_channel),
-            specular_value=0.0,
-            palette_specular_value=_mean_triplet(palette_finish_specular(palette, material_channel)) or 0.0,
-            metallic_value=0.0,
-            specular_color=None,
-            x=-180,
-            y=-140,
-            label="Secondary Layer",
-        )
+        if secondary_color_ref is not None:
+            secondary_color_node = self._image_node(
+                nodes,
+                secondary_color_ref.export_path if secondary_color_ref is not None else None,
+                x=-720,
+                y=20,
+                is_color=True,
+            )
+            secondary_normal_ref = _submaterial_texture_reference(submaterial, slots=("TexSlot3",), roles=("normal_gloss",))
+            secondary_normal_node = self._image_node(
+                nodes,
+                secondary_normal_ref.export_path if secondary_normal_ref is not None else None,
+                x=-720,
+                y=-700,
+                is_color=False,
+            )
+            secondary_detail = self._detail_texture_channels(nodes, self._texture_path_for_slot(submaterial, "TexSlot13"), x=-720, y=-980)
+            secondary_roughness, secondary_roughness_is_smoothness = self._roughness_socket_for_texture_reference(nodes, secondary_normal_ref, x=-460, y=-700)
+            secondary_specular = self._specular_socket_for_texture_path(nodes, self._texture_path_for_slot(submaterial, "TexSlot10"), x=-720, y=980)
+            secondary = self._connect_layer_surface_group(
+                nodes,
+                links,
+                base_color_socket=secondary_color_node.outputs[0] if secondary_color_node is not None else None,
+                base_alpha_socket=(
+                    _output_socket(secondary_color_node, "Alpha")
+                    if (secondary_color_node is not None and plan.uses_alpha)
+                    else None
+                ),
+                normal_color_socket=secondary_normal_node.outputs[0] if secondary_normal_node is not None else None,
+                roughness_socket=secondary_roughness,
+                roughness_source_is_smoothness=secondary_roughness_is_smoothness,
+                detail_channels=secondary_detail,
+                detail_diffuse_strength=0.35,
+                detail_gloss_strength=0.35,
+                detail_bump_strength=0.15,
+                tint_color=None,
+                palette=palette,
+                palette_channel_name=material_channel,
+                palette_finish_channel_name=material_channel,
+                palette_glossiness=palette_finish_glossiness(palette, material_channel),
+                specular_value=0.0,
+                palette_specular_value=_mean_triplet(palette_finish_specular(palette, material_channel)) or 0.0,
+                metallic_value=0.0,
+                specular_color=None,
+                x=-180,
+                y=-140,
+                label="Secondary Layer",
+            )
+        else:
+            secondary = LayerSurfaceSockets()
 
         height_primary = self._mask_socket(nodes, self._texture_path_for_slot(submaterial, "TexSlot8"), x=-720, y=-1240)
         height_secondary = self._mask_socket(nodes, self._texture_path_for_slot(submaterial, "TexSlot11"), x=-720, y=-1400)
@@ -1294,11 +1307,12 @@ class BuildersMixin:
         self._link_group_input(links, primary.roughness, shader_group, "Primary Roughness")
         self._link_group_input(links, primary.specular, shader_group, "Primary Specular")
         self._link_group_input(links, primary.normal, shader_group, "Primary Normal")
-        self._link_group_input(links, secondary.color, shader_group, "Secondary Color")
-        self._link_group_input(links, secondary.alpha, shader_group, "Secondary Alpha")
-        self._link_group_input(links, secondary.roughness, shader_group, "Secondary Roughness")
-        self._link_group_input(links, secondary.specular, shader_group, "Secondary Specular")
-        self._link_group_input(links, secondary.normal, shader_group, "Secondary Normal")
+        if secondary.color is not None:
+            self._link_group_input(links, secondary.color, shader_group, "Secondary Color")
+            self._link_group_input(links, secondary.alpha, shader_group, "Secondary Alpha")
+            self._link_group_input(links, secondary.roughness, shader_group, "Secondary Roughness")
+            self._link_group_input(links, secondary.specular, shader_group, "Secondary Specular")
+            self._link_group_input(links, secondary.normal, shader_group, "Secondary Normal")
         self._link_group_input(links, blend_mask_socket, shader_group, "Blend Mask")
         if plan.template_key == "parallax_pom":
             self._link_group_input(links, height_primary, shader_group, "Primary Height")
