@@ -40,6 +40,8 @@ use starbreaker_blend::{
     build_library_block, build_id_stub, LAMP_SIZE, OBJECT_SIZE,
     build_bdeformgroup, build_mdeformvert_array, build_mdeformweight_array, 
     build_custom_data_layer_mdeformvert, SDNA_IDX_BDEFORMGROUP, SDNA_IDX_MDEFORMVERT, SDNA_IDX_LAMP,
+    build_weld_modifier, build_weighted_normal_modifier, set_object_modifiers_listbase,
+    SDNA_IDX_WELD_MODIFIER, SDNA_IDX_WEIGHTED_NORMAL_MODIFIER,
     ints2_data, triangle_edge_topology, write_f32, write_i16, write_identity_matrix4x4, write_ptr,
     write_idprop_blocks, write_light_gobo_node_tree, ATTR_TYPE_INT32_2D, IdPropValue, STARTUP_UI_SCREEN_PTR,
 };
@@ -1383,6 +1385,10 @@ fn mesh_to_blend_flat(
 
     // poly_offsets: [0, 3, 6, ..., totloop] — totpoly+1 entries (sentinel at end)
     let poly_offsets: Vec<i32> = (0..=totpoly as i32).map(|i| i * 3).collect();
+
+    // Modifier pointer allocations (Weld first, WeightedNormal last in chain).
+    let weld_mod_ptr = ptrs.alloc();
+    let wn_mod_ptr = ptrs.alloc();
     let raw_poly_offsets = ints_data(&poly_offsets);
 
     // corner_vert[i] = vertex index for loop corner i
@@ -1475,6 +1481,7 @@ fn mesh_to_blend_flat(
         BLENDER_BAKED_ROOT_QUAT,
         BLENDER_BAKED_ROOT_SCALE,
     );
+    set_object_modifiers_listbase(&mut object_data, weld_mod_ptr, wn_mod_ptr);
     let scene_data = build_scene_with_motion_blur_curve_and_properties(
         name,
         view_layer_ptr,
@@ -1541,6 +1548,12 @@ fn mesh_to_blend_flat(
     write_block(&mut out, b"OB\0\0", SDNA_IDX_OBJECT, object_ptr, 1, &object_data);
     write_block(&mut out, b"DATA", 0, obj_mat_ptr,      1, &obj_mat_array);
     write_block(&mut out, b"DATA", 0, obj_matbits_ptr,  1, &obj_matbits);
+    // Modifier DATA blocks (part of OB's consecutive data chain).
+    // Weld (first): next→wn, prev→0.  WeightedNormal (last): next→0, prev→weld.
+    write_block(&mut out, b"DATA", SDNA_IDX_WELD_MODIFIER, weld_mod_ptr, 1,
+        &build_weld_modifier("StarBreaker Weld", wn_mod_ptr, 0, 0.0005));
+    write_block(&mut out, b"DATA", SDNA_IDX_WEIGHTED_NORMAL_MODIFIER, wn_mod_ptr, 1,
+        &build_weighted_normal_modifier("StarBreaker Weighted Normal", 0, weld_mod_ptr, 50, 0.01));
 
     // ME block + DATA block (gap=1 rule: mesh mat** must immediately follow ME)
     write_block(&mut out, b"ME\0\0", SDNA_IDX_MESH, mesh_ptr, 1, &mesh_data);
@@ -1763,6 +1776,8 @@ struct MeshBlockData {
     vgroup_ptrs: Vec<u64>,
     mdeformvert_ptrs: Vec<(u64, u64)>,
     mdeformweight_ptrs: Vec<u64>,
+    weld_mod_ptr: u64,
+    wn_mod_ptr: u64,
     totvert: usize,
     totedge: usize,
     totpoly: usize,
@@ -2594,6 +2609,8 @@ fn allocate_mesh_block(
         vgroup_ptrs,
         mdeformvert_ptrs,
         mdeformweight_ptrs,
+        weld_mod_ptr: ptrs.alloc(),
+        wn_mod_ptr: ptrs.alloc(),
         totvert,
         totedge,
         totpoly,
@@ -2636,6 +2653,7 @@ fn write_mesh_block(
         0,
     );
     patch_object_parent_transform(&mut object_data, parent_ptr, transform.0, transform.1, transform.2);
+    set_object_modifiers_listbase(&mut object_data, block.weld_mod_ptr, block.wn_mod_ptr);
     let mut mesh_data = build_mesh(
         &object.name,
         block.totvert,
@@ -2661,6 +2679,11 @@ fn write_mesh_block(
     write_block(out, b"OB\0\0", SDNA_IDX_OBJECT, block.object_ptr, 1, &object_data);
     write_block(out, b"DATA", 0, block.obj_mat_ptr, 1, &obj_mat_array);
     write_block(out, b"DATA", 0, block.obj_matbits_ptr, 1, &obj_matbits);
+    // Modifier DATA blocks (part of OB's consecutive data chain).
+    write_block(out, b"DATA", SDNA_IDX_WELD_MODIFIER, block.weld_mod_ptr, 1,
+        &build_weld_modifier("StarBreaker Weld", block.wn_mod_ptr, 0, 0.0005));
+    write_block(out, b"DATA", SDNA_IDX_WEIGHTED_NORMAL_MODIFIER, block.wn_mod_ptr, 1,
+        &build_weighted_normal_modifier("StarBreaker Weighted Normal", 0, block.weld_mod_ptr, 50, 0.01));
     write_block(out, b"ME\0\0", SDNA_IDX_MESH, block.mesh_ptr, 1, &mesh_data);
     write_block(out, b"DATA", 0, block.mesh_mat_ptr, 1, &mesh_mat_array);
     write_block(out, b"DATA", SDNA_IDX_ATTRIBUTE, block.attrs_ptr, block.num_attrs, &block.attr_blob);
@@ -2998,6 +3021,8 @@ fn mesh_to_blend_hierarchy(
                     vgroup_ptrs: block.vgroup_ptrs.clone(),
                     mdeformvert_ptrs: block.mdeformvert_ptrs.clone(),
                     mdeformweight_ptrs: block.mdeformweight_ptrs.clone(),
+                    weld_mod_ptr: block.weld_mod_ptr,
+                    wn_mod_ptr: block.wn_mod_ptr,
                     totvert: block.totvert,
                     totedge: block.totedge,
                     totpoly: block.totpoly,
@@ -3251,6 +3276,8 @@ fn create_scene_blend_package_with_instances(
     let mut interior_coll_obj_ptrs = Vec::new();
     let mut local_mesh_object_entries = Vec::new();
     let mut instance_anchor_entries = Vec::new();
+    // Parallel vec of (weld_mod_ptr, wn_mod_ptr) per local mesh object entry.
+    let mut local_mesh_modifier_ptrs: Vec<(u64, u64)> = Vec::new();
     let mut scene_source_node_entries = Vec::new();
     let mut source_empty_entries = Vec::new();
     let mut parent_empty_entries = Vec::new();
@@ -3472,6 +3499,7 @@ fn create_scene_blend_package_with_instances(
                 .filter_map(|name| scene_material_ptrs.get(name).copied())
                 .collect::<Vec<_>>(),
         ));
+        local_mesh_modifier_ptrs.push((ptrs.alloc(), ptrs.alloc()));
         instance_anchor_entries.push((anchor_ptr, idx, anchor_parent_ptr, anchor_idprops));
         if instance.is_interior {
             interior_coll_obj_ptrs.push((anchor_coll_obj_ptr, anchor_ptr));
@@ -3686,7 +3714,7 @@ fn create_scene_blend_package_with_instances(
     }
 
     let mut local_mesh_object_data = Vec::new();
-    for (object_ptr, mat_ptr, matbits_ptr, idx, object_idprops, parent_anchor_ptr, material_ptrs) in &local_mesh_object_entries {
+    for (entry_idx, (object_ptr, mat_ptr, matbits_ptr, idx, object_idprops, parent_anchor_ptr, material_ptrs)) in local_mesh_object_entries.iter().enumerate() {
         let instance = &mesh_instances_input[*idx];
         let (mesh_id_ptr, _, _) = linked_mesh_ids[*idx];
         let material_slot_count = material_ptrs.len() as i32;
@@ -3705,6 +3733,8 @@ fn create_scene_blend_package_with_instances(
             instance.source_quat,
             instance.source_scale,
         );
+        let (weld_mod_ptr, wn_mod_ptr) = local_mesh_modifier_ptrs[entry_idx];
+        set_object_modifiers_listbase(&mut object_data, weld_mod_ptr, wn_mod_ptr);
         local_mesh_object_data.push((
             *object_ptr,
             object_data,
@@ -3908,6 +3938,12 @@ fn create_scene_blend_package_with_instances(
         }
         write_block(&mut out, b"DATA", 0, local_mesh_object_entries[idx].1, 1, mat_array);
         write_block(&mut out, b"DATA", 0, local_mesh_object_entries[idx].2, 1, matbits);
+        // Modifier DATA blocks (part of OB's consecutive data chain).
+        let (weld_mod_ptr, wn_mod_ptr) = local_mesh_modifier_ptrs[idx];
+        write_block(&mut out, b"DATA", SDNA_IDX_WELD_MODIFIER, weld_mod_ptr, 1,
+            &build_weld_modifier("StarBreaker Weld", wn_mod_ptr, 0, 0.0005));
+        write_block(&mut out, b"DATA", SDNA_IDX_WEIGHTED_NORMAL_MODIFIER, wn_mod_ptr, 1,
+            &build_weighted_normal_modifier("StarBreaker Weighted Normal", 0, weld_mod_ptr, 50, 0.01));
     }
 
     for (material_ptr, material_data) in &scene_material_blocks {

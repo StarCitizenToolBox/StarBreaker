@@ -64,6 +64,8 @@ pub const SDNA_IDX_NODE_TEX_ENVIRONMENT: u32 = 534;
 pub const SDNA_IDX_BNSV_RGBA: u32 = 479;
 pub const SDNA_IDX_BNSV_FLOAT: u32 = 475;
 pub const SDNA_IDX_BNSV_VECTOR: u32 = 477;
+pub const SDNA_IDX_WELD_MODIFIER: u32 = 406;
+pub const SDNA_IDX_WEIGHTED_NORMAL_MODIFIER: u32 = 413;
 
 // ── Struct sizes (bytes) ──────────────────────────────────────────────────────
 pub const FILE_GLOBAL_SIZE: usize = 1216;
@@ -103,6 +105,13 @@ pub const CUSTOM_DATA_LAYER_SIZE: usize = 112;
 pub const IDPROPERTY_SIZE: usize = 144;
 pub const LIBRARY_SIZE: usize = 1472;  // ID (408) + filepath[1024] + flag (2) + undo_runtime_tag (2) + _pad (4) + archive_parent_library (8) + packedfile (8) + runtime (8) + _pad2 (8)
 pub const ID_STUB_SIZE: usize = 408;
+pub const WELD_MODIFIER_SIZE: usize = 192;
+pub const WEIGHTED_NORMAL_MODIFIER_SIZE: usize = 192;
+/// `eModifierType_Displace` = 14, `eModifierType_WeightedNormal` = 54, `eModifierType_Weld` = 55.
+pub const MODIFIER_TYPE_WELD: i32 = 55;
+pub const MODIFIER_TYPE_WEIGHTED_NORMAL: i32 = 54;
+/// `mode` field bitmask: `eModifierMode_Realtime` (1) | `eModifierMode_Render` (2).
+pub const MODIFIER_MODE_DEFAULT: i32 = 3;
 
 const NODE_TEX_SKY_REFERENCE_HEX: &str = concat!(
     "0000000000000000000000000000000000000000000000000000803f0000803f0000803f0000000001020300000000000000803f000000000000000000000000",
@@ -2143,7 +2152,77 @@ pub fn build_id_stub(datablock_type: &str, name: &str, lib_ptr: u64) -> Vec<u8> 
     buf
 }
 
-/// Compress/decompress test for Zstd roundtrip.
+// ── Modifier builders ─────────────────────────────────────────────────────────
+
+/// Write the 120-byte `ModifierData` base into the start of `data`.
+///
+/// Layout (SDNA-verified, Blender 5.1):
+/// - +0:  `*next` (ptr)
+/// - +8:  `*prev` (ptr)
+/// - +16: `type`  (int, eModifierType)
+/// - +20: `mode`  (int, eModifierMode bitmask)
+/// - +40: `name[64]` (char)
+fn write_modifier_base(data: &mut Vec<u8>, next_ptr: u64, prev_ptr: u64, mod_type: i32, name: &str) {
+    write_ptr(data, 0, next_ptr);
+    write_ptr(data, 8, prev_ptr);
+    write_i32(data, 16, mod_type);
+    write_i32(data, 20, MODIFIER_MODE_DEFAULT);
+    write_cstr_fixed(data, 40, 64, name);
+}
+
+/// Build a `WeldModifierData` block (192 bytes).
+///
+/// Merges nearby vertices during evaluation.
+/// Layout (SDNA #406, Blender 5.1):
+/// - +0..+119: `ModifierData` base
+/// - +120: `merge_dist` (float)
+/// - +124: `defgrp_name[64]` (char) — empty = no vertex group restriction
+/// - +188: `mode` (char) — 0 = ALL
+pub fn build_weld_modifier(name: &str, next_ptr: u64, prev_ptr: u64, merge_dist: f32) -> Vec<u8> {
+    let mut data = vec![0u8; WELD_MODIFIER_SIZE];
+    write_modifier_base(&mut data, next_ptr, prev_ptr, MODIFIER_TYPE_WELD, name);
+    write_f32(&mut data, 120, merge_dist);
+    // defgrp_name[64] at +124: all zeros = no vertex group restriction
+    // mode at +188: 0 = ALL (default, already zero)
+    data
+}
+
+/// Build a `WeightedNormalModifierData` block (192 bytes).
+///
+/// Applies weighted normals using face area weighting.
+/// Layout (SDNA #413, Blender 5.1):
+/// - +0..+119: `ModifierData` base
+/// - +120: `defgrp_name[64]` (char) — empty = no vertex group restriction
+/// - +184: `mode` (char) — 0 = FACE_AREA
+/// - +185: `flag` (char)
+/// - +186: `weight` (short, i16)
+/// - +188: `thresh` (float)
+pub fn build_weighted_normal_modifier(
+    name: &str,
+    next_ptr: u64,
+    prev_ptr: u64,
+    weight: i16,
+    thresh: f32,
+) -> Vec<u8> {
+    let mut data = vec![0u8; WEIGHTED_NORMAL_MODIFIER_SIZE];
+    write_modifier_base(&mut data, next_ptr, prev_ptr, MODIFIER_TYPE_WEIGHTED_NORMAL, name);
+    // defgrp_name[64] at +120: all zeros = no vertex group restriction
+    // mode at +184: 0 = FACE_AREA (default, already zero)
+    write_i16(&mut data, 186, weight);
+    write_f32(&mut data, 188, thresh);
+    data
+}
+
+/// Patch `Object.modifiers` ListBase at offsets 656/664.
+///
+/// `first_ptr` points to the first modifier in the chain; `last_ptr` to the last.
+/// Each modifier's `next`/`prev` pointers form the doubly-linked list.
+pub fn set_object_modifiers_listbase(data: &mut Vec<u8>, first_ptr: u64, last_ptr: u64) {
+    write_ptr(data, 656, first_ptr);
+    write_ptr(data, 664, last_ptr);
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
