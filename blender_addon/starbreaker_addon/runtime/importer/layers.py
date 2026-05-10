@@ -222,6 +222,8 @@ class LayersMixin:
         palette_specular_value: float,
         metallic_value: float,
         specular_color: tuple[float, float, float] | None,
+        specular_socket: Any = None,
+        metallic_socket: Any = None,
         x: int,
         y: int,
         label: str,
@@ -305,6 +307,8 @@ class LayersMixin:
         self._link_group_input(links, base_alpha_socket, group_node, "Base Alpha")
         self._link_group_input(links, normal_color_socket, group_node, "Normal Color")
         self._link_group_input(links, roughness_socket, group_node, "Roughness Source")
+        self._link_group_input(links, specular_socket, group_node, "Specular Value")
+        self._link_group_input(links, metallic_socket, group_node, "Metallic")
         self._link_group_input(links, palette_color_socket, group_node, "Palette Color")
         self._link_group_input(links, palette_gloss_socket, group_node, "Palette Glossiness")
         self._link_group_input(links, palette_specular_socket, group_node, "Palette Specular")
