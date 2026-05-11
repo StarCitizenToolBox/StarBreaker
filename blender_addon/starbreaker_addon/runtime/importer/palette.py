@@ -280,8 +280,21 @@ class PaletteMixin:
             }
             expected_inputs = {"Image", "Decal Red Tint", "Decal Green Tint", "Decal Blue Tint"}
             expected_outputs = {"Color", "Alpha"}
-            if expected_inputs.issubset(existing_inputs) and expected_outputs.issubset(
-                existing_outputs
+            has_map_range = any(node.bl_idname == "ShaderNodeMapRange" for node in group.nodes)
+            channel_mix_nodes = [
+                node
+                for node in group.nodes
+                if node.bl_idname == "ShaderNodeMix"
+                and getattr(node, "label", "") in {"Red Mix", "Green Mix", "Blue Mix"}
+            ]
+            mixes_are_add = len(channel_mix_nodes) == 3 and all(
+                getattr(node, "blend_type", "") == "ADD" for node in channel_mix_nodes
+            )
+            if (
+                expected_inputs.issubset(existing_inputs)
+                and expected_outputs.issubset(existing_outputs)
+                and has_map_range
+                and mixes_are_add
             ):
                 return group
         if group is None:
@@ -308,19 +321,27 @@ class PaletteMixin:
         separate_rgb.location = (-140, 300)
         if hasattr(separate_rgb, "mode"):
             separate_rgb.mode = "RGB"
-        group.links.new(group_input.outputs["Image"], separate_rgb.inputs[0])
+
+        map_range = group.nodes.new("ShaderNodeMapRange")
+        map_range.location = (-360, 380)
+        if hasattr(map_range, "data_type"):
+            map_range.data_type = "FLOAT"
+        if hasattr(map_range, "clamp"):
+            map_range.clamp = True
+        group.links.new(group_input.outputs["Image"], map_range.inputs["Value"])
+        group.links.new(map_range.outputs["Result"], separate_rgb.inputs[0])
 
         separate_hsv = group.nodes.new("ShaderNodeSeparateColor")
         separate_hsv.location = (460, 60)
         if hasattr(separate_hsv, "mode"):
             separate_hsv.mode = "HSV"
-        group.links.new(group_input.outputs["Image"], separate_hsv.inputs[0])
+        group.links.new(map_range.outputs["Result"], separate_hsv.inputs[0])
 
         red_mix = group.nodes.new("ShaderNodeMix")
         red_mix.label = "Red Mix"
         red_mix.location = (60, 340)
         red_mix.data_type = "RGBA"
-        red_mix.blend_type = "MIX"
+        red_mix.blend_type = "ADD"
         red_mix.clamp_factor = True
         red_mix.inputs[6].default_value = (0.0, 0.0, 0.0, 1.0)
         group.links.new(_output_socket(separate_rgb, "Red", "R"), red_mix.inputs[0])
@@ -330,7 +351,7 @@ class PaletteMixin:
         green_mix.label = "Green Mix"
         green_mix.location = (260, 320)
         green_mix.data_type = "RGBA"
-        green_mix.blend_type = "MIX"
+        green_mix.blend_type = "ADD"
         green_mix.clamp_factor = True
         group.links.new(_output_socket(separate_rgb, "Green", "G"), green_mix.inputs[0])
         group.links.new(red_mix.outputs[2], green_mix.inputs[6])
@@ -340,7 +361,7 @@ class PaletteMixin:
         blue_mix.label = "Blue Mix"
         blue_mix.location = (460, 300)
         blue_mix.data_type = "RGBA"
-        blue_mix.blend_type = "MIX"
+        blue_mix.blend_type = "ADD"
         blue_mix.clamp_factor = True
         group.links.new(_output_socket(separate_rgb, "Blue", "B"), blue_mix.inputs[0])
         group.links.new(green_mix.outputs[2], blue_mix.inputs[6])
