@@ -1064,6 +1064,8 @@ pub struct ExportRequest {
     pub overwrite_existing_assets: bool,
     pub include_nodraw: bool,
     pub include_animations: bool,
+    #[serde(default)]
+    pub include_object_type_directory: bool,
 }
 
 #[derive(Clone)]
@@ -1329,6 +1331,7 @@ pub async fn start_export(
         include_animations: request.include_animations,
         apply_default_animation_pose: !request.include_animations,
         default_animation_tags: vec!["landing_gear_extend".to_string()],
+        decomposed_package_subdir: None,
     };
 
     log::info!(
@@ -1346,6 +1349,7 @@ pub async fn start_export(
     let output_dir = request.output_dir;
     let requested_threads = request.threads;
     let overwrite_existing_assets = request.overwrite_existing_assets;
+    let include_object_type_directory = request.include_object_type_directory;
 
     tokio::task::spawn_blocking(move || {
         let db = match starbreaker_datacore::database::Database::from_bytes(&dcb_bytes) {
@@ -1418,9 +1422,17 @@ pub async fn start_export(
                         sanitize_filename(export_name),
                         bundled_extension(opts.format),
                     );
+                    let object_type_dir = if include_object_type_directory {
+                        output_object_type_directory_for_record(&db, record_id)
+                    } else {
+                        None
+                    };
                     let output_path = match opts.kind {
                         starbreaker_3d::ExportKind::Bundled => {
-                            std::path::PathBuf::from(&output_dir).join(&filename)
+                            let base_output_dir = object_type_dir
+                                .map(|dir| std::path::PathBuf::from(&output_dir).join(dir))
+                                .unwrap_or_else(|| std::path::PathBuf::from(&output_dir));
+                            base_output_dir.join(&filename)
                         }
                         starbreaker_3d::ExportKind::Decomposed => std::path::PathBuf::from(&output_dir),
                     };
@@ -1433,6 +1445,7 @@ pub async fn start_export(
                         &opts,
                         export_name,
                         overwrite_existing_assets,
+                        object_type_dir,
                         Some(progress_slot.progress.as_ref()),
                         Some(existing_asset_paths.as_ref()),
                     ) {
@@ -1489,6 +1502,7 @@ fn export_single(
     opts: &starbreaker_3d::ExportOptions,
     export_name: &str,
     overwrite_existing_assets: bool,
+    object_type_dir: Option<&str>,
     progress: Option<&Progress>,
     existing_asset_paths: Option<&HashSet<String>>,
 ) -> Result<(), AppError> {
@@ -1502,7 +1516,14 @@ fn export_single(
         p4k,
         record,
         &tree,
-        opts,
+        &starbreaker_3d::ExportOptions {
+            decomposed_package_subdir: if opts.kind == starbreaker_3d::ExportKind::Decomposed {
+                object_type_dir.map(ToOwned::to_owned)
+            } else {
+                None
+            },
+            ..opts.clone()
+        },
         progress,
         existing_asset_paths,
     )?;
@@ -1564,6 +1585,23 @@ fn export_entity_name(name: &str) -> String {
         .to_string()
 }
 
+fn output_object_type_directory_for_record(
+    db: &starbreaker_datacore::database::Database,
+    record_id: &CigGuid,
+) -> Option<&'static str> {
+    let record = db.record_by_id(record_id)?;
+    let file_path = db.resolve_string(record.file_name_offset).to_ascii_lowercase();
+    if file_path.contains("entities/spaceships") {
+        Some("ship")
+    } else if file_path.contains("entities/groundvehicles") {
+        Some("vehicle")
+    } else if file_path.contains("weapon") {
+        Some("weapon")
+    } else {
+        Some("other")
+    }
+}
+
 fn sanitize_export_name(name: &str) -> String {
     let mut cleaned = String::new();
     let mut last_was_space = false;
@@ -1601,8 +1639,9 @@ fn sanitize_filename(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        decomposed_package_directory_name, export_entity_name, sanitize_export_name,
-        should_skip_existing_decomposed_asset, snapshot_export_progress, ExportProgressSlot,
+        decomposed_package_directory_name, export_entity_name,
+        sanitize_export_name, should_skip_existing_decomposed_asset, snapshot_export_progress,
+        ExportProgressSlot,
     };
     use starbreaker_common::Progress;
     use std::sync::Arc;

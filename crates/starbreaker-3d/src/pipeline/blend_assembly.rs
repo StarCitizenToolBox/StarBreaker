@@ -145,6 +145,19 @@ fn package_scene_path(package_name: &str) -> String {
     format!("Packages/{package_name}/scene.json")
 }
 
+fn package_path_depth(package_name: &str) -> usize {
+    package_name.split('/').filter(|part| !part.is_empty()).count()
+}
+
+fn scene_library_blend_path(package_name: &str, mesh_asset: &str) -> String {
+    let mut relative = String::from("//");
+    for _ in 0..(package_path_depth(package_name) + 1) {
+        relative.push_str("../");
+    }
+    relative.push_str(mesh_asset);
+    relative
+}
+
 fn package_root_properties(entity_name: &str) -> Vec<(String, IdPropValue)> {
     vec![
         ("starbreaker_package_root".to_string(), IdPropValue::Int(1)),
@@ -1039,6 +1052,15 @@ pub fn write_decomposed_export_blend(
         .collect();
 
     scene_mesh_instances.clear();
+    let scene_package_name = manifest_files
+        .iter()
+        .find_map(|file| {
+            file.relative_path
+                .strip_prefix("Packages/")
+                .and_then(|path| path.strip_suffix("/scene.json"))
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_else(|| scene_entity_name.clone());
     let manifest_instances = scene_manifest_instances(&manifest_files);
     let mut used_scene_object_names = HashMap::new();
     if manifest_instances.is_empty() {
@@ -1075,7 +1097,7 @@ pub fn write_decomposed_export_blend(
                         source_quat: linked_mesh_ref.object_quat,
                         source_scale: linked_mesh_ref.object_scale,
                         parent_node_name: None,
-                        blend_path: format!("//../../{}", file.relative_path),
+                        blend_path: scene_library_blend_path(&scene_package_name, &file.relative_path),
                         mesh_asset: file.relative_path.clone(),
                         position: [0.0, 0.0, 0.0],
                         rotation: [1.0, 0.0, 0.0, 0.0],
@@ -1120,7 +1142,10 @@ pub fn write_decomposed_export_blend(
                         source_quat: linked_mesh_ref.object_quat,
                         source_scale: linked_mesh_ref.object_scale,
                         parent_node_name: manifest_instance.parent_node_name.clone(),
-                        blend_path: format!("//../../{}", manifest_instance.mesh_asset),
+                        blend_path: scene_library_blend_path(
+                            &scene_package_name,
+                            &manifest_instance.mesh_asset,
+                        ),
                         mesh_asset: manifest_instance.mesh_asset.clone(),
                         position: manifest_instance.loc,
                         rotation: manifest_instance.quat,
@@ -1150,15 +1175,6 @@ pub fn write_decomposed_export_blend(
     // Library paths are relative to scene.blend location, which is in Packages/{package}/
     // So we need ../../Data/Objects to reach the shared assets
     log::info!("[blend-debug] Creating scene.blend with {} children and {} lights", children_for_scene.len(), extracted_lights.len());
-    let scene_package_name = manifest_files
-        .iter()
-        .find_map(|file| {
-            file.relative_path
-                .strip_prefix("Packages/")
-                .and_then(|path| path.strip_suffix("/scene.json"))
-                .map(ToOwned::to_owned)
-        })
-        .unwrap_or_else(|| scene_entity_name.clone());
     let scene_blend_bytes = create_scene_blend_package_with_instances_and_decal_offsets(
         &scene_package_name,
         &scene_entity_name,
@@ -1183,21 +1199,7 @@ pub fn write_decomposed_export_blend(
     all_files.extend(other_files);
     
     // Determine package_name from first mesh if available
-    let package_name = if let Some(first_file) = all_files.iter().find(|f| f.relative_path.contains("Packages/")) {
-        // Extract "Packages/PackageName" from relative paths like "Packages/PackageName/mesh_0.blend"
-        if let Some(pkg_start) = first_file.relative_path.find("Packages/") {
-            let after_packages = &first_file.relative_path[pkg_start + 9..]; // Skip "Packages/"
-            if let Some(slash_pos) = after_packages.find('/') {
-                format!("Packages/{}", &after_packages[..slash_pos])
-            } else {
-                "Packages/Default".to_string()
-            }
-        } else {
-            "Packages/Default".to_string()
-        }
-    } else {
-        "Packages/Default".to_string()
-    };
+    let package_name = format!("Packages/{scene_package_name}");
     
     // Add our detailed scene.blend with proper relative path and kind
     all_files.push(ExportedFile {
@@ -4198,6 +4200,27 @@ fn linked_collection_object_data(entries: &[(u64, u64)]) -> Vec<(u64, Vec<u8>)> 
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests_package_paths {
+    use super::scene_library_blend_path;
+
+    #[test]
+    fn scene_library_path_for_top_level_package() {
+        assert_eq!(
+            scene_library_blend_path("DRAK Buccaneer_LOD0_TEX0", "Data/Objects/test.blend"),
+            "//../../Data/Objects/test.blend"
+        );
+    }
+
+    #[test]
+    fn scene_library_path_for_typed_package_subdir() {
+        assert_eq!(
+            scene_library_blend_path("ship/DRAK Buccaneer_LOD0_TEX0", "Data/Objects/test.blend"),
+            "//../../../Data/Objects/test.blend"
+        );
+    }
 }
 
 #[cfg(test)]

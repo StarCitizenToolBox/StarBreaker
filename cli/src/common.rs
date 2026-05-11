@@ -104,6 +104,7 @@ impl From<&ExportOpts> for starbreaker_3d::ExportOptions {
             include_animations: matches!(kind, starbreaker_3d::ExportKind::Decomposed),
             apply_default_animation_pose: !matches!(kind, starbreaker_3d::ExportKind::Decomposed),
             default_animation_tags: vec!["landing_gear_extend".to_string()],
+            decomposed_package_subdir: None,
         }
     }
 }

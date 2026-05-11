@@ -344,6 +344,19 @@ fn package_relative_path(package_name: &str, file_name: &str) -> String {
     format!("Packages/{package_name}/{file_name}")
 }
 
+fn normalize_package_subdir(subdir: &str) -> Option<String> {
+    let normalized = subdir.replace('\\', "/");
+    let parts = normalized
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != "." && *part != "..")
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("/"))
+    }
+}
+
 pub(crate) fn build_decomposed_material_view(
     mesh: &Mesh,
     materials: Option<&MtlFile>,
@@ -743,7 +756,16 @@ pub(crate) fn write_decomposed_export(
     let mut png_cache = PngCache::new();
     let mut palette_records = BTreeMap::new();
     let mut livery_usage = BTreeMap::new();
-    let package_name = package_directory_name(&input.entity_name, opts.lod_level, opts.texture_mip);
+    let package_leaf = package_directory_name(&input.entity_name, opts.lod_level, opts.texture_mip);
+    let package_name = if let Some(subdir) = opts
+        .decomposed_package_subdir
+        .as_deref()
+        .and_then(normalize_package_subdir)
+    {
+        format!("{subdir}/{package_leaf}")
+    } else {
+        package_leaf
+    };
     let scene_manifest_path = package_relative_path(&package_name, "scene.json");
     let palettes_manifest_path = package_relative_path(&package_name, "palettes.json");
     let liveries_manifest_path = package_relative_path(&package_name, "liveries.json");
@@ -3016,6 +3038,14 @@ mod tests {
             package_directory_name("EntityClassDefinition.RSI_Aurora_Mk2", 2, 1),
             "RSI Aurora Mk2_LOD2_TEX1"
         );
+    }
+
+    #[test]
+    fn normalize_package_subdir_filters_invalid_segments() {
+        assert_eq!(normalize_package_subdir("ship"), Some("ship".to_string()));
+        assert_eq!(normalize_package_subdir("vehicle/test"), Some("vehicle/test".to_string()));
+        assert_eq!(normalize_package_subdir("../ship"), Some("ship".to_string()));
+        assert_eq!(normalize_package_subdir(""), None);
     }
 
     #[test]

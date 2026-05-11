@@ -130,6 +130,10 @@ pub struct ExportOptions {
     /// when `apply_default_animation_pose` is enabled. The first match wins
     /// per skeleton. Default: `landing_gear_extend`.
     pub default_animation_tags: Vec<String>,
+    /// Optional subdirectory under `Packages/` for decomposed outputs.
+    /// Example: `ship` writes manifests to `Packages/ship/<package>/...` while
+    /// still keeping shared assets under `Data/...`.
+    pub decomposed_package_subdir: Option<String>,
 }
 
 impl Default for ExportOptions {
@@ -149,6 +153,7 @@ impl Default for ExportOptions {
             include_animations: false,
             apply_default_animation_pose: true,
             default_animation_tags: vec!["landing_gear_extend".to_string()],
+            decomposed_package_subdir: None,
         }
     }
 }

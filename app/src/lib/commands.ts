@@ -124,6 +124,7 @@ export interface ExportRequest {
   overwrite_existing_assets: boolean;
   include_nodraw: boolean;
   include_animations: boolean;
+  include_object_type_directory: boolean;
 }
 
 export interface ExportProgress {

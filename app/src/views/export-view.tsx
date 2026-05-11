@@ -47,6 +47,7 @@ export function ExportView() {
   const overwriteExistingAssets = useExportStore((s) => s.overwriteExistingAssets);
   const includeNodraw = useExportStore((s) => s.includeNodraw);
   const includeAnimations = useExportStore((s) => s.includeAnimations);
+  const includeObjectTypeDirectory = useExportStore((s) => s.includeObjectTypeDirectory);
   const threads = useExportStore((s) => s.threads);
   const outputDir = useExportStore((s) => s.outputDir);
   const setLod = useExportStore((s) => s.setLod);
@@ -59,6 +60,7 @@ export function ExportView() {
   const setOverwriteExistingAssets = useExportStore((s) => s.setOverwriteExistingAssets);
   const setIncludeNodraw = useExportStore((s) => s.setIncludeNodraw);
   const setIncludeAnimations = useExportStore((s) => s.setIncludeAnimations);
+  const setIncludeObjectTypeDirectory = useExportStore((s) => s.setIncludeObjectTypeDirectory);
   const setThreads = useExportStore((s) => s.setThreads);
   const setOutputDir = useExportStore((s) => s.setOutputDir);
 
@@ -187,6 +189,7 @@ export function ExportView() {
       overwrite_existing_assets: overwriteExistingAssets,
       include_nodraw: includeNodraw,
       include_animations: includeAnimations,
+      include_object_type_directory: includeObjectTypeDirectory,
     };
     setExporting(true);
     setProgress(
@@ -727,6 +730,17 @@ export function ExportView() {
                 {outputDir ?? "Choose folder..."}
               </span>
             </button>
+            <label className="flex items-center gap-2.5 cursor-pointer group mt-1">
+              <input
+                type="checkbox"
+                checked={includeObjectTypeDirectory}
+                onChange={(e) => setIncludeObjectTypeDirectory(e.target.checked)}
+                className="accent-accent w-3.5 h-3.5 rounded"
+              />
+              <span className="text-xs text-text-sub group-hover:text-text transition-colors">
+                Include object type directory (ship, vehicle, weapon, other)
+              </span>
+            </label>
           </div>
         </div>
 
