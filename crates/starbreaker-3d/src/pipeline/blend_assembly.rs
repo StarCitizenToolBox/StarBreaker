@@ -594,18 +594,6 @@ fn light_data_properties(
     props
 }
 
-fn insert_stem_suffix(path: &str, suffix: &str) -> String {
-    let (dir, file) = match path.rsplit_once('/') {
-        Some((dir, file)) => (format!("{dir}/"), file),
-        None => (String::new(), path),
-    };
-    let (stem, ext) = match file.find('.') {
-        Some(index) => (&file[..index], &file[index..]),
-        None => (file, ""),
-    };
-    format!("{dir}{stem}{suffix}{ext}")
-}
-
 fn decal_face_indices_for_mesh(mesh: &Mesh, mesh_with_decals: &MeshWithDecals) -> Vec<usize> {
     let decal_material_indices = mesh_with_decals
         .decal_materials
@@ -633,54 +621,12 @@ fn decal_face_indices_for_mesh(mesh: &Mesh, mesh_with_decals: &MeshWithDecals) -
     decal_face_indices
 }
 
-fn replace_extension(path: &str, new_extension: &str) -> String {
-    let Some((stem, _)) = path.rsplit_once('.') else {
-        return format!("{path}{new_extension}");
-    };
-    stem.to_string() + new_extension
-}
-
-fn normalize_source_path(p4k: &MappedP4k, path: &str) -> String {
-    let p4k_path = crate::pipeline::datacore_path_to_p4k(path);
-    p4k.entry_case_insensitive(&p4k_path)
-        .map(|entry| entry.name.replace('\\', "/"))
-        .unwrap_or_else(|| p4k_path.replace('\\', "/"))
-}
-
-fn mesh_asset_relative_path_with_extension(
-    p4k: &MappedP4k,
-    geometry_path: &str,
-    fallback_name: &str,
-    lod: u32,
-    extension: &str,
-) -> String {
-    let base = if geometry_path.is_empty() {
-        format!(
-            "Data/generated/{}{}",
-            fallback_name.replace([' ', '\\', '/', ':'], "_"),
-            extension
-        )
-    } else {
-        replace_extension(&normalize_source_path(p4k, geometry_path), extension)
-    };
-    insert_stem_suffix(&base, &format!("_LOD{lod}"))
-}
-
-fn blend_mesh_asset_relative_path(
-    p4k: &MappedP4k,
-    geometry_path: &str,
-    fallback_name: &str,
-    lod: u32,
-) -> String {
-    mesh_asset_relative_path_with_extension(p4k, geometry_path, fallback_name, lod, ".blend")
-}
-
 /// Convert `DecomposedInput` into a decomposed export with individual `.blend` files.
 ///
 /// **Phase 1**: Mesh Decomposition to individual .blend files
 /// - Extracts real mesh data from DecomposedInput::children
 /// - Generates full decomposed export (scene.json, package manifests, etc.)
-/// - Replaces generic mesh asset payloads with individual .blend files using real geometry
+/// - Writes native .blend mesh assets directly to the decomposed package
 /// - Each mesh gets its own uncompressed .blend file with actual mesh data
 ///
 /// **Phase 3**: Lights and Empties Integration
@@ -709,7 +655,13 @@ pub fn write_decomposed_export_blend(
     let mut mesh_data_map: HashMap<String, MeshDataEntry> = HashMap::new();
     let mut child_mesh_data_map: HashMap<String, MeshDataEntry> = HashMap::new();
     
-    let root_mesh_asset = blend_mesh_asset_relative_path(p4k, &input.geometry_path, &input.entity_name, opts.lod_level);
+    let root_mesh_asset = crate::decomposed::mesh_asset_relative_path(
+        p4k,
+        &input.geometry_path,
+        &input.entity_name,
+        opts.lod_level,
+        opts.format,
+    );
     let root_material_view = crate::decomposed::build_decomposed_material_view(
         &input.root_mesh,
         input.root_materials.as_ref(),
@@ -725,7 +677,13 @@ pub fn write_decomposed_export_blend(
     });
     
     for child in &input.children {
-        let mesh_asset = blend_mesh_asset_relative_path(p4k, &child.geometry_path, &child.entity_name, opts.lod_level);
+        let mesh_asset = crate::decomposed::mesh_asset_relative_path(
+            p4k,
+            &child.geometry_path,
+            &child.entity_name,
+            opts.lod_level,
+            opts.format,
+        );
         let child_material_view = crate::decomposed::build_decomposed_material_view(
             &child.mesh,
             child.materials.as_ref(),
@@ -771,7 +729,13 @@ pub fn write_decomposed_export_blend(
         -> Option<(Mesh, Option<crate::mtl::MtlFile>, Option<crate::nmc::NodeMeshCombo>)> {
         let loaded = load_interior_mesh_asset(p4k, entry, &interior_mesh_opts, &mut interior_png_cache)?;
         let (mesh, materials, nmc) = loaded.clone();
-        let mesh_asset = blend_mesh_asset_relative_path(p4k, &entry.cgf_path, &entry.name, opts.lod_level);
+        let mesh_asset = crate::decomposed::mesh_asset_relative_path(
+            p4k,
+            &entry.cgf_path,
+            &entry.name,
+            opts.lod_level,
+            opts.format,
+        );
         let material_view = crate::decomposed::build_decomposed_material_view(
             &mesh,
             materials.as_ref(),
@@ -791,8 +755,9 @@ pub fn write_decomposed_export_blend(
 
     report_progress(progress, 0.0, "Generating decomposed export with .blend mesh files");
 
-    // Generate the package manifest and reusable-asset list with the shared decomposed
-    // exporter, then replace its mesh asset payloads with native .blend bytes below.
+    // Generate package manifests, sidecars, textures, palettes, and the reusable
+    // native .blend asset list with the shared decomposed exporter. Mesh asset
+    // payloads are populated with real .blend bytes below.
     let base_export = crate::decomposed::write_decomposed_export(
         p4k,
         input,
@@ -881,7 +846,7 @@ pub fn write_decomposed_export_blend(
 
     report_progress(progress, 0.5, "Writing native .blend mesh assets with real geometry");
 
-    // Replace generic mesh asset payloads with .blend files using REAL mesh data.
+    // Populate native .blend mesh asset payloads with real geometry.
     let mut blend_files = Vec::new();
     let mut manifest_files = Vec::new();
     let mut other_files = Vec::new();
@@ -889,11 +854,14 @@ pub fn write_decomposed_export_blend(
     let mut source_nodes_by_asset = HashMap::new();
     let mut blend_asset_jobs = Vec::new();
     for file in base_export.files {
-        if file.relative_path.ends_with(".glb") && file.kind == ExportedFileKind::MeshAsset {
-            // This is a generic mesh asset placeholder from the shared decomposed enumerator.
-            // The native Blend workflow only keeps the corresponding .blend path and payload.
-            let blend_path = file.relative_path.replace(".glb", ".blend");
-            
+        if file.kind == ExportedFileKind::MeshAsset {
+            let blend_path = file.relative_path;
+            if !blend_path.ends_with(".blend") {
+                return Err(Error::Other(format!(
+                    "native Blend export expected .blend mesh asset path, got '{}'",
+                    blend_path
+                )));
+            }
             // Extract mesh name from path for Blender object naming
             let mesh_name = blend_path
                 .split('/')
@@ -908,12 +876,9 @@ pub fn write_decomposed_export_blend(
                 blend_key,
             });
         } else if file.kind == ExportedFileKind::PackageManifest {
-            // Update manifest files to replace .glb references with .blend
-            let bytes_str = String::from_utf8_lossy(&file.bytes);
-            let updated = bytes_str.replace(".glb\"", ".blend\"");
             manifest_files.push(ExportedFile {
                 relative_path: file.relative_path,
-                bytes: updated.into_bytes(),
+                bytes: file.bytes,
                 kind: file.kind,
             });
         } else if !file.relative_path.ends_with("scene.blend") {

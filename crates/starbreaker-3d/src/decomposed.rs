@@ -12,7 +12,7 @@ use crate::gltf::{offset_to_gltf_matrix, GlbBuilder, PackedMeshInfo};
 use crate::mtl::{MtlFile, SemanticTextureBinding, SubMaterial, TextureSemanticRole, TintPalette};
 use crate::nmc::NodeMeshCombo;
 use crate::pipeline::{
-    DecomposedExport, ExportOptions, ExportedFile, ExportedFileKind, InteriorCgfEntry,
+    DecomposedExport, ExportFormat, ExportOptions, ExportedFile, ExportedFileKind, InteriorCgfEntry,
     LoadedInteriors, MaterialMode,
     PngCache,
 };
@@ -766,6 +766,7 @@ pub(crate) fn write_decomposed_export(
         root_material_view.glb_nmc.as_ref(),
         &input.root_bones,
         opts.lod_level,
+        opts.format,
         existing_asset_paths,
     )?;
     let root_material_sidecar = root_material_view.sidecar_materials.as_ref().map(|materials| {
@@ -868,6 +869,7 @@ pub(crate) fn write_decomposed_export(
             child_material_view.glb_nmc.as_ref(),
             &child.bones,
             opts.lod_level,
+            opts.format,
             existing_asset_paths,
         )?;
         let material_sidecar = child_material_view.sidecar_materials.as_ref().map(|materials| {
@@ -978,7 +980,13 @@ pub(crate) fn write_decomposed_export(
                     mesh.submeshes.len(),
                     interior_material_view.mesh.submeshes.len()
                 );
-                let requested_mesh_asset = mesh_asset_relative_path(p4k, &entry.cgf_path, &entry.name, opts.lod_level);
+                let requested_mesh_asset = mesh_asset_relative_path(
+                    p4k,
+                    &entry.cgf_path,
+                    &entry.name,
+                    opts.lod_level,
+                    opts.format,
+                );
                 let requested_material_sidecar = interior_material_view.sidecar_materials.as_ref().map(|materials| {
                     let source_material_path = material_source_path(
                         p4k,
@@ -1025,6 +1033,7 @@ pub(crate) fn write_decomposed_export(
                         interior_material_view.glb_nmc.as_ref(),
                         &[],
                         opts.lod_level,
+                        opts.format,
                         existing_asset_paths,
                     )?
                 };
@@ -1322,7 +1331,7 @@ pub(crate) fn write_decomposed_export(
 fn classify_exported_file_kind(relative_path: &str) -> ExportedFileKind {
     if relative_path.ends_with(".materials.json") {
         ExportedFileKind::MaterialSidecar
-    } else if relative_path.ends_with(".glb") {
+    } else if relative_path.ends_with(".glb") || relative_path.ends_with(".blend") {
         ExportedFileKind::MeshAsset
     } else if relative_path.ends_with(".png") {
         ExportedFileKind::TextureAsset
@@ -1539,9 +1548,10 @@ fn write_mesh_asset(
     _nmc: Option<&NodeMeshCombo>,
     _bones: &[Bone],
     lod_level: u32,
+    format: ExportFormat,
     existing_asset_paths: Option<&HashSet<String>>,
 ) -> Result<String, Error> {
-    let requested_path = mesh_asset_relative_path(p4k, geometry_path, fallback_name, lod_level);
+    let requested_path = mesh_asset_relative_path(p4k, geometry_path, fallback_name, lod_level, format);
     if existing_asset_paths
         .is_some_and(|paths| paths.contains(&requested_path.to_ascii_lowercase()))
     {
@@ -2172,11 +2182,25 @@ fn material_source_request(materials: &MtlFile, material_path: &str, geometry_pa
     }
 }
 
-fn mesh_asset_relative_path(p4k: &MappedP4k, geometry_path: &str, fallback_name: &str, lod: u32) -> String {
+fn mesh_asset_extension(format: ExportFormat) -> &'static str {
+    match format {
+        ExportFormat::Blend => ".blend",
+        ExportFormat::Glb | ExportFormat::Stl => ".glb",
+    }
+}
+
+pub(crate) fn mesh_asset_relative_path(
+    p4k: &MappedP4k,
+    geometry_path: &str,
+    fallback_name: &str,
+    lod: u32,
+    format: ExportFormat,
+) -> String {
+    let extension = mesh_asset_extension(format);
     let base = if geometry_path.is_empty() {
-        format!("Data/generated/{}.glb", sanitize_identifier(fallback_name))
+        format!("Data/generated/{}{}", sanitize_identifier(fallback_name), extension)
     } else {
-        replace_extension(&normalize_source_path(p4k, geometry_path), ".glb")
+        replace_extension(&normalize_source_path(p4k, geometry_path), extension)
     };
     insert_stem_suffix(&base, &format!("_LOD{lod}"))
 }
@@ -2906,6 +2930,19 @@ mod tests {
         assert_eq!(
             insert_stem_suffix("Data/foo.bar/hull.glb", "_LOD3"),
             "Data/foo.bar/hull_LOD3.glb"
+        );
+    }
+
+    #[test]
+    fn decomposed_blend_exports_classify_blend_mesh_assets() {
+        assert_eq!(
+            mesh_asset_extension(ExportFormat::Blend),
+            ".blend",
+            "native decomposed Blend exports should request .blend mesh asset paths directly",
+        );
+        assert_eq!(
+            classify_exported_file_kind("Data/Objects/Test/hull_LOD0.blend"),
+            ExportedFileKind::MeshAsset,
         );
     }
 
