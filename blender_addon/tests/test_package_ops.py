@@ -340,7 +340,12 @@ class PackageOpsTests(unittest.TestCase):
             self.package_ops._temporary_object_mode = _no_mode
             self.package_ops.time.perf_counter = lambda: next(perf_values)
             context = types.SimpleNamespace(view_layer=FakeViewLayer())
-            session = self.package_ops.MaterialRefreshSession(context, package_root, "palette/test")
+            session = self.package_ops.MaterialRefreshSession(
+                context,
+                package_root,
+                "palette/test",
+                purge_orphans=False,
+            )
 
             self.assertFalse(session.step(budget_seconds=0.001, min_objects=1))
             self.assertEqual(session.applied, 1)
@@ -363,6 +368,83 @@ class PackageOpsTests(unittest.TestCase):
             importer_stub.events,
             [("rebuild", "wing", "palette/test"), ("rebuild", "hull", "palette/test")],
         )
+
+    def test_material_refresh_session_splits_orphan_cleanup_across_steps(self) -> None:
+        @contextmanager
+        def _no_suspend(_context):
+            yield
+
+        @contextmanager
+        def _no_mode(_context):
+            yield
+
+        package_root = FakeObject(
+            "StarBreaker RSI Aurora",
+            starbreaker_package_root=True,
+            starbreaker_scene_path="/tmp/aurora/scene.json",
+        )
+        mesh = FakeObject("hull", starbreaker_material_sidecar="hull.materials.json")
+        mesh.type = "MESH"
+        mesh.data = FakeMeshData(FakeUVLayers(["UVMap"], active_index=-1))
+        mesh.parent = package_root
+        package_root.children.append(mesh)
+
+        cleanup_events: list[str] = []
+        clock = {"value": 0.0}
+
+        def _cleanup_step(name: str):
+            def _run() -> int:
+                cleanup_events.append(name)
+                clock["value"] += 1.0
+                return 1
+
+            return _run
+
+        original_suspend = self.package_ops._suspend_heavy_viewports
+        original_mode = self.package_ops._temporary_object_mode
+        original_perf_counter = self.package_ops.time.perf_counter
+        original_purges = (
+            self.package_ops._purge_orphaned_managed_materials,
+            self.package_ops._purge_orphaned_runtime_groups,
+            self.package_ops._purge_orphaned_runtime_actions,
+            self.package_ops._purge_orphaned_file_backed_images,
+        )
+        try:
+            self.package_ops._suspend_heavy_viewports = _no_suspend
+            self.package_ops._temporary_object_mode = _no_mode
+            self.package_ops.time.perf_counter = lambda: clock["value"]
+            self.package_ops._purge_orphaned_managed_materials = _cleanup_step("materials")
+            self.package_ops._purge_orphaned_runtime_groups = _cleanup_step("groups")
+            self.package_ops._purge_orphaned_runtime_actions = _cleanup_step("actions")
+            self.package_ops._purge_orphaned_file_backed_images = _cleanup_step("images")
+
+            context = types.SimpleNamespace(view_layer=FakeViewLayer())
+            session = self.package_ops.MaterialRefreshSession(context, package_root)
+
+            self.assertFalse(session.step(budget_seconds=0.1, min_objects=1))
+            self.assertEqual(cleanup_events, ["materials"])
+            self.assertFalse(session.done)
+            self.assertLess(session.progress, 1.0)
+
+            self.assertFalse(session.step(budget_seconds=0.1, min_objects=1))
+            self.assertEqual(cleanup_events, ["materials", "groups"])
+
+            self.assertFalse(session.step(budget_seconds=0.1, min_objects=1))
+            self.assertEqual(cleanup_events, ["materials", "groups", "actions"])
+
+            self.assertTrue(session.step(budget_seconds=0.1, min_objects=1))
+            self.assertEqual(cleanup_events, ["materials", "groups", "actions", "images"])
+            self.assertEqual(session.progress, 1.0)
+        finally:
+            self.package_ops._suspend_heavy_viewports = original_suspend
+            self.package_ops._temporary_object_mode = original_mode
+            self.package_ops.time.perf_counter = original_perf_counter
+            (
+                self.package_ops._purge_orphaned_managed_materials,
+                self.package_ops._purge_orphaned_runtime_groups,
+                self.package_ops._purge_orphaned_runtime_actions,
+                self.package_ops._purge_orphaned_file_backed_images,
+            ) = original_purges
 
     def test_refresh_materials_uses_object_palette_without_explicit_override(self) -> None:
         @contextmanager

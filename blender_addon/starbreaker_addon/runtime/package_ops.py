@@ -292,6 +292,18 @@ class MaterialRefreshSession:
         self.needs_view_layer_update = False
         self.done = False
         self.purge_orphans = purge_orphans
+        self._objects_finalized = False
+        self._cleanup_steps: list[Callable[[], int]] = (
+            [
+                _purge_orphaned_managed_materials,
+                _purge_orphaned_runtime_groups,
+                _purge_orphaned_runtime_actions,
+                _purge_orphaned_file_backed_images,
+            ]
+            if purge_orphans
+            else []
+        )
+        self._cleanup_index = 0
         self.default_palette_cache: dict[str, str | None] = {}
         self._context_stack = ExitStack()
         self._context_stack.enter_context(_suspend_heavy_viewports(context))
@@ -303,9 +315,18 @@ class MaterialRefreshSession:
 
     @property
     def progress(self) -> float:
-        if self.total == 0:
+        if self.done:
             return 1.0
-        return min(1.0, self.index / self.total)
+        if self.total == 0:
+            object_progress = 1.0
+        else:
+            object_progress = min(1.0, self.index / self.total)
+        if not self._cleanup_steps:
+            return object_progress
+        if not self._objects_finalized:
+            return min(0.95, object_progress * 0.95)
+        cleanup_progress = self._cleanup_index / len(self._cleanup_steps)
+        return min(0.99, 0.95 + cleanup_progress * 0.05)
 
     def step(self, budget_seconds: float = 0.05, min_objects: int = 1) -> bool:
         if self.done:
@@ -313,7 +334,7 @@ class MaterialRefreshSession:
 
         deadline = time.perf_counter() + max(0.001, budget_seconds)
         processed = 0
-        while self.index < len(self.objects):
+        while not self._objects_finalized and self.index < len(self.objects):
             obj = self.objects[self.index]
             self.index += 1
             processed += 1
@@ -341,13 +362,29 @@ class MaterialRefreshSession:
             if processed >= min_objects and time.perf_counter() >= deadline:
                 break
 
-        if self.index >= len(self.objects):
-            self.finish()
+        if not self._objects_finalized and self.index >= len(self.objects):
+            self._finish_objects()
+            if not self._cleanup_steps:
+                self.done = True
+                return True
+            if processed >= min_objects and time.perf_counter() >= deadline:
+                return False
+
+        while self._cleanup_index < len(self._cleanup_steps):
+            self._cleanup_steps[self._cleanup_index]()
+            self._cleanup_index += 1
+            if self._cleanup_index >= len(self._cleanup_steps):
+                break
+            if time.perf_counter() >= deadline:
+                return False
+
+        if self._objects_finalized:
+            self.done = True
             return True
         return False
 
-    def finish(self) -> None:
-        if self.done:
+    def _finish_objects(self) -> None:
+        if self._objects_finalized:
             return
         try:
             if self.palette_id is not None:
@@ -357,14 +394,18 @@ class MaterialRefreshSession:
                 update = getattr(view_layer, "update", None) if view_layer is not None else None
                 if callable(update):
                     update()
-            if self.purge_orphans:
-                _purge_orphaned_managed_materials()
-                _purge_orphaned_runtime_groups()
-                _purge_orphaned_runtime_actions()
-                _purge_orphaned_file_backed_images()
-            self.done = True
+            self._objects_finalized = True
         finally:
             self._context_stack.close()
+
+    def finish(self) -> None:
+        if self.done:
+            return
+        self._finish_objects()
+        while self._cleanup_index < len(self._cleanup_steps):
+            self._cleanup_steps[self._cleanup_index]()
+            self._cleanup_index += 1
+        self.done = True
 
 
 def _material_refresh_palette_id(
