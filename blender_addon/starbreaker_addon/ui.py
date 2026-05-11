@@ -1475,21 +1475,11 @@ class STARBREAKER_AP_preferences(bpy.types.AddonPreferences):
         default=True,
     )
 
-    auto_refresh_materials_after_file_open: BoolProperty(  # type: ignore[assignment]
-        name="Auto-refresh materials after opening .blend files",
-        description=(
-            "Automatically rebuild StarBreaker materials when opening generated "
-            ".blend files. Runs incrementally after file open so large scenes remain responsive."
-        ),
-        default=True,
-    )
-
     def draw(self, context: bpy.types.Context) -> None:
         layout = self.layout
         layout.label(text="Post-import behaviour:")
         layout.prop(self, "landing_gear_retract_after_import")
         layout.prop(self, "viewport_change_after_import")
-        layout.prop(self, "auto_refresh_materials_after_file_open")
 
 
 def _get_prefs() -> STARBREAKER_AP_preferences | None:
@@ -1512,13 +1502,6 @@ def _should_change_viewport(prefs: object | None) -> bool:
     if prefs is None:
         return True
     return bool(getattr(prefs, "viewport_change_after_import", True))
-
-
-def _should_auto_refresh_materials_after_file_open(prefs: object | None) -> bool:
-    """Pure gate — return True when file-open should run a material refresh."""
-    if prefs is None:
-        return True
-    return bool(getattr(prefs, "auto_refresh_materials_after_file_open", True))
 
 
 def _material_refresh_prompt_timer(token: int | None = None) -> float | None:
@@ -1553,7 +1536,6 @@ def _material_refresh_prompt_timer(token: int | None = None) -> float | None:
             context,
             obj,
             palette_id if isinstance(palette_id, str) and palette_id else None,
-            purge_orphans=False,
         )
         _begin_import_progress(
             context,
@@ -1568,8 +1550,6 @@ def _starbreaker_load_post(_dummy: object) -> None:
     global _AUTO_MATERIAL_REFRESH_SESSION, _AUTO_MATERIAL_REFRESH_TOKEN
     _AUTO_MATERIAL_REFRESH_SESSION = None
     _AUTO_MATERIAL_REFRESH_TOKEN += 1
-    if not _should_auto_refresh_materials_after_file_open(_get_prefs()):
-        return
     token = _AUTO_MATERIAL_REFRESH_TOKEN
     bpy.app.timers.register(
         lambda: _material_refresh_prompt_timer(token),

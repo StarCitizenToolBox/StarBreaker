@@ -125,6 +125,8 @@ def _load_package_ops() -> types.ModuleType:
 
     validators_stub = types.ModuleType("sb_anim_test_runtime.validators")
     validators_stub._purge_orphaned_file_backed_images = lambda: 0
+    validators_stub._purge_orphaned_managed_materials = lambda: 0
+    validators_stub._purge_orphaned_runtime_actions = lambda: 0
     validators_stub._purge_orphaned_runtime_groups = lambda: 0
     sys.modules["sb_anim_test_runtime.validators"] = validators_stub
 

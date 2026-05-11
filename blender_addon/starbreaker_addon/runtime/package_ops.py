@@ -44,7 +44,12 @@ from .animation_fps import (
     describe_reconciliation,
     reconcile_animation_fps,
 )
-from .validators import _purge_orphaned_file_backed_images, _purge_orphaned_runtime_groups
+from .validators import (
+    _purge_orphaned_file_backed_images,
+    _purge_orphaned_managed_materials,
+    _purge_orphaned_runtime_actions,
+    _purge_orphaned_runtime_groups,
+)
 
 
 def import_package(
@@ -244,7 +249,9 @@ def refresh_materials_for_package_root(
         update = getattr(view_layer, "update", None)
         if callable(update):
             update()
+    _purge_orphaned_managed_materials()
     _purge_orphaned_runtime_groups()
+    _purge_orphaned_runtime_actions()
     _purge_orphaned_file_backed_images()
     return applied
 
@@ -351,7 +358,9 @@ class MaterialRefreshSession:
                 if callable(update):
                     update()
             if self.purge_orphans:
+                _purge_orphaned_managed_materials()
                 _purge_orphaned_runtime_groups()
+                _purge_orphaned_runtime_actions()
                 _purge_orphaned_file_backed_images()
             self.done = True
         finally:

@@ -188,6 +188,15 @@ class OrchestrationMixin:
                 self.material_identity_index[material_identity] = material
         self.material_identity_index_ready = True
 
+    def _remove_replaced_slot_material(self, material: bpy.types.Material | None) -> None:
+        if material is None or getattr(material, "library", None) is not None:
+            return
+        if material.users != 0:
+            return
+        if material.get(PROP_MATERIAL_IDENTITY):
+            return
+        bpy.data.materials.remove(material)
+
     def _submaterials_by_index(self, sidecar_path: str, sidecar: MaterialSidecar) -> dict[int, SubmaterialRecord]:
         cache_key = sidecar_path or _canonical_material_sidecar_path(sidecar_path, sidecar)
         cached = self.sidecar_submaterials_by_index.get(cache_key)
@@ -464,8 +473,11 @@ class OrchestrationMixin:
                     continue
                 material = self.material_for_submaterial(sidecar_path, sidecar, submaterial, palette)
                 slot = obj.material_slots[slot_index]
+                replaced_material = slot.material
                 slot.link = "OBJECT"
                 slot.material = material
+                if replaced_material is not material:
+                    self._remove_replaced_slot_material(replaced_material)
                 applied += 1
             if effective_palette_id is not None:
                 obj[PROP_PALETTE_ID] = effective_palette_id
@@ -487,8 +499,11 @@ class OrchestrationMixin:
                 continue
             material = self.material_for_submaterial(sidecar_path, sidecar, submaterial, palette)
             slot = obj.material_slots[submaterial.index]
+            replaced_material = slot.material
             slot.link = "OBJECT"
             slot.material = material
+            if replaced_material is not material:
+                self._remove_replaced_slot_material(replaced_material)
             applied += 1
         if effective_palette_id is not None:
             obj[PROP_PALETTE_ID] = effective_palette_id
