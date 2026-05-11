@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -248,6 +249,100 @@ def refresh_materials_for_package_root(
     return applied
 
 
+class MaterialRefreshSession:
+    """Incremental material refresh for post-file-open timer execution."""
+
+    def __init__(
+        self,
+        context: bpy.types.Context,
+        package_root: bpy.types.Object,
+        palette_id: str | None = None,
+    ) -> None:
+        from .importer import PackageImporter
+
+        self.context = context
+        self.package_root = package_root
+        self.package = _load_package_from_root(package_root)
+        self.importer = PackageImporter(
+            context,
+            self.package,
+            package_root=package_root,
+            create_template_collection=False,
+        )
+        self.palette_id = palette_id
+        self.objects = [
+            obj
+            for obj in _iter_package_objects(package_root)
+            if (
+                getattr(obj, "type", None) == "MESH"
+                and _string_prop(obj, PROP_MATERIAL_SIDECAR) is not None
+            )
+        ]
+        self.index = 0
+        self.applied = 0
+        self.needs_view_layer_update = False
+        self.done = False
+
+    @property
+    def total(self) -> int:
+        return len(self.objects)
+
+    @property
+    def progress(self) -> float:
+        if self.total == 0:
+            return 1.0
+        return min(1.0, self.index / self.total)
+
+    def step(self, budget_seconds: float = 0.05, min_objects: int = 1) -> bool:
+        if self.done:
+            return True
+
+        deadline = time.perf_counter() + max(0.001, budget_seconds)
+        processed = 0
+        with _suspend_heavy_viewports(self.context), _temporary_object_mode(self.context):
+            while self.index < len(self.objects):
+                obj = self.objects[self.index]
+                self.index += 1
+                processed += 1
+
+                if getattr(obj, "type", None) != "MESH":
+                    if processed >= min_objects and time.perf_counter() >= deadline:
+                        break
+                    continue
+                if _string_prop(obj, PROP_MATERIAL_SIDECAR) is None:
+                    if processed >= min_objects and time.perf_counter() >= deadline:
+                        break
+                    continue
+
+                object_palette_id = _material_refresh_palette_id(self.package, obj, self.palette_id)
+                self.applied += self.importer.rebuild_object_materials(obj, object_palette_id)
+                self.needs_view_layer_update = _refresh_mesh_material_evaluation(obj) or self.needs_view_layer_update
+                if self.palette_id is not None:
+                    obj[PROP_PALETTE_ID] = self.palette_id
+
+                if processed >= min_objects and time.perf_counter() >= deadline:
+                    break
+
+        if self.index >= len(self.objects):
+            self.finish()
+            return True
+        return False
+
+    def finish(self) -> None:
+        if self.done:
+            return
+        if self.palette_id is not None:
+            self.package_root[PROP_PALETTE_ID] = self.palette_id
+        if self.needs_view_layer_update:
+            view_layer = getattr(self.context, "view_layer", None)
+            update = getattr(view_layer, "update", None) if view_layer is not None else None
+            if callable(update):
+                update()
+        _purge_orphaned_runtime_groups()
+        _purge_orphaned_file_backed_images()
+        self.done = True
+
+
 def _material_refresh_palette_id(
     package: PackageBundle,
     obj: bpy.types.Object,
@@ -341,34 +436,45 @@ def _tag_id_for_refresh(data_block: Any) -> bool:
 
 
 def package_root_needs_material_refresh(package_root: bpy.types.Object) -> bool:
+    package: PackageBundle | None = None
+    sidecar_cache: dict[str, Any] = {}
     for obj in _iter_package_objects(package_root):
         if getattr(obj, "type", None) != "MESH":
             continue
-        if _string_prop(obj, PROP_MATERIAL_SIDECAR) is None:
+        sidecar_path = _string_prop(obj, PROP_MATERIAL_SIDECAR)
+        if sidecar_path is None:
             continue
         material_slots = getattr(obj, "material_slots", ())
         if len(material_slots) == 0:
-            return True
-        used_slot_indices = _used_material_slot_indices(obj)
-        for slot_index in used_slot_indices:
-            if slot_index >= len(material_slots):
+            if package is None:
+                package = _load_package_from_root(package_root)
+            sidecar = _material_refresh_sidecar(package, sidecar_cache, sidecar_path)
+            if _sidecar_has_submaterial_index(sidecar, 0):
                 return True
-            slot = material_slots[slot_index]
+            continue
+        for slot in material_slots:
             material = getattr(slot, "material", None)
             if material is None:
-                return True
+                continue
             if getattr(material, "library", None) is not None:
-                return True
-            if _string_prop(material, PROP_MATERIAL_IDENTITY) is None:
                 return True
     return False
 
 
-def _used_material_slot_indices(obj: bpy.types.Object) -> set[int]:
-    polygons = getattr(getattr(obj, "data", None), "polygons", None)
-    if polygons is None:
-        return set(range(len(getattr(obj, "material_slots", ()))))
-    return {int(poly.material_index) for poly in polygons}
+def _material_refresh_sidecar(
+    package: PackageBundle,
+    cache: dict[str, Any],
+    sidecar_path: str,
+) -> Any:
+    if sidecar_path not in cache:
+        cache[sidecar_path] = package.load_material_sidecar(sidecar_path)
+    return cache[sidecar_path]
+
+
+def _sidecar_has_submaterial_index(sidecar: Any, index: int) -> bool:
+    if sidecar is None:
+        return False
+    return any(int(getattr(submaterial, "index", -1)) == index for submaterial in sidecar.submaterials)
 
 
 def dump_selected_metadata(context: bpy.types.Context) -> list[str]:

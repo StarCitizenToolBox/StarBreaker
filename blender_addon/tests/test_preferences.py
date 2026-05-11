@@ -15,7 +15,7 @@ sys.path.insert(0, str(ADDON_ROOT))
 
 
 def _load_preference_gates() -> tuple:
-    """Extract the two pure gate functions from ui.py via AST, no bpy needed."""
+    """Extract pure preference gate functions from ui.py via AST, no bpy needed."""
     import ast as ast_mod
 
     ui_path = ADDON_ROOT / "starbreaker_addon" / "ui.py"
@@ -27,15 +27,24 @@ def _load_preference_gates() -> tuple:
         if isinstance(node, ast_mod.FunctionDef) and node.name in (
             "_should_apply_landing_gear",
             "_should_change_viewport",
+            "_should_auto_refresh_materials_after_file_open",
         ):
             func_source = ast_mod.get_source_segment(source, node)
             if func_source:
                 exec(compile(ast_mod.parse(func_source), str(ui_path), "exec"), namespace)  # noqa: S102
 
-    return namespace["_should_apply_landing_gear"], namespace["_should_change_viewport"]
+    return (
+        namespace["_should_apply_landing_gear"],
+        namespace["_should_change_viewport"],
+        namespace["_should_auto_refresh_materials_after_file_open"],
+    )
 
 
-_should_apply_landing_gear, _should_change_viewport = _load_preference_gates()
+(
+    _should_apply_landing_gear,
+    _should_change_viewport,
+    _should_auto_refresh_materials_after_file_open,
+) = _load_preference_gates()
 
 
 class _MockPrefs:
@@ -45,9 +54,11 @@ class _MockPrefs:
         self,
         landing_gear_retract_after_import: bool = True,
         viewport_change_after_import: bool = True,
+        auto_refresh_materials_after_file_open: bool = True,
     ) -> None:
         self.landing_gear_retract_after_import = landing_gear_retract_after_import
         self.viewport_change_after_import = viewport_change_after_import
+        self.auto_refresh_materials_after_file_open = auto_refresh_materials_after_file_open
 
 
 class TestPreferenceGates(unittest.TestCase):
@@ -80,6 +91,28 @@ class TestPreferenceGates(unittest.TestCase):
     def test_viewport_true_when_attr_missing(self) -> None:
         """Gracefully defaults to True when the attribute is absent."""
         self.assertTrue(_should_change_viewport(object()))
+
+    # ── _should_auto_refresh_materials_after_file_open ───────────────────────
+
+    def test_auto_refresh_materials_default_true_when_prefs_none(self) -> None:
+        self.assertTrue(_should_auto_refresh_materials_after_file_open(None))
+
+    def test_auto_refresh_materials_false_when_pref_disabled(self) -> None:
+        self.assertFalse(
+            _should_auto_refresh_materials_after_file_open(
+                _MockPrefs(auto_refresh_materials_after_file_open=False)
+            )
+        )
+
+    def test_auto_refresh_materials_true_when_pref_enabled(self) -> None:
+        self.assertTrue(
+            _should_auto_refresh_materials_after_file_open(
+                _MockPrefs(auto_refresh_materials_after_file_open=True)
+            )
+        )
+
+    def test_auto_refresh_materials_true_when_attr_missing(self) -> None:
+        self.assertTrue(_should_auto_refresh_materials_after_file_open(object()))
 
     # ── Independence ─────────────────────────────────────────────────────────
 

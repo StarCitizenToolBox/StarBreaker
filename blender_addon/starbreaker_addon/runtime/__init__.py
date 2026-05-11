@@ -71,6 +71,7 @@ from .package_ops import (
     exterior_palette_ids,
     find_package_root,
     import_package,
+    MaterialRefreshSession,
     package_root_needs_material_refresh,
     refresh_materials_for_package_root,
     resolve_package_scene_path,

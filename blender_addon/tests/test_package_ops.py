@@ -305,6 +305,63 @@ class PackageOpsTests(unittest.TestCase):
         self.assertEqual(package_root["starbreaker_palette_id"], "palette/test")
         self.assertEqual(mesh["starbreaker_palette_id"], "palette/test")
 
+    def test_material_refresh_session_processes_meshes_incrementally(self) -> None:
+        @contextmanager
+        def _no_suspend(_context):
+            yield
+
+        @contextmanager
+        def _no_mode(_context):
+            yield
+
+        package_root = FakeObject(
+            "StarBreaker RSI Aurora",
+            starbreaker_package_root=True,
+            starbreaker_scene_path="/tmp/aurora/scene.json",
+        )
+        mesh_a = FakeObject("hull", starbreaker_material_sidecar="hull.materials.json")
+        mesh_b = FakeObject("wing", starbreaker_material_sidecar="wing.materials.json")
+        for mesh in (mesh_a, mesh_b):
+            mesh.type = "MESH"
+            mesh.data = FakeMeshData(FakeUVLayers(["UVMap"], active_index=-1))
+            mesh.parent = package_root
+            package_root.children.append(mesh)
+
+        importer_stub = sys.modules["sb_pkg_test_runtime.importer"]
+        importer_stub.events = []
+        original_suspend = self.package_ops._suspend_heavy_viewports
+        original_mode = self.package_ops._temporary_object_mode
+        original_perf_counter = self.package_ops.time.perf_counter
+        perf_values = iter([0.0, 1.0, 2.0, 3.0])
+        try:
+            self.package_ops._suspend_heavy_viewports = _no_suspend
+            self.package_ops._temporary_object_mode = _no_mode
+            self.package_ops.time.perf_counter = lambda: next(perf_values)
+            context = types.SimpleNamespace(view_layer=FakeViewLayer())
+            session = self.package_ops.MaterialRefreshSession(context, package_root, "palette/test")
+
+            self.assertFalse(session.step(budget_seconds=0.001, min_objects=1))
+            self.assertEqual(session.applied, 1)
+            self.assertEqual(session.progress, 0.5)
+
+            self.assertTrue(session.step(budget_seconds=0.001, min_objects=1))
+        finally:
+            self.package_ops._suspend_heavy_viewports = original_suspend
+            self.package_ops._temporary_object_mode = original_mode
+            self.package_ops.time.perf_counter = original_perf_counter
+
+        self.assertEqual(session.applied, 2)
+        self.assertEqual(session.progress, 1.0)
+        self.assertTrue(session.done)
+        self.assertEqual(package_root["starbreaker_palette_id"], "palette/test")
+        self.assertEqual(mesh_a["starbreaker_palette_id"], "palette/test")
+        self.assertEqual(mesh_b["starbreaker_palette_id"], "palette/test")
+        self.assertEqual(context.view_layer.update_count, 1)
+        self.assertEqual(
+            importer_stub.events,
+            [("rebuild", "wing", "palette/test"), ("rebuild", "hull", "palette/test")],
+        )
+
     def test_refresh_materials_uses_object_palette_without_explicit_override(self) -> None:
         @contextmanager
         def _no_suspend(_context):
@@ -448,23 +505,35 @@ class PackageOpsTests(unittest.TestCase):
         self.assertEqual(mesh.update_tags, [{"DATA"}])
         self.assertEqual(view_layer.update_count, 1)
 
-    def test_package_root_needs_material_refresh_for_linked_or_unmanaged_slots(self) -> None:
+    def test_package_root_needs_material_refresh_for_empty_or_linked_slots(self) -> None:
         package_root = FakeObject("Root", starbreaker_package_root=True)
         mesh = FakeObject("mesh", starbreaker_material_sidecar="mesh.materials.json")
         mesh.type = "MESH"
         mesh.parent = package_root
         package_root.children.append(mesh)
+        sidecar = types.SimpleNamespace(
+            submaterials=[types.SimpleNamespace(index=0, submaterial_name="local")]
+        )
+        package = types.SimpleNamespace(load_material_sidecar=lambda _path: sidecar)
+        original_load = self.package_ops._load_package_from_root
+        try:
+            self.package_ops._load_package_from_root = lambda _root: package
 
-        self.assertTrue(self.package_ops.package_root_needs_material_refresh(package_root))
+            self.assertTrue(self.package_ops.package_root_needs_material_refresh(package_root))
 
-        mesh.material_slots = [FakeSlot(FakeMaterial("linked", library=object(), starbreaker_material_identity="id"))]
-        self.assertTrue(self.package_ops.package_root_needs_material_refresh(package_root))
+            mesh.material_slots = [
+                FakeSlot(FakeMaterial("linked", library=object(), starbreaker_material_identity="id"))
+            ]
+            self.assertTrue(self.package_ops.package_root_needs_material_refresh(package_root))
 
-        mesh.material_slots = [FakeSlot(FakeMaterial("local"))]
-        self.assertTrue(self.package_ops.package_root_needs_material_refresh(package_root))
+            mesh.material_slots = [FakeSlot(FakeMaterial("local"))]
+            self.assertFalse(self.package_ops.package_root_needs_material_refresh(package_root))
 
-        mesh.material_slots = [FakeSlot(FakeMaterial("local", starbreaker_material_identity="id"))]
-        self.assertFalse(self.package_ops.package_root_needs_material_refresh(package_root))
+            mesh.material_slots = [FakeSlot(FakeMaterial("local", starbreaker_material_identity="id"))]
+            mesh.data = types.SimpleNamespace(polygons=object())
+            self.assertFalse(self.package_ops.package_root_needs_material_refresh(package_root))
+        finally:
+            self.package_ops._load_package_from_root = original_load
 
     def test_resolve_package_relative_scene_path_from_opened_blend_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

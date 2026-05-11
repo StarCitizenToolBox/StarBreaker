@@ -31,6 +31,7 @@ from .runtime import (
     PROP_TEMPLATE_KEY,
     SCENE_POM_DETAIL_PROP,
     TEMPLATE_COLLECTION_NAME,
+    MaterialRefreshSession,
     apply_pom_detail_mode,
     SCENE_WEAR_STRENGTH_PROP,
     animation_overlap_warnings,
@@ -51,7 +52,6 @@ from .runtime import (
     solo_animation_instance,
     package_animation_instances,
     package_animation_mode_map,
-    package_root_needs_material_refresh,
     refresh_materials_for_package_root,
     resolve_package_scene_path,
     update_animation_instance_start_frame,
@@ -89,6 +89,8 @@ _IMPORT_PROGRESS_VALUE_PROP = "starbreaker_import_progress_value"
 _IMPORT_PROGRESS_DESCRIPTION_PROP = "starbreaker_import_progress_description"
 _IMPORT_PROGRESS_LAST_UPDATE = 0.0
 _IMPORT_PROGRESS_DRAW_HANDLER = None
+_AUTO_MATERIAL_REFRESH_SESSION: MaterialRefreshSession | None = None
+_AUTO_MATERIAL_REFRESH_TOKEN = 0
 
 
 def _progress_fraction(value: float) -> float:
@@ -1473,11 +1475,21 @@ class STARBREAKER_AP_preferences(bpy.types.AddonPreferences):
         default=True,
     )
 
+    auto_refresh_materials_after_file_open: BoolProperty(  # type: ignore[assignment]
+        name="Auto-refresh materials after opening .blend files",
+        description=(
+            "Automatically rebuild StarBreaker materials when opening generated "
+            ".blend files. Runs incrementally after file open so large scenes remain responsive."
+        ),
+        default=True,
+    )
+
     def draw(self, context: bpy.types.Context) -> None:
         layout = self.layout
         layout.label(text="Post-import behaviour:")
         layout.prop(self, "landing_gear_retract_after_import")
         layout.prop(self, "viewport_change_after_import")
+        layout.prop(self, "auto_refresh_materials_after_file_open")
 
 
 def _get_prefs() -> STARBREAKER_AP_preferences | None:
@@ -1502,26 +1514,67 @@ def _should_change_viewport(prefs: object | None) -> bool:
     return bool(getattr(prefs, "viewport_change_after_import", True))
 
 
-def _material_refresh_prompt_timer() -> float | None:
+def _should_auto_refresh_materials_after_file_open(prefs: object | None) -> bool:
+    """Pure gate — return True when file-open should run a material refresh."""
+    if prefs is None:
+        return True
+    return bool(getattr(prefs, "auto_refresh_materials_after_file_open", True))
+
+
+def _material_refresh_prompt_timer(token: int | None = None) -> float | None:
+    global _AUTO_MATERIAL_REFRESH_SESSION
+    if token is not None and token != _AUTO_MATERIAL_REFRESH_TOKEN:
+        return None
+    context = bpy.context
+    if _AUTO_MATERIAL_REFRESH_SESSION is not None:
+        session = _AUTO_MATERIAL_REFRESH_SESSION
+        done = session.step(budget_seconds=0.04, min_objects=2)
+        package_name = session.package_root.get(PROP_PACKAGE_NAME, session.package.package_name)
+        _update_import_progress(
+            context,
+            session.progress,
+            f"Refreshing materials for {package_name}",
+            force=done,
+        )
+        if done:
+            _end_import_progress(
+                context,
+                f"Refreshed {session.applied} material slots for {package_name}",
+            )
+            _AUTO_MATERIAL_REFRESH_SESSION = None
+            return None
+        return 0.01
+
     for obj in bpy.data.objects:
         if not bool(obj.get(PROP_PACKAGE_ROOT)):
             continue
-        if not package_root_needs_material_refresh(obj):
-            continue
-        try:
-            bpy.ops.starbreaker.refresh_materials("EXEC_DEFAULT", package_root_name=obj.name)
-        except Exception:
-            return None
-        return None
+        palette_id = obj.get(PROP_PALETTE_ID, "")
+        _AUTO_MATERIAL_REFRESH_SESSION = MaterialRefreshSession(
+            context,
+            obj,
+            palette_id if isinstance(palette_id, str) and palette_id else None,
+        )
+        _begin_import_progress(
+            context,
+            f"Refreshing materials for {obj.get(PROP_PACKAGE_NAME, obj.name)}",
+        )
+        return 0.01
     return None
 
 
 @persistent
 def _starbreaker_load_post(_dummy: object) -> None:
-    try:
-        bpy.app.timers.register(_material_refresh_prompt_timer, first_interval=0.5, persistent=False)
-    except Exception:
-        pass
+    global _AUTO_MATERIAL_REFRESH_SESSION, _AUTO_MATERIAL_REFRESH_TOKEN
+    _AUTO_MATERIAL_REFRESH_SESSION = None
+    _AUTO_MATERIAL_REFRESH_TOKEN += 1
+    if not _should_auto_refresh_materials_after_file_open(_get_prefs()):
+        return
+    token = _AUTO_MATERIAL_REFRESH_TOKEN
+    bpy.app.timers.register(
+        lambda: _material_refresh_prompt_timer(token),
+        first_interval=0.5,
+        persistent=False,
+    )
 
 
 CLASSES = [
@@ -1543,6 +1596,26 @@ CLASSES = [
 
 
 def register() -> None:
+    setattr(
+        bpy.types.WindowManager,
+        _IMPORT_PROGRESS_ACTIVE_PROP,
+        BoolProperty(name="StarBreaker Import Active", default=False),
+    )
+    setattr(
+        bpy.types.WindowManager,
+        _IMPORT_PROGRESS_VALUE_PROP,
+        FloatProperty(
+            name="StarBreaker Import Progress",
+            default=0.0,
+            min=0.0,
+            max=1.0,
+        ),
+    )
+    setattr(
+        bpy.types.WindowManager,
+        _IMPORT_PROGRESS_DESCRIPTION_PROP,
+        StringProperty(name="StarBreaker Import Progress Description", default=""),
+    )
     setattr(
         bpy.types.Scene,
         SCENE_POM_DETAIL_PROP,
@@ -1593,6 +1666,12 @@ def register() -> None:
     )
     for cls in CLASSES:
         bpy.utils.register_class(cls)
+    for handler in list(bpy.app.handlers.load_post):
+        if (
+            handler is not _starbreaker_load_post
+            and getattr(handler, "__name__", "") == _starbreaker_load_post.__name__
+        ):
+            bpy.app.handlers.load_post.remove(handler)
     if _starbreaker_load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_starbreaker_load_post)
 
@@ -1611,3 +1690,10 @@ def unregister() -> None:
         delattr(bpy.types.Scene, SCENE_WEAR_STRENGTH_PROP)
     if hasattr(bpy.types.Scene, _SCENE_ANIMATION_FPS_POLICY_PROP):
         delattr(bpy.types.Scene, _SCENE_ANIMATION_FPS_POLICY_PROP)
+    for prop_name in (
+        _IMPORT_PROGRESS_ACTIVE_PROP,
+        _IMPORT_PROGRESS_VALUE_PROP,
+        _IMPORT_PROGRESS_DESCRIPTION_PROP,
+    ):
+        if hasattr(bpy.types.WindowManager, prop_name):
+            delattr(bpy.types.WindowManager, prop_name)
