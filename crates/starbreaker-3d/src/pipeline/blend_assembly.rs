@@ -3959,7 +3959,7 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
             effective_gobo_path.map(|gobo_path| {
                 let node_tree_ptr = ptrs.alloc();
                 let image_ptr = ptrs.alloc();
-                let normalized_path = gobo_image_blend_filepath(gobo_path);
+                let normalized_path = gobo_image_blend_filepath(package_name, gobo_path);
                 let image_filename = gobo_path
                     .replace('\\', "/")
                     .rsplit('/')
@@ -4211,7 +4211,7 @@ fn linked_collection_object_data(entries: &[(u64, u64)]) -> Vec<(u64, Vec<u8>)> 
 
 #[cfg(test)]
 mod tests_package_paths {
-    use super::scene_library_blend_path;
+    use super::{gobo_image_blend_filepath, scene_library_blend_path};
 
     #[test]
     fn scene_library_path_for_top_level_package() {
@@ -4226,6 +4226,22 @@ mod tests_package_paths {
         assert_eq!(
             scene_library_blend_path("ship/DRAK Buccaneer_LOD0_TEX0", "Data/Objects/test.blend"),
             "//../../../Data/Objects/test.blend"
+        );
+    }
+
+    #[test]
+    fn gobo_image_path_for_top_level_package() {
+        assert_eq!(
+            gobo_image_blend_filepath("DRAK Buccaneer_LOD0_TEX0", "Data/Textures/lights/light_ies_5_TEX0.png"),
+            "//../../Data/Textures/lights/light_ies_5_TEX0.png"
+        );
+    }
+
+    #[test]
+    fn gobo_image_path_for_typed_package_subdir() {
+        assert_eq!(
+            gobo_image_blend_filepath("ship/DRAK Buccaneer_LOD0_TEX0", "Data/Textures/lights/light_ies_5_TEX0.png"),
+            "//../../../Data/Textures/lights/light_ies_5_TEX0.png"
         );
     }
 }
@@ -4342,19 +4358,25 @@ fn soft_shadow_radius_from_source(light_radius: f32) -> f32 {
     (light_radius * 0.05).clamp(0.01, 0.5)
 }
 
-fn gobo_image_blend_filepath(gobo_path: &str) -> String {
+fn gobo_image_blend_filepath(package_name: &str, gobo_path: &str) -> String {
     let normalized = gobo_path.replace('\\', "/");
     let lower = normalized.to_ascii_lowercase();
     if normalized.starts_with("//") || normalized.starts_with('/') {
         normalized
     } else if lower.starts_with("data/textures/") {
-        format!("//../../Data/Textures/{}", &normalized["Data/Textures/".len()..])
+        scene_library_blend_path(
+            package_name,
+            &format!("Data/Textures/{}", &normalized["Data/Textures/".len()..]),
+        )
     } else if lower.starts_with("textures/") {
-        format!("//../../Data/Textures/{}", &normalized["Textures/".len()..])
+        scene_library_blend_path(
+            package_name,
+            &format!("Data/Textures/{}", &normalized["Textures/".len()..]),
+        )
     } else if normalized.starts_with("Data/") {
-        format!("//../../{normalized}")
+        scene_library_blend_path(package_name, &normalized)
     } else {
-        format!("//../../{normalized}")
+        scene_library_blend_path(package_name, &normalized)
     }
 }
 
