@@ -448,6 +448,62 @@ class DecalOffsetTests(unittest.TestCase):
         self.assertEqual(importer.illum_rgb_calls, [palette.primary])
         self.assertEqual(obj.material_slots[0].material.name, "drak_vulture:pom_decals__host_rgb")
 
+    def test_mesh_decal_host_variant_names_do_not_chain_existing_host_suffixes(self) -> None:
+        bpy = sys.modules["bpy"]
+        original_materials = getattr(bpy.data, "materials", None)
+        materials = FakeMaterialsCollection()
+        bpy.data.materials = materials
+        try:
+            decal = FakeMaterial(
+                "drak_clipper_ext:Decal_POM_A#03e817cc__host_secondary",
+                starbreaker_shader_family="MeshDecal",
+                **{PROP_HAS_POM: True},
+            )
+            importer = ImporterUnderTest(channel="tertiary")
+            palette = types.SimpleNamespace(
+                primary=(0.2, 0.3, 0.4),
+                secondary=(0.5, 0.6, 0.7),
+                tertiary=(0.8, 0.1, 0.2),
+                glass=(0.9, 0.9, 0.95),
+            )
+
+            variant = importer._ensure_mesh_decal_host_variant(decal, "tertiary", palette)
+
+            self.assertEqual(
+                variant.name,
+                "drak_clipper_ext:Decal_POM_A#03e817cc__host_tertiary",
+            )
+        finally:
+            bpy.data.materials = original_materials
+
+    def test_host_channel_scan_returns_single_channel_without_polygon_counts(self) -> None:
+        obj = FakeObject(
+            material_slots=[FakeSlot(FakeMaterial("drak_clipper_ext_Paint_Secondary"))],
+            mesh=FakeMesh(polygons=[], vertex_count=0),
+        )
+        importer = ImporterUnderTest()
+
+        self.assertEqual(importer._scan_slots_for_host_channel(obj), "secondary")
+
+    def test_host_channel_scan_uses_polygon_weight_when_channels_compete(self) -> None:
+        obj = FakeObject(
+            material_slots=[
+                FakeSlot(FakeMaterial("drak_clipper_ext_Paint_Primary")),
+                FakeSlot(FakeMaterial("drak_clipper_ext_Paint_Tertiary")),
+            ],
+            mesh=FakeMesh(
+                polygons=[
+                    FakePolygon(0, [0, 1, 2]),
+                    FakePolygon(1, [3, 4, 5]),
+                    FakePolygon(1, [6, 7, 8]),
+                ],
+                vertex_count=9,
+            ),
+        )
+        importer = ImporterUnderTest()
+
+        self.assertEqual(importer._scan_slots_for_host_channel(obj), "tertiary")
+
     def test_parallax_bias_value_prefers_authored_height_bias(self) -> None:
         importer = ImporterUnderTest()
         submaterial = SubmaterialRecord.from_value(

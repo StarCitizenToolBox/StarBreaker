@@ -103,6 +103,9 @@ class OrchestrationMixin:
         self.sidecar_submaterials_by_name: dict[str, dict[str, SubmaterialRecord]] = {}
         self.sidecar_submaterials_by_name_all: dict[str, dict[str, list[SubmaterialRecord]]] = {}
         self.slot_mapping_cache: dict[int, list[int | None] | None] = {}
+        self.host_channel_cache: dict[tuple[int, tuple[int, ...]], str | None] = {}
+        self.host_rgb_cache: dict[tuple[int, tuple[int, ...]], tuple[float, float, float] | None] = {}
+        self.decal_vertex_cache: dict[tuple[int, tuple[int, ...]], frozenset[int]] = {}
         self.progress_callback = progress_callback
         self._progress_total_steps = 1
         self._progress_completed_steps = 0

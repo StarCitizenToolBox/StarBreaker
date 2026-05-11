@@ -169,7 +169,7 @@ def _load_package_ops() -> tuple[types.ModuleType, types.ModuleType]:
     importer_stub.events = []
 
     class PackageImporter:
-        def __init__(self, context, package, progress_callback=None, package_root=None):
+        def __init__(self, context, package, progress_callback=None, package_root=None, create_template_collection=True):
             self.context = context
             self.package = package
             self.progress_callback = progress_callback
@@ -517,7 +517,7 @@ class PackageOpsTests(unittest.TestCase):
         rebuild_calls: list[tuple[str, str | None, str | None]] = []
 
         class FakeImporter:
-            def __init__(self, context, package, package_root=None):
+            def __init__(self, context, package, package_root=None, create_template_collection=True):
                 self.context = context
                 self.package = package
                 self.package_root = package_root

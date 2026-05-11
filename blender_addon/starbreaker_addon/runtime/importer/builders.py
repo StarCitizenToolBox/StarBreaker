@@ -1930,6 +1930,44 @@ class BuildersMixin:
         "tertiary": "Tertiary Glossiness",
         "glass": "Glass Glossiness",
     }
+    _DECAL_HOST_VARIANT_MARKERS = ("__host_rgb_", "__host_")
+
+    @classmethod
+    def _decal_host_variant_base_name(cls, material: bpy.types.Material) -> str:
+        base_name = material.name
+        for marker in cls._DECAL_HOST_VARIANT_MARKERS:
+            index = base_name.find(marker)
+            if index >= 0:
+                return base_name[:index]
+        return base_name
+
+    @classmethod
+    def _decal_host_variant_base_material(cls, material: bpy.types.Material) -> bpy.types.Material:
+        base_name = cls._decal_host_variant_base_name(material)
+        if base_name == material.name:
+            return material
+        base_material = bpy.data.materials.get(base_name)
+        if base_material is not None and getattr(base_material, "node_tree", None) is not None:
+            return base_material
+        return material
+
+    @staticmethod
+    def _id_pointer(data_block: object | None) -> int:
+        if data_block is None:
+            return 0
+        as_pointer = getattr(data_block, "as_pointer", None)
+        if callable(as_pointer):
+            return int(as_pointer())
+        return id(data_block)
+
+    @classmethod
+    def _object_material_signature(cls, obj: bpy.types.Object) -> tuple[int, tuple[int, ...]]:
+        data_pointer = cls._id_pointer(getattr(obj, "data", None))
+        material_pointers: list[int] = []
+        for slot in getattr(obj, "material_slots", []) or []:
+            mat = slot.material if slot is not None else None
+            material_pointers.append(cls._id_pointer(mat))
+        return data_pointer, tuple(material_pointers)
 
     def _mesh_decal_host_channel_for_object(self, obj: bpy.types.Object) -> str | None:
         """Scan ``obj``'s material slots for a non-decal paint material
@@ -1952,20 +1990,19 @@ class BuildersMixin:
         return channel
 
     def _scan_slots_for_host_channel(self, obj: bpy.types.Object) -> str | None:
+        cache = getattr(self, "host_channel_cache", None)
+        cache_key = self._object_material_signature(obj) if cache is not None else None
+        if cache is not None and cache_key in cache:
+            return cache[cache_key]
+
         priorities = ("primary", "secondary", "tertiary", "glass")
         slots = list(getattr(obj, "material_slots", []) or [])
         if not slots:
+            if cache is not None and cache_key is not None:
+                cache[cache_key] = None
             return None
 
-        counts: dict[int, int] = {}
-        mesh = getattr(obj, "data", None)
-        polygons = getattr(mesh, "polygons", None) if mesh is not None else None
-        if polygons is not None:
-            for poly in polygons:
-                idx = int(getattr(poly, "material_index", 0))
-                counts[idx] = counts.get(idx, 0) + 1
-
-        channel_counts: dict[str, int] = {}
+        slot_channels: dict[int, str] = {}
         for index, slot in enumerate(slots):
             mat = slot.material if slot is not None else None
             if mat is None:
@@ -2001,15 +2038,39 @@ class BuildersMixin:
                         break
             if channel is None:
                 continue
-            channel_counts[channel] = channel_counts.get(channel, 0) + max(1, counts.get(index, 0))
+            slot_channels[index] = channel
 
-        if not channel_counts:
+        if not slot_channels:
+            if cache is not None and cache_key is not None:
+                cache[cache_key] = None
             return None
 
-        return min(
+        unique_channels = set(slot_channels.values())
+        if len(unique_channels) == 1:
+            result = next(iter(unique_channels))
+            if cache is not None and cache_key is not None:
+                cache[cache_key] = result
+            return result
+
+        counts: dict[int, int] = {}
+        mesh = getattr(obj, "data", None)
+        polygons = getattr(mesh, "polygons", None) if mesh is not None else None
+        if polygons is not None:
+            for poly in polygons:
+                idx = int(getattr(poly, "material_index", 0))
+                counts[idx] = counts.get(idx, 0) + 1
+
+        channel_counts: dict[str, int] = {}
+        for index, channel in slot_channels.items():
+            channel_counts[channel] = channel_counts.get(channel, 0) + max(1, counts.get(index, 0))
+
+        result = min(
             channel_counts,
             key=lambda channel: (-channel_counts[channel], priorities.index(channel)),
         )
+        if cache is not None and cache_key is not None:
+            cache[cache_key] = result
+        return result
 
     def _mesh_decal_host_rgb_for_object(
         self, obj: bpy.types.Object
@@ -2033,8 +2094,15 @@ class BuildersMixin:
     def _dominant_paint_tint_for_object(
         self, obj: bpy.types.Object
     ) -> tuple[float, float, float] | None:
+        cache = getattr(self, "host_rgb_cache", None)
+        cache_key = self._object_material_signature(obj) if cache is not None else None
+        if cache is not None and cache_key in cache:
+            return cache[cache_key]
+
         slots = list(getattr(obj, "material_slots", []) or [])
         if not slots:
+            if cache is not None and cache_key is not None:
+                cache[cache_key] = None
             return None
         # Tally polygons per slot where possible.
         counts: dict[int, int] = {}
@@ -2057,7 +2125,11 @@ class BuildersMixin:
                 continue
             rgb = self._read_paint_tint_rgb(mat)
             if rgb is not None:
+                if cache is not None and cache_key is not None:
+                    cache[cache_key] = rgb
                 return rgb
+        if cache is not None and cache_key is not None:
+            cache[cache_key] = None
         return None
 
     @staticmethod
@@ -2132,12 +2204,13 @@ class BuildersMixin:
         if material is None or material.node_tree is None:
             return material
         rgb_key = self._rgb_variant_key(rgb)
-        clone_name = f"{material.name}__host_rgb_{rgb_key}"
+        base_material = self._decal_host_variant_base_material(material)
+        clone_name = f"{self._decal_host_variant_base_name(material)}__host_rgb_{rgb_key}"
         clone = bpy.data.materials.get(clone_name)
         if clone is not None and clone.get("starbreaker_decal_host_rgb_key") == rgb_key:
             return clone
         if clone is None:
-            clone = material.copy()
+            clone = base_material.copy()
             clone.name = clone_name
         clone["starbreaker_decal_host_rgb_key"] = rgb_key
 
@@ -2175,12 +2248,13 @@ class BuildersMixin:
         output_name = self._MESH_DECAL_HOST_CHANNEL_OUTPUT.get(channel)
         if output_name is None:
             return material
-        clone_name = f"{material.name}__host_{channel}"
+        base_material = self._decal_host_variant_base_material(material)
+        clone_name = f"{self._decal_host_variant_base_name(material)}__host_{channel}"
         clone = bpy.data.materials.get(clone_name)
         if clone is not None and clone.get("starbreaker_decal_host_channel") == channel:
             return clone
         if clone is None:
-            clone = material.copy()
+            clone = base_material.copy()
             clone.name = clone_name
         clone["starbreaker_decal_host_channel"] = channel
 
@@ -2318,11 +2392,19 @@ class BuildersMixin:
                 decal_slot_indices.add(idx)
         if not decal_slot_indices:
             return False
-        vertex_ids: set[int] = set()
-        for poly in mesh.polygons:
-            if int(getattr(poly, "material_index", 0)) in decal_slot_indices:
-                for v in poly.vertices:
-                    vertex_ids.add(int(v))
+        cache = getattr(self, "decal_vertex_cache", None)
+        cache_key = (self._id_pointer(mesh), tuple(sorted(decal_slot_indices)))
+        cached_vertex_ids = cache.get(cache_key) if cache is not None else None
+        if cached_vertex_ids is None:
+            vertex_ids: set[int] = set()
+            for poly in mesh.polygons:
+                if int(getattr(poly, "material_index", 0)) in decal_slot_indices:
+                    for v in poly.vertices:
+                        vertex_ids.add(int(v))
+            cached_vertex_ids = frozenset(vertex_ids)
+            if cache is not None:
+                cache[cache_key] = cached_vertex_ids
+        vertex_ids = cached_vertex_ids
         if not vertex_ids:
             return False
         group = obj.vertex_groups.get(self._DECAL_OFFSET_GROUP_NAME)
@@ -2364,15 +2446,7 @@ class BuildersMixin:
           wires Host Tint to the dominant host paint's authored tint
           when no palette channel can be identified.
         """
-        channel = (
-            self._mesh_decal_host_channel_for_object(obj)
-            if palette is not None
-            else None
-        )
-        fallback_rgb = self._mesh_decal_host_rgb_for_object(obj)
-        if channel is None and fallback_rgb is None:
-            return 0
-        rebound = 0
+        decal_slots: list[tuple[bpy.types.MaterialSlot, bpy.types.Material, bool]] = []
         for slot in getattr(obj, "material_slots", []):
             mat = slot.material if slot is not None else None
             if mat is None:
@@ -2391,6 +2465,20 @@ class BuildersMixin:
             # colour and must not be retinted by the host.
             if not bool(mat.get(PROP_HAS_POM, False)):
                 continue
+            decal_slots.append((slot, mat, is_mesh_decal))
+        if not decal_slots:
+            return 0
+
+        channel = (
+            self._mesh_decal_host_channel_for_object(obj)
+            if palette is not None
+            else None
+        )
+        fallback_rgb = None if channel is not None else self._mesh_decal_host_rgb_for_object(obj)
+        if channel is None and fallback_rgb is None:
+            return 0
+        rebound = 0
+        for slot, mat, is_mesh_decal in decal_slots:
             if is_mesh_decal and channel is not None:
                 if mat.get("starbreaker_decal_host_channel") == channel:
                     continue
@@ -2436,12 +2524,13 @@ class BuildersMixin:
         if material is None or material.node_tree is None:
             return material
         rgb_key = self._rgb_variant_key(rgb)
-        clone_name = f"{material.name}__host_rgb_{rgb_key}"
+        base_material = self._decal_host_variant_base_material(material)
+        clone_name = f"{self._decal_host_variant_base_name(material)}__host_rgb_{rgb_key}"
         clone = bpy.data.materials.get(clone_name)
         if clone is not None and clone.get("starbreaker_decal_host_rgb_key") == rgb_key:
             return clone
         if clone is None:
-            clone = material.copy()
+            clone = base_material.copy()
             clone.name = clone_name
         clone["starbreaker_decal_host_rgb_key"] = rgb_key
         nodes = clone.node_tree.nodes
