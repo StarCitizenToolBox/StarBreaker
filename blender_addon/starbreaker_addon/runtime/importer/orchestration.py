@@ -97,6 +97,7 @@ class OrchestrationMixin:
         self.import_palette_override: str | None = None
         self.import_paint_variant_sidecar: str | None = None
         self.runtime_shared_groups_ready = False
+        self.material_identity_cache: dict[tuple[str, int, str], str] = {}
         self.material_identity_index: dict[str, bpy.types.Material] = {}
         self.material_identity_index_ready = False
         self.sidecar_submaterials_by_index: dict[str, dict[int, SubmaterialRecord]] = {}

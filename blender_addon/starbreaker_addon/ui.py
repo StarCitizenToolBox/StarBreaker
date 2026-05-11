@@ -1553,6 +1553,7 @@ def _material_refresh_prompt_timer(token: int | None = None) -> float | None:
             context,
             obj,
             palette_id if isinstance(palette_id, str) and palette_id else None,
+            purge_orphans=False,
         )
         _begin_import_progress(
             context,

@@ -87,7 +87,13 @@ class MaterialsMixin:
         palette: PaletteRecord | None,
     ) -> bpy.types.Material:
         palette_scope = self._palette_scope(palette)
-        cache_key = _material_identity(sidecar_path, sidecar, submaterial, palette, palette_scope)
+        identity_cache = getattr(self, "material_identity_cache", None)
+        identity_key = (sidecar_path, int(submaterial.index), palette_scope)
+        cache_key = identity_cache.get(identity_key) if identity_cache is not None else None
+        if cache_key is None:
+            cache_key = _material_identity(sidecar_path, sidecar, submaterial, palette, palette_scope)
+            if identity_cache is not None:
+                identity_cache[identity_key] = cache_key
         expected_template_key = template_plan_for_submaterial(submaterial).template_key
         cached = self.material_cache.get(cache_key)
         if cached is not None:

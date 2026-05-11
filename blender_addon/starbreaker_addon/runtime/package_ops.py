@@ -15,7 +15,7 @@ import math
 import re
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, Callable
 
@@ -257,6 +257,8 @@ class MaterialRefreshSession:
         context: bpy.types.Context,
         package_root: bpy.types.Object,
         palette_id: str | None = None,
+        *,
+        purge_orphans: bool = True,
     ) -> None:
         from .importer import PackageImporter
 
@@ -282,6 +284,11 @@ class MaterialRefreshSession:
         self.applied = 0
         self.needs_view_layer_update = False
         self.done = False
+        self.purge_orphans = purge_orphans
+        self.default_palette_cache: dict[str, str | None] = {}
+        self._context_stack = ExitStack()
+        self._context_stack.enter_context(_suspend_heavy_viewports(context))
+        self._context_stack.enter_context(_temporary_object_mode(context))
 
     @property
     def total(self) -> int:
@@ -299,29 +306,33 @@ class MaterialRefreshSession:
 
         deadline = time.perf_counter() + max(0.001, budget_seconds)
         processed = 0
-        with _suspend_heavy_viewports(self.context), _temporary_object_mode(self.context):
-            while self.index < len(self.objects):
-                obj = self.objects[self.index]
-                self.index += 1
-                processed += 1
+        while self.index < len(self.objects):
+            obj = self.objects[self.index]
+            self.index += 1
+            processed += 1
 
-                if getattr(obj, "type", None) != "MESH":
-                    if processed >= min_objects and time.perf_counter() >= deadline:
-                        break
-                    continue
-                if _string_prop(obj, PROP_MATERIAL_SIDECAR) is None:
-                    if processed >= min_objects and time.perf_counter() >= deadline:
-                        break
-                    continue
-
-                object_palette_id = _material_refresh_palette_id(self.package, obj, self.palette_id)
-                self.applied += self.importer.rebuild_object_materials(obj, object_palette_id)
-                self.needs_view_layer_update = _refresh_mesh_material_evaluation(obj) or self.needs_view_layer_update
-                if self.palette_id is not None:
-                    obj[PROP_PALETTE_ID] = self.palette_id
-
+            if getattr(obj, "type", None) != "MESH":
                 if processed >= min_objects and time.perf_counter() >= deadline:
                     break
+                continue
+            if _string_prop(obj, PROP_MATERIAL_SIDECAR) is None:
+                if processed >= min_objects and time.perf_counter() >= deadline:
+                    break
+                continue
+
+            object_palette_id = _material_refresh_palette_id(
+                self.package,
+                obj,
+                self.palette_id,
+                self.default_palette_cache,
+            )
+            self.applied += self.importer.rebuild_object_materials(obj, object_palette_id)
+            self.needs_view_layer_update = _refresh_mesh_material_evaluation(obj) or self.needs_view_layer_update
+            if self.palette_id is not None:
+                obj[PROP_PALETTE_ID] = self.palette_id
+
+            if processed >= min_objects and time.perf_counter() >= deadline:
+                break
 
         if self.index >= len(self.objects):
             self.finish()
@@ -331,22 +342,27 @@ class MaterialRefreshSession:
     def finish(self) -> None:
         if self.done:
             return
-        if self.palette_id is not None:
-            self.package_root[PROP_PALETTE_ID] = self.palette_id
-        if self.needs_view_layer_update:
-            view_layer = getattr(self.context, "view_layer", None)
-            update = getattr(view_layer, "update", None) if view_layer is not None else None
-            if callable(update):
-                update()
-        _purge_orphaned_runtime_groups()
-        _purge_orphaned_file_backed_images()
-        self.done = True
+        try:
+            if self.palette_id is not None:
+                self.package_root[PROP_PALETTE_ID] = self.palette_id
+            if self.needs_view_layer_update:
+                view_layer = getattr(self.context, "view_layer", None)
+                update = getattr(view_layer, "update", None) if view_layer is not None else None
+                if callable(update):
+                    update()
+            if self.purge_orphans:
+                _purge_orphaned_runtime_groups()
+                _purge_orphaned_file_backed_images()
+            self.done = True
+        finally:
+            self._context_stack.close()
 
 
 def _material_refresh_palette_id(
     package: PackageBundle,
     obj: bpy.types.Object,
     explicit_palette_id: str | None,
+    default_palette_cache: dict[str, str | None] | None = None,
 ) -> str | None:
     if explicit_palette_id is not None:
         return explicit_palette_id
@@ -356,7 +372,12 @@ def _material_refresh_palette_id(
     sidecar_path = _string_prop(obj, PROP_MATERIAL_SIDECAR)
     if sidecar_path is None:
         return None
-    return _sidecar_default_palette_id(package, sidecar_path)
+    if default_palette_cache is not None and sidecar_path in default_palette_cache:
+        return default_palette_cache[sidecar_path]
+    palette_id = _sidecar_default_palette_id(package, sidecar_path)
+    if default_palette_cache is not None:
+        default_palette_cache[sidecar_path] = palette_id
+    return palette_id
 
 
 def _sidecar_default_palette_id(package: PackageBundle, sidecar_path: str) -> str | None:
