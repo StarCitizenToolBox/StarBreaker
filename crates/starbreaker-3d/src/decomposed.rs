@@ -732,6 +732,11 @@ pub(crate) fn write_decomposed_export(
         &InteriorCgfEntry,
     ) -> Option<(Mesh, Option<MtlFile>, Option<NodeMeshCombo>)>,
 ) -> Result<DecomposedExport, Error> {
+    const ROOT_ASSETS_START: f32 = 0.01;
+    const CHILD_ASSETS_START: f32 = 0.16;
+    const CHILD_ASSETS_END: f32 = 0.38;
+    const INTERIOR_ASSETS_END: f32 = 0.99;
+
     let mut files = BTreeMap::new();
     let mut texture_cache: HashMap<(String, TextureFlavor), String> = HashMap::new();
     let mut mtl_cache: HashMap<String, Option<MtlFile>> = HashMap::new();
@@ -744,7 +749,7 @@ pub(crate) fn write_decomposed_export(
     let liveries_manifest_path = package_relative_path(&package_name, "liveries.json");
     let total_start = Instant::now();
     let mut phase_start = Instant::now();
-    report_progress(progress, 0.05, "Writing root assets");
+    report_progress(progress, ROOT_ASSETS_START, "Writing root assets");
     for palette in &input.available_palettes {
         register_palette(&mut palette_records, palette);
     }
@@ -849,7 +854,7 @@ pub(crate) fn write_decomposed_export(
     log::info!("[timing][decomposed] paint_variants: {:.2}s", phase_start.elapsed().as_secs_f32());
     phase_start = Instant::now();
 
-    report_progress(progress, 0.15, "Writing child assets");
+    report_progress(progress, CHILD_ASSETS_START, "Writing child assets");
 
     let resolved_child_transforms = resolve_child_instance_transforms(&input);
     let mut child_instances = Vec::with_capacity(input.children.len());
@@ -926,11 +931,15 @@ pub(crate) fn write_decomposed_export(
 
         if child_count > 0 {
             let fraction = (index + 1) as f32 / child_count as f32;
-            report_progress(progress, 0.15 + 0.40 * fraction, "Writing child assets");
+            report_progress(
+                progress,
+                CHILD_ASSETS_START + (CHILD_ASSETS_END - CHILD_ASSETS_START) * fraction,
+                "Writing child assets",
+            );
         }
     }
     if child_count == 0 {
-        report_progress(progress, 0.55, "Writing interior assets");
+        report_progress(progress, CHILD_ASSETS_END, "Writing interior assets");
     }
     log::info!("[timing][decomposed] child_assets: {:.2}s", phase_start.elapsed().as_secs_f32());
     phase_start = Instant::now();
@@ -938,6 +947,13 @@ pub(crate) fn write_decomposed_export(
     let mut interior_asset_cache: HashMap<String, (String, Option<String>)> = HashMap::new();
     let mut interior_records = Vec::with_capacity(input.interiors.containers.len());
     let container_count = input.interiors.containers.len();
+    let total_interior_placements = input
+        .interiors
+        .containers
+        .iter()
+        .map(|container| container.placements.len())
+        .sum::<usize>();
+    let mut processed_interior_placements = 0usize;
     for (index, container) in input.interiors.containers.iter().enumerate() {
         let palette_id = container
             .palette
@@ -969,6 +985,16 @@ pub(crate) fn write_decomposed_export(
             } else {
                 let Some((mesh, materials, _nmc)) = load_interior_mesh(entry) else {
                     log::warn!("failed to build decomposed interior asset for {}", entry.cgf_path);
+                    processed_interior_placements += 1;
+                    if total_interior_placements > 0 {
+                        let fraction =
+                            processed_interior_placements as f32 / total_interior_placements as f32;
+                        report_progress(
+                            progress,
+                            CHILD_ASSETS_END + (INTERIOR_ASSETS_END - CHILD_ASSETS_END) * fraction,
+                            "Writing interior assets",
+                        );
+                    }
                     continue;
                 };
                 let interior_material_view = build_decomposed_material_view(
@@ -1066,6 +1092,100 @@ pub(crate) fn write_decomposed_export(
                 transform: *transform,
                 palette_id: placement_palette_id,
             });
+            processed_interior_placements += 1;
+            if total_interior_placements > 0 {
+                let fraction =
+                    processed_interior_placements as f32 / total_interior_placements as f32;
+                report_progress(
+                    progress,
+                    CHILD_ASSETS_END + (INTERIOR_ASSETS_END - CHILD_ASSETS_END) * fraction,
+                    "Writing interior assets",
+                );
+            }
+        }
+
+        let mut lights = Vec::with_capacity(container.lights.len());
+        for light in &container.lights {
+            // Extract the projector (gobo) texture.
+            // ONLY for Projector lights (spot lights). Point lights (Omni) should never have gobos.
+            // Priority: EXR (for HDR formats like BC6H) -> PNG (for SDR formats) -> white PNG fallback
+            // EXR preserves float values >1.0, allowing Blender to sample full HDR energy.
+            let projector_texture_export = if light.light_type == "Projector" {
+                light.projector_texture.as_deref().and_then(|src| {
+                    // Try HDR EXR export first (for BC6H gobos with values >1.0)
+                    if let Some(exr_data) = export_gobo_as_exr(p4k, src, opts.texture_mip) {
+                        let normalized = normalize_source_path(p4k, src);
+                        let exr_path = replace_extension(&normalized, ".exr");
+                        return Some(insert_binary_file(&mut files, exr_path, exr_data));
+                    }
+
+                    // Fall back to standard PNG export (for SDR or unsupported formats)
+                    if let Some(png_path) = export_texture_asset(
+                        &mut files,
+                        p4k,
+                        &mut png_cache,
+                        &mut texture_cache,
+                        src,
+                        TextureFlavor::Generic,
+                        opts.texture_mip,
+                        existing_asset_paths,
+                    ) {
+                        return Some(png_path);
+                    }
+
+                    // Both EXR and PNG failed. Log a warning and use white PNG fallback.
+                    log::warn!(
+                        "Failed to export projector texture '{}' (EXR and PNG both failed). Using white PNG fallback.",
+                        src
+                    );
+                    let normalized = normalize_source_path(p4k, src);
+                    let fallback_path = replace_extension(&normalized, ".png");
+                    let fallback_png = create_white_png_fallback();
+                    Some(insert_binary_file(&mut files, fallback_path, fallback_png))
+                })
+            } else {
+                None
+            };
+            lights.push(serde_json::json!({
+                "name": light.name,
+                "position": light.position,
+                "transform_basis": light.transform_basis,
+                "rotation": light.rotation,
+                "direction_sc": light.direction_sc,
+                "color": light.color,
+                "light_type": light.light_type,
+                "semantic_light_kind": light.semantic_light_kind,
+                "intensity_raw": light.intensity_raw,
+                "intensity_unit": light.intensity_unit,
+                "intensity_candela_proxy": light.intensity_candela_proxy,
+                "intensity": light.intensity,
+                "radius": light.radius,
+                "radius_m": light.radius_m,
+                "inner_angle": light.inner_angle,
+                "outer_angle": light.outer_angle,
+                "projector_texture": projector_texture_export,
+                "active_state": light.active_state,
+                "states": light
+                    .states
+                    .iter()
+                    .map(|(name, s)| {
+                        (
+                            name.clone(),
+                            serde_json::json!({
+                                "intensity_raw": s.intensity_raw,
+                                "intensity_unit": s.intensity_unit,
+                                "intensity_cd": s.intensity_cd,
+                                "intensity_candela_proxy": s.intensity_candela_proxy,
+                                "temperature": s.temperature,
+                                "use_temperature": s.use_temperature,
+                                "color": s.color,
+                                "light_style": s.light_style,
+                                "preset_tag": s.preset_tag,
+                            }),
+                        )
+                    })
+                    .collect::<serde_json::Map<_, _>>(),
+            }));
         }
 
         interior_records.push(InteriorContainerRecord {
@@ -1073,104 +1193,20 @@ pub(crate) fn write_decomposed_export(
             palette_id,
             container_transform: container.container_transform,
             placements,
-            lights: container
-                .lights
-                .iter()
-                .map(|light| {
-                    // Extract the projector (gobo) texture.
-                    // ONLY for Projector lights (spot lights). Point lights (Omni) should never have gobos.
-                    // Priority: EXR (for HDR formats like BC6H) -> PNG (for SDR formats) -> white PNG fallback
-                    // EXR preserves float values >1.0, allowing Blender to sample full HDR energy.
-                    let projector_texture_export = if light.light_type == "Projector" {
-                        light
-                            .projector_texture
-                            .as_deref()
-                            .and_then(|src| {
-                                // Try HDR EXR export first (for BC6H gobos with values >1.0)
-                                if let Some(exr_data) = export_gobo_as_exr(p4k, src, opts.texture_mip) {
-                                    let normalized = normalize_source_path(p4k, src);
-                                    let exr_path = replace_extension(&normalized, ".exr");
-                                    return Some(insert_binary_file(&mut files, exr_path, exr_data));
-                                }
-                                
-                                // Fall back to standard PNG export (for SDR or unsupported formats)
-                                if let Some(png_path) = export_texture_asset(
-                                    &mut files,
-                                    p4k,
-                                    &mut png_cache,
-                                    &mut texture_cache,
-                                    src,
-                                    TextureFlavor::Generic,
-                                    opts.texture_mip,
-                                    existing_asset_paths,
-                                ) {
-                                    return Some(png_path);
-                                }
-                                
-                                // Both EXR and PNG failed. Log a warning and use white PNG fallback.
-                                log::warn!(
-                                    "Failed to export projector texture '{}' (EXR and PNG both failed). Using white PNG fallback.",
-                                    src
-                                );
-                                let normalized = normalize_source_path(p4k, src);
-                                let fallback_path = replace_extension(&normalized, ".png");
-                                let fallback_png = create_white_png_fallback();
-                                Some(insert_binary_file(&mut files, fallback_path, fallback_png))
-                            })
-                    } else {
-                        None
-                    };
-                    serde_json::json!({
-                        "name": light.name,
-                        "position": light.position,
-                        "transform_basis": light.transform_basis,
-                        "rotation": light.rotation,
-                        "direction_sc": light.direction_sc,
-                        "color": light.color,
-                        "light_type": light.light_type,
-                        "semantic_light_kind": light.semantic_light_kind,
-                        "intensity_raw": light.intensity_raw,
-                        "intensity_unit": light.intensity_unit,
-                        "intensity_candela_proxy": light.intensity_candela_proxy,
-                        "intensity": light.intensity,
-                        "radius": light.radius,
-                        "radius_m": light.radius_m,
-                        "inner_angle": light.inner_angle,
-                        "outer_angle": light.outer_angle,
-                        "projector_texture": projector_texture_export,
-                        "active_state": light.active_state,
-                        "states": light
-                            .states
-                            .iter()
-                            .map(|(name, s)| {
-                                (
-                                    name.clone(),
-                                    serde_json::json!({
-                                        "intensity_raw": s.intensity_raw,
-                                        "intensity_unit": s.intensity_unit,
-                                        "intensity_cd": s.intensity_cd,
-                                        "intensity_candela_proxy": s.intensity_candela_proxy,
-                                        "temperature": s.temperature,
-                                        "use_temperature": s.use_temperature,
-                                        "color": s.color,
-                                        "light_style": s.light_style,
-                                        "preset_tag": s.preset_tag,
-                                    }),
-                                )
-                            })
-                            .collect::<serde_json::Map<_, _>>(),
-                    })
-                })
-                .collect(),
+            lights,
         });
 
-        if container_count > 0 {
+        if container_count > 0 && total_interior_placements == 0 {
             let fraction = (index + 1) as f32 / container_count as f32;
-            report_progress(progress, 0.55 + 0.30 * fraction, "Writing interior assets");
+            report_progress(
+                progress,
+                CHILD_ASSETS_END + (INTERIOR_ASSETS_END - CHILD_ASSETS_END) * fraction,
+                "Writing interior assets",
+            );
         }
     }
     if container_count == 0 {
-        report_progress(progress, 0.85, "Writing manifests");
+        report_progress(progress, INTERIOR_ASSETS_END, "Writing manifests");
     }
     log::info!("[timing][decomposed] interior_assets: {:.2}s", phase_start.elapsed().as_secs_f32());
     phase_start = Instant::now();
@@ -1297,7 +1333,7 @@ pub(crate) fn write_decomposed_export(
         &interior_records,
         opts,
     );
-    report_progress(progress, 0.95, "Writing manifests");
+    report_progress(progress, INTERIOR_ASSETS_END, "Writing manifests");
     finalize_palette_records(
         &mut palette_records,
         &mut files,

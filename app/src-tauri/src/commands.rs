@@ -22,7 +22,7 @@ use crate::state::AppState;
 /// Minimum Blender version required to install the StarBreaker addon.
 const MIN_BLENDER_MAJOR: u32 = 5;
 const MIN_BLENDER_MINOR: u32 = 0;
-const EXPORT_FINAL_WRITE_START: f32 = 0.80;
+const EXPORT_FINAL_WRITE_START: f32 = 0.90;
 
 /// Discovery result returned to the frontend.
 #[derive(Serialize)]

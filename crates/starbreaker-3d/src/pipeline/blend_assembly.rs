@@ -13,6 +13,7 @@
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use rayon::prelude::*;
@@ -647,6 +648,12 @@ pub fn write_decomposed_export_blend(
     progress: Option<&Progress>,
     existing_asset_paths: Option<&HashSet<String>>,
 ) -> Result<DecomposedExport, Error> {
+    const BASE_DECOMPOSED_END: f32 = 0.90;
+    const DECAL_GROUPS_START: f32 = 0.90;
+    const NATIVE_BLEND_ASSETS_START: f32 = 0.91;
+    const NATIVE_BLEND_ASSETS_END: f32 = 0.995;
+    const SCENE_BLEND_START: f32 = 0.995;
+
     let total_start = Instant::now();
     let mut phase_start = Instant::now();
     // Phase 1: Extract mesh data from input children BEFORE calling write_decomposed_export.
@@ -754,6 +761,7 @@ pub fn write_decomposed_export_blend(
     };
 
     report_progress(progress, 0.0, "Generating decomposed export with .blend mesh files");
+    let base_progress = progress.map(|progress| progress.sub(0.0, BASE_DECOMPOSED_END));
 
     // Generate package manifests, sidecars, textures, palettes, and the reusable
     // native .blend asset list with the shared decomposed exporter. Mesh asset
@@ -762,7 +770,7 @@ pub fn write_decomposed_export_blend(
         p4k,
         input,
         opts,
-        progress,
+        base_progress.as_ref(),
         existing_asset_paths,
         &mut interior_mesh_loader,
     )?;
@@ -809,7 +817,7 @@ pub fn write_decomposed_export_blend(
     log::info!("[blend-debug] Extracted {} light projector texture paths", light_projector_texture_map.len());
 
     // Phase 4: Collect vertex groups for all meshes BEFORE creating .blend files
-    report_progress(progress, 0.45, "Collecting decal vertex groups from meshes");
+    report_progress(progress, DECAL_GROUPS_START, "Collecting decal vertex groups from meshes");
     
     let mut mesh_vertex_groups: HashMap<String, Vec<VertexGroup>> = HashMap::new();
     
@@ -844,7 +852,7 @@ pub fn write_decomposed_export_blend(
     log::info!("[timing][blend] collect_decal_vertex_groups: {:.2}s", phase_start.elapsed().as_secs_f32());
     phase_start = Instant::now();
 
-    report_progress(progress, 0.5, "Writing native .blend mesh assets with real geometry");
+    report_progress(progress, NATIVE_BLEND_ASSETS_START, "Writing native .blend mesh assets with real geometry");
 
     // Populate native .blend mesh asset payloads with real geometry.
     let mut blend_files = Vec::new();
@@ -978,6 +986,9 @@ pub fn write_decomposed_export_blend(
         &mesh_data_map,
         &mesh_vertex_groups,
         opts.threads,
+        progress,
+        NATIVE_BLEND_ASSETS_START,
+        NATIVE_BLEND_ASSETS_END,
     )? {
         refs_by_asset.insert(
             built_asset.file.relative_path.clone(),
@@ -1102,7 +1113,7 @@ pub fn write_decomposed_export_blend(
     phase_start = Instant::now();
 
     // Phase 3: Create scene.blend with lights and empties
-    report_progress(progress, 0.7, "Creating scene.blend with linked mesh instances");
+    report_progress(progress, SCENE_BLEND_START, "Creating scene.blend with linked mesh instances");
     
     // Create scene.blend with properly linked mesh instances and lights
     // Library paths are relative to scene.blend location, which is in Packages/{package}/
@@ -2105,11 +2116,26 @@ fn build_native_blend_assets(
     mesh_data_map: &HashMap<String, MeshDataEntry>,
     mesh_vertex_groups: &HashMap<String, Vec<VertexGroup>>,
     threads: usize,
+    progress: Option<&Progress>,
+    progress_from: f32,
+    progress_to: f32,
 ) -> Result<Vec<BuiltBlendAsset>, Error> {
+    let total_jobs = jobs.len().max(1);
+    let progress_range = progress_to - progress_from;
     if threads == 1 || jobs.len() <= 1 {
         return jobs
             .iter()
-            .map(|job| build_native_blend_asset(job, mesh_data_map, mesh_vertex_groups))
+            .enumerate()
+            .map(|(index, job)| {
+                let built = build_native_blend_asset(job, mesh_data_map, mesh_vertex_groups)?;
+                let fraction = (index + 1) as f32 / total_jobs as f32;
+                report_progress(
+                    progress,
+                    progress_from + progress_range * fraction,
+                    "Writing native .blend mesh assets with real geometry",
+                );
+                Ok(built)
+            })
             .collect();
     }
 
@@ -2121,8 +2147,19 @@ fn build_native_blend_assets(
         .build()
         .map_err(|err| Error::Other(format!("failed to build blend export thread pool: {err}")))?;
     pool.install(|| {
+        let completed = AtomicUsize::new(0);
         jobs.par_iter()
-            .map(|job| build_native_blend_asset(job, mesh_data_map, mesh_vertex_groups))
+            .map(|job| {
+                let built = build_native_blend_asset(job, mesh_data_map, mesh_vertex_groups)?;
+                let finished = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                let fraction = finished as f32 / total_jobs as f32;
+                report_progress(
+                    progress,
+                    progress_from + progress_range * fraction,
+                    "Writing native .blend mesh assets with real geometry",
+                );
+                Ok(built)
+            })
             .collect()
     })
 }

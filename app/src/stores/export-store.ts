@@ -168,16 +168,34 @@ export const useExportStore = create<ExportState>()(
         : {}),
     }),
   setProgress: (fraction, current, total, label, stage) =>
-    set({
-      progressFraction: fraction,
-      progress: current,
-      progressTotal: total,
-      progressLabel: label,
-      progressStage: stage,
+    set((s) => {
+      const progressFraction = Math.max(s.progressFraction, fraction);
+      const progressTotal = Math.max(s.progressTotal, total);
+      return {
+        progressFraction,
+        progress: Math.max(s.progress, current),
+        progressTotal,
+        progressLabel: label,
+        progressStage: stage,
+      };
     }),
   addExportError: (msg) =>
     set((s) => ({ exportErrors: [...s.exportErrors, msg] })),
-  setResult: (result) => set({ result, exporting: false }),
+  setResult: (result) =>
+    set((s) => {
+      if (result === null) {
+        return { result, exporting: false };
+      }
+      const total = s.progressTotal || result.success + result.errors;
+      return {
+        result,
+        exporting: false,
+        progressFraction: 1,
+        progress: total,
+        progressTotal: total,
+        progressStage: "Done",
+      };
+    }),
   deselectIds: (ids) =>
     set((s) => {
       const next = new Set(s.selected);

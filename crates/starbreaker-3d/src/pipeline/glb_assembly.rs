@@ -39,8 +39,11 @@ pub fn assemble_glb_with_loadout_with_progress(
     progress: Option<&Progress>,
     existing_asset_paths: Option<&HashSet<String>>,
 ) -> Result<ExportResult, Error> {
-    const ASSEMBLY_STAGE_START: f32 = 0.60;
-    const ASSEMBLY_STAGE_END: f32 = 0.80;
+    const LOADOUT_STAGE_START: f32 = 0.005;
+    const ROOT_EXPORT_STAGE_START: f32 = 0.03;
+    const FLATTEN_STAGE_START: f32 = 0.05;
+    const ASSEMBLY_STAGE_START: f32 = 0.06;
+    const ASSEMBLY_STAGE_END: f32 = 0.90;
 
     let total_start = Instant::now();
 
@@ -48,7 +51,7 @@ pub fn assemble_glb_with_loadout_with_progress(
 
     use crate::types::EntityPayload;
 
-    report_progress(progress, 0.02, "Resolving loadout");
+    report_progress(progress, LOADOUT_STAGE_START, "Resolving loadout");
     let phase_start = Instant::now();
     let payload_material_mode = if opts.kind == ExportKind::Decomposed {
         MaterialMode::Colors
@@ -65,7 +68,7 @@ pub fn assemble_glb_with_loadout_with_progress(
     log::info!("[mem-pipeline] resolved: {} children", resolved.children.len());
     log::info!("[timing] resolve_loadout_meshes: {:.2}s", phase_start.elapsed().as_secs_f32());
     
-    report_progress(progress, 0.14, "Exporting root mesh");
+    report_progress(progress, ROOT_EXPORT_STAGE_START, "Exporting root mesh");
     let phase_start = Instant::now();
     let localization = load_localization_map(p4k);
     let paint_display_names = build_paint_display_name_map(db, &localization);
@@ -122,7 +125,7 @@ pub fn assemble_glb_with_loadout_with_progress(
     };
     let gear_parts = query_landing_gear(db, record);
     let mut child_payloads: Vec<EntityPayload> = Vec::new();
-    report_progress(progress, 0.28, "Flattening attachments");
+    report_progress(progress, FLATTEN_STAGE_START, "Flattening attachments");
     let phase_start = Instant::now();
     if opts.include_attachments {
         let mut gear_cache: HashMap<String, LandingGearAsset> = HashMap::new();
@@ -222,7 +225,7 @@ pub fn assemble_glb_with_loadout_with_progress(
     log::info!("[timing] load_landing_gear + flatten_tree: {:.2}s", phase_start.elapsed().as_secs_f32());
     let total_child_verts: usize = child_payloads.iter().map(|c| c.mesh.positions.len()).sum();
     log::info!("[mem-pipeline] flattened: {} payloads, {} total verts", child_payloads.len(), total_child_verts);
-    report_progress(progress, 0.42, "Discovering interiors");
+    report_progress(progress, ASSEMBLY_STAGE_START, "Discovering interiors");
 
     // Interior discovery (no mesh loading — JIT during GLB packing).
     let phase_start = Instant::now();
