@@ -50,6 +50,13 @@ if "bpy" not in sys.modules:
     sys.modules["bpy"] = bpy
 
 
+from starbreaker_addon.runtime.importer.builders import (
+    _clamp_unit_float,
+    _layered_wear_base_layer,
+    _layered_wear_first_diffuse_layer,
+    _layered_wear_metallic_values,
+    _layered_wear_first_non_neutral_tint,
+)
 from starbreaker_addon.runtime.importer.layers import _detail_strength_or_zero, _stencil_override_selection
 
 
@@ -112,6 +119,64 @@ class LayerDetailTests(unittest.TestCase):
         self.assertIsNone(specular)
         self.assertEqual(color_enable, 1.0)
         self.assertEqual(tone_mode, 0.0)
+
+    def test_layered_wear_base_layer_returns_none_for_empty_manifest(self) -> None:
+        submaterial = types.SimpleNamespace(layer_manifest=[])
+        self.assertIsNone(_layered_wear_base_layer(submaterial))
+
+    def test_layered_wear_base_layer_uses_first_manifest_entry(self) -> None:
+        first = object()
+        second = object()
+        submaterial = types.SimpleNamespace(layer_manifest=[first, second])
+        self.assertIs(_layered_wear_base_layer(submaterial), first)
+
+    def test_layered_wear_base_layer_uses_single_layer_manifest_entry(self) -> None:
+        only = object()
+        submaterial = types.SimpleNamespace(layer_manifest=[only])
+        self.assertIs(_layered_wear_base_layer(submaterial), only)
+
+    def test_layered_wear_first_diffuse_layer_returns_first_with_diffuse(self) -> None:
+        layer_a = types.SimpleNamespace(diffuse_export_path=None)
+        layer_b = types.SimpleNamespace(diffuse_export_path="Data/foo.dds")
+        layer_c = types.SimpleNamespace(diffuse_export_path="Data/bar.dds")
+        submaterial = types.SimpleNamespace(layer_manifest=[layer_a, layer_b, layer_c])
+        self.assertIs(_layered_wear_first_diffuse_layer(submaterial), layer_b)
+
+    def test_layered_wear_first_non_neutral_tint_prefers_first_non_white(self) -> None:
+        layer_a = types.SimpleNamespace(tint_color=(1.0, 1.0, 1.0))
+        layer_b = types.SimpleNamespace(tint_color=(0.3, 0.4, 0.5))
+        layer_c = types.SimpleNamespace(tint_color=(0.8, 0.7, 0.6))
+        submaterial = types.SimpleNamespace(layer_manifest=[layer_a, layer_b, layer_c])
+        self.assertEqual(
+            _layered_wear_first_non_neutral_tint(submaterial),
+            (0.3, 0.4, 0.5),
+        )
+
+    def test_layered_wear_first_non_neutral_tint_returns_none_when_neutral(self) -> None:
+        layer_a = types.SimpleNamespace(tint_color=(1.0, 1.0, 1.0))
+        layer_b = types.SimpleNamespace(tint_color=None)
+        submaterial = types.SimpleNamespace(layer_manifest=[layer_a, layer_b])
+        self.assertIsNone(_layered_wear_first_non_neutral_tint(submaterial))
+
+    def test_clamp_unit_float(self) -> None:
+        self.assertEqual(_clamp_unit_float(-0.5), 0.0)
+        self.assertEqual(_clamp_unit_float(0.25), 0.25)
+        self.assertEqual(_clamp_unit_float(2.0), 1.0)
+
+    def test_layered_wear_metallic_values_uses_both_layers(self) -> None:
+        base_layer = types.SimpleNamespace(layer_snapshot={"metallic": 0.8})
+        wear_layer = types.SimpleNamespace(layer_snapshot={"metallic": 0.2})
+        self.assertEqual(
+            _layered_wear_metallic_values(base_layer, wear_layer),
+            (0.8, 0.2),
+        )
+
+    def test_layered_wear_metallic_values_falls_back_to_present_layer(self) -> None:
+        wear_layer = types.SimpleNamespace(layer_snapshot={"metallic": 1.5})
+        self.assertEqual(
+            _layered_wear_metallic_values(None, wear_layer),
+            (1.0, 1.0),
+        )
 
 
 if __name__ == "__main__":

@@ -47,6 +47,7 @@ from ..record_utils import (
     _float_authored_attribute,
     _float_public_param,
     _hard_surface_angle_shift_enabled,
+    _layer_snapshot_float,
     _layer_texture_reference,
     _matching_texture_reference,
     _mean_triplet,
@@ -90,6 +91,54 @@ def _authored_emissive_triplet(submaterial: SubmaterialRecord) -> tuple[float, f
             continue
         return _triplet_from_any(attribute.get("value"))
     return None
+
+
+def _layered_wear_base_layer(
+    submaterial: SubmaterialRecord,
+) -> LayerManifestEntry | None:
+    if submaterial.layer_manifest:
+        return submaterial.layer_manifest[0]
+    return None
+
+
+def _layered_wear_first_diffuse_layer(
+    submaterial: SubmaterialRecord,
+) -> LayerManifestEntry | None:
+    return next(
+        (layer for layer in submaterial.layer_manifest if layer.diffuse_export_path),
+        None,
+    )
+
+
+def _layered_wear_first_non_neutral_tint(
+    submaterial: SubmaterialRecord,
+) -> tuple[float, float, float] | None:
+    for layer in submaterial.layer_manifest:
+        tint = layer.tint_color
+        if tint is not None and any(abs(channel - 1.0) > 1e-6 for channel in tint):
+            return tint
+    return None
+
+
+def _clamp_unit_float(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def _layered_wear_metallic_values(
+    base_layer: LayerManifestEntry | None,
+    wear_layer: LayerManifestEntry | None,
+) -> tuple[float, float] | None:
+    base_metallic = _layer_snapshot_float(base_layer, "metallic") if base_layer is not None else None
+    wear_metallic = _layer_snapshot_float(wear_layer, "metallic") if wear_layer is not None else None
+    if base_metallic is None and wear_metallic is None:
+        return None
+    if base_metallic is None:
+        base_metallic = wear_metallic
+    if wear_metallic is None:
+        wear_metallic = base_metallic
+    if base_metallic is None or wear_metallic is None:
+        return None
+    return _clamp_unit_float(base_metallic), _clamp_unit_float(wear_metallic)
 
 
 class BuildersMixin:
@@ -1574,16 +1623,17 @@ class BuildersMixin:
         #     hijack that socket's default with the base layer's
         #     tint_color (Base Palette is multiplied with Base Image
         #     internally, so this works out as a base tint multiply).
-        base_layer = (
-            submaterial.layer_manifest[0]
-            if len(submaterial.layer_manifest) > 1
-            else None
-        )
-        if base_layer is not None:
-            if base_image_node is None and base_layer.diffuse_export_path:
+        base_layer = _layered_wear_base_layer(submaterial)
+        if base_image_node is None:
+            image_source_layer = (
+                base_layer
+                if base_layer is not None and base_layer.diffuse_export_path
+                else _layered_wear_first_diffuse_layer(submaterial)
+            )
+            if image_source_layer is not None and image_source_layer.diffuse_export_path:
                 fallback_image_node = self._image_node(
                     nodes,
-                    base_layer.diffuse_export_path,
+                    image_source_layer.diffuse_export_path,
                     x=-280,
                     y=220,
                     is_color=True,
@@ -1592,19 +1642,24 @@ class BuildersMixin:
                     fallback_target = _input_socket(layered_group, "Base Image")
                     if fallback_target is not None:
                         links.new(fallback_image_node.outputs[0], fallback_target)
+        fallback_tint = (
+            base_layer.tint_color
             if (
-                not base_palette_linked
+                base_layer is not None
                 and base_layer.tint_color is not None
                 and any(abs(c - 1.0) > 1e-6 for c in base_layer.tint_color)
+            )
+            else _layered_wear_first_non_neutral_tint(submaterial)
+        )
+        if not base_palette_linked and fallback_tint is not None:
+            base_palette_target = _input_socket(layered_group, "Base Palette")
+            if base_palette_target is not None and hasattr(
+                base_palette_target, "default_value"
             ):
-                base_palette_target = _input_socket(layered_group, "Base Palette")
-                if base_palette_target is not None and hasattr(
-                    base_palette_target, "default_value"
-                ):
-                    base_palette_target.default_value = (
-                        *base_layer.tint_color,
-                        1.0,
-                    )
+                base_palette_target.default_value = (
+                    *fallback_tint,
+                    1.0,
+                )
 
         # Wear layer (tint + palette + diffuse).
         wear_layer = self._layered_wear_layer(submaterial)
@@ -1645,6 +1700,22 @@ class BuildersMixin:
             target = _input_socket(layered_group, "Wear Factor")
             if target is not None:
                 links.new(wear_factor_socket, target)
+
+        metallic_values = _layered_wear_metallic_values(base_layer, wear_layer)
+        metallic_target = _input_socket(principled_group, "Metallic")
+        if metallic_values is not None and metallic_target is not None:
+            base_metallic, wear_metallic = metallic_values
+            if wear_factor_socket is not None and abs(base_metallic - wear_metallic) > 1e-6:
+                metallic_mix = nodes.new("ShaderNodeMix")
+                metallic_mix.location = (140, -900)
+                if hasattr(metallic_mix, "data_type"):
+                    metallic_mix.data_type = "FLOAT"
+                metallic_mix.inputs[2].default_value = base_metallic
+                metallic_mix.inputs[3].default_value = wear_metallic
+                links.new(wear_factor_socket, metallic_mix.inputs[0])
+                links.new(metallic_mix.outputs[0], metallic_target)
+            else:
+                metallic_target.default_value = wear_metallic
 
         # Roughness (base + wear layer).
         base_roughness_source = self._roughness_group_source_socket(
