@@ -43,7 +43,7 @@ pub fn assemble_glb_with_loadout_with_progress(
     const ROOT_EXPORT_STAGE_START: f32 = 0.03;
     const FLATTEN_STAGE_START: f32 = 0.05;
     const ASSEMBLY_STAGE_START: f32 = 0.06;
-    const ASSEMBLY_STAGE_END: f32 = 0.90;
+    const ASSEMBLY_STAGE_END: f32 = 0.91;
 
     let total_start = Instant::now();
 

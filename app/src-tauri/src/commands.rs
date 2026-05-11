@@ -22,7 +22,9 @@ use crate::state::AppState;
 /// Minimum Blender version required to install the StarBreaker addon.
 const MIN_BLENDER_MAJOR: u32 = 5;
 const MIN_BLENDER_MINOR: u32 = 0;
-const EXPORT_FINAL_WRITE_START: f32 = 0.90;
+// Latest Clipper decomposed .blend profile spends ~91% of wall time in the
+// exporter and ~9% writing package files to disk.
+const EXPORT_FINAL_WRITE_START: f32 = 0.91;
 
 /// Discovery result returned to the frontend.
 #[derive(Serialize)]
@@ -1600,8 +1602,11 @@ fn sanitize_filename(name: &str) -> String {
 mod tests {
     use super::{
         decomposed_package_directory_name, export_entity_name, sanitize_export_name,
-        should_skip_existing_decomposed_asset,
+        should_skip_existing_decomposed_asset, snapshot_export_progress, ExportProgressSlot,
     };
+    use starbreaker_common::Progress;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
     fn export_entity_name_strips_record_prefix_and_quotes() {
@@ -1648,6 +1653,32 @@ mod tests {
             decomposed_package_directory_name(&files, "Argo Mole"),
             "Argo Mole"
         );
+    }
+
+    #[test]
+    fn export_progress_stays_below_complete_until_slot_done() {
+        let progress = Arc::new(Progress::new());
+        progress.report(1.0, "Done");
+        let done = Arc::new(AtomicBool::new(false));
+        let slots = vec![ExportProgressSlot {
+            entity_name: "DRAK Clipper".into(),
+            entity_id: "clipper-id".into(),
+            progress: progress.clone(),
+            done: done.clone(),
+        }];
+
+        let running = snapshot_export_progress(&slots);
+        assert_eq!(running.current, 0);
+        assert_eq!(running.total, 1);
+        assert!(running.fraction < 1.0);
+        assert_eq!(running.stage, "Done");
+
+        done.store(true, Ordering::Relaxed);
+
+        let completed = snapshot_export_progress(&slots);
+        assert_eq!(completed.current, 1);
+        assert_eq!(completed.total, 1);
+        assert_eq!(completed.fraction, 1.0);
     }
 
     #[test]
