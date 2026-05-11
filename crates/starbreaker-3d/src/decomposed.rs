@@ -734,6 +734,7 @@ pub(crate) fn write_decomposed_export(
 ) -> Result<DecomposedExport, Error> {
     let mut files = BTreeMap::new();
     let mut texture_cache: HashMap<(String, TextureFlavor), String> = HashMap::new();
+    let mut mtl_cache: HashMap<String, Option<MtlFile>> = HashMap::new();
     let mut png_cache = PngCache::new();
     let mut palette_records = BTreeMap::new();
     let mut livery_usage = BTreeMap::new();
@@ -783,6 +784,7 @@ pub(crate) fn write_decomposed_export(
             &root_material_view.sidecar_original_indices,
             opts.texture_mip,
             existing_asset_paths,
+            &mut mtl_cache,
         )
     });
     let root_palette_id = input
@@ -823,6 +825,7 @@ pub(crate) fn write_decomposed_export(
                 &identity,
                 opts.texture_mip,
                 existing_asset_paths,
+                &mut mtl_cache,
             )
         });
         paint_variant_json.push(serde_json::json!({
@@ -886,6 +889,7 @@ pub(crate) fn write_decomposed_export(
                 &child_material_view.sidecar_original_indices,
                 opts.texture_mip,
                 existing_asset_paths,
+                &mut mtl_cache,
             )
         });
         let palette_id = child
@@ -1010,6 +1014,7 @@ pub(crate) fn write_decomposed_export(
                         &interior_material_view.sidecar_original_indices,
                         opts.texture_mip,
                         existing_asset_paths,
+                        &mut mtl_cache,
                     )
                 });
                 let reuse_existing_mesh_asset = (files.contains_key(&requested_mesh_asset)
@@ -1573,6 +1578,7 @@ fn write_material_sidecar(
     original_indices: &[u32],
     texture_mip: u32,
     existing_asset_paths: Option<&HashSet<String>>,
+    mtl_cache: &mut HashMap<String, Option<MtlFile>>,
 ) -> String {
     let source_material_path = material_source_path(p4k, materials, material_path, geometry_path);
     let relative_path = material_sidecar_relative_path(&source_material_path, fallback_name, texture_mip);
@@ -1584,6 +1590,7 @@ fn write_material_sidecar(
         &source_material_path,
         materials,
         original_indices,
+        mtl_cache,
     );
     let extracted = sidecar_materials
         .materials
@@ -1597,6 +1604,7 @@ fn write_material_sidecar(
                 material,
                 texture_mip,
                 existing_asset_paths,
+                mtl_cache,
             )
         })
         .collect::<Vec<_>>();
@@ -1616,9 +1624,9 @@ fn canonical_sidecar_materials_from_source(
     source_material_path: &str,
     fallback_materials: &MtlFile,
     fallback_indices: &[u32],
+    mtl_cache: &mut HashMap<String, Option<MtlFile>>,
 ) -> (MtlFile, Vec<u32>) {
-    let p4k_path = source_material_path.replace('/', "\\");
-    if let Some(parsed) = crate::pipeline::try_load_mtl(p4k, &p4k_path) {
+    if let Some(parsed) = load_mtl_cached(p4k, mtl_cache, source_material_path) {
         let mut original_indices = Vec::new();
         let mut non_hidden = Vec::new();
         for (idx, material) in parsed.materials.into_iter().enumerate() {
@@ -1641,6 +1649,21 @@ fn canonical_sidecar_materials_from_source(
     (fallback_materials.clone(), fallback_indices.to_vec())
 }
 
+fn load_mtl_cached(
+    p4k: &MappedP4k,
+    cache: &mut HashMap<String, Option<MtlFile>>,
+    material_path: &str,
+) -> Option<MtlFile> {
+    let p4k_path = crate::pipeline::datacore_path_to_p4k(material_path);
+    let cache_key = p4k_path.to_ascii_lowercase();
+    if let Some(cached) = cache.get(&cache_key) {
+        return cached.clone();
+    }
+    let loaded = crate::pipeline::try_load_mtl(p4k, &p4k_path);
+    cache.insert(cache_key, loaded.clone());
+    loaded
+}
+
 fn extract_material_entry(
     files: &mut BTreeMap<String, Vec<u8>>,
     p4k: &MappedP4k,
@@ -1649,6 +1672,7 @@ fn extract_material_entry(
     material: &SubMaterial,
     texture_mip: u32,
     existing_asset_paths: Option<&HashSet<String>>,
+    mtl_cache: &mut HashMap<String, Option<MtlFile>>,
 ) -> ExtractedMaterialEntry {
     let semantic_slots = material.semantic_texture_slots();
     let slot_exports = semantic_slots
@@ -1721,7 +1745,7 @@ fn extract_material_entry(
         .iter()
         .map(|layer| {
             let layer_material_path = normalize_source_path(p4k, &layer.path);
-            let layer_mtl = crate::pipeline::try_load_mtl(p4k, &crate::pipeline::datacore_path_to_p4k(&layer.path));
+            let layer_mtl = load_mtl_cached(p4k, mtl_cache, &layer.path);
             let layer_sub = layer_mtl
                 .as_ref()
                 .and_then(|mtl| crate::mtl::resolve_layer_submaterial(mtl, &layer.sub_material));
