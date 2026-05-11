@@ -29,6 +29,7 @@ from .constants import (
     PROP_LIGHT_STATES_JSON,
     PROP_MATERIAL_IDENTITY,
     PROP_MATERIAL_SIDECAR,
+    PROP_MESH_ASSET,
     PROP_PACKAGE_ROOT,
     PROP_PAINT_VARIANT_SIDECAR,
     PROP_PALETTE_ID,
@@ -2313,13 +2314,7 @@ def _clip_cyclic_transition_target_frame(clip: dict[str, Any]) -> float | None:
     return cyclic_targets[len(cyclic_targets) // 2]
 
 
-def _object_bone_hash(obj: bpy.types.Object) -> str:
-    return _object_bone_hash_keys(obj)[0]
-
-
-def _object_bone_hash_keys(obj: bpy.types.Object) -> list[str]:
-    import zlib
-
+def _object_source_name_candidates(obj: bpy.types.Object) -> list[str]:
     names: list[str] = []
     seen_names: set[str] = set()
 
@@ -2345,10 +2340,23 @@ def _object_bone_hash_keys(obj: bpy.types.Object) -> list[str]:
             if not part.isdigit():
                 continue
             _add_name("_".join(parts[index + 1:]))
+        while len(parts) > 1 and parts[-1].isdigit():
+            parts = parts[:-1]
+            _add_name("_".join(parts))
+
+    return names
+
+
+def _object_bone_hash(obj: bpy.types.Object) -> str:
+    return _object_bone_hash_keys(obj)[0]
+
+
+def _object_bone_hash_keys(obj: bpy.types.Object) -> list[str]:
+    import zlib
 
     keys: list[str] = []
     seen_keys: set[str] = set()
-    for name in names:
+    for name in _object_source_name_candidates(obj):
         digest = zlib.crc32(name.encode("utf-8")) & 0xFFFFFFFF
         key = f"0x{digest:08X}"
         if key in seen_keys:
@@ -2401,21 +2409,65 @@ def _provenance_tokens(value: Any) -> set[str]:
     return {token for token in re.split(r"[^a-z0-9]+", stem) if len(token) > 1}
 
 
+def _asset_stem(value: Any) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    stem = Path(value.replace("\\", "/").lower()).stem
+    while True:
+        stripped = re.sub(r"_(?:lod|tex|mip)\d+$", "", stem)
+        if stripped == stem:
+            return stem
+        stem = stripped
+
+
+def _asset_stem_score(asset_path: Any, channel_skeleton: str) -> int:
+    asset_stem = _asset_stem(asset_path)
+    skeleton_stem = _asset_stem(channel_skeleton)
+    if not asset_stem or not skeleton_stem:
+        return 0
+    if asset_stem == skeleton_stem:
+        return 14
+    if asset_stem.startswith(f"{skeleton_stem}_"):
+        return 10
+    return 0
+
+
 _DIRECTION_TOKENS = {"front", "rear", "left", "right", "upper", "lower", "top", "bottom"}
+
+
+def _object_provenance_tokens(obj: bpy.types.Object, *, include_self: bool = True) -> set[str]:
+    tokens: set[str] = set()
+    current = obj if include_self else obj.parent
+    visited = 0
+    while current is not None and visited < 16:
+        visited += 1
+        for value in (
+            current.get(PROP_SOURCE_NODE_NAME),
+            current.get(PROP_TEMPLATE_PATH),
+            current.name,
+        ):
+            tokens.update(_provenance_tokens(value))
+        current = current.parent
+    return tokens
 
 
 def _channel_variant_score(obj: bpy.types.Object, channel: dict[str, Any]) -> int:
     obj_source = str(obj.get(PROP_SOURCE_NODE_NAME, "") or "").strip().lower()
     obj_template = str(obj.get(PROP_TEMPLATE_PATH, "") or "").strip().lower()
+    obj_mesh_asset = str(obj.get(PROP_MESH_ASSET, "") or "").strip().lower()
     channel_source = str(channel.get("source_node_name", "") or "").strip().lower()
     channel_skeleton = str(channel.get("source_skeleton_path", "") or "").strip().lower()
 
     score = 0
-    if obj_source and channel_source:
-        if obj_source == channel_source:
-            score += 6
-        elif obj_source.endswith(channel_source) or channel_source.endswith(obj_source):
-            score += 4
+    obj_sources = [name.lower() for name in _object_source_name_candidates(obj)]
+    if channel_source:
+        for source in obj_sources:
+            if source == channel_source:
+                score += 6
+                break
+            if source.endswith(channel_source) or channel_source.endswith(source):
+                score += 4
+                break
 
     if obj_template and channel_skeleton:
         template_tokens = _provenance_tokens(obj_template)
@@ -2427,6 +2479,25 @@ def _channel_variant_score(obj: bpy.types.Object, channel: dict[str, Any]) -> in
         skeleton_dirs = skeleton_tokens.intersection(_DIRECTION_TOKENS)
         if template_dirs and skeleton_dirs:
             direction_overlap = template_dirs.intersection(skeleton_dirs)
+            if direction_overlap:
+                score += 6 + len(direction_overlap)
+            else:
+                score -= 6
+
+    if channel_skeleton:
+        score += _asset_stem_score(obj_mesh_asset, channel_skeleton)
+        score += _asset_stem_score(obj_template, channel_skeleton)
+
+        object_tokens = _object_provenance_tokens(obj)
+        skeleton_tokens = _provenance_tokens(channel_skeleton)
+        overlap = object_tokens.intersection(skeleton_tokens)
+        score += min(len(overlap), 4)
+
+        direction_tokens = _object_provenance_tokens(obj, include_self=False) or object_tokens
+        object_dirs = direction_tokens.intersection(_DIRECTION_TOKENS)
+        skeleton_dirs = skeleton_tokens.intersection(_DIRECTION_TOKENS)
+        if object_dirs and skeleton_dirs:
+            direction_overlap = object_dirs.intersection(skeleton_dirs)
             if direction_overlap:
                 score += 6 + len(direction_overlap)
             else:
@@ -2928,16 +2999,6 @@ def _apply_animation_pose(
     updated = 0
     for obj, key, bind_data, channel in candidates:
         allow_position = position_policy.get(id(obj), True)
-        local_anchor_frame = anchor_frame
-        if not allow_position:
-            positions = channel.get("position")
-            # Duplicate-hash fallback: when absolute position routing is
-            # ambiguous, keep rotation and use bind-relative position deltas
-            # (anchored to frame 0) so these channels still animate.
-            if isinstance(positions, list) and positions:
-                allow_position = True
-                if local_anchor_frame is None:
-                    local_anchor_frame = 0.0
 
         _apply_best_channel_transform(
             obj,
@@ -2946,7 +3007,7 @@ def _apply_animation_pose(
             frame_index,
             endpoint_policy,
             target_frame,
-            local_anchor_frame,
+            anchor_frame,
             # Duplicate-hash disambiguation only suppresses incompatible
             # position tracks; rotation remains valid and must still apply.
             allow_rotation=True,
@@ -3087,6 +3148,7 @@ def _insert_animation_action(
                 except Exception:
                     pass
     for obj, key, bind_data, channel in candidates:
+        _restore_object_bind_pose(obj, bind_data)
         obj.rotation_mode = "QUATERNION"
         obj.animation_data_create()
 
@@ -3123,13 +3185,12 @@ def _insert_animation_action(
         channel_times = [*rotation_times, *position_times]
         duration_frame = trim_frame if trim_frame is not None else max(channel_times, default=0.0)
         allow_position = position_policy.get(id(obj), True)
-        use_relative_position_fallback = (not allow_position) and bool(positions)
 
         def _action_frame(sample_time: float) -> float:
             local_time = duration_frame - sample_time if reverse_playback else sample_time
             return frame_offset + (local_time * fps_reconciliation.frame_scale)
 
-        if (allow_position or use_relative_position_fallback) and positions:
+        if allow_position and positions:
             bind_location = bind_data.get("location", obj.location)
             bind = (float(bind_location[0]), float(bind_location[1]), float(bind_location[2]))
 
@@ -3152,7 +3213,7 @@ def _insert_animation_action(
                     continue
                 if isinstance(sample, list) and len(sample) >= 3:
                     sample_decoded = _bind_equivalent_position(_decode_animation_position(sample, sample_decoder), bind)
-                    if (use_relative_position_fallback or trim_frame is not None) and anchor is not None:
+                    if trim_frame is not None and anchor is not None:
                         # Cyclic clip: use bind-delta to anchor the animation
                         # at the bind pose (e.g. Scorpius landing_gear_deploy).
                         obj.location = (

@@ -383,6 +383,82 @@ class AnimationPoseTests(unittest.TestCase):
         self.assertIs(candidates[0][0], child)
         self.assertEqual(candidates[0][1], source_hash)
 
+    def test_trailing_instance_suffix_matches_source_node_hash(self) -> None:
+        root = self._make_object("StarBreaker DRAK Clipper_LOD0_TEX0", (0.0, 0.0, 0.0))
+        child = self._make_object("door_upper_anim_001", (2.304258, 0.0, 0.327204))
+        root.children_recursive = [child]
+        source_hash = f"0x{zlib.crc32(b'door_upper_anim') & 0xFFFFFFFF:08X}"
+        bones = {
+            source_hash: [
+                {
+                    "position": [[2.304258, -0.327204, 0.0], [1.360307, 0.015211, 0.0]],
+                    "rotation": [[-0.300719, 0.0, 0.0, 0.953713], [1.0, 0.0, 0.0, 0.0]],
+                }
+            ]
+        }
+
+        candidates, _policy, _decoder = self.package_ops._animation_bone_candidates(root, bones)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertIs(candidates[0][0], child)
+        self.assertEqual(candidates[0][1], source_hash)
+
+    def test_channel_variant_selection_uses_parent_hierarchy_provenance(self) -> None:
+        rear_parent = self._make_object("door_upper_anim_001_0_drak_clipper_landing_gear_rear", (0, 0, 0))
+        rear_obj = self._make_object("door_upper_anim_001_14_swingarm_big_anim", (0, 0, 0))
+        rear_obj.parent = rear_parent
+        front = {
+            "source_skeleton_path": "Objects/Spaceships/Ships/DRAK/clipper/landing_gear/drak_clipper_landing_gear_front.cga",
+            "position": [[0.0, 0.0, 0.0]],
+        }
+        rear = {
+            "source_skeleton_path": "Objects/Spaceships/Ships/DRAK/clipper/landing_gear/drak_clipper_landing_gear_rear.cga",
+            "rotation": [[1.0, 0.0, 0.0, 0.0]],
+        }
+
+        self.assertIs(self.package_ops._select_channel_variant_for_object(rear_obj, [front, rear]), rear)
+
+    def test_channel_variant_selection_prefers_direct_mesh_asset_over_parent_tokens(self) -> None:
+        rear_parent = self._make_object("body_7_drak_clipper_landing_gear_rear_door_right", (0, 0, 0))
+        exterior_obj = self._make_object("door_upper_anim", (0, 0, 0))
+        exterior_obj.parent = rear_parent
+        exterior_obj["starbreaker_mesh_asset"] = (
+            "Data/Objects/Spaceships/Ships/DRAK/clipper/exterior/drak_clipper_LOD0.blend"
+        )
+        exterior = {
+            "source_skeleton_path": "Objects/Spaceships/Ships/DRAK/clipper/exterior/drak_clipper.cga",
+            "position": [[1.330354, -0.673419, 0.0]],
+        }
+        rear = {
+            "source_skeleton_path": "Objects/Spaceships/Ships/DRAK/clipper/landing_gear/drak_clipper_landing_gear_rear.cga",
+            "position": [[2.304258, -0.327204, 0.0]],
+        }
+
+        self.assertIs(
+            self.package_ops._select_channel_variant_for_object(exterior_obj, [exterior, rear]),
+            exterior,
+        )
+
+    def test_channel_variant_direction_uses_parent_not_bone_function_name(self) -> None:
+        rear_parent = self._make_object("door_upper_anim_001_23_Foot_joint_anim", (0, 0, 0))
+        rear_grandparent = self._make_object("door_upper_anim_001_0_drak_clipper_landing_gear_rear", (0, 0, 0))
+        rear_parent.parent = rear_grandparent
+        rear_step = self._make_object("door_upper_anim_001_28_front_step_anim", (0, 0, 0))
+        rear_step.parent = rear_parent
+        front = {
+            "source_skeleton_path": "Objects/Spaceships/Ships/DRAK/clipper/landing_gear/drak_clipper_landing_gear_front.cga",
+            "position": [[0.0, 0.298622, -0.439994]],
+        }
+        rear = {
+            "source_skeleton_path": "Objects/Spaceships/Ships/DRAK/clipper/landing_gear/drak_clipper_landing_gear_rear.cga",
+            "position": [[1.325272, 0.440688, 0.0]],
+        }
+
+        self.assertIs(
+            self.package_ops._select_channel_variant_for_object(rear_step, [front, rear]),
+            rear,
+        )
+
     def test_override_blend_mode_uses_sample_verbatim(self) -> None:
         """Phase 38 override path. When the per-bone `blend_mode` is
         marked as `override` (CHR-bind sits outside the AABB of CAF
@@ -485,6 +561,28 @@ class AnimationPoseTests(unittest.TestCase):
         expected_rot = (1.0, 0.0, 0.0, 0.0)
         for axis, (got, want) in enumerate(zip(obj.rotation_quaternion, expected_rot)):
             self.assertAlmostEqual(got, want, places=5, msg=f"rotation axis {axis}")
+
+    def test_apply_animation_pose_does_not_position_incompatible_duplicate_hash(self) -> None:
+        root = self._make_object("StarBreaker Test", (0.0, 0.0, 0.0))
+        incompatible = self._make_object("shared_node", (10.0, 0.0, 0.0))
+        compatible = self._make_object("shared_node_001", (0.0, 0.0, 0.0))
+        root.children_recursive = [incompatible, compatible]
+        source_hash = f"0x{zlib.crc32(b'shared_node') & 0xFFFFFFFF:08X}"
+        clip = {
+            "bones": {
+                source_hash: {
+                    "position": [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+                    "rotation": [[1.0, 0.0, 0.0, 0.0], [0.707, 0.707, 0.0, 0.0]],
+                }
+            }
+        }
+
+        self.package_ops._apply_animation_pose(root, clip, 1)
+
+        self.assertEqual(incompatible.location, (10.0, 0.0, 0.0))
+        self.assertEqual(compatible.location, (1.0, 0.0, 0.0))
+        for got, want in zip(incompatible.rotation_quaternion, (0.707, 0.707, 0.0, 0.0)):
+            self.assertAlmostEqual(got, want, places=5)
 
     # ---- Phase 39: layered-Action helpers ---------------------------
 
