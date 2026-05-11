@@ -140,79 +140,15 @@ class FakePolygon:
         self.vertices = vertices
 
 
-class FakeVertex:
-    def __init__(self, index: int):
-        self.index = index
-
-
 class FakeMesh:
     def __init__(self, polygons: list[FakePolygon], vertex_count: int):
         self.polygons = polygons
-        self.vertices = [FakeVertex(index) for index in range(vertex_count)]
-
-
-class FakeVertexGroup:
-    def __init__(self, name: str):
-        self.name = name
-        self.members: set[int] = set()
-
-    def add(self, indices: list[int], weight: float, mode: str) -> None:
-        self.members.update(int(index) for index in indices)
-
-    def remove(self, indices: list[int]) -> None:
-        for index in indices:
-            self.members.discard(int(index))
-
-
-class FakeVertexGroups:
-    def __init__(self):
-        self._groups: dict[str, FakeVertexGroup] = {}
-
-    def get(self, name: str):
-        return self._groups.get(name)
-
-    def new(self, name: str):
-        group = FakeVertexGroup(name)
-        self._groups[name] = group
-        return group
-
-
-class FakeModifier:
-    def __init__(self, name: str, modifier_type: str):
-        self.name = name
-        self.type = modifier_type
-        self.strength = None
-        self.mid_level = None
-        self.direction = None
-        self.space = None
-        self.vertex_group = ""
-
-
-class FakeModifiers:
-    def __init__(self):
-        self._modifiers: list[FakeModifier] = []
-
-    def get(self, name: str):
-        for modifier in self._modifiers:
-            if modifier.name == name:
-                return modifier
-        return None
-
-    def new(self, name: str, type: str):
-        modifier = FakeModifier(name, type)
-        self._modifiers.append(modifier)
-        return modifier
-
-    def remove(self, modifier: FakeModifier) -> None:
-        self._modifiers.remove(modifier)
 
 
 class FakeObject:
     def __init__(self, material_slots: list[FakeSlot], mesh: FakeMesh, **props):
         self.material_slots = material_slots
         self.data = mesh
-        self.vertex_groups = FakeVertexGroups()
-        self.modifiers = FakeModifiers()
         self._props = dict(props)
 
     def get(self, name: str, default=None):
@@ -325,72 +261,6 @@ class ManagedMaterialBuildImporterUnderTest(BuildersMixin):
 
 
 class DecalOffsetTests(unittest.TestCase):
-    def test_illum_pom_loadout_decal_uses_smaller_offset_strength(self) -> None:
-        decal = FakeMaterial(
-            "KLWE_las_rep_s1-3:pom_decals__host_rgb_070707",
-            starbreaker_shader_family="Illum",
-            **{
-                PROP_HAS_POM: True,
-                PROP_TEMPLATE_KEY: "decal_stencil",
-            },
-        )
-        host = FakeMaterial("KLWE_las_rep_s1-3:H_painted_metal_dark_gray_01", starbreaker_shader_family="LayerBlend_V2")
-        obj = FakeObject(
-            material_slots=[FakeSlot(decal), FakeSlot(host)],
-            mesh=FakeMesh(
-                polygons=[
-                    FakePolygon(0, [0, 1, 2]),
-                    FakePolygon(1, [3, 4, 5]),
-                ],
-                vertex_count=6,
-            ),
-            starbreaker_material_sidecar="Data/Objects/Spaceships/Weapons/KLWE/KLWE_las_rep_s1-3_TEX0.materials.json",
-        )
-
-        importer = ImporterUnderTest()
-
-        self.assertTrue(importer._apply_decal_offset_modifier(obj))
-        group = obj.vertex_groups.get(importer._DECAL_OFFSET_GROUP_NAME)
-        self.assertIsNotNone(group)
-        self.assertEqual(group.members, {0, 1, 2})
-
-        modifier = obj.modifiers.get(importer._DECAL_OFFSET_MODIFIER_NAME)
-        self.assertIsNotNone(modifier)
-        self.assertEqual(modifier.type, "DISPLACE")
-        self.assertEqual(modifier.vertex_group, importer._DECAL_OFFSET_GROUP_NAME)
-        self.assertAlmostEqual(modifier.strength, importer._LOADOUT_DECAL_OFFSET_STRENGTH)
-        self.assertEqual(modifier.direction, "NORMAL")
-        self.assertEqual(modifier.space, "LOCAL")
-
-    def test_ship_decal_keeps_default_offset_strength(self) -> None:
-        decal = FakeMaterial(
-            "rsi_aurora_mk2:pom_decals",
-            starbreaker_shader_family="Illum",
-            **{
-                PROP_HAS_POM: True,
-                PROP_TEMPLATE_KEY: "decal_stencil",
-            },
-        )
-        host = FakeMaterial("rsi_aurora_mk2:hull", starbreaker_shader_family="LayerBlend_V2")
-        obj = FakeObject(
-            material_slots=[FakeSlot(decal), FakeSlot(host)],
-            mesh=FakeMesh(
-                polygons=[
-                    FakePolygon(0, [0, 1, 2]),
-                    FakePolygon(1, [3, 4, 5]),
-                ],
-                vertex_count=6,
-            ),
-            starbreaker_material_sidecar="Data/Objects/Spaceships/Ships/RSI/aurora_mk2/rsi_aurora_mk2_TEX0.materials.json",
-        )
-
-        importer = ImporterUnderTest()
-
-        self.assertTrue(importer._apply_decal_offset_modifier(obj))
-        modifier = obj.modifiers.get(importer._DECAL_OFFSET_MODIFIER_NAME)
-        self.assertIsNotNone(modifier)
-        self.assertAlmostEqual(modifier.strength, importer._DECAL_OFFSET_STRENGTH)
-
     def test_illum_pom_rebind_uses_palette_channel_rgb_when_no_authored_fallback_exists(self) -> None:
         decal = FakeMaterial(
             "drak_vulture:pom_decals",

@@ -65,6 +65,12 @@ fn mesh_block_by_name<'a>(blocks: &'a [BlendBlock<'a>], name: &str) -> &'a Blend
         .unwrap_or_else(|| panic!("missing Mesh block named {name}"))
 }
 
+fn cstr_at(data: &[u8], offset: usize, len: usize) -> &str {
+    let raw = &data[offset..offset + len];
+    let end = raw.iter().position(|&byte| byte == 0).unwrap_or(raw.len());
+    std::str::from_utf8(&raw[..end]).unwrap()
+}
+
 fn test_mesh_with_submeshes(submeshes: Vec<SubMesh>) -> Mesh {
     Mesh {
         positions: vec![[0.0, 0.0, 0.0]; 3],
@@ -141,6 +147,29 @@ fn mesh_to_blend_exports_secondary_uv_map() {
     assert_ne!(default_uv_ptr, 0, "mesh should persist its render-active UV map name");
     assert!(blocks.iter().any(|block| block.old_ptr == active_uv_ptr && block.data == b"UVMap\0"));
     assert!(blocks.iter().any(|block| block.old_ptr == default_uv_ptr && block.data == b"UVMap\0"));
+}
+
+#[test]
+fn mesh_to_blend_exports_decal_offset_displace_modifier_for_decal_vertex_group() {
+    let mesh = test_mesh_with_submeshes(vec![test_submesh(0, "decal", 0)]);
+    let vertex_groups = vec![VertexGroup {
+        name: DECAL_OFFSET_GROUP_NAME.to_string(),
+        vertex_indices: vec![0, 1, 2],
+    }];
+
+    let bytes = mesh_to_blend("decal_mesh", &mesh, &None, None, Some(&vertex_groups));
+    let blocks = parse_blend_blocks(&bytes);
+    let object = object_block_by_name(&blocks, "decal_mesh");
+    let last_modifier_ptr = u64::from_le_bytes(object.data[664..672].try_into().unwrap());
+    let displace = blocks
+        .iter()
+        .find(|block| block.sdna == SDNA_IDX_DISPLACE_MODIFIER)
+        .expect("decal mesh should include a Displace modifier");
+
+    assert_eq!(displace.old_ptr, last_modifier_ptr);
+    assert_eq!(cstr_at(displace.data, 40, 64), DECAL_OFFSET_MODIFIER_NAME);
+    assert_eq!(cstr_at(displace.data, 288, 64), DECAL_OFFSET_GROUP_NAME);
+    assert!((f32::from_le_bytes(displace.data[280..284].try_into().unwrap()) - 0.005).abs() < 0.000001);
 }
 
 #[test]
@@ -1714,6 +1743,65 @@ fn test_create_scene_blend_hides_invisible_linked_instance_objects() {
 
     assert_eq!(i16::from_le_bytes(anchor.data[1082..1084].try_into().unwrap()), 0x0005);
     assert_eq!(i16::from_le_bytes(mesh.data[1082..1084].try_into().unwrap()), 0x0005);
+}
+
+#[test]
+fn test_create_scene_blend_writes_decal_offset_modifier_for_decal_mesh_asset() {
+    let instance = LinkedMeshInstance {
+        scene_instance_id: 0,
+        entity_name: "HullComponent".to_string(),
+        parent_entity_name: None,
+        parent_empty_name: None,
+        parent_empty_loc: [0.0, 0.0, 0.0],
+        parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+        parent_empty_scale: [1.0, 1.0, 1.0],
+        is_interior: false,
+        source_object_name: "HullMesh".to_string(),
+        name: "HullMesh".to_string(),
+        mesh_name: "HullMesh".to_string(),
+        material_names: Vec::new(),
+        material_sidecar: Some("Data/Objects/Spaceships/Ships/DRAK/Clipper/drak_clipper_ext_TEX0.materials.json".to_string()),
+        palette_id: None,
+        source_ancestors: Vec::new(),
+        source_nodes: Vec::new(),
+        source_loc: [0.0, 0.0, 0.0],
+        source_quat: [1.0, 0.0, 0.0, 0.0],
+        source_scale: [1.0, 1.0, 1.0],
+        source_parent_name: None,
+        parent_node_name: None,
+        blend_path: "//../../Data/Objects/hull_component.blend".to_string(),
+        mesh_asset: "Data/Objects/hull_component.blend".to_string(),
+        position: [0.0, 0.0, 0.0],
+        rotation: [1.0, 0.0, 0.0, 0.0],
+        scale: [1.0, 1.0, 1.0],
+        hidden: false,
+    };
+    let decal_mesh_refs = HashSet::from([(
+        "data/objects/hull_component.blend".to_string(),
+        "HullMesh".to_string(),
+    )]);
+
+    let blend_bytes = create_scene_blend_package_with_instances_and_decal_offsets(
+        "Test",
+        "Test",
+        &[instance],
+        &[],
+        &HashMap::new(),
+        &decal_mesh_refs,
+    )
+    .unwrap();
+    let blocks = parse_blend_blocks(&blend_bytes);
+    let object = object_block_by_name(&blocks, "HullMesh");
+    let last_modifier_ptr = u64::from_le_bytes(object.data[664..672].try_into().unwrap());
+    let displace = blocks
+        .iter()
+        .find(|block| block.sdna == SDNA_IDX_DISPLACE_MODIFIER)
+        .expect("scene mesh instance should include a Displace modifier");
+
+    assert_eq!(displace.old_ptr, last_modifier_ptr);
+    assert_eq!(cstr_at(displace.data, 40, 64), DECAL_OFFSET_MODIFIER_NAME);
+    assert_eq!(cstr_at(displace.data, 288, 64), DECAL_OFFSET_GROUP_NAME);
+    assert!((f32::from_le_bytes(displace.data[280..284].try_into().unwrap()) - 0.005).abs() < 0.000001);
 }
 
 #[test]

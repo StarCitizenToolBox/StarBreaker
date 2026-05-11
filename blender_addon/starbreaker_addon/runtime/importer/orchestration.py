@@ -106,7 +106,6 @@ class OrchestrationMixin:
         self.slot_mapping_cache: dict[int, list[int | None] | None] = {}
         self.host_channel_cache: dict[tuple[int, tuple[int, ...]], str | None] = {}
         self.host_rgb_cache: dict[tuple[int, tuple[int, ...]], tuple[float, float, float] | None] = {}
-        self.decal_vertex_cache: dict[tuple[int, tuple[int, ...]], frozenset[int]] = {}
         self.progress_callback = progress_callback
         self._progress_total_steps = 1
         self._progress_completed_steps = 0
@@ -485,8 +484,6 @@ class OrchestrationMixin:
             # slots to per-host-channel clones so each decal picks up the
             # palette colour of the nearest paint material on the mesh.
             self._rebind_mesh_decal_for_host(obj, palette)
-            # Phase 30: lift decal faces off the host geometry.
-            self._apply_decal_offset_modifier(obj)
             return applied
         for submaterial in sorted(sidecar.submaterials, key=lambda item: item.index):
             if mesh_materials is not None:
@@ -511,8 +508,6 @@ class OrchestrationMixin:
         # slots to per-host-channel clones so each decal picks up the
         # palette colour of the nearest paint material on the mesh.
         self._rebind_mesh_decal_for_host(obj, palette)
-        # Phase 30: lift decal faces off the host geometry.
-        self._apply_decal_offset_modifier(obj)
         return applied
 
     def apply_palette_to_package_root(self, package_root: bpy.types.Object, palette_id: str | None) -> int:

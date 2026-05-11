@@ -39,10 +39,10 @@ use starbreaker_blend::{
     build_lamp, build_lamp_with_node_tree_and_properties, build_lamp_object,
     build_lamp_object_with_properties_and_visibility, build_empty_object, build_empty_object_with_properties,
     build_library_block, build_id_stub, LAMP_SIZE, OBJECT_SIZE,
-    build_bdeformgroup, build_mdeformvert_array, build_mdeformweight_array, 
+    build_bdeformgroup, build_mdeformvert_array, build_mdeformweight_array,
     build_custom_data_layer_mdeformvert, SDNA_IDX_BDEFORMGROUP, SDNA_IDX_MDEFORMVERT, SDNA_IDX_LAMP,
-    build_weld_modifier, build_weighted_normal_modifier, set_object_modifiers_listbase,
-    SDNA_IDX_WELD_MODIFIER, SDNA_IDX_WEIGHTED_NORMAL_MODIFIER,
+    build_displace_modifier, build_weld_modifier, build_weighted_normal_modifier, set_object_modifiers_listbase,
+    SDNA_IDX_DISPLACE_MODIFIER, SDNA_IDX_WELD_MODIFIER, SDNA_IDX_WEIGHTED_NORMAL_MODIFIER,
     ints2_data, triangle_edge_topology, write_f32, write_i16, write_identity_matrix4x4, write_ptr,
     write_idprop_blocks, write_light_gobo_node_tree, ATTR_TYPE_INT32_2D, IdPropValue, STARTUP_UI_SCREEN_PTR,
 };
@@ -56,6 +56,10 @@ use crate::pipeline::{
 use crate::types::{Mesh, SubMesh};
 use crate::nmc::NodeMeshCombo;
 use crate::mtl::MtlFile;
+
+const DECAL_OFFSET_GROUP_NAME: &str = "starbreaker_decal_offset";
+const DECAL_OFFSET_MODIFIER_NAME: &str = "StarBreaker Decal Offset";
+const DECAL_OFFSET_MIDLEVEL: f32 = 0.0;
 
 /// Internal structure to hold mesh data for .blend file generation
 #[derive(Clone)]
@@ -230,6 +234,21 @@ fn instance_decal_offset_strength(instance: &LinkedMeshInstance) -> f64 {
         }
     }
     0.001
+}
+
+fn has_decal_offset_vertices(vertex_groups: Option<&Vec<VertexGroup>>) -> bool {
+    vertex_groups.is_some_and(|groups| {
+        groups
+            .iter()
+            .any(|group| group.name == DECAL_OFFSET_GROUP_NAME && !group.vertex_indices.is_empty())
+    })
+}
+
+fn mesh_ref_has_decal_offset(
+    instance: &LinkedMeshInstance,
+    decal_mesh_refs: &HashSet<(String, String)>,
+) -> bool {
+    decal_mesh_refs.contains(&(instance.mesh_asset.to_ascii_lowercase(), instance.source_object_name.clone()))
 }
 
 
@@ -927,6 +946,9 @@ pub fn write_decomposed_export_blend(
         let override_key = override_path.to_ascii_lowercase();
         if !mesh_data_map.contains_key(&override_key) {
             mesh_data_map.insert(override_key.clone(), child_entry);
+            if let Some(vertex_groups) = mesh_vertex_groups.get(&original_key).cloned() {
+                mesh_vertex_groups.insert(override_key.clone(), vertex_groups);
+            }
             let mesh_name = override_path
                 .split('/')
                 .last()
@@ -1112,6 +1134,15 @@ pub fn write_decomposed_export_blend(
     log::info!("[timing][blend] scene_instance_records: {:.2}s", phase_start.elapsed().as_secs_f32());
     phase_start = Instant::now();
 
+    let decal_mesh_refs = refs_by_asset
+        .iter()
+        .flat_map(|(asset_path, refs)| {
+            refs.iter()
+                .filter(|mesh_ref| mesh_ref.has_decal_offset_modifier)
+                .map(|mesh_ref| (asset_path.to_ascii_lowercase(), mesh_ref.object_name.clone()))
+        })
+        .collect::<HashSet<_>>();
+
     // Phase 3: Create scene.blend with lights and empties
     report_progress(progress, SCENE_BLEND_START, "Creating scene.blend with linked mesh instances");
     
@@ -1128,12 +1159,13 @@ pub fn write_decomposed_export_blend(
                 .map(ToOwned::to_owned)
         })
         .unwrap_or_else(|| scene_entity_name.clone());
-    let scene_blend_bytes = create_scene_blend_package_with_instances(
+    let scene_blend_bytes = create_scene_blend_package_with_instances_and_decal_offsets(
         &scene_package_name,
         &scene_entity_name,
         &scene_mesh_instances,
         &extracted_lights,
         &light_projector_texture_map,
+        &decal_mesh_refs,
     )?;
     log::info!("[blend-debug] scene.blend created, size: {} bytes", scene_blend_bytes.len());
     log::info!("[blend-debug] First 20 bytes of uncompressed: {:?}", &scene_blend_bytes[..20.min(scene_blend_bytes.len())]);
@@ -1373,9 +1405,12 @@ fn mesh_to_blend_flat(
     // poly_offsets: [0, 3, 6, ..., totloop] — totpoly+1 entries (sentinel at end)
     let poly_offsets: Vec<i32> = (0..=totpoly as i32).map(|i| i * 3).collect();
 
-    // Modifier pointer allocations (Weld first, WeightedNormal last in chain).
+    // Modifier pointer allocations. Decal meshes append a Displace modifier
+    // after the existing Weld and Weighted Normal modifiers.
+    let has_decal_offset = has_decal_offset_vertices(vertex_groups);
     let weld_mod_ptr = ptrs.alloc();
     let wn_mod_ptr = ptrs.alloc();
+    let decal_offset_mod_ptr = if has_decal_offset { ptrs.alloc() } else { 0 };
     let raw_poly_offsets = ints_data(&poly_offsets);
 
     // corner_vert[i] = vertex index for loop corner i
@@ -1468,7 +1503,11 @@ fn mesh_to_blend_flat(
         BLENDER_BAKED_ROOT_QUAT,
         BLENDER_BAKED_ROOT_SCALE,
     );
-    set_object_modifiers_listbase(&mut object_data, weld_mod_ptr, wn_mod_ptr);
+    set_object_modifiers_listbase(
+        &mut object_data,
+        weld_mod_ptr,
+        if has_decal_offset { decal_offset_mod_ptr } else { wn_mod_ptr },
+    );
     let scene_data = build_scene_with_motion_blur_curve_and_properties(
         name,
         view_layer_ptr,
@@ -1536,11 +1575,27 @@ fn mesh_to_blend_flat(
     write_block(&mut out, b"DATA", 0, obj_mat_ptr,      1, &obj_mat_array);
     write_block(&mut out, b"DATA", 0, obj_matbits_ptr,  1, &obj_matbits);
     // Modifier DATA blocks (part of OB's consecutive data chain).
-    // Weld (first): next→wn, prev→0.  WeightedNormal (last): next→0, prev→weld.
     write_block(&mut out, b"DATA", SDNA_IDX_WELD_MODIFIER, weld_mod_ptr, 1,
         &build_weld_modifier("StarBreaker Weld", wn_mod_ptr, 0, 0.0005));
     write_block(&mut out, b"DATA", SDNA_IDX_WEIGHTED_NORMAL_MODIFIER, wn_mod_ptr, 1,
-        &build_weighted_normal_modifier("StarBreaker Weighted Normal", 0, weld_mod_ptr, 50, 0.01));
+        &build_weighted_normal_modifier(
+            "StarBreaker Weighted Normal",
+            decal_offset_mod_ptr,
+            weld_mod_ptr,
+            50,
+            0.01,
+        ));
+    if has_decal_offset {
+        write_block(&mut out, b"DATA", SDNA_IDX_DISPLACE_MODIFIER, decal_offset_mod_ptr, 1,
+            &build_displace_modifier(
+                DECAL_OFFSET_MODIFIER_NAME,
+                0,
+                wn_mod_ptr,
+                0.005,
+                DECAL_OFFSET_GROUP_NAME,
+                DECAL_OFFSET_MIDLEVEL,
+            ));
+    }
 
     // ME block + DATA block (gap=1 rule: mesh mat** must immediately follow ME)
     write_block(&mut out, b"ME\0\0", SDNA_IDX_MESH, mesh_ptr, 1, &mesh_data);
@@ -1765,6 +1820,7 @@ struct MeshBlockData {
     mdeformweight_ptrs: Vec<u64>,
     weld_mod_ptr: u64,
     wn_mod_ptr: u64,
+    decal_offset_mod_ptr: u64,
     totvert: usize,
     totedge: usize,
     totpoly: usize,
@@ -1856,6 +1912,7 @@ struct LinkedMeshRef {
     object_quat: [f32; 4],
     object_scale: [f32; 3],
     ancestors: Vec<LinkedSourceAncestor>,
+    has_decal_offset_modifier: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1882,6 +1939,7 @@ fn blend_link_data_from_bytes(blend_bytes: &[u8]) -> (Vec<LinkedMeshRef>, Vec<Li
         object_type: i16,
         parent_ptr: u64,
         mesh_ptr: u64,
+        modifier_first_ptr: u64,
         loc: [f32; 3],
         quat: [f32; 4],
         scale: [f32; 3],
@@ -1898,6 +1956,7 @@ fn blend_link_data_from_bytes(blend_bytes: &[u8]) -> (Vec<LinkedMeshRef>, Vec<Li
     let mut meshes_by_ptr = HashMap::new();
     let mut material_names_by_ptr = HashMap::new();
     let mut data_by_ptr = HashMap::new();
+    let mut sdna_by_ptr = HashMap::new();
     let mut offset = BLEND_MAGIC.len();
     while offset + 32 <= blend_bytes.len() {
         let code = &blend_bytes[offset..offset + 4];
@@ -1931,6 +1990,8 @@ fn blend_link_data_from_bytes(blend_bytes: &[u8]) -> (Vec<LinkedMeshRef>, Vec<Li
             }
         } else if code == b"DATA" {
             data_by_ptr.insert(old_ptr, blend_bytes[data_start..data_end].to_vec());
+            let sdna = u32::from_le_bytes(blend_bytes[offset + 4..offset + 8].try_into().unwrap());
+            sdna_by_ptr.insert(old_ptr, sdna);
         } else if code == b"OB\0\0" {
             let data = &blend_bytes[data_start..data_end];
             if data.len() >= OBJECT_SIZE {
@@ -1946,6 +2007,7 @@ fn blend_link_data_from_bytes(blend_bytes: &[u8]) -> (Vec<LinkedMeshRef>, Vec<Li
                         object_type,
                         parent_ptr: u64::from_le_bytes(data[496..504].try_into().unwrap()),
                         mesh_ptr: u64::from_le_bytes(data[552..560].try_into().unwrap()),
+                        modifier_first_ptr: u64::from_le_bytes(data[656..664].try_into().unwrap()),
                         loc: [
                             f32::from_le_bytes(data[736..740].try_into().unwrap()),
                             f32::from_le_bytes(data[740..744].try_into().unwrap()),
@@ -1996,6 +2058,22 @@ fn blend_link_data_from_bytes(blend_bytes: &[u8]) -> (Vec<LinkedMeshRef>, Vec<Li
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
+            let mut has_decal_offset_modifier = false;
+            let mut modifier_ptr = object.modifier_first_ptr;
+            let mut visited_modifiers = HashSet::new();
+            while modifier_ptr != 0 && visited_modifiers.insert(modifier_ptr) {
+                if sdna_by_ptr.get(&modifier_ptr).copied() == Some(SDNA_IDX_DISPLACE_MODIFIER) {
+                    has_decal_offset_modifier = true;
+                    break;
+                }
+                let Some(modifier_data) = data_by_ptr.get(&modifier_ptr) else {
+                    break;
+                };
+                if modifier_data.len() < 8 {
+                    break;
+                }
+                modifier_ptr = u64::from_le_bytes(modifier_data[0..8].try_into().unwrap());
+            }
             let mut ancestors = Vec::new();
             let mut parent_ptr = object.parent_ptr;
             while parent_ptr != 0 {
@@ -2022,6 +2100,7 @@ fn blend_link_data_from_bytes(blend_bytes: &[u8]) -> (Vec<LinkedMeshRef>, Vec<Li
                 object_quat: object.quat,
                 object_scale: object.scale,
                 ancestors,
+                has_decal_offset_modifier,
             })
         })
         .collect();
@@ -2095,6 +2174,7 @@ fn build_native_blend_asset(
             object_quat: [1.0, 0.0, 0.0, 0.0],
             object_scale: [1.0, 1.0, 1.0],
             ancestors: Vec::new(),
+            has_decal_offset_modifier: has_decal_offset_vertices(vgroups.as_ref()),
         });
     }
     // Compress for storage (matching Blender 5.x standard zstd format)
@@ -2581,6 +2661,8 @@ fn allocate_mesh_block(
         num_attrs += 1;
     }
 
+    let has_decal_offset = has_decal_offset_vertices(vertex_groups);
+
     MeshBlockData {
         object_ptr,
         mesh_ptr,
@@ -2624,6 +2706,7 @@ fn allocate_mesh_block(
         mdeformweight_ptrs,
         weld_mod_ptr: ptrs.alloc(),
         wn_mod_ptr: ptrs.alloc(),
+        decal_offset_mod_ptr: if has_decal_offset { ptrs.alloc() } else { 0 },
         totvert,
         totedge,
         totpoly,
@@ -2666,7 +2749,12 @@ fn write_mesh_block(
         0,
     );
     patch_object_parent_transform(&mut object_data, parent_ptr, transform.0, transform.1, transform.2);
-    set_object_modifiers_listbase(&mut object_data, block.weld_mod_ptr, block.wn_mod_ptr);
+    let has_decal_offset = block.decal_offset_mod_ptr != 0;
+    set_object_modifiers_listbase(
+        &mut object_data,
+        block.weld_mod_ptr,
+        if has_decal_offset { block.decal_offset_mod_ptr } else { block.wn_mod_ptr },
+    );
     let mut mesh_data = build_mesh(
         &object.name,
         block.totvert,
@@ -2692,11 +2780,27 @@ fn write_mesh_block(
     write_block(out, b"OB\0\0", SDNA_IDX_OBJECT, block.object_ptr, 1, &object_data);
     write_block(out, b"DATA", 0, block.obj_mat_ptr, 1, &obj_mat_array);
     write_block(out, b"DATA", 0, block.obj_matbits_ptr, 1, &obj_matbits);
-    // Modifier DATA blocks (part of OB's consecutive data chain).
     write_block(out, b"DATA", SDNA_IDX_WELD_MODIFIER, block.weld_mod_ptr, 1,
         &build_weld_modifier("StarBreaker Weld", block.wn_mod_ptr, 0, 0.0005));
     write_block(out, b"DATA", SDNA_IDX_WEIGHTED_NORMAL_MODIFIER, block.wn_mod_ptr, 1,
-        &build_weighted_normal_modifier("StarBreaker Weighted Normal", 0, block.weld_mod_ptr, 50, 0.01));
+        &build_weighted_normal_modifier(
+            "StarBreaker Weighted Normal",
+            block.decal_offset_mod_ptr,
+            block.weld_mod_ptr,
+            50,
+            0.01,
+        ));
+    if has_decal_offset {
+        write_block(out, b"DATA", SDNA_IDX_DISPLACE_MODIFIER, block.decal_offset_mod_ptr, 1,
+            &build_displace_modifier(
+                DECAL_OFFSET_MODIFIER_NAME,
+                0,
+                block.wn_mod_ptr,
+                0.005,
+                DECAL_OFFSET_GROUP_NAME,
+                DECAL_OFFSET_MIDLEVEL,
+            ));
+    }
     write_block(out, b"ME\0\0", SDNA_IDX_MESH, block.mesh_ptr, 1, &mesh_data);
     write_block(out, b"DATA", 0, block.mesh_mat_ptr, 1, &mesh_mat_array);
     write_block(out, b"DATA", SDNA_IDX_ATTRIBUTE, block.attrs_ptr, block.num_attrs, &block.attr_blob);
@@ -3036,6 +3140,7 @@ fn mesh_to_blend_hierarchy(
                     mdeformweight_ptrs: block.mdeformweight_ptrs.clone(),
                     weld_mod_ptr: block.weld_mod_ptr,
                     wn_mod_ptr: block.wn_mod_ptr,
+                    decal_offset_mod_ptr: block.decal_offset_mod_ptr,
                     totvert: block.totvert,
                     totedge: block.totedge,
                     totpoly: block.totpoly,
@@ -3231,6 +3336,24 @@ fn create_scene_blend_package_with_instances(
     lights: &[ExtractedLight],
     light_projector_texture_map: &HashMap<String, String>,
 ) -> Result<Vec<u8>, Error> {
+    create_scene_blend_package_with_instances_and_decal_offsets(
+        package_name,
+        root_entity_name,
+        mesh_instances_input,
+        lights,
+        light_projector_texture_map,
+        &HashSet::new(),
+    )
+}
+
+fn create_scene_blend_package_with_instances_and_decal_offsets(
+    package_name: &str,
+    root_entity_name: &str,
+    mesh_instances_input: &[LinkedMeshInstance],
+    lights: &[ExtractedLight],
+    light_projector_texture_map: &HashMap<String, String>,
+    decal_mesh_refs: &HashSet<(String, String)>,
+) -> Result<Vec<u8>, Error> {
     let children_count = mesh_instances_input.len();
     // Build a minimal input structure for compatibility with internal logic
     let mut ptrs = PtrAlloc::new(0x1000);
@@ -3296,8 +3419,9 @@ fn create_scene_blend_package_with_instances(
     let mut interior_coll_obj_ptrs = Vec::new();
     let mut local_mesh_object_entries = Vec::new();
     let mut instance_anchor_entries = Vec::new();
-    // Parallel vec of (weld_mod_ptr, wn_mod_ptr) per local mesh object entry.
-    let mut local_mesh_modifier_ptrs: Vec<(u64, u64)> = Vec::new();
+    // Parallel vec of (weld_mod_ptr, weighted_normal_mod_ptr, optional_decal_offset_mod_ptr)
+    // per local mesh object entry.
+    let mut local_mesh_modifier_ptrs: Vec<(u64, u64, u64)> = Vec::new();
     let mut scene_source_node_entries = Vec::new();
     let mut source_empty_entries = Vec::new();
     let mut parent_empty_entries = Vec::new();
@@ -3519,7 +3643,12 @@ fn create_scene_blend_package_with_instances(
                 .filter_map(|name| scene_material_ptrs.get(name).copied())
                 .collect::<Vec<_>>(),
         ));
-        local_mesh_modifier_ptrs.push((ptrs.alloc(), ptrs.alloc()));
+        let decal_offset_mod_ptr = if mesh_ref_has_decal_offset(instance, decal_mesh_refs) {
+            ptrs.alloc()
+        } else {
+            0
+        };
+        local_mesh_modifier_ptrs.push((ptrs.alloc(), ptrs.alloc(), decal_offset_mod_ptr));
         instance_anchor_entries.push((anchor_ptr, idx, anchor_parent_ptr, anchor_idprops));
         if instance.is_interior {
             interior_coll_obj_ptrs.push((anchor_coll_obj_ptr, anchor_ptr));
@@ -3765,8 +3894,12 @@ fn create_scene_blend_package_with_instances(
         if instance.hidden {
             hide_object_viewport_and_render(&mut object_data);
         }
-        let (weld_mod_ptr, wn_mod_ptr) = local_mesh_modifier_ptrs[entry_idx];
-        set_object_modifiers_listbase(&mut object_data, weld_mod_ptr, wn_mod_ptr);
+        let (weld_mod_ptr, wn_mod_ptr, decal_offset_mod_ptr) = local_mesh_modifier_ptrs[entry_idx];
+        set_object_modifiers_listbase(
+            &mut object_data,
+            weld_mod_ptr,
+            if decal_offset_mod_ptr != 0 { decal_offset_mod_ptr } else { wn_mod_ptr },
+        );
         local_mesh_object_data.push((
             *object_ptr,
             object_data,
@@ -3971,11 +4104,29 @@ fn create_scene_blend_package_with_instances(
         write_block(&mut out, b"DATA", 0, local_mesh_object_entries[idx].1, 1, mat_array);
         write_block(&mut out, b"DATA", 0, local_mesh_object_entries[idx].2, 1, matbits);
         // Modifier DATA blocks (part of OB's consecutive data chain).
-        let (weld_mod_ptr, wn_mod_ptr) = local_mesh_modifier_ptrs[idx];
+        let (weld_mod_ptr, wn_mod_ptr, decal_offset_mod_ptr) = local_mesh_modifier_ptrs[idx];
         write_block(&mut out, b"DATA", SDNA_IDX_WELD_MODIFIER, weld_mod_ptr, 1,
             &build_weld_modifier("StarBreaker Weld", wn_mod_ptr, 0, 0.0005));
         write_block(&mut out, b"DATA", SDNA_IDX_WEIGHTED_NORMAL_MODIFIER, wn_mod_ptr, 1,
-            &build_weighted_normal_modifier("StarBreaker Weighted Normal", 0, weld_mod_ptr, 50, 0.01));
+            &build_weighted_normal_modifier(
+                "StarBreaker Weighted Normal",
+                decal_offset_mod_ptr,
+                weld_mod_ptr,
+                50,
+                0.01,
+            ));
+        if decal_offset_mod_ptr != 0 {
+            let instance = &mesh_instances_input[local_mesh_object_entries[idx].3];
+            write_block(&mut out, b"DATA", SDNA_IDX_DISPLACE_MODIFIER, decal_offset_mod_ptr, 1,
+                &build_displace_modifier(
+                    DECAL_OFFSET_MODIFIER_NAME,
+                    0,
+                    wn_mod_ptr,
+                    instance_decal_offset_strength(instance) as f32,
+                    DECAL_OFFSET_GROUP_NAME,
+                    DECAL_OFFSET_MIDLEVEL,
+                ));
+        }
     }
 
     for (material_ptr, material_data) in &scene_material_blocks {
@@ -5386,7 +5537,7 @@ pub fn collect_decal_vertices(
     
     // Create single consolidated vertex group
     let decal_vgroup = VertexGroup {
-        name: "starbreaker_decal_offset".to_string(),
+        name: DECAL_OFFSET_GROUP_NAME.to_string(),
         vertex_indices,
     };
     

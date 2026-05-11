@@ -71,6 +71,7 @@ pub const SDNA_IDX_NODE_TEX_ENVIRONMENT: u32 = 534;
 pub const SDNA_IDX_BNSV_RGBA: u32 = 479;
 pub const SDNA_IDX_BNSV_FLOAT: u32 = 475;
 pub const SDNA_IDX_BNSV_VECTOR: u32 = 477;
+pub const SDNA_IDX_DISPLACE_MODIFIER: u32 = 362;
 pub const SDNA_IDX_WELD_MODIFIER: u32 = 406;
 pub const SDNA_IDX_WEIGHTED_NORMAL_MODIFIER: u32 = 413;
 
@@ -112,13 +113,19 @@ pub const CUSTOM_DATA_LAYER_SIZE: usize = 112;
 pub const IDPROPERTY_SIZE: usize = 144;
 pub const LIBRARY_SIZE: usize = 1472;  // ID (408) + filepath[1024] + flag (2) + undo_runtime_tag (2) + _pad (4) + archive_parent_library (8) + packedfile (8) + runtime (8) + _pad2 (8)
 pub const ID_STUB_SIZE: usize = 408;
+pub const DISPLACE_MODIFIER_SIZE: usize = 368;
 pub const WELD_MODIFIER_SIZE: usize = 192;
 pub const WEIGHTED_NORMAL_MODIFIER_SIZE: usize = 192;
 /// `eModifierType_Displace` = 14, `eModifierType_WeightedNormal` = 54, `eModifierType_Weld` = 55.
+pub const MODIFIER_TYPE_DISPLACE: i32 = 14;
 pub const MODIFIER_TYPE_WELD: i32 = 55;
 pub const MODIFIER_TYPE_WEIGHTED_NORMAL: i32 = 54;
 /// `mode` field bitmask: `eModifierMode_Realtime` (1) | `eModifierMode_Render` (2).
 pub const MODIFIER_MODE_DEFAULT: i32 = 3;
+/// `DisplaceModifierData.direction`: displace along vertex normals.
+pub const DISPLACE_DIRECTION_NORMAL: i32 = 3;
+/// `DisplaceModifierData.space`: local coordinates.
+pub const DISPLACE_SPACE_LOCAL: i32 = 0;
 
 const NODE_TEX_SKY_REFERENCE_HEX: &str = concat!(
     "0000000000000000000000000000000000000000000000000000803f0000803f0000803f0000000001020300000000000000803f000000000000000000000000",
@@ -2177,6 +2184,33 @@ fn write_modifier_base(data: &mut Vec<u8>, next_ptr: u64, prev_ptr: u64, mod_typ
     write_cstr_fixed(data, 40, 64, name);
 }
 
+/// Build a `DisplaceModifierData` block (368 bytes).
+///
+/// Layout (SDNA #362, Blender 5.1):
+/// - +0..+119: `ModifierData` base
+/// - +280: `strength` (float)
+/// - +284: `direction` (int) — 3 = NORMAL
+/// - +288: `defgrp_name[64]` (char)
+/// - +352: `midlevel` (float)
+/// - +356: `space` (int) — 0 = LOCAL
+pub fn build_displace_modifier(
+    name: &str,
+    next_ptr: u64,
+    prev_ptr: u64,
+    strength: f32,
+    vertex_group_name: &str,
+    midlevel: f32,
+) -> Vec<u8> {
+    let mut data = vec![0u8; DISPLACE_MODIFIER_SIZE];
+    write_modifier_base(&mut data, next_ptr, prev_ptr, MODIFIER_TYPE_DISPLACE, name);
+    write_f32(&mut data, 280, strength);
+    write_i32(&mut data, 284, DISPLACE_DIRECTION_NORMAL);
+    write_cstr_fixed(&mut data, 288, 64, vertex_group_name);
+    write_f32(&mut data, 352, midlevel);
+    write_i32(&mut data, 356, DISPLACE_SPACE_LOCAL);
+    data
+}
+
 /// Build a `WeldModifierData` block (192 bytes).
 ///
 /// Merges nearby vertices during evaluation.
@@ -2250,6 +2284,36 @@ mod tests {
             .read_to_end(&mut decompressed)
             .expect("compressed blend bytes should round-trip");
         assert_eq!(decompressed, original);
+    }
+
+    #[test]
+    fn test_build_displace_modifier_writes_decal_offset_fields() {
+        let bytes = build_displace_modifier(
+            "StarBreaker Decal Offset",
+            0x2222,
+            0x1111,
+            0.005,
+            "starbreaker_decal_offset",
+            0.0,
+        );
+
+        assert_eq!(bytes.len(), DISPLACE_MODIFIER_SIZE);
+        assert_eq!(u64::from_le_bytes(bytes[0..8].try_into().unwrap()), 0x2222);
+        assert_eq!(u64::from_le_bytes(bytes[8..16].try_into().unwrap()), 0x1111);
+        assert_eq!(i32::from_le_bytes(bytes[16..20].try_into().unwrap()), MODIFIER_TYPE_DISPLACE);
+        assert_eq!(i32::from_le_bytes(bytes[20..24].try_into().unwrap()), MODIFIER_MODE_DEFAULT);
+        assert_eq!(
+            &bytes[40..40 + "StarBreaker Decal Offset".len()],
+            b"StarBreaker Decal Offset"
+        );
+        assert!((f32::from_le_bytes(bytes[280..284].try_into().unwrap()) - 0.005).abs() < 0.000001);
+        assert_eq!(i32::from_le_bytes(bytes[284..288].try_into().unwrap()), DISPLACE_DIRECTION_NORMAL);
+        assert_eq!(
+            &bytes[288..288 + "starbreaker_decal_offset".len()],
+            b"starbreaker_decal_offset"
+        );
+        assert_eq!(f32::from_le_bytes(bytes[352..356].try_into().unwrap()), 0.0);
+        assert_eq!(i32::from_le_bytes(bytes[356..360].try_into().unwrap()), DISPLACE_SPACE_LOCAL);
     }
     
     #[test]
