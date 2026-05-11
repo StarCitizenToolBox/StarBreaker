@@ -447,6 +447,11 @@ class OrchestrationMixin:
             for slot_index, mapped_index in enumerate(slot_mapping):
                 fallback_index = mapped_index if mapped_index is not None else slot_index
                 source_submaterial = source_submaterials_by_index.get(fallback_index)
+                slot_material = (
+                    obj.material_slots[slot_index].material
+                    if slot_index < len(obj.material_slots)
+                    else None
+                )
                 submaterial = _remapped_submaterial_for_slot(
                     source_submaterial,
                     fallback_index,
@@ -454,15 +459,15 @@ class OrchestrationMixin:
                     target_submaterials_by_name,
                     target_submaterials_by_name_all,
                 )
-                if submaterial is None and slot_index < len(obj.material_slots):
-                    slot_material = obj.material_slots[slot_index].material
-                    if slot_material is not None:
-                        canonical_slot_name = _canonical_source_name(slot_material.name)
-                        if canonical_slot_name is not None:
-                            submaterial = target_submaterials_by_name.get(canonical_slot_name)
+                if submaterial is None and slot_material is not None:
+                    canonical_slot_name = _canonical_source_name(slot_material.name)
+                    if canonical_slot_name is not None:
+                        submaterial = target_submaterials_by_name.get(canonical_slot_name)
                 if submaterial is None:
+                    if mapped_index is None and slot_material is None:
+                        continue
                     print(
-                        f"StarBreaker: missing sidecar submaterial index {mapped_index} for {obj.name}"
+                        f"StarBreaker: missing sidecar submaterial index {fallback_index} for {obj.name}"
                     )
                     continue
                 if slot_index >= len(obj.material_slots):

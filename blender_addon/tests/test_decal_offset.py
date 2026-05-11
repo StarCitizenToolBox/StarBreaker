@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 from pathlib import Path
 import sys
@@ -76,6 +78,7 @@ from starbreaker_addon.manifest import MaterialSidecar, SubmaterialRecord
 from starbreaker_addon.runtime.importer.builders import BuildersMixin
 from starbreaker_addon.runtime.importer.decals import DecalsMixin
 from starbreaker_addon.runtime.importer.materials import MaterialsMixin
+from starbreaker_addon.runtime.importer.orchestration import OrchestrationMixin
 from starbreaker_addon.runtime.importer.utils import (
     _canonical_material_sidecar_path,
     _material_identity,
@@ -144,9 +147,14 @@ class FakeMesh:
     def __init__(self, polygons: list[FakePolygon], vertex_count: int):
         self.polygons = polygons
 
+    def as_pointer(self) -> int:
+        return id(self)
+
 
 class FakeObject:
     def __init__(self, material_slots: list[FakeSlot], mesh: FakeMesh, **props):
+        self.name = props.pop("name", "FakeObject")
+        self.type = "MESH"
         self.material_slots = material_slots
         self.data = mesh
         self._props = dict(props)
@@ -260,7 +268,82 @@ class ManagedMaterialBuildImporterUnderTest(BuildersMixin):
         return "test-scope"
 
 
+class FakeSidecar:
+    def __init__(self, submaterials):
+        self.submaterials = submaterials
+
+
+class FakeSubmaterial:
+    def __init__(self, index: int, name: str):
+        self.index = index
+        self.submaterial_name = name
+
+
+class FakePackageWithSidecars:
+    def __init__(self, sidecar):
+        self.sidecar = sidecar
+        self.palettes = {}
+        self.scene = types.SimpleNamespace(root_entity=types.SimpleNamespace(palette_id=None))
+
+    def load_material_sidecar(self, sidecar_path):
+        return self.sidecar
+
+
+class OrchestrationImporterUnderTest(OrchestrationMixin):
+    def __init__(self, sidecar):
+        self.package = FakePackageWithSidecars(sidecar)
+        self.package_root = None
+        self.import_palette_override = None
+        self.import_paint_variant_sidecar = None
+        self.exterior_material_sidecars = None
+        self.slot_mapping_cache = {}
+        self.sidecar_submaterials_by_index = {}
+        self.sidecar_submaterials_by_name = {}
+        self.sidecar_submaterials_by_name_all = {}
+
+    def _ensure_runtime_shared_groups(self) -> None:
+        return None
+
+    def _effective_palette_id(self, palette_id: str | None) -> str | None:
+        return palette_id
+
+    def material_for_submaterial(self, sidecar_path, sidecar, submaterial, palette):
+        return FakeMaterial(f"material_{submaterial.index}")
+
+    def _remove_replaced_slot_material(self, material) -> None:
+        return None
+
+    def _rebind_mesh_decal_for_host(self, obj, palette) -> int:
+        return 0
+
+
 class DecalOffsetTests(unittest.TestCase):
+    def test_rebuild_object_materials_skips_empty_unmapped_slots_without_warning(self) -> None:
+        sidecar = FakeSidecar([
+            FakeSubmaterial(0, "decal pom"),
+            FakeSubmaterial(1, "tint_secondary"),
+        ])
+        importer = OrchestrationImporterUnderTest(sidecar)
+        mesh = FakeMesh(polygons=[], vertex_count=0)
+        importer.slot_mapping_cache[mesh.as_pointer()] = [0, 1, None, None]
+        obj = FakeObject(
+            material_slots=[FakeSlot(None), FakeSlot(None), FakeSlot(None), FakeSlot(None)],
+            mesh=mesh,
+            name="flair_poster_hook_mesh_005",
+            starbreaker_material_sidecar="Data/Objects/props/flair/poster/flair_poster_1_a_TEX0.materials.json",
+        )
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            applied = importer.rebuild_object_materials(obj, None)
+
+        self.assertEqual(applied, 2)
+        self.assertEqual(output.getvalue(), "")
+        self.assertIsNotNone(obj.material_slots[0].material)
+        self.assertIsNotNone(obj.material_slots[1].material)
+        self.assertIsNone(obj.material_slots[2].material)
+        self.assertIsNone(obj.material_slots[3].material)
+
     def test_illum_pom_rebind_uses_palette_channel_rgb_when_no_authored_fallback_exists(self) -> None:
         decal = FakeMaterial(
             "drak_vulture:pom_decals",
