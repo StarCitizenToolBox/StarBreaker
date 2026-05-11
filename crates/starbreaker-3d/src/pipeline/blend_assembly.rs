@@ -50,7 +50,7 @@ use crate::error::Error;
 use crate::decomposed::DecomposedInput;
 use crate::pipeline::{
     load_interior_mesh_asset, DecomposedExport, ExportedFile, ExportedFileKind, ExportOptions,
-    LoadedInteriors, PngCache,
+    LoadedInteriors, PngCache, port_flags_mark_invisible,
 };
 use crate::types::{Mesh, SubMesh};
 use crate::nmc::NodeMeshCombo;
@@ -268,6 +268,7 @@ struct SceneManifestInstance {
     loc: [f32; 3],
     quat: [f32; 4],
     scale: [f32; 3],
+    hidden: bool,
 }
 
 fn manifest_vec3(value: &serde_json::Value, key: &str) -> Option<[f32; 3]> {
@@ -352,9 +353,11 @@ fn apply_reference_root_conversion(
 }
 
 fn manifest_scene_transform(value: &serde_json::Value) -> ([f32; 3], [f32; 4], [f32; 3]) {
-    if value.get("source_transform_basis").and_then(|v| v.as_str()) == Some("cryengine_z_up") {
-        if let Some(source) = manifest_matrix(value, "local_transform_sc") {
-            return sc_matrix_to_scene_transform(source);
+    if let Some(source) = manifest_matrix(value, "local_transform_sc") {
+        match value.get("source_transform_basis").and_then(|v| v.as_str()) {
+            Some("cryengine_z_up") => return sc_matrix_to_scene_transform(source),
+            Some("gltf_y_up") => return matrix_to_transform(source.to_cols_array()),
+            _ => {}
         }
     }
 
@@ -427,6 +430,10 @@ fn scene_manifest_instances(manifest_files: &[ExportedFile]) -> Vec<SceneManifes
             .unwrap_or(mesh_asset)
             .to_string();
         let (loc, quat, scale) = manifest_scene_transform(value);
+        let hidden = value
+            .get("port_flags")
+            .and_then(|v| v.as_str())
+            .is_some_and(port_flags_mark_invisible);
         let material_sidecar = value
             .get("material_sidecar")
             .and_then(|v| v.as_str())
@@ -463,6 +470,7 @@ fn scene_manifest_instances(manifest_files: &[ExportedFile]) -> Vec<SceneManifes
             loc,
             quat,
             scale,
+            hidden,
         });
     };
     if let Some(root_entity) = root.get("root_entity") {
@@ -533,6 +541,7 @@ fn scene_manifest_instances(manifest_files: &[ExportedFile]) -> Vec<SceneManifes
                         loc,
                         quat,
                         scale,
+                        hidden: false,
                     });
                 }
             }
@@ -1073,6 +1082,7 @@ pub fn write_decomposed_export_blend(
                         position: [0.0, 0.0, 0.0],
                         rotation: [1.0, 0.0, 0.0, 0.0],
                         scale: [1.0, 1.0, 1.0],
+                        hidden: false,
                     });
                 }
             }
@@ -1117,6 +1127,7 @@ pub fn write_decomposed_export_blend(
                         position: manifest_instance.loc,
                         rotation: manifest_instance.quat,
                         scale: manifest_instance.scale,
+                        hidden: manifest_instance.hidden,
                     });
                 }
             }
@@ -3117,6 +3128,12 @@ pub struct LinkedMeshInstance {
     pub rotation: [f32; 4],
     /// Blender coordinates scale.
     pub scale: [f32; 3],
+    /// Whether this scene instance should be hidden in viewport and render by default.
+    pub hidden: bool,
+}
+
+fn hide_object_viewport_and_render(object_data: &mut [u8]) {
+    write_i16(object_data, 1082, 0x0005);
 }
 
 const BLENDER_BAKED_ROOT_QUAT: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
@@ -3189,6 +3206,7 @@ pub fn create_scene_blend(
                 position: [0.0, 0.0, 0.0],
                 rotation: [1.0, 0.0, 0.0, 0.0],
                 scale: [1.0, 1.0, 1.0],
+                hidden: false,
             }
         })
         .collect();
@@ -3676,7 +3694,7 @@ fn create_scene_blend_package_with_instances(
     let mut instance_anchor_data = Vec::new();
     for (anchor_ptr, idx, anchor_parent_ptr, anchor_idprops) in &instance_anchor_entries {
         let instance = &mesh_instances_input[*idx];
-        let object_data = build_empty_object_with_properties(
+        let mut object_data = build_empty_object_with_properties(
             &scene_anchor_name(&instance.name),
             instance.position,
             instance.rotation,
@@ -3684,6 +3702,9 @@ fn create_scene_blend_package_with_instances(
             *anchor_parent_ptr,
             anchor_idprops.as_ref().map(|props| props.root_ptr).unwrap_or(0),
         );
+        if instance.hidden {
+            hide_object_viewport_and_render(&mut object_data);
+        }
         instance_anchor_data.push((*anchor_ptr, object_data));
     }
 
@@ -3691,25 +3712,31 @@ fn create_scene_blend_package_with_instances(
     for (empty_ptr, idx, node_index, parent_ptr) in &scene_source_node_entries {
         let instance = &mesh_instances_input[*idx];
         let source_node = &instance.source_nodes[*node_index];
-        let object_data = build_empty_object(
+        let mut object_data = build_empty_object(
             &scene_source_empty_name(&instance.name, *node_index, &source_node.name),
             source_node.loc,
             source_node.quat,
             source_node.scale,
             *parent_ptr,
         );
+        if instance.hidden {
+            hide_object_viewport_and_render(&mut object_data);
+        }
         source_empty_data.push((*empty_ptr, object_data));
     }
     for (empty_ptr, idx, ancestor_index, parent_ptr) in &source_empty_entries {
         let instance = &mesh_instances_input[*idx];
         let ancestor = &instance.source_ancestors[*ancestor_index];
-        let object_data = build_empty_object(
+        let mut object_data = build_empty_object(
             &scene_source_empty_name(&instance.name, *ancestor_index, &ancestor.name),
             ancestor.loc,
             ancestor.quat,
             ancestor.scale,
             *parent_ptr,
         );
+        if instance.hidden {
+            hide_object_viewport_and_render(&mut object_data);
+        }
         source_empty_data.push((*empty_ptr, object_data));
     }
 
@@ -3733,6 +3760,9 @@ fn create_scene_blend_package_with_instances(
             instance.source_quat,
             instance.source_scale,
         );
+        if instance.hidden {
+            hide_object_viewport_and_render(&mut object_data);
+        }
         let (weld_mod_ptr, wn_mod_ptr) = local_mesh_modifier_ptrs[entry_idx];
         set_object_modifiers_listbase(&mut object_data, weld_mod_ptr, wn_mod_ptr);
         local_mesh_object_data.push((

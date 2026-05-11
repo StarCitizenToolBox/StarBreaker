@@ -359,3 +359,20 @@ pub(crate) fn is_shield_related_name(value: &str) -> bool {
         })
 }
 
+pub(crate) fn port_flags_mark_invisible(flags: &str) -> bool {
+    flags.split_whitespace().any(|flag| flag.eq_ignore_ascii_case("invisible"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_port_flags_mark_invisible_ports() {
+        assert!(port_flags_mark_invisible("invisible uneditable"));
+        assert!(port_flags_mark_invisible("uneditable invisible"));
+        assert!(!port_flags_mark_invisible("dockingport1"));
+        assert!(!port_flags_mark_invisible("not_invisible"));
+    }
+}
+

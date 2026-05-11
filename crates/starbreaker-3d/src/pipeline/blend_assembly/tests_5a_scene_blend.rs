@@ -761,6 +761,7 @@ fn test_create_scene_blend_links_object_ids_instead_of_empty_mesh_stubs() {
         position: [0.0, 0.0, 0.0],
         rotation: [1.0, 0.0, 0.0, 0.0],
         scale: [1.0, 1.0, 1.0],
+        hidden: false,
     };
     let blend_bytes = create_scene_blend_with_instances("SceneLinkTest", &[instance], &[]).unwrap();
     let blocks = parse_blend_blocks(&blend_bytes);
@@ -830,6 +831,7 @@ fn test_create_scene_blend_writes_addon_style_scene_anchors() {
         position: [1.0, 2.0, 3.0],
         rotation: [1.0, 0.0, 0.0, 0.0],
         scale: [1.0, 1.0, 1.0],
+        hidden: false,
     };
     let blend_bytes = create_scene_blend_with_instances("AnchorEntity", &[instance], &[]).unwrap();
     let blocks = parse_blend_blocks(&blend_bytes);
@@ -936,6 +938,7 @@ fn test_interior_meshes_do_not_parent_to_global_coordinate_nodes() {
         position: [0.0, 0.0, 0.0],
         rotation: [1.0, 0.0, 0.0, 0.0],
         scale: [1.0, 1.0, 1.0],
+        hidden: false,
     };
     let interior = LinkedMeshInstance {
         scene_instance_id: 1,
@@ -970,6 +973,7 @@ fn test_interior_meshes_do_not_parent_to_global_coordinate_nodes() {
         position: [0.0, 0.0, 0.0],
         rotation: [1.0, 0.0, 0.0, 0.0],
         scale: [1.0, 1.0, 1.0],
+        hidden: false,
     };
     let blend_bytes = create_scene_blend_with_instances("InteriorParentEntity", &[exterior, interior], &[]).unwrap();
     let blocks = parse_blend_blocks(&blend_bytes);
@@ -1040,6 +1044,7 @@ fn test_create_scene_blend_uses_full_source_empty_tree_for_parent_nodes() {
         position: [0.0, 0.0, 0.0],
         rotation: [1.0, 0.0, 0.0, 0.0],
         scale: [1.0, 1.0, 1.0],
+        hidden: false,
     };
     let child = LinkedMeshInstance {
         scene_instance_id: 1,
@@ -1068,6 +1073,7 @@ fn test_create_scene_blend_uses_full_source_empty_tree_for_parent_nodes() {
         position: [0.0, 0.0, 0.0],
         rotation: [1.0, 0.0, 0.0, 0.0],
         scale: [1.0, 1.0, 1.0],
+        hidden: false,
     };
     let blend_bytes = create_scene_blend_with_instances("ParentNodeEntity", &[root, child], &[]).unwrap();
     let blocks = parse_blend_blocks(&blend_bytes);
@@ -1135,6 +1141,7 @@ fn test_create_scene_blend_parents_source_empty_to_local_mesh_object() {
         position: [0.0, 0.0, 0.0],
         rotation: [1.0, 0.0, 0.0, 0.0],
         scale: [1.0, 1.0, 1.0],
+        hidden: false,
     };
     let blend_bytes = create_scene_blend_with_instances("MeshParentEntity", &[instance], &[]).unwrap();
     let blocks = parse_blend_blocks(&blend_bytes);
@@ -1183,6 +1190,7 @@ fn test_create_scene_blend_uses_instance_local_source_parent_before_global_name(
         position: [0.0, 0.0, 0.0],
         rotation: [1.0, 0.0, 0.0, 0.0],
         scale: [1.0, 1.0, 1.0],
+        hidden: false,
     };
     let second = LinkedMeshInstance {
         scene_instance_id: 1,
@@ -1217,6 +1225,7 @@ fn test_create_scene_blend_uses_instance_local_source_parent_before_global_name(
         position: [0.0, 0.0, 0.0],
         rotation: [1.0, 0.0, 0.0, 0.0],
         scale: [1.0, 1.0, 1.0],
+        hidden: false,
     };
     let blend_bytes = create_scene_blend_with_instances("LocalSourceParentEntity", &[first, second], &[]).unwrap();
     let blocks = parse_blend_blocks(&blend_bytes);
@@ -1275,6 +1284,7 @@ fn test_create_scene_blend_reuses_source_tree_for_same_scene_instance_mesh_refs(
         position: [0.0, 0.0, 0.0],
         rotation: [1.0, 0.0, 0.0, 0.0],
         scale: [1.0, 1.0, 1.0],
+        hidden: false,
     };
     let instance_source_tree_holder = LinkedMeshInstance {
         scene_instance_id: 1,
@@ -1309,6 +1319,7 @@ fn test_create_scene_blend_reuses_source_tree_for_same_scene_instance_mesh_refs(
         position: [0.0, 0.0, 0.0],
         rotation: [1.0, 0.0, 0.0, 0.0],
         scale: [1.0, 1.0, 1.0],
+        hidden: false,
     };
     let second_mesh_ref_same_scene_instance = LinkedMeshInstance {
         scene_instance_id: 1,
@@ -1337,6 +1348,7 @@ fn test_create_scene_blend_reuses_source_tree_for_same_scene_instance_mesh_refs(
         position: [0.0, 0.0, 0.0],
         rotation: [1.0, 0.0, 0.0, 0.0],
         scale: [1.0, 1.0, 1.0],
+        hidden: false,
     };
 
     let blend_bytes = create_scene_blend_with_instances(
@@ -1393,6 +1405,7 @@ fn test_create_scene_blend_resolves_parent_node_against_matching_parent_entity_i
         position: [0.0, 0.0, 0.0],
         rotation: [1.0, 0.0, 0.0, 0.0],
         scale: [1.0, 1.0, 1.0],
+        hidden: false,
     };
     let first_weapon = LinkedMeshInstance {
         scene_instance_id: 1,
@@ -1421,6 +1434,7 @@ fn test_create_scene_blend_resolves_parent_node_against_matching_parent_entity_i
         position: [0.0, 0.0, 0.0],
         rotation: [1.0, 0.0, 0.0, 0.0],
         scale: [1.0, 1.0, 1.0],
+        hidden: false,
     };
     let second_parent = LinkedMeshInstance {
         scene_instance_id: 2,
@@ -1455,6 +1469,7 @@ fn test_create_scene_blend_resolves_parent_node_against_matching_parent_entity_i
         position: [0.0, 0.0, 0.0],
         rotation: [1.0, 0.0, 0.0, 0.0],
         scale: [1.0, 1.0, 1.0],
+        hidden: false,
     };
     let second_weapon = LinkedMeshInstance {
         scene_instance_id: 3,
@@ -1483,6 +1498,7 @@ fn test_create_scene_blend_resolves_parent_node_against_matching_parent_entity_i
         position: [0.0, 0.0, 0.0],
         rotation: [1.0, 0.0, 0.0, 0.0],
         scale: [1.0, 1.0, 1.0],
+        hidden: false,
     };
 
     let blend_bytes = create_scene_blend_with_instances(
@@ -1609,6 +1625,95 @@ fn create_test_input(
         },
         paint_variants: vec![],
     }
+}
+
+#[test]
+fn test_manifest_scene_transform_uses_gltf_y_up_local_transform() {
+    let record = serde_json::json!({
+        "source_transform_basis": "gltf_y_up",
+        "offset_position": [9.0, 9.0, 9.0],
+        "local_transform_sc": [
+            [0.0, -1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [1.25, 2.5, 3.75, 1.0]
+        ]
+    });
+
+    let (loc, quat, scale) = manifest_scene_transform(&record);
+
+    assert_eq!(loc, [1.25, 2.5, 3.75]);
+    assert_eq!(scale, [1.0, 1.0, 1.0]);
+    assert!(
+        (quat[0].abs() - std::f32::consts::FRAC_1_SQRT_2).abs() < 1.0e-5,
+        "expected 90 degree Z rotation quaternion, got {quat:?}"
+    );
+    assert!(
+        (quat[3].abs() - std::f32::consts::FRAC_1_SQRT_2).abs() < 1.0e-5,
+        "expected 90 degree Z rotation quaternion, got {quat:?}"
+    );
+}
+
+#[test]
+fn test_scene_manifest_instances_mark_invisible_port_hidden() {
+    let scene = serde_json::json!({
+        "children": [{
+            "entity_name": "HiddenComponent",
+            "mesh_asset": "Data/Objects/hidden_component.blend",
+            "port_flags": "invisible uneditable"
+        }]
+    });
+    let manifest = vec![ExportedFile {
+        relative_path: "Packages/Test/scene.json".to_string(),
+        bytes: serde_json::to_vec(&scene).unwrap(),
+        kind: ExportedFileKind::PackageManifest,
+    }];
+
+    let instances = scene_manifest_instances(&manifest);
+
+    assert_eq!(instances.len(), 1);
+    assert!(instances[0].hidden, "invisible port flags should hide, not skip, the scene instance");
+}
+
+#[test]
+fn test_create_scene_blend_hides_invisible_linked_instance_objects() {
+    let instance = LinkedMeshInstance {
+        scene_instance_id: 0,
+        entity_name: "HiddenComponent".to_string(),
+        parent_entity_name: None,
+        parent_empty_name: None,
+        parent_empty_loc: [0.0, 0.0, 0.0],
+        parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+        parent_empty_scale: [1.0, 1.0, 1.0],
+        is_interior: false,
+        source_object_name: "HiddenMesh".to_string(),
+        name: "HiddenMesh".to_string(),
+        mesh_name: "HiddenMesh".to_string(),
+        material_names: Vec::new(),
+        material_sidecar: None,
+        palette_id: None,
+        source_ancestors: Vec::new(),
+        source_nodes: Vec::new(),
+        source_loc: [0.0, 0.0, 0.0],
+        source_quat: [1.0, 0.0, 0.0, 0.0],
+        source_scale: [1.0, 1.0, 1.0],
+        source_parent_name: None,
+        parent_node_name: None,
+        blend_path: "//../../Data/Objects/hidden_component.blend".to_string(),
+        mesh_asset: "Data/Objects/hidden_component.blend".to_string(),
+        position: [0.0, 0.0, 0.0],
+        rotation: [1.0, 0.0, 0.0, 0.0],
+        scale: [1.0, 1.0, 1.0],
+        hidden: true,
+    };
+
+    let blend_bytes = create_scene_blend_package_with_instances("Test", "Test", &[instance], &[], &HashMap::new()).unwrap();
+    let blocks = parse_blend_blocks(&blend_bytes);
+    let anchor = object_block_by_name(&blocks, "HiddenMesh_anchor");
+    let mesh = object_block_by_name(&blocks, "HiddenMesh");
+
+    assert_eq!(i16::from_le_bytes(anchor.data[1082..1084].try_into().unwrap()), 0x0005);
+    assert_eq!(i16::from_le_bytes(mesh.data[1082..1084].try_into().unwrap()), 0x0005);
 }
 
 #[test]
