@@ -285,6 +285,15 @@ fn unique_scene_object_name(base: &str, used: &mut HashMap<String, usize>) -> St
     name
 }
 
+fn lookup_named_ptr(map: &HashMap<String, u64>, name: &str) -> Option<u64> {
+    map.get(name)
+        .copied()
+        .or_else(|| {
+            map.iter()
+                .find_map(|(candidate, ptr)| candidate.eq_ignore_ascii_case(name).then_some(*ptr))
+        })
+}
+
 #[derive(Debug, Clone)]
 struct SceneManifestInstance {
     entity_name: String,
@@ -3486,21 +3495,19 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
                 .parent_name
                 .as_ref()
                 .and_then(|name| {
-                    local_source_node_ptrs
-                        .get(name)
+                    lookup_named_ptr(&local_source_node_ptrs, name)
                         .or_else(|| {
                             source_node_ptrs_by_scene_instance
                                 .get(&instance.scene_instance_id)
-                                .and_then(|nodes| nodes.get(name))
+                                .and_then(|nodes| lookup_named_ptr(nodes, name))
                         })
                         .or_else(|| {
                             source_object_ptrs_by_scene_instance
                                 .get(&instance.scene_instance_id)
-                                .and_then(|objects| objects.get(name))
+                                .and_then(|objects| lookup_named_ptr(objects, name))
                         })
-                        .or_else(|| source_object_ptr_by_name.get(name))
+                        .or_else(|| lookup_named_ptr(&source_object_ptr_by_name, name))
                 })
-                .copied()
                 .unwrap_or(anchor_ptr);
             scene_source_node_entries.push((*empty_ptr, idx, *node_index, parent_ptr));
         }
@@ -3543,29 +3550,31 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
                                 }
                                 local_source_node_ptrs_by_instance
                                     .get(parent_idx)
-                                    .and_then(|nodes| nodes.get(name))
-                                    .copied()
+                                    .and_then(|nodes| lookup_named_ptr(nodes, name))
                                     .or_else(|| {
                                         source_node_ptrs_by_scene_instance
                                             .get(&candidate.scene_instance_id)
-                                            .and_then(|nodes| nodes.get(name))
-                                            .copied()
+                                            .and_then(|nodes| lookup_named_ptr(nodes, name))
                                     })
-                                    .or_else(|| (candidate.name == *name).then_some(preallocated_local_object_ptrs[parent_idx]))
+                                    .or_else(|| {
+                                        candidate
+                                            .name
+                                            .eq_ignore_ascii_case(name)
+                                            .then_some(preallocated_local_object_ptrs[parent_idx])
+                                    })
                             })
                     })
                     .or_else(|| {
                         source_node_ptrs_by_scene_instance
                             .get(&instance.scene_instance_id)
-                            .and_then(|nodes| nodes.get(name))
-                            .or_else(|| source_node_ptr_by_name.get(name))
+                            .and_then(|nodes| lookup_named_ptr(nodes, name))
+                            .or_else(|| lookup_named_ptr(&source_node_ptr_by_name, name))
                             .or_else(|| {
                                 source_object_ptrs_by_scene_instance
                                     .get(&instance.scene_instance_id)
-                                    .and_then(|objects| objects.get(name))
+                                    .and_then(|objects| lookup_named_ptr(objects, name))
                             })
-                            .or_else(|| source_object_ptr_by_name.get(name))
-                            .copied()
+                            .or_else(|| lookup_named_ptr(&source_object_ptr_by_name, name))
                     })
             })
             .or_else(|| {
@@ -3579,22 +3588,20 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
             .source_parent_name
             .as_ref()
             .and_then(|name| {
-                local_source_node_ptrs_by_instance[idx]
-                    .get(name)
+                lookup_named_ptr(&local_source_node_ptrs_by_instance[idx], name)
                     .or_else(|| {
                         source_node_ptrs_by_scene_instance
                             .get(&instance.scene_instance_id)
-                            .and_then(|nodes| nodes.get(name))
+                            .and_then(|nodes| lookup_named_ptr(nodes, name))
                     })
                     .or_else(|| {
                         source_object_ptrs_by_scene_instance
                             .get(&instance.scene_instance_id)
-                            .and_then(|objects| objects.get(name))
+                            .and_then(|objects| lookup_named_ptr(objects, name))
                     })
-                    .or_else(|| source_node_ptr_by_name.get(name))
-                    .or_else(|| source_object_ptr_by_name.get(name))
+                    .or_else(|| lookup_named_ptr(&source_node_ptr_by_name, name))
+                    .or_else(|| lookup_named_ptr(&source_object_ptr_by_name, name))
             })
-            .copied()
             .unwrap_or_else(|| {
                 let ancestor_indices = instance
                     .source_ancestors

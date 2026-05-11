@@ -1553,6 +1553,85 @@ fn test_create_scene_blend_resolves_parent_node_against_matching_parent_entity_i
 }
 
 #[test]
+fn test_create_scene_blend_resolves_parent_node_case_insensitively() {
+    let parent = LinkedMeshInstance {
+        scene_instance_id: 0,
+        entity_name: "RetroMount".to_string(),
+        parent_entity_name: None,
+        parent_empty_name: None,
+        parent_empty_loc: [0.0, 0.0, 0.0],
+        parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+        parent_empty_scale: [1.0, 1.0, 1.0],
+        is_interior: false,
+        source_object_name: "retro_mount_mesh".to_string(),
+        name: "retro_mount_mesh".to_string(),
+        mesh_name: "retro_mount_mesh_data".to_string(),
+        material_names: Vec::new(),
+        material_sidecar: None,
+        palette_id: None,
+        source_nodes: vec![LinkedSourceNode {
+            name: "hardpoint_Right_Main_Retro".to_string(),
+            parent_name: None,
+            loc: [0.0, 0.0, 0.0],
+            quat: [1.0, 0.0, 0.0, 0.0],
+            scale: [1.0, 1.0, 1.0],
+        }],
+        source_ancestors: Vec::new(),
+        source_loc: [0.0, 0.0, 0.0],
+        source_quat: [1.0, 0.0, 0.0, 0.0],
+        source_scale: [1.0, 1.0, 1.0],
+        source_parent_name: None,
+        parent_node_name: None,
+        blend_path: "//../../Data/Objects/Ships/retro_mount.blend".to_string(),
+        mesh_asset: "Data/Objects/Ships/retro_mount.blend".to_string(),
+        position: [0.0, 0.0, 0.0],
+        rotation: [1.0, 0.0, 0.0, 0.0],
+        scale: [1.0, 1.0, 1.0],
+        hidden: false,
+    };
+    let child = LinkedMeshInstance {
+        scene_instance_id: 1,
+        entity_name: "RetroThruster".to_string(),
+        parent_entity_name: Some("RetroMount".to_string()),
+        parent_empty_name: None,
+        parent_empty_loc: [0.0, 0.0, 0.0],
+        parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+        parent_empty_scale: [1.0, 1.0, 1.0],
+        is_interior: false,
+        source_object_name: "retro_thruster_mesh".to_string(),
+        name: "retro_thruster_mesh".to_string(),
+        mesh_name: "retro_thruster_mesh_data".to_string(),
+        material_names: Vec::new(),
+        material_sidecar: None,
+        palette_id: None,
+        source_nodes: Vec::new(),
+        source_ancestors: Vec::new(),
+        source_loc: [0.0, 0.0, 0.0],
+        source_quat: [1.0, 0.0, 0.0, 0.0],
+        source_scale: [1.0, 1.0, 1.0],
+        source_parent_name: None,
+        parent_node_name: Some("hardpoint_right_main_retro".to_string()),
+        blend_path: "//../../Data/Objects/Ships/retro_thruster.blend".to_string(),
+        mesh_asset: "Data/Objects/Ships/retro_thruster.blend".to_string(),
+        position: [0.0, 0.0, 0.0],
+        rotation: [1.0, 0.0, 0.0, 0.0],
+        scale: [1.0, 1.0, 1.0],
+        hidden: false,
+    };
+
+    let blend_bytes =
+        create_scene_blend_with_instances("CaseInsensitiveParent", &[parent, child], &[]).unwrap();
+    let blocks = parse_blend_blocks(&blend_bytes);
+    let hardpoint = object_block_by_name(&blocks, "retro_mount_mesh_0_hardpoint_Right_Main_Retro");
+    let child_anchor = object_block_by_name(&blocks, "retro_thruster_mesh_anchor");
+
+    assert_eq!(
+        u64::from_le_bytes(child_anchor.data[496..504].try_into().unwrap()),
+        hardpoint.old_ptr,
+    );
+}
+
+#[test]
 fn test_create_scene_blend_parents_lights_to_entity_wrapper_with_properties() {
     let light = ExtractedLight {
         name: "SceneLight".to_string(),
