@@ -2091,6 +2091,13 @@ def _position_distance(a: list[Any], b: list[Any]) -> float:
     return (dx * dx + dy * dy + dz * dz) ** 0.5
 
 
+def _vec_distance_sq(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
+    dx = float(a[0]) - float(b[0])
+    dy = float(a[1]) - float(b[1])
+    dz = float(a[2]) - float(b[2])
+    return dx * dx + dy * dy + dz * dz
+
+
 def _quat_mul(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
     aw, ax, ay, az = a
     bw, bx, by, bz = b
@@ -2111,6 +2118,51 @@ def _quat_align(reference: tuple[float, float, float, float], q: tuple[float, fl
     if reference[0] * q[0] + reference[1] * q[1] + reference[2] * q[2] + reference[3] * q[3] < 0.0:
         return (-q[0], -q[1], -q[2], -q[3])
     return q
+
+
+_ANIMATION_SAMPLE_DECODERS = ("identity", "source")
+_BIND_POSITION_EPSILON_METERS = 0.01
+_BIND_ROTATION_EPSILON_RADIANS = 0.025
+
+
+def _quat_distance_sq(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> float:
+    aligned = _quat_align(b, a)
+    return (
+        (aligned[0] - b[0]) ** 2
+        + (aligned[1] - b[1]) ** 2
+        + (aligned[2] - b[2]) ** 2
+        + (aligned[3] - b[3]) ** 2
+    )
+
+
+def _bind_equivalent_position(
+    sample: tuple[float, float, float],
+    bind: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    if _vec_distance_sq(sample, bind) <= (
+        _BIND_POSITION_EPSILON_METERS * _BIND_POSITION_EPSILON_METERS
+    ):
+        return bind
+    return sample
+
+
+def _bind_equivalent_rotation(
+    sample: tuple[float, float, float, float],
+    bind: tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
+    dot = abs(
+        sample[0] * bind[0]
+        + sample[1] * bind[1]
+        + sample[2] * bind[2]
+        + sample[3] * bind[3]
+    )
+    dot = max(0.0, min(1.0, dot))
+    if 2.0 * math.acos(dot) <= _BIND_ROTATION_EPSILON_RADIANS:
+        return bind
+    return sample
 
 
 def _positive_speed_fragment(fragment: dict[str, Any]) -> bool:
@@ -2365,13 +2417,14 @@ def _position_track_matches_bind(
     bind_loc: tuple[float, float, float],
     positions: list[Any],
     *,
+    decoder: str = "identity",
     tol: float = 0.15,
 ) -> bool:
     tol_sq = tol * tol
     for sample in positions:
         if not isinstance(sample, list) or len(sample) < 3:
             continue
-        decoded = _decode_animation_position(sample, "identity")
+        decoded = _decode_animation_position(sample, decoder)
         dist_sq = (
             (decoded[0] - bind_loc[0]) ** 2
             + (decoded[1] - bind_loc[1]) ** 2
@@ -2385,6 +2438,8 @@ def _position_track_matches_bind(
 def _shared_hash_position_policy(
     groups: dict[str, list[tuple[bpy.types.Object, dict[str, Any], dict[str, Any]]]],
     _legacy_bones: Any | None = None,
+    *,
+    decoder: str = "identity",
 ) -> dict[int, bool]:
     """Return per-object position eligibility for duplicate-hash channels.
 
@@ -2424,7 +2479,7 @@ def _shared_hash_position_policy(
                 matches.append(False)
                 continue
             bind_loc = (float(bind_location[0]), float(bind_location[1]), float(bind_location[2]))
-            matches.append(_position_track_matches_bind(bind_loc, positions))
+            matches.append(_position_track_matches_bind(bind_loc, positions, decoder=decoder))
 
         if not any(matches) or all(matches):
             continue
@@ -2438,10 +2493,88 @@ def _shared_hash_position_policy(
     return policy
 
 
+def _animation_sample_decoder_score(
+    candidates: list[tuple[bpy.types.Object, str, dict[str, Any], dict[str, Any]]],
+    decoder: str,
+) -> tuple[float, int]:
+    score = 0.0
+    evidence = 0
+    for _obj, _key, bind_data, channel in candidates:
+        bind_location = bind_data.get("location")
+        positions = channel.get("position")
+        if (
+            isinstance(bind_location, list)
+            and len(bind_location) >= 3
+            and isinstance(positions, list)
+        ):
+            bind_loc = (float(bind_location[0]), float(bind_location[1]), float(bind_location[2]))
+            samples = [
+                sample
+                for sample in (positions[:1] + positions[-1:])
+                if isinstance(sample, list) and len(sample) >= 3
+            ]
+            if samples:
+                best = min(
+                    _vec_distance_sq(_decode_animation_position(sample, decoder), bind_loc)
+                    for sample in samples
+                )
+                score += min(best, 1.0)
+                evidence += 1
+
+        bind_rotation = bind_data.get("rotation_quaternion")
+        rotations = channel.get("rotation")
+        if (
+            isinstance(bind_rotation, list)
+            and len(bind_rotation) >= 4
+            and isinstance(rotations, list)
+        ):
+            bind_rot = (
+                float(bind_rotation[0]),
+                float(bind_rotation[1]),
+                float(bind_rotation[2]),
+                float(bind_rotation[3]),
+            )
+            samples = [
+                sample
+                for sample in (rotations[:1] + rotations[-1:])
+                if isinstance(sample, list) and len(sample) >= 4
+            ]
+            if samples:
+                best = min(
+                    _quat_distance_sq(_decode_animation_rotation(sample, decoder), bind_rot)
+                    for sample in samples
+                )
+                score += min(best * 4.0, 1.0)
+                evidence += 1
+
+    return score, evidence
+
+
+def _select_animation_sample_decoder(
+    candidates: list[tuple[bpy.types.Object, str, dict[str, Any], dict[str, Any]]],
+) -> str:
+    scored = [
+        (_animation_sample_decoder_score(candidates, decoder), decoder)
+        for decoder in _ANIMATION_SAMPLE_DECODERS
+    ]
+    scored = [item for item in scored if item[0][1] > 0]
+    if not scored:
+        return "identity"
+    scored.sort(key=lambda item: (item[0][0] / item[0][1], item[0][0], item[1] != "identity"))
+    best_score, best_decoder = scored[0]
+    identity = next((score for score, decoder in scored if decoder == "identity"), None)
+    if identity is not None:
+        best_average = best_score[0] / best_score[1]
+        identity_average = identity[0] / identity[1]
+        if abs(identity_average - best_average) <= 1.0e-8:
+            return "identity"
+    return best_decoder
+
+
 def _animation_bone_candidates(
     package_root: bpy.types.Object,
     bones: dict[str, list[dict[str, Any]]],
-) -> tuple[list[tuple[bpy.types.Object, str, dict[str, Any], dict[str, Any]]], dict[int, bool]]:
+) -> tuple[list[tuple[bpy.types.Object, str, dict[str, Any], dict[str, Any]]], dict[int, bool], str]:
     candidates: list[tuple[bpy.types.Object, str, dict[str, Any], dict[str, Any]]] = []
     groups: dict[str, list[tuple[bpy.types.Object, dict[str, Any], dict[str, Any]]]] = {}
 
@@ -2461,7 +2594,8 @@ def _animation_bone_candidates(
         candidates.append((obj, key, bind_data, channel))
         groups.setdefault(key, []).append((obj, bind_data, channel))
 
-    return candidates, _shared_hash_position_policy(groups)
+    decoder = _select_animation_sample_decoder(candidates)
+    return candidates, _shared_hash_position_policy(groups, decoder=decoder), decoder
 
 
 def _iter_candidate_bone_objects(package_root: bpy.types.Object) -> list[bpy.types.Object]:
@@ -2583,6 +2717,7 @@ def _apply_best_channel_transform(
     anchor_frame: float | None = None,
     allow_rotation: bool = True,
     allow_position: bool = True,
+    sample_decoder: str = "identity",
 ) -> None:
     _restore_object_bind_pose(obj, bind_data)
 
@@ -2641,11 +2776,9 @@ def _apply_best_channel_transform(
     if allow_rotation and rotation_sample is not None:
         obj.rotation_mode = "QUATERNION"
         rot_sample_q = (
-            float(rotation_sample[0]),
-            float(rotation_sample[1]),
-            float(rotation_sample[2]),
-            float(rotation_sample[3]),
+            *_decode_animation_rotation(rotation_sample, sample_decoder),
         )
+        rot_sample_q = _bind_equivalent_rotation(rot_sample_q, bind_rot)
         blend_mode = str(channel.get("blend_mode") or "").lower()
         if blend_mode == "override":
             # Override mode (Phase 38): the exporter classified this bone's
@@ -2666,7 +2799,7 @@ def _apply_best_channel_transform(
         obj.rotation_quaternion = rot_sample_q
 
     if allow_position and position_sample is not None and isinstance(positions, list) and positions:
-        sample_decoded = _decode_animation_position(position_sample, "identity")
+        sample_decoded = _bind_equivalent_position(_decode_animation_position(position_sample, sample_decoder), bind_loc)
         blend_mode = str(channel.get("blend_mode") or "").lower()
         if blend_mode == "override":
             # Override mode (Phase 38): use the sampled position verbatim.
@@ -2688,13 +2821,16 @@ def _apply_best_channel_transform(
         # 52 / Phase 53 landed.
         valid_positions: list[list[Any]] = [v for v in positions if isinstance(v, list) and len(v) >= 3]
         if valid_positions:
-            first_decoded = _decode_animation_position(valid_positions[0], "identity")
+            first_decoded = _bind_equivalent_position(_decode_animation_position(valid_positions[0], sample_decoder), bind_loc)
             if anchor_frame is not None:
                 anchor_target = _sample_nearest_time(
                     positions, _channel_times(channel, "position_time", len(positions)), 3, anchor_frame
                 )
                 if anchor_target is not None:
-                    anchor_target_decoded = _decode_animation_position(anchor_target, "identity")
+                    anchor_target_decoded = _bind_equivalent_position(
+                        _decode_animation_position(anchor_target, sample_decoder),
+                        bind_loc,
+                    )
                     d_first = (
                         (first_decoded[0] - bind_loc[0]) ** 2
                         + (first_decoded[1] - bind_loc[1]) ** 2
@@ -2746,7 +2882,7 @@ def _apply_animation_pose(
     bones = _normalized_bone_channels(clip)
     if not bones:
         return 0
-    candidates, position_policy = _animation_bone_candidates(package_root, bones)
+    candidates, position_policy, sample_decoder = _animation_bone_candidates(package_root, bones)
     updated = 0
     for obj, key, bind_data, channel in candidates:
         allow_position = position_policy.get(id(obj), True)
@@ -2773,6 +2909,7 @@ def _apply_animation_pose(
             # position tracks; rotation remains valid and must still apply.
             allow_rotation=True,
             allow_position=allow_position,
+            sample_decoder=sample_decoder,
         )
         updated += 1
     return updated
@@ -2893,7 +3030,7 @@ def _insert_animation_action(
         "driven_hashes": sorted(_clip_bone_hashes(clip)),
     }
 
-    candidates, position_policy = _animation_bone_candidates(package_root, bones)
+    candidates, position_policy, sample_decoder = _animation_bone_candidates(package_root, bones)
     updated = 0
     # Multi-clip mode: when prior instances exist, clear live action from all
     # objects so NLA is the sole driver.  This covers the case where the first
@@ -2965,14 +3102,14 @@ def _insert_animation_action(
             first = positions[0] if isinstance(positions[0], list) and len(positions[0]) >= 3 else None
             anchor: tuple[float, float, float] | None = None
             if first is not None:
-                anchor = _decode_animation_position(first, "identity")
+                anchor = _bind_equivalent_position(_decode_animation_position(first, sample_decoder), bind)
 
             for index, sample in enumerate(positions):
                 sample_time = position_times[index] if index < len(position_times) else float(index)
                 if trim_frame is not None and sample_time > trim_frame:
                     continue
                 if isinstance(sample, list) and len(sample) >= 3:
-                    sample_decoded = _decode_animation_position(sample, "identity")
+                    sample_decoded = _bind_equivalent_position(_decode_animation_position(sample, sample_decoder), bind)
                     if (use_relative_position_fallback or trim_frame is not None) and anchor is not None:
                         # Cyclic clip: use bind-delta to anchor the animation
                         # at the bind pose (e.g. Scorpius landing_gear_deploy).
@@ -2995,18 +3132,20 @@ def _insert_animation_action(
         # frame between the two keys (observed on Scorpius
         # `landing_gear_extend` BONE_Front_Landing_Gear_Foot frames 37→39).
         prev_keyed_quat: tuple[float, float, float, float] | None = None
+        bind_rotation = bind_data.get("rotation_quaternion", obj.rotation_quaternion)
+        bind_rot = (
+            float(bind_rotation[0]),
+            float(bind_rotation[1]),
+            float(bind_rotation[2]),
+            float(bind_rotation[3]),
+        )
         if rotations:
             for index, sample in enumerate(rotations):
                 sample_time = rotation_times[index] if index < len(rotation_times) else float(index)
                 if trim_frame is not None and sample_time > trim_frame:
                     continue
                 if isinstance(sample, list) and len(sample) >= 4:
-                    sample_q = (
-                        float(sample[0]),
-                        float(sample[1]),
-                        float(sample[2]),
-                        float(sample[3]),
-                    )
+                    sample_q = _bind_equivalent_rotation(_decode_animation_rotation(sample, sample_decoder), bind_rot)
                     if prev_keyed_quat is not None:
                         sample_q = _quat_align(prev_keyed_quat, sample_q)
                     obj.rotation_quaternion = sample_q
@@ -3130,6 +3269,10 @@ def _decode_animation_position(sample: list[Any], decoder: str) -> tuple[float, 
     x = float(sample[0])
     y = float(sample[1])
     z = float(sample[2])
+    if decoder == "source":
+        # Native .blend hierarchy nodes can retain source/CryEngine local axes
+        # while sidecars remain authored in the exported Blender-frame contract.
+        return (x, z, -y)
     if decoder == "legacy":
         # Legacy export decode: [x, z, -y] -> (x, y, z_blender)
         return (x, -z, y)
@@ -3138,6 +3281,16 @@ def _decode_animation_position(sample: list[Any], decoder: str) -> tuple[float, 
         return (z, y, x)
     # "identity": already-authored Blender XYZ.
     return (x, y, z)
+
+
+def _decode_animation_rotation(sample: list[Any], decoder: str) -> tuple[float, float, float, float]:
+    w = float(sample[0])
+    x = float(sample[1])
+    y = float(sample[2])
+    z = float(sample[3])
+    if decoder == "source":
+        return (w, x, z, -y)
+    return (w, x, y, z)
 
 
 def _select_position_decoder(
@@ -3153,7 +3306,7 @@ def _select_position_decoder(
         return None
 
     bind = (float(bind_location[0]), float(bind_location[1]), float(bind_location[2]))
-    candidates = ("legacy", "swizzled", "identity")
+    candidates = ("legacy", "swizzled", "identity", "source")
 
     if frame_index is None:
         anchor_samples = [valid_samples[0], valid_samples[-1]]

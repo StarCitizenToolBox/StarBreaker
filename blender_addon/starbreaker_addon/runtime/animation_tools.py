@@ -143,23 +143,43 @@ def resolve_animation_key(
     if not clips:
         return None
 
-    # If already in fragment:key form, pass through
-    if animation_name.startswith(_FRAGMENT_ANIMATION_PREFIX + "0:"):
+    # If already in fragment:key form, pass through.
+    if _parse_fragment_animation_key(animation_name) is not None:
         return animation_name
 
-    # Search for the animation name (fragment or clip name)
-    for clip_idx, clip in enumerate(clips):
-        clip_name = clip.get("name", "")
+    target = animation_name.strip()
+    target_lower = target.lower()
+
+    # Exact clip names are canonical and disambiguate paired fragments such as
+    # Scorpius Wings Deploy/Retract.
+    for clip in clips:
+        clip_name = str(clip.get("name", "")).strip()
+        if clip_name and clip_name.lower() == target_lower:
+            return clip_name
+
+    # Search fragment labels only after exact clip names have had a chance to
+    # resolve. Fragment keys store the fragment index within the clip, not the
+    # clip's index in scene.json.
+    for clip in clips:
+        clip_name = str(clip.get("name", "")).strip()
         fragments = clip.get("fragments", [])
-        for frag in fragments:
-            frag_name = frag.get("fragment", "")
+        if not clip_name or not isinstance(fragments, list):
+            continue
+        for fragment_index, frag in enumerate(fragments):
+            if not isinstance(frag, dict):
+                continue
+            frag_name = str(frag.get("fragment", "")).strip()
             anims = frag.get("animations", [])
+            if frag_name.lower() == target_lower:
+                return f"{_FRAGMENT_ANIMATION_PREFIX}{fragment_index}:{clip_name}"
+            if not isinstance(anims, list):
+                continue
             for anim in anims:
-                anim_clip_name = anim.get("name", "")
-                if (frag_name == animation_name or
-                        anim_clip_name == animation_name or
-                        frag_name.lower() == animation_name.lower()):
-                    return f"{_FRAGMENT_ANIMATION_PREFIX}{clip_idx}:{anim_clip_name}"
+                if not isinstance(anim, dict):
+                    continue
+                anim_clip_name = str(anim.get("name", "")).strip()
+                if anim_clip_name and anim_clip_name.lower() == target_lower:
+                    return clip_name
 
     return None
 

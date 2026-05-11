@@ -5,8 +5,8 @@ Pins:
 
 * `_decode_animation_position("identity", …)` is a pass-through; the
   exporter writes Blender-frame XYZ already (per
-  `crates/starbreaker-3d/src/animation.rs::clip_to_json`, which emits
-  `(cry_y, -cry_z, cry_x)`).
+  `crates/starbreaker-3d/src/animation/serialise.rs::clip_to_json`,
+  which emits `(x, -z, y)`).
 * The endpoint-policy selector picks the first sample at frame_index=0
   and the last sample otherwise (literal mode).
 * The position-track delta is computed against the keyframe whose
@@ -161,17 +161,21 @@ def _load_package_ops() -> types.ModuleType:
 # Pinned values from the live sidecar
 # `ships/Packages/RSI Scorpius_LOD0_TEX0/scene.json`,
 # clip "wings_deploy" (verified 2026-04-27).
-# Position values are already in Blender XYZ (cry_y, -cry_z, cry_x).
+# Position values are already in exported Blender-frame XYZ.
 _TOP_LEFT_POS_FIRST = [0.023793935775756836, 0.8021461367607117, -1.3102056980133057]
 _TOP_LEFT_POS_LAST = [0.023793935775756836, 0.8021461367607117, -1.3102056980133057]
 _TOP_RIGHT_POS_FIRST = [-0.5459997653961182, 0.8021460771560669, 1.3102059364318848]
 _TOP_RIGHT_POS_LAST = [0.023352086544036865, 0.8021460771560669, 1.6394926309585571]
 
-# Bind positions in Blender local frame (NMC bone_to_world translation
-# axis-swapped via (cry_y, -cry_z, cry_x); see
-# docs/StarBreaker/animation-research.md → bind pose tables).
+# Bind positions in Blender local frame; see
+# docs/StarBreaker/animation-research.md -> bind pose tables.
 _TOP_LEFT_BIND = (-0.546, 0.802, -1.310)
 _TOP_RIGHT_BIND = (-0.546, 0.802, 1.310)
+
+_NATIVE_BLEND_ROTATOR_BIND = (-1.3102056980133057, -0.5459997653961182, -0.8021461367607117)
+_NATIVE_BLEND_ROTATOR_BIND_ROT = (0.999048, 0.0, 0.0, -0.043619)
+_NATIVE_BLEND_ROTATOR_SIDECAR_FIRST = [-1.3102056980133057, 0.8021461367607117, -0.5459997653961182]
+_NATIVE_BLEND_ROTATOR_SIDECAR_ROT_FIRST = [0.999048, 0.000014, 0.043620, 0.000014]
 
 
 class AnimationPoseTests(unittest.TestCase):
@@ -320,6 +324,44 @@ class AnimationPoseTests(unittest.TestCase):
 
         for axis, (got, want) in enumerate(zip(obj.location, _TOP_RIGHT_POS_LAST)):
             self.assertAlmostEqual(got, want, places=5, msg=f"axis {axis}")
+
+    def test_native_blend_source_basis_decoder_matches_bind_endpoint(self) -> None:
+        obj = self._make_object("Wing_Rotator_Top_Left", _NATIVE_BLEND_ROTATOR_BIND)
+        channel = {
+            "rotation": [_NATIVE_BLEND_ROTATOR_SIDECAR_ROT_FIRST, [0.984808, 0.0, 0.173648, 0.0]],
+            "position": [_NATIVE_BLEND_ROTATOR_SIDECAR_FIRST, _NATIVE_BLEND_ROTATOR_SIDECAR_FIRST],
+        }
+        bind_data = self._bind_data(_NATIVE_BLEND_ROTATOR_BIND)
+        bind_data["rotation_quaternion"] = list(_NATIVE_BLEND_ROTATOR_BIND_ROT)
+
+        self.package_ops._apply_best_channel_transform(
+            obj,
+            bind_data,
+            channel,
+            frame_index=0,
+            endpoint_policy="literal",
+            sample_decoder="source",
+        )
+
+        for axis, (got, want) in enumerate(zip(obj.location, _NATIVE_BLEND_ROTATOR_BIND)):
+            self.assertAlmostEqual(got, want, places=5, msg=f"axis {axis}")
+        for axis, (got, want) in enumerate(zip(obj.rotation_quaternion, _NATIVE_BLEND_ROTATOR_BIND_ROT)):
+            self.assertAlmostEqual(got, want, places=4, msg=f"quat {axis}")
+
+    def test_animation_sample_decoder_uses_bind_pose_evidence(self) -> None:
+        obj = self._make_object("Wing_Rotator_Top_Left", _NATIVE_BLEND_ROTATOR_BIND)
+        bind_data = self._bind_data(_NATIVE_BLEND_ROTATOR_BIND)
+        bind_data["rotation_quaternion"] = list(_NATIVE_BLEND_ROTATOR_BIND_ROT)
+        channel = {
+            "rotation": [_NATIVE_BLEND_ROTATOR_SIDECAR_ROT_FIRST, [0.984808, 0.0, 0.173648, 0.0]],
+            "position": [_NATIVE_BLEND_ROTATOR_SIDECAR_FIRST, _NATIVE_BLEND_ROTATOR_SIDECAR_FIRST],
+        }
+
+        decoder = self.package_ops._select_animation_sample_decoder(
+            [(obj, "0xDEADBEEF", bind_data, channel)]
+        )
+
+        self.assertEqual(decoder, "source")
 
     def test_override_blend_mode_uses_sample_verbatim(self) -> None:
         """Phase 38 override path. When the per-bone `blend_mode` is
@@ -512,9 +554,10 @@ class AnimationPoseTests(unittest.TestCase):
             frame_index=0,
             endpoint_policy="literal",
         )
-        # At frame 0 the literal policy picks pos[0]. With verbatim position,
-        # location = pos[0] directly.
-        for axis, (got, want) in enumerate(zip(obj.location, _TOP_RIGHT_POS_FIRST)):
+        # At frame 0 the literal policy picks pos[0]. This endpoint is
+        # bind-equivalent, so CAF quantization residual is snapped back
+        # to the stored bind pose.
+        for axis, (got, want) in enumerate(zip(obj.location, _TOP_RIGHT_BIND)):
             self.assertAlmostEqual(got, want, places=5, msg=f"axis {axis}")
         # Rotation at frame 0 is bind-equivalent (~5° tilt).
         self.assertAlmostEqual(obj.rotation_quaternion[0], 0.999, places=3)
