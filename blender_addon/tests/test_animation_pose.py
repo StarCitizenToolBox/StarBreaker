@@ -34,6 +34,7 @@ import math
 import sys
 import types
 import unittest
+import zlib
 from pathlib import Path
 
 
@@ -362,6 +363,25 @@ class AnimationPoseTests(unittest.TestCase):
         )
 
         self.assertEqual(decoder, "source")
+
+    def test_prefixed_native_blend_object_matches_source_node_suffix_hash(self) -> None:
+        root = self._make_object("StarBreaker RSI Aurora Mk2_LOD0_TEX0", (0.0, 0.0, 0.0))
+        child = self._make_object("geo_nose_167_anim_wing_top_left", (1.0, 2.0, 3.0))
+        root.children_recursive = [child]
+        source_hash = f"0x{zlib.crc32(b'anim_wing_top_left') & 0xFFFFFFFF:08X}"
+        bones = {
+            source_hash: [
+                {
+                    "rotation": [[1.0, 0.0, 0.0, 0.0]],
+                }
+            ]
+        }
+
+        candidates, _policy, _decoder = self.package_ops._animation_bone_candidates(root, bones)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertIs(candidates[0][0], child)
+        self.assertEqual(candidates[0][1], source_hash)
 
     def test_override_blend_mode_uses_sample_verbatim(self) -> None:
         """Phase 38 override path. When the per-bone `blend_mode` is

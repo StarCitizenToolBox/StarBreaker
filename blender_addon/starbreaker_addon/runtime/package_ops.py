@@ -2314,11 +2314,48 @@ def _clip_cyclic_transition_target_frame(clip: dict[str, Any]) -> float | None:
 
 
 def _object_bone_hash(obj: bpy.types.Object) -> str:
+    return _object_bone_hash_keys(obj)[0]
+
+
+def _object_bone_hash_keys(obj: bpy.types.Object) -> list[str]:
     import zlib
 
-    source_name = str(obj.get(PROP_SOURCE_NODE_NAME, obj.name) or "")
-    digest = zlib.crc32(source_name.encode("utf-8")) & 0xFFFFFFFF
-    return f"0x{digest:08X}"
+    names: list[str] = []
+    seen_names: set[str] = set()
+
+    def _add_name(value: Any) -> None:
+        if not isinstance(value, str):
+            return
+        name = value.strip()
+        if not name or name in seen_names:
+            return
+        seen_names.add(name)
+        names.append(name)
+
+    _add_name(obj.get(PROP_SOURCE_NODE_NAME))
+    _add_name(obj.name)
+
+    # Native .blend linked hierarchies can prefix source animation node names
+    # with parent path + instance indices, e.g. geo_nose_167_anim_wing_top_left.
+    # Hash suffixes after numeric path tokens so those objects still match the
+    # source CAF/DBA bone hashes without asset-specific name branches.
+    for raw_name in list(names):
+        parts = raw_name.split("_")
+        for index, part in enumerate(parts[:-1]):
+            if not part.isdigit():
+                continue
+            _add_name("_".join(parts[index + 1:]))
+
+    keys: list[str] = []
+    seen_keys: set[str] = set()
+    for name in names:
+        digest = zlib.crc32(name.encode("utf-8")) & 0xFFFFFFFF
+        key = f"0x{digest:08X}"
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        keys.append(key)
+    return keys
 
 
 def _canonical_bone_hash_key(value: Any) -> str | None:
@@ -2579,9 +2616,14 @@ def _animation_bone_candidates(
     groups: dict[str, list[tuple[bpy.types.Object, dict[str, Any], dict[str, Any]]]] = {}
 
     for obj in _iter_candidate_bone_objects(package_root):
-        key = _canonical_bone_hash_key(_object_bone_hash(obj)) or _object_bone_hash(obj)
-        variants = bones.get(key)
-        if not isinstance(variants, list) or not variants:
+        key = None
+        variants = None
+        for candidate_key in _object_bone_hash_keys(obj):
+            key = _canonical_bone_hash_key(candidate_key) or candidate_key
+            variants = bones.get(key)
+            if isinstance(variants, list) and variants:
+                break
+        if key is None or not isinstance(variants, list) or not variants:
             continue
         channel = _select_channel_variant_for_object(obj, variants)
         if not isinstance(channel, dict):
