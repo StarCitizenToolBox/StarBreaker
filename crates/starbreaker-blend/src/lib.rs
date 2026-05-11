@@ -25,6 +25,13 @@ pub const DNA1_BYTES: &[u8] = include_bytes!("dna1_blender501.bin");
 /// Format: BLENDER (7) + 17 (2) + - (1) + 01 (2) + v (1) + 0501 (4) = 17 bytes
 pub const BLEND_MAGIC: &[u8] = b"BLENDER17-01v0501";
 
+/// Standard zstd compression level for generated `.blend` files.
+///
+/// Blender accepts standard zstd frames regardless of level.  Using zstd's
+/// default level keeps export time practical for large native `.blend` packages;
+/// maximum compression is much slower and only marginally improves package size.
+const BLEND_ZSTD_LEVEL: i32 = 3;
+
 // ── SDNA indices (verified against Blender 5.1.1 DNA1 block) ─────────────────
 pub const SDNA_IDX_ATTRIBUTE: u32 = 75;
 pub const SDNA_IDX_ATTRIBUTE_ARRAY: u32 = 73;
@@ -215,7 +222,7 @@ pub fn write_block(
 ///
 /// Magic bytes: 0x28 0xB5 0x2F 0xFD (Zstd frame header)
 pub fn compress_blend_bytes(raw_blend: &[u8]) -> Vec<u8> {
-    match Encoder::new(Vec::new(), 19) {
+    match Encoder::new(Vec::new(), BLEND_ZSTD_LEVEL) {
         Ok(mut encoder) => {
             if encoder.write_all(raw_blend).is_err() {
                 return raw_blend.to_vec();
@@ -2229,11 +2236,20 @@ mod tests {
     
     #[test]
     fn test_zstd_compression_roundtrip() {
+        use std::io::Read;
+
         let original = b"Hello, Blender 5.1!";
         let compressed = compress_blend_bytes_zstd(original);
-        // Just verify it compresses to something
         assert!(!compressed.is_empty(), "Compression produced empty result");
-        // Note: actual decompression requires zstd::Decoder, which we don't use in Rust export
+        assert_eq!(&compressed[..4], &[0x28, 0xB5, 0x2F, 0xFD]);
+
+        let mut decoder = zstd::Decoder::new(compressed.as_slice())
+            .expect("compressed blend bytes should be a valid zstd frame");
+        let mut decompressed = Vec::new();
+        decoder
+            .read_to_end(&mut decompressed)
+            .expect("compressed blend bytes should round-trip");
+        assert_eq!(decompressed, original);
     }
     
     #[test]

@@ -40,9 +40,8 @@ START_NS="$(date +%s%N)"
 (
   cd "$ROOT/.."
   SC_DATA_P4K="$SC_DATA_P4K" RUST_LOG="$RUST_LOG" "$ROOT/target/release/starbreaker" entity export \
-    "aurora_mk2" "$OUTPUT_ROOT" \
-    --kind decomposed --format blend --lod 0 --mip 0 --materials all \
-    --threads "$THREADS"
+    --kind decomposed --lod 0 --mip 0 --materials all --threads "$THREADS" \
+    "aurora_mk2" "$OUTPUT_ROOT"
 ) 2>&1 | tee "$LOG_PATH"
 END_NS="$(date +%s%N)"
 
