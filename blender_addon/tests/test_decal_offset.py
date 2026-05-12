@@ -78,6 +78,7 @@ from starbreaker_addon.manifest import MaterialSidecar, SubmaterialRecord
 from starbreaker_addon.runtime.importer.builders import BuildersMixin
 from starbreaker_addon.runtime.importer.decals import DecalsMixin
 from starbreaker_addon.runtime.importer.materials import MaterialsMixin
+from starbreaker_addon.runtime.importer.materials import _material_datablock_is_valid
 from starbreaker_addon.runtime.importer.orchestration import OrchestrationMixin
 from starbreaker_addon.runtime.importer.utils import (
     _canonical_material_sidecar_path,
@@ -317,7 +318,39 @@ class OrchestrationImporterUnderTest(OrchestrationMixin):
         return 0
 
 
+class OrphanRemovalImporterUnderTest(OrchestrationMixin):
+    def __init__(self):
+        self._pending_orphan_materials = set()
+
+
+class FakeHashableMaterial:
+    library = None
+
+    def __init__(self):
+        self.users = 0
+
+    def get(self, _key, default=None):
+        return default
+
+
+class FakeInvalidMaterial:
+    @property
+    def name(self):
+        raise ReferenceError("StructRNA of type Material has been removed")
+
+
 class DecalOffsetTests(unittest.TestCase):
+    def test_invalid_material_datablock_is_detected(self) -> None:
+        self.assertFalse(_material_datablock_is_valid(FakeInvalidMaterial()))
+
+    def test_replaced_slot_material_cleanup_is_deferred(self) -> None:
+        importer = OrphanRemovalImporterUnderTest()
+        material = FakeHashableMaterial()
+
+        importer._remove_replaced_slot_material(material)
+
+        self.assertIn(material, importer._pending_orphan_materials)
+
     def test_rebuild_object_materials_skips_empty_unmapped_slots_without_warning(self) -> None:
         sidecar = FakeSidecar([
             FakeSubmaterial(0, "decal pom"),

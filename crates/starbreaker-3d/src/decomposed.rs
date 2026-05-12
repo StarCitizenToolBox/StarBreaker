@@ -37,6 +37,8 @@ pub(crate) struct DecomposedInput {
     pub paint_variants: Vec<crate::mtl::PaintVariant>,
 }
 
+pub(crate) type ExistingInteriorAssetMap = HashMap<String, (String, Option<String>)>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum TextureFlavor {
     Generic,
@@ -914,6 +916,7 @@ pub(crate) fn write_decomposed_export(
     opts: &ExportOptions,
     progress: Option<&Progress>,
     existing_asset_paths: Option<&HashSet<String>>,
+    existing_interior_assets: Option<&ExistingInteriorAssetMap>,
     load_interior_mesh: &mut dyn FnMut(
         &InteriorCgfEntry,
     ) -> Option<(Mesh, Option<MtlFile>, Option<NodeMeshCombo>)>,
@@ -1201,101 +1204,118 @@ pub(crate) fn write_decomposed_export(
             let effective_palette_ref = placement_palette
                 .as_ref()
                 .or(container.palette.as_ref());
-            let cache_key = format!(
-                "{}|{}",
-                entry.cgf_path.to_lowercase(),
-                entry.material_path.as_deref().unwrap_or("").to_lowercase()
-            );
+            let normalized_cgf_path = normalize_source_path(p4k, &entry.cgf_path);
+            let normalized_material_path = entry
+                .material_path
+                .as_deref()
+                .map(|path| normalize_source_path(p4k, path));
+            let cache_key = interior_asset_lookup_key(&normalized_cgf_path, normalized_material_path.as_deref());
             let (mesh_asset, material_sidecar) = if let Some(cached) = interior_asset_cache.get(&cache_key) {
                 cached.clone()
             } else {
-                let Some((mesh, materials, _nmc)) = load_interior_mesh(entry) else {
-                    log::warn!("failed to build decomposed interior asset for {}", entry.cgf_path);
-                    processed_interior_placements += 1;
-                    if total_interior_placements > 0 {
-                        let fraction =
-                            processed_interior_placements as f32 / total_interior_placements as f32;
-                        report_progress(
-                            progress,
-                            CHILD_ASSETS_END + (INTERIOR_ASSETS_END - CHILD_ASSETS_END) * fraction,
-                            "Writing interior assets",
-                        );
-                    }
-                    continue;
-                };
-                let interior_material_view = build_decomposed_material_view(
-                    &mesh,
-                    materials.as_ref(),
-                    None,
-                    opts.include_nodraw,
-                    opts.include_shields,
-                );
-                log::debug!(
-                    "[interior-asset] {} submeshes: {} before -> {} after filtering",
-                    entry.name,
-                    mesh.submeshes.len(),
-                    interior_material_view.mesh.submeshes.len()
-                );
-                let requested_mesh_asset = mesh_asset_relative_path(
+                if let Some(reusable) = existing_interior_asset_paths(
+                    existing_interior_assets,
+                    existing_asset_paths,
+                    &cache_key,
+                ).or_else(|| reusable_interior_asset_paths(
                     p4k,
-                    &entry.cgf_path,
-                    &entry.name,
+                    entry,
                     opts.lod_level,
+                    opts.texture_mip,
                     opts.format,
-                );
-                let requested_material_sidecar = interior_material_view.sidecar_materials.as_ref().map(|materials| {
-                    let source_material_path = material_source_path(
-                        p4k,
-                        materials,
-                        entry.material_path.as_deref().unwrap_or(""),
-                        &entry.cgf_path,
-                    );
-                    material_sidecar_relative_path(&source_material_path, &entry.name, opts.texture_mip)
-                });
-                let material_sidecar = interior_material_view.sidecar_materials.as_ref().map(|materials| {
-                    write_material_sidecar(
-                        &mut files,
-                        p4k,
-                        &mut png_cache,
-                        &mut texture_cache,
-                        &palettes_manifest_path,
-                        &entry.name,
-                        &entry.cgf_path,
-                        entry.material_path.as_deref().unwrap_or(""),
-                        materials,
-                        &interior_material_view.sidecar_original_indices,
-                        opts.texture_mip,
-                        existing_asset_paths,
-                        &mut mtl_cache,
-                    )
-                });
-                let reuse_existing_mesh_asset = (files.contains_key(&requested_mesh_asset)
-                    || existing_asset_paths.is_some_and(|paths| paths.contains(&requested_mesh_asset.to_ascii_lowercase())))
-                    && requested_material_sidecar
-                        .as_ref()
-                        .is_none_or(|requested_path| material_sidecar.as_deref() == Some(requested_path.as_str()));
-                let mesh_asset = if reuse_existing_mesh_asset {
-                    requested_mesh_asset
+                    existing_asset_paths,
+                )) {
+                    interior_asset_cache.insert(cache_key.clone(), reusable.clone());
+                    reusable
                 } else {
-                    write_mesh_asset(
-                        &mut files,
+                    let Some((mesh, materials, _nmc)) = load_interior_mesh(entry) else {
+                        log::warn!("failed to build decomposed interior asset for {}", entry.cgf_path);
+                        processed_interior_placements += 1;
+                        if total_interior_placements > 0 {
+                            let fraction =
+                                processed_interior_placements as f32 / total_interior_placements as f32;
+                            report_progress(
+                                progress,
+                                CHILD_ASSETS_END + (INTERIOR_ASSETS_END - CHILD_ASSETS_END) * fraction,
+                                "Writing interior assets",
+                            );
+                        }
+                        continue;
+                    };
+                    let interior_material_view = build_decomposed_material_view(
+                        &mesh,
+                        materials.as_ref(),
+                        None,
+                        opts.include_nodraw,
+                        opts.include_shields,
+                    );
+                    log::debug!(
+                        "[interior-asset] {} submeshes: {} before -> {} after filtering",
+                        entry.name,
+                        mesh.submeshes.len(),
+                        interior_material_view.mesh.submeshes.len()
+                    );
+                    let requested_mesh_asset = mesh_asset_relative_path(
                         p4k,
-                        &entry.name,
                         &entry.cgf_path,
-                        &interior_material_view.mesh,
-                        interior_material_view.glb_materials.as_ref(),
-                        // Interior meshes already follow the bundled flat-mesh path.
-                        // Preserving the raw NMC hierarchy here makes decomposed interiors
-                        // diverge from the reference import and can double-apply placement transforms.
-                        interior_material_view.glb_nmc.as_ref(),
-                        &[],
+                        &entry.name,
                         opts.lod_level,
                         opts.format,
-                        existing_asset_paths,
-                    )?
-                };
-                interior_asset_cache.insert(cache_key, (mesh_asset.clone(), material_sidecar.clone()));
-                (mesh_asset, material_sidecar)
+                    );
+                    let requested_material_sidecar = interior_material_view.sidecar_materials.as_ref().map(|materials| {
+                        let source_material_path = material_source_path(
+                            p4k,
+                            materials,
+                            entry.material_path.as_deref().unwrap_or(""),
+                            &entry.cgf_path,
+                        );
+                        material_sidecar_relative_path(&source_material_path, &entry.name, opts.texture_mip)
+                    });
+                    let material_sidecar = interior_material_view.sidecar_materials.as_ref().map(|materials| {
+                        write_material_sidecar(
+                            &mut files,
+                            p4k,
+                            &mut png_cache,
+                            &mut texture_cache,
+                            &palettes_manifest_path,
+                            &entry.name,
+                            &entry.cgf_path,
+                            entry.material_path.as_deref().unwrap_or(""),
+                            materials,
+                            &interior_material_view.sidecar_original_indices,
+                            opts.texture_mip,
+                            existing_asset_paths,
+                            &mut mtl_cache,
+                        )
+                    });
+                    let reuse_existing_mesh_asset = (files.contains_key(&requested_mesh_asset)
+                        || existing_asset_paths.is_some_and(|paths| paths.contains(&requested_mesh_asset.to_ascii_lowercase())))
+                        && requested_material_sidecar
+                            .as_ref()
+                            .is_none_or(|requested_path| material_sidecar.as_deref() == Some(requested_path.as_str()));
+                    let mesh_asset = if reuse_existing_mesh_asset {
+                        requested_mesh_asset
+                    } else {
+                        write_mesh_asset(
+                            &mut files,
+                            p4k,
+                            &entry.name,
+                            &entry.cgf_path,
+                            &interior_material_view.mesh,
+                            interior_material_view.glb_materials.as_ref(),
+                            // Interior meshes already follow the bundled flat-mesh path.
+                            // Preserving the raw NMC hierarchy here makes decomposed interiors
+                            // diverge from the reference import and can double-apply placement transforms.
+                            interior_material_view.glb_nmc.as_ref(),
+                            &[],
+                            opts.lod_level,
+                            opts.format,
+                            existing_asset_paths,
+                        )?
+                    };
+                    interior_asset_cache.insert(cache_key, (mesh_asset.clone(), material_sidecar.clone()));
+                    (mesh_asset, material_sidecar)
+                }
             };
 
             register_livery_usage(
@@ -1338,10 +1358,16 @@ pub(crate) fn write_decomposed_export(
             // EXR preserves float values >1.0, allowing Blender to sample full HDR energy.
             let projector_texture_export = if light.light_type == "Projector" {
                 light.projector_texture.as_deref().and_then(|src| {
+                    let normalized = normalize_source_path(p4k, src);
+                    let exr_path = replace_extension(&normalized, ".exr");
+                    if existing_asset_paths
+                        .is_some_and(|paths| paths.contains(&exr_path.to_ascii_lowercase()))
+                    {
+                        return Some(exr_path);
+                    }
+
                     // Try HDR EXR export first (for BC6H gobos with values >1.0)
                     if let Some(exr_data) = export_gobo_as_exr(p4k, src, opts.texture_mip) {
-                        let normalized = normalize_source_path(p4k, src);
-                        let exr_path = replace_extension(&normalized, ".exr");
                         return Some(insert_binary_file(&mut files, exr_path, exr_data));
                     }
 
@@ -2494,6 +2520,71 @@ fn material_source_request(materials: &MtlFile, material_path: &str, geometry_pa
         "Data/generated/generated.mtl".to_string()
     } else {
         replace_extension(geometry_path, ".mtl")
+    }
+}
+
+fn requested_material_source_path(p4k: &MappedP4k, material_path: Option<&str>, geometry_path: &str) -> String {
+    let request = if let Some(material_path) = material_path.filter(|path| !path.is_empty()) {
+        if material_path.rsplit('/').next().is_some_and(|name| name.contains('.')) {
+            material_path.to_string()
+        } else {
+            format!("{material_path}.mtl")
+        }
+    } else {
+        replace_extension(geometry_path, ".mtl")
+    };
+    normalize_source_path(p4k, &request)
+}
+
+fn existing_asset_set_contains(existing_asset_paths: Option<&HashSet<String>>, relative_path: &str) -> bool {
+    existing_asset_paths
+        .is_some_and(|paths| paths.contains(&relative_path.to_ascii_lowercase()))
+}
+
+pub(crate) fn interior_asset_lookup_key(cgf_path: &str, material_path: Option<&str>) -> String {
+    format!(
+        "{}|{}",
+        cgf_path.to_ascii_lowercase(),
+        material_path.unwrap_or("").to_ascii_lowercase()
+    )
+}
+
+fn existing_interior_asset_paths(
+    existing_interior_assets: Option<&ExistingInteriorAssetMap>,
+    existing_asset_paths: Option<&HashSet<String>>,
+    lookup_key: &str,
+) -> Option<(String, Option<String>)> {
+    let (mesh_asset, material_sidecar) = existing_interior_assets?.get(lookup_key)?;
+    if !existing_asset_set_contains(existing_asset_paths, mesh_asset) {
+        return None;
+    }
+    if let Some(sidecar) = material_sidecar.as_deref() {
+        if !existing_asset_set_contains(existing_asset_paths, sidecar) {
+            return None;
+        }
+    }
+    Some((mesh_asset.clone(), material_sidecar.clone()))
+}
+
+fn reusable_interior_asset_paths(
+    p4k: &MappedP4k,
+    entry: &InteriorCgfEntry,
+    lod_level: u32,
+    texture_mip: u32,
+    format: ExportFormat,
+    existing_asset_paths: Option<&HashSet<String>>,
+) -> Option<(String, Option<String>)> {
+    let mesh_asset = mesh_asset_relative_path(p4k, &entry.cgf_path, &entry.name, lod_level, format);
+    if !existing_asset_set_contains(existing_asset_paths, &mesh_asset) {
+        return None;
+    }
+
+    let material_source = requested_material_source_path(p4k, entry.material_path.as_deref(), &entry.cgf_path);
+    let material_sidecar = material_sidecar_relative_path(&material_source, &entry.name, texture_mip);
+    if existing_asset_set_contains(existing_asset_paths, &material_sidecar) {
+        Some((mesh_asset, Some(material_sidecar)))
+    } else {
+        None
     }
 }
 

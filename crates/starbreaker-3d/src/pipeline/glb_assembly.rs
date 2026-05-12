@@ -27,7 +27,7 @@ pub fn assemble_glb_with_loadout(
     tree: &starbreaker_datacore::loadout::LoadoutTree,
     opts: &ExportOptions,
 ) -> Result<ExportResult, Error> {
-    assemble_glb_with_loadout_with_progress(db, p4k, record, tree, opts, None, None)
+    assemble_glb_with_loadout_with_progress(db, p4k, record, tree, opts, None, None, None, None)
 }
 
 pub fn assemble_glb_with_loadout_with_progress(
@@ -38,6 +38,8 @@ pub fn assemble_glb_with_loadout_with_progress(
     opts: &ExportOptions,
     progress: Option<&Progress>,
     existing_asset_paths: Option<&HashSet<String>>,
+    existing_interior_assets: Option<&crate::decomposed::ExistingInteriorAssetMap>,
+    existing_asset_loader: Option<&(dyn Fn(&str) -> Option<Vec<u8>> + Sync)>,
 ) -> Result<ExportResult, Error> {
     const LOADOUT_STAGE_START: f32 = 0.005;
     const ROOT_EXPORT_STAGE_START: f32 = 0.03;
@@ -386,6 +388,8 @@ pub fn assemble_glb_with_loadout_with_progress(
             opts,
             decomposed_progress.as_ref(),
             existing_asset_paths,
+            existing_interior_assets,
+            existing_asset_loader,
         )?;
         log::info!("[timing] write_decomposed_export: {:.2}s", phase_start.elapsed().as_secs_f32());
 

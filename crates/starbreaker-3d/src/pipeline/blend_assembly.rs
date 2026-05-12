@@ -77,7 +77,8 @@ struct BlendAssetJob {
 }
 
 struct BuiltBlendAsset {
-    file: ExportedFile,
+    file: Option<ExportedFile>,
+    relative_path: String,
     linked_mesh_refs: Vec<LinkedMeshRef>,
     source_nodes: Vec<LinkedSourceNode>,
 }
@@ -715,6 +716,8 @@ pub fn write_decomposed_export_blend(
     opts: &ExportOptions,
     progress: Option<&Progress>,
     existing_asset_paths: Option<&HashSet<String>>,
+    existing_interior_assets: Option<&crate::decomposed::ExistingInteriorAssetMap>,
+    existing_asset_loader: Option<&(dyn Fn(&str) -> Option<Vec<u8>> + Sync)>,
 ) -> Result<DecomposedExport, Error> {
     const BASE_DECOMPOSED_END: f32 = 0.90;
     const DECAL_GROUPS_START: f32 = 0.90;
@@ -840,6 +843,7 @@ pub fn write_decomposed_export_blend(
         opts,
         base_progress.as_ref(),
         existing_asset_paths,
+        existing_interior_assets,
         &mut interior_mesh_loader,
     )?;
     log::info!("[timing][blend] base_decomposed_export: {:.2}s", phase_start.elapsed().as_secs_f32());
@@ -1052,6 +1056,27 @@ pub fn write_decomposed_export_blend(
         }
     }
 
+    let mut scheduled_blend_assets = blend_asset_jobs
+        .iter()
+        .map(|job| job.blend_path.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    for instance in scene_manifest_instances(&manifest_files) {
+        if scheduled_blend_assets.insert(instance.mesh_asset.to_ascii_lowercase()) {
+            let mesh_name = instance
+                .mesh_asset
+                .split('/')
+                .last()
+                .unwrap_or("mesh")
+                .trim_end_matches(".blend")
+                .to_string();
+            blend_asset_jobs.push(BlendAssetJob {
+                blend_path: instance.mesh_asset.clone(),
+                mesh_name,
+                blend_key: instance.mesh_asset.to_ascii_lowercase(),
+            });
+        }
+    }
+
     for built_asset in build_native_blend_assets(
         &blend_asset_jobs,
         &mesh_data_map,
@@ -1060,16 +1085,19 @@ pub fn write_decomposed_export_blend(
         progress,
         NATIVE_BLEND_ASSETS_START,
         NATIVE_BLEND_ASSETS_END,
+        existing_asset_loader,
     )? {
         refs_by_asset.insert(
-            built_asset.file.relative_path.clone(),
+            built_asset.relative_path.clone(),
             built_asset.linked_mesh_refs.clone(),
         );
         source_nodes_by_asset.insert(
-            built_asset.file.relative_path.clone(),
+            built_asset.relative_path.clone(),
             built_asset.source_nodes,
         );
-        blend_files.push(built_asset.file);
+        if let Some(file) = built_asset.file {
+            blend_files.push(file);
+        }
     }
     log::info!("[timing][blend] build_native_blend_assets: {:.2}s", phase_start.elapsed().as_secs_f32());
     phase_start = Instant::now();
@@ -2174,11 +2202,55 @@ fn source_empty_nodes_from_blend_bytes(blend_bytes: &[u8]) -> Vec<LinkedSourceNo
     blend_link_data_from_bytes(blend_bytes).1
 }
 
+fn reusable_native_blend_asset(
+    job: &BlendAssetJob,
+    existing_asset_loader: Option<&(dyn Fn(&str) -> Option<Vec<u8>> + Sync)>,
+) -> Result<Option<BuiltBlendAsset>, Error> {
+    let Some(loader) = existing_asset_loader else {
+        return Ok(None);
+    };
+    let Some(stored_bytes) = loader(&job.blend_path) else {
+        return Ok(None);
+    };
+    let blend_bytes = starbreaker_blend::decompress_blend_bytes_if_needed(&stored_bytes)
+        .map_err(|error| {
+            Error::Other(format!(
+                "failed to decompress reusable native Blend asset '{}': {error}",
+                job.blend_path
+            ))
+        })?;
+    let (mut linked_mesh_refs, source_nodes) = blend_link_data_from_bytes(&blend_bytes);
+    if linked_mesh_refs.is_empty() {
+        linked_mesh_refs.push(LinkedMeshRef {
+            object_name: job.mesh_name.clone(),
+            mesh_name: job.mesh_name.clone(),
+            material_names: Vec::new(),
+            source_parent_name: None,
+            object_loc: [0.0, 0.0, 0.0],
+            object_quat: [1.0, 0.0, 0.0, 0.0],
+            object_scale: [1.0, 1.0, 1.0],
+            ancestors: Vec::new(),
+            has_decal_offset_modifier: false,
+        });
+    }
+    Ok(Some(BuiltBlendAsset {
+        file: None,
+        relative_path: job.blend_path.clone(),
+        linked_mesh_refs,
+        source_nodes,
+    }))
+}
+
 fn build_native_blend_asset(
     job: &BlendAssetJob,
     mesh_data_map: &HashMap<String, MeshDataEntry>,
     mesh_vertex_groups: &HashMap<String, Vec<VertexGroup>>,
+    existing_asset_loader: Option<&(dyn Fn(&str) -> Option<Vec<u8>> + Sync)>,
 ) -> Result<BuiltBlendAsset, Error> {
+    if let Some(reusable) = reusable_native_blend_asset(job, existing_asset_loader)? {
+        return Ok(reusable);
+    }
+
     let mesh_entry = mesh_data_map.get(&job.blend_key).ok_or_else(|| {
         Error::Other(format!(
             "native Blend export has no mesh payload for generated asset '{}'",
@@ -2223,11 +2295,12 @@ fn build_native_blend_asset(
     let compressed = starbreaker_blend::compress_blend_bytes(&blend_bytes);
 
     Ok(BuiltBlendAsset {
-        file: ExportedFile {
+        file: Some(ExportedFile {
             relative_path: job.blend_path.clone(),
             bytes: compressed,
             kind: ExportedFileKind::MeshAsset,
-        },
+        }),
+        relative_path: job.blend_path.clone(),
         linked_mesh_refs,
         source_nodes,
     })
@@ -2241,6 +2314,7 @@ fn build_native_blend_assets(
     progress: Option<&Progress>,
     progress_from: f32,
     progress_to: f32,
+    existing_asset_loader: Option<&(dyn Fn(&str) -> Option<Vec<u8>> + Sync)>,
 ) -> Result<Vec<BuiltBlendAsset>, Error> {
     let total_jobs = jobs.len().max(1);
     let progress_range = progress_to - progress_from;
@@ -2249,7 +2323,7 @@ fn build_native_blend_assets(
             .iter()
             .enumerate()
             .map(|(index, job)| {
-                let built = build_native_blend_asset(job, mesh_data_map, mesh_vertex_groups)?;
+                let built = build_native_blend_asset(job, mesh_data_map, mesh_vertex_groups, existing_asset_loader)?;
                 let fraction = (index + 1) as f32 / total_jobs as f32;
                 report_progress(
                     progress,
@@ -2272,7 +2346,7 @@ fn build_native_blend_assets(
         let completed = AtomicUsize::new(0);
         jobs.par_iter()
             .map(|job| {
-                let built = build_native_blend_asset(job, mesh_data_map, mesh_vertex_groups)?;
+                let built = build_native_blend_asset(job, mesh_data_map, mesh_vertex_groups, existing_asset_loader)?;
                 let finished = completed.fetch_add(1, Ordering::Relaxed) + 1;
                 let fraction = finished as f32 / total_jobs as f32;
                 report_progress(

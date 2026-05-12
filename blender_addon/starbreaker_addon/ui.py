@@ -482,6 +482,7 @@ def _update_import_progress(
     description: str,
     *,
     force: bool = False,
+    redraw: bool = True,
 ) -> None:
     global _IMPORT_PROGRESS_LAST_UPDATE
     now = time.monotonic()
@@ -496,10 +497,11 @@ def _update_import_progress(
         window_manager.progress_update(int(round(clamped * 100.0)))
     except Exception:
         pass
-    try:
-        bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=1)
-    except Exception:
-        pass
+    if redraw:
+        try:
+            bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=1)
+        except Exception:
+            pass
     _tag_view3d_redraws(context)
 
 
@@ -1539,6 +1541,7 @@ def _material_refresh_prompt_timer(token: int | None = None) -> float | None:
             session.progress,
             f"Refreshing materials for {package_name}",
             force=done,
+            redraw=False,
         )
         if done:
             _end_import_progress(

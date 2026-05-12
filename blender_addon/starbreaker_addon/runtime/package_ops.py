@@ -391,6 +391,9 @@ class MaterialRefreshSession:
         if self._objects_finalized:
             return
         try:
+            flush_orphans = getattr(self.importer, "_flush_pending_orphan_materials", None)
+            if callable(flush_orphans):
+                flush_orphans()
             if self.palette_id is not None:
                 self.package_root[PROP_PALETTE_ID] = self.palette_id
             if engine_glow_control_enabled(self.package_root):

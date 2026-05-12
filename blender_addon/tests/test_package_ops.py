@@ -491,6 +491,42 @@ class PackageOpsTests(unittest.TestCase):
                 self.package_ops._purge_orphaned_file_backed_images,
             ) = original_purges
 
+    def test_material_refresh_session_flushes_importer_orphan_queue(self) -> None:
+        @contextmanager
+        def _no_suspend(_context):
+            yield
+
+        @contextmanager
+        def _no_mode(_context):
+            yield
+
+        package_root = FakeObject(
+            "StarBreaker RSI Aurora",
+            starbreaker_package_root=True,
+            starbreaker_scene_path="/tmp/aurora/scene.json",
+        )
+
+        original_suspend = self.package_ops._suspend_heavy_viewports
+        original_mode = self.package_ops._temporary_object_mode
+        try:
+            self.package_ops._suspend_heavy_viewports = _no_suspend
+            self.package_ops._temporary_object_mode = _no_mode
+            context = types.SimpleNamespace(view_layer=FakeViewLayer())
+            session = self.package_ops.MaterialRefreshSession(
+                context,
+                package_root,
+                purge_orphans=False,
+            )
+            flushed = []
+            session.importer._flush_pending_orphan_materials = lambda: flushed.append(True)
+
+            self.assertTrue(session.step())
+        finally:
+            self.package_ops._suspend_heavy_viewports = original_suspend
+            self.package_ops._temporary_object_mode = original_mode
+
+        self.assertEqual(flushed, [True])
+
     def test_refresh_materials_uses_object_palette_without_explicit_override(self) -> None:
         @contextmanager
         def _no_suspend(_context):

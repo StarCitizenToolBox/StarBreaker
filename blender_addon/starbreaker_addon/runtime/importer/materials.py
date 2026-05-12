@@ -76,6 +76,16 @@ from .utils import (
 )
 
 
+def _material_datablock_is_valid(material: bpy.types.Material | None) -> bool:
+    if material is None:
+        return False
+    try:
+        material.name
+    except ReferenceError:
+        return False
+    return True
+
+
 class MaterialsMixin:
     """Material lifecycle + node/socket utilities for ``PackageImporter``."""
 
@@ -97,7 +107,10 @@ class MaterialsMixin:
         expected_template_key = template_plan_for_submaterial(submaterial).template_key
         cached = self.material_cache.get(cache_key)
         if cached is not None:
-            return cached
+            if _material_datablock_is_valid(cached):
+                return cached
+            self.material_cache.pop(cache_key, None)
+            self.material_identity_index.pop(cache_key, None)
 
         reusable = self._reusable_material(sidecar_path, sidecar, submaterial, palette, palette_scope, cache_key)
         if reusable is not None:
@@ -142,6 +155,9 @@ class MaterialsMixin:
 
         self._ensure_material_identity_index()
         indexed_material = self.material_identity_index.get(material_identity)
+        if indexed_material is not None and not _material_datablock_is_valid(indexed_material):
+            self.material_identity_index.pop(material_identity, None)
+            indexed_material = None
         if indexed_material is not None and getattr(indexed_material, "library", None) is None:
             return indexed_material
 
@@ -229,6 +245,9 @@ class MaterialsMixin:
 
         self._ensure_material_identity_index()
         indexed_material = self.material_identity_index.get(material_identity)
+        if indexed_material is not None and not _material_datablock_is_valid(indexed_material):
+            self.material_identity_index.pop(material_identity, None)
+            indexed_material = None
         if indexed_material is not None and _material_is_compatible(
             indexed_material,
             self.package,

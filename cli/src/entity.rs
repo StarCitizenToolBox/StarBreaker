@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -7,6 +7,7 @@ use clap::Subcommand;
 use starbreaker_datacore::database::Database;
 use starbreaker_datacore::loadout::{EntityIndex, LoadoutNode, resolve_loadout_indexed};
 use starbreaker_datacore::types::Record;
+use starbreaker_p4k::MappedP4k;
 
 use crate::common::{ExportOpts, load_dcb_bytes};
 use crate::error::{CliError, Result};
@@ -78,13 +79,14 @@ fn should_skip_existing_decomposed_asset(
     file: &starbreaker_3d::ExportedFile,
     skip_existing_assets: bool,
 ) -> bool {
-    skip_existing_assets && file.kind.is_mesh_or_texture_asset()
+    skip_existing_assets && file.kind.is_reusable_asset()
 }
 
 fn write_decomposed_file(
     file: &starbreaker_3d::ExportedFile,
     output_path: &PathBuf,
     skip_existing_assets: bool,
+    p4k: &MappedP4k,
 ) -> Result<()> {
     if output_path.exists() {
         if !output_path.is_file() {
@@ -93,17 +95,20 @@ fn write_decomposed_file(
                 output_path.display(),
             )));
         }
-        if should_skip_existing_decomposed_asset(file, skip_existing_assets) {
+        if should_skip_existing_decomposed_asset(file, skip_existing_assets)
+            && existing_asset_matches_source_mtime(output_path, p4k, &file.relative_path)?
+        {
             return Ok(());
         }
     }
 
     std::fs::write(output_path, &file.bytes)
         .map_err(|e| CliError::IoPath { source: e, path: output_path.display().to_string() })?;
+    apply_source_mtime(output_path, p4k, &file.relative_path)?;
     Ok(())
 }
 
-fn collect_existing_decomposed_assets(output_root: &Path) -> Result<HashSet<String>> {
+fn collect_existing_decomposed_assets(output_root: &Path, p4k: &MappedP4k) -> Result<HashSet<String>> {
     let data_root = output_root.join("Data");
     let mut existing = HashSet::new();
     if !data_root.exists() {
@@ -132,7 +137,8 @@ fn collect_existing_decomposed_assets(output_root: &Path) -> Result<HashSet<Stri
             let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
                 continue;
             };
-            if !matches!(extension, "blend" | "png") {
+            let filename = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+            if !matches!(extension, "blend" | "png" | "exr") && !filename.ends_with(".materials.json") {
                 continue;
             }
 
@@ -147,11 +153,193 @@ fn collect_existing_decomposed_assets(output_root: &Path) -> Result<HashSet<Stri
                 .to_string_lossy()
                 .replace('\\', "/")
                 .to_ascii_lowercase();
+            if !existing_asset_matches_source_mtime(&path, p4k, &relative)? {
+                continue;
+            }
             existing.insert(relative);
         }
     }
 
     Ok(existing)
+}
+
+fn existing_asset_matches_source_mtime(path: &Path, p4k: &MappedP4k, relative_path: &str) -> Result<bool> {
+    let Some(source_seconds) = source_modified_unix_seconds(p4k, relative_path) else {
+        return Ok(false);
+    };
+    let modified = path
+        .metadata()
+        .and_then(|metadata| metadata.modified())
+        .map_err(|e| CliError::IoPath { source: e, path: path.display().to_string() })?;
+    let Ok(asset_seconds) = modified.duration_since(UNIX_EPOCH) else {
+        return Ok(false);
+    };
+    Ok(asset_seconds.as_secs() == source_seconds)
+}
+
+fn apply_source_mtime(path: &Path, p4k: &MappedP4k, relative_path: &str) -> Result<()> {
+    let Some(seconds) = source_modified_unix_seconds(p4k, relative_path) else {
+        return Ok(());
+    };
+    let file_time = filetime::FileTime::from_unix_time(seconds as i64, 0);
+    filetime::set_file_mtime(path, file_time)
+        .map_err(|e| CliError::IoPath { source: e, path: path.display().to_string() })
+}
+
+fn source_modified_unix_seconds(p4k: &MappedP4k, relative_path: &str) -> Option<u64> {
+    source_asset_candidates(relative_path)
+        .into_iter()
+        .find_map(|candidate| p4k.entry_case_insensitive(&candidate).map(|entry| dos_datetime_to_unix_seconds(entry.last_modified)))
+}
+
+fn source_asset_candidates(relative_path: &str) -> Vec<String> {
+    let path = relative_path.replace('/', "\\");
+    if let Some(stem) = path.strip_suffix(".materials.json") {
+        return vec![format!("{}.mtl", strip_numeric_suffix(stem, "_TEX"))];
+    }
+    if let Some(stem) = path.strip_suffix(".blend") {
+        let source_stem = strip_numeric_suffix(stem, "_LOD");
+        return [".cgfm", ".cgam", ".skinm", ".cgf", ".cga", ".skin", ".chr"]
+            .into_iter()
+            .map(|extension| format!("{source_stem}{extension}"))
+            .collect();
+    }
+    if let Some(stem) = path.strip_suffix(".png") {
+        let source_stem = strip_numeric_suffix(stem, "_TEX");
+        return [".dds", ".tif", ".png"]
+            .into_iter()
+            .map(|extension| format!("{source_stem}{extension}"))
+            .collect();
+    }
+    if let Some(stem) = path.strip_suffix(".exr") {
+        return [".dds", ".tif", ".exr"]
+            .into_iter()
+            .map(|extension| format!("{stem}{extension}"))
+            .collect();
+    }
+    Vec::new()
+}
+
+fn strip_numeric_suffix<'a>(value: &'a str, marker: &str) -> &'a str {
+    let Some(pos) = value.rfind(marker) else {
+        return value;
+    };
+    let suffix = &value[pos + marker.len()..];
+    if !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit()) {
+        &value[..pos]
+    } else {
+        value
+    }
+}
+
+fn dos_datetime_to_unix_seconds(value: u32) -> u64 {
+    let time = value & 0xffff;
+    let date = value >> 16;
+    let second = (time & 0x1f) * 2;
+    let minute = (time >> 5) & 0x3f;
+    let hour = (time >> 11) & 0x1f;
+    let day = (date & 0x1f).max(1);
+    let month = ((date >> 5) & 0x0f).clamp(1, 12);
+    let year = 1980 + ((date >> 9) & 0x7f) as i32;
+    (days_from_civil(year, month, day) as u64) * 86_400
+        + (hour as u64) * 3_600
+        + (minute as u64) * 60
+        + second as u64
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+    let year = year - if month <= 2 { 1 } else { 0 };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let month = month as i32;
+    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day as i32 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    (era * 146_097 + doe - 719_468) as i64
+}
+
+fn collect_existing_interior_assets(output_root: &Path) -> Result<HashMap<String, (String, Option<String>)>> {
+    let packages_root = output_root.join("Packages");
+    let mut existing = HashMap::new();
+    if !packages_root.exists() {
+        return Ok(existing);
+    }
+
+    let mut pending = vec![packages_root];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir)
+            .map_err(|e| CliError::IoPath { source: e, path: dir.display().to_string() })?
+        {
+            let entry = entry
+                .map_err(|e| CliError::IoPath { source: e, path: dir.display().to_string() })?;
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .map_err(|e| CliError::IoPath { source: e, path: path.display().to_string() })?;
+            if file_type.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if !file_type.is_file() || path.file_name().and_then(|name| name.to_str()) != Some("scene.json") {
+                continue;
+            }
+            let bytes = std::fs::read(&path)
+                .map_err(|e| CliError::IoPath { source: e, path: path.display().to_string() })?;
+            collect_scene_interior_assets(&mut existing, &bytes);
+        }
+    }
+
+    Ok(existing)
+}
+
+fn collect_scene_interior_assets(
+    existing: &mut HashMap<String, (String, Option<String>)>,
+    scene_bytes: &[u8],
+) {
+    let Ok(scene) = serde_json::from_slice::<serde_json::Value>(scene_bytes) else {
+        return;
+    };
+    let Some(interiors) = scene.get("interiors").and_then(|value| value.as_array()) else {
+        return;
+    };
+    for placement in interiors
+        .iter()
+        .filter_map(|interior| interior.get("placements").and_then(|value| value.as_array()))
+        .flatten()
+    {
+        let Some(cgf_path) = placement.get("cgf_path").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let material_path = placement.get("material_path").and_then(|value| value.as_str());
+        let Some(mesh_asset) = placement.get("mesh_asset").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let material_sidecar = placement
+            .get("material_sidecar")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned);
+        let key = interior_asset_lookup_key(cgf_path, material_path);
+        existing.entry(key).or_insert_with(|| (mesh_asset.to_string(), material_sidecar));
+    }
+}
+
+fn interior_asset_lookup_key(cgf_path: &str, material_path: Option<&str>) -> String {
+    format!(
+        "{}|{}",
+        cgf_path.to_ascii_lowercase(),
+        material_path.unwrap_or("").to_ascii_lowercase()
+    )
+}
+
+fn read_reusable_decomposed_asset(
+    output_root: &Path,
+    reusable_asset_paths: &HashSet<String>,
+    relative_path: &str,
+) -> Option<Vec<u8>> {
+    let key = relative_path.replace('\\', "/").to_ascii_lowercase();
+    if !reusable_asset_paths.contains(&key) {
+        return None;
+    }
+    std::fs::read(output_root.join(relative_path)).ok()
 }
 
 #[derive(Subcommand)]
@@ -257,7 +445,14 @@ fn export(
     let existing_asset_paths = if export_opts.kind == starbreaker_3d::ExportKind::Decomposed
         && opts.skip_existing_assets
     {
-        Some(collect_existing_decomposed_assets(&output)?)
+        Some(collect_existing_decomposed_assets(&output, &p4k)?)
+    } else {
+        None
+    };
+    let existing_interior_assets = if export_opts.kind == starbreaker_3d::ExportKind::Decomposed
+        && opts.skip_existing_assets
+    {
+        Some(collect_existing_interior_assets(&output)?)
     } else {
         None
     };
@@ -282,6 +477,10 @@ fn export(
     }
 
     crate::log_mem_stats("before export");
+    let existing_asset_loader =
+        |relative_path: &str| existing_asset_paths.as_ref().and_then(|paths| {
+            read_reusable_decomposed_asset(&output, paths, relative_path)
+        });
     let result = starbreaker_3d::assemble_glb_with_loadout_with_progress(
         &db,
         &p4k,
@@ -290,6 +489,8 @@ fn export(
         &export_opts,
         None,
         existing_asset_paths.as_ref(),
+        existing_interior_assets.as_ref(),
+        Some(&existing_asset_loader),
     )?;
     crate::log_mem_stats("after export");
     eprintln!("Geometry: {}", result.geometry_path);
@@ -325,7 +526,7 @@ fn export(
                     std::fs::create_dir_all(parent)
                         .map_err(|e| CliError::IoPath { source: e, path: parent.display().to_string() })?;
                 }
-                write_decomposed_file(file, &output_path, opts.skip_existing_assets)?;
+                write_decomposed_file(file, &output_path, opts.skip_existing_assets, &p4k)?;
             }
         }
     }
@@ -382,11 +583,20 @@ fn export_blend(
         prepare_decomposed_output_root(&output_dir, &package_name)?;
 
         let existing_asset_paths = if opts.skip_existing_assets {
-            Some(collect_existing_decomposed_assets(&output_dir)?)
+            Some(collect_existing_decomposed_assets(&output_dir, &p4k)?)
+        } else {
+            None
+        };
+        let existing_interior_assets = if opts.skip_existing_assets {
+            Some(collect_existing_interior_assets(&output_dir)?)
         } else {
             None
         };
 
+        let existing_asset_loader =
+            |relative_path: &str| existing_asset_paths.as_ref().and_then(|paths| {
+                read_reusable_decomposed_asset(&output_dir, paths, relative_path)
+            });
         let result = starbreaker_3d::assemble_glb_with_loadout_with_progress(
             &db,
             &p4k,
@@ -395,6 +605,8 @@ fn export_blend(
             &export_opts,
             None,
             existing_asset_paths.as_ref(),
+            existing_interior_assets.as_ref(),
+            Some(&existing_asset_loader),
         )?;
 
         let decomposed = result
@@ -410,7 +622,7 @@ fn export_blend(
                     path: parent.display().to_string(),
                 })?;
             }
-            write_decomposed_file(file, &output_path, opts.skip_existing_assets)?;
+            write_decomposed_file(file, &output_path, opts.skip_existing_assets, &p4k)?;
         }
 
         let scene_json_path = output_dir.join("Packages").join(&package_name).join("scene.json");

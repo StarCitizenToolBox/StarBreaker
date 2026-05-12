@@ -1,13 +1,13 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::net::TcpStream;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -1168,14 +1168,45 @@ fn should_skip_existing_decomposed_asset(
     file: &starbreaker_3d::ExportedFile,
     overwrite_existing_assets: bool,
 ) -> bool {
-    !overwrite_existing_assets && file.kind.is_mesh_or_texture_asset()
+    !overwrite_existing_assets && file.kind.is_reusable_asset()
 }
 
 fn write_decomposed_file(
     file: &starbreaker_3d::ExportedFile,
     file_path: &Path,
     overwrite_existing_assets: bool,
+    export_session_asset_paths: Option<&Mutex<HashSet<String>>>,
+    p4k: &MappedP4k,
 ) -> Result<DecomposedWriteOutcome, AppError> {
+    let reusable_key = file
+        .kind
+        .is_reusable_asset()
+        .then(|| file.relative_path.replace('\\', "/").to_ascii_lowercase());
+    if let (Some(session_assets), Some(key)) = (export_session_asset_paths, reusable_key.as_deref()) {
+        let mut session_assets = session_assets.lock().unwrap();
+        if session_assets.contains(key) {
+            return Ok(DecomposedWriteOutcome::SkippedExisting);
+        }
+        if file_path.exists() {
+            if !file_path.is_file() {
+                return Err(AppError::Internal(format!(
+                    "decomposed output path '{}' already exists as a directory",
+                    file_path.display(),
+                )));
+            }
+            if should_skip_existing_decomposed_asset(file, overwrite_existing_assets)
+                && existing_asset_matches_source_mtime(file_path, p4k, &file.relative_path)?
+            {
+                session_assets.insert(key.to_string());
+                return Ok(DecomposedWriteOutcome::SkippedExisting);
+            }
+        }
+        std::fs::write(file_path, &file.bytes)?;
+        apply_source_mtime(file_path, p4k, &file.relative_path)?;
+        session_assets.insert(key.to_string());
+        return Ok(DecomposedWriteOutcome::Written);
+    }
+
     if file_path.exists() {
         if !file_path.is_file() {
             return Err(AppError::Internal(format!(
@@ -1183,16 +1214,18 @@ fn write_decomposed_file(
                 file_path.display(),
             )));
         }
-        if should_skip_existing_decomposed_asset(file, overwrite_existing_assets) {
+        if should_skip_existing_decomposed_asset(file, overwrite_existing_assets)
+            && existing_asset_matches_source_mtime(file_path, p4k, &file.relative_path)?
+        {
             return Ok(DecomposedWriteOutcome::SkippedExisting);
         }
     }
-
     std::fs::write(file_path, &file.bytes)?;
+    apply_source_mtime(file_path, p4k, &file.relative_path)?;
     Ok(DecomposedWriteOutcome::Written)
 }
 
-fn collect_existing_decomposed_assets(output_root: &Path) -> Result<HashSet<String>, AppError> {
+fn collect_existing_decomposed_assets(output_root: &Path, p4k: &MappedP4k) -> Result<HashSet<String>, AppError> {
     let data_root = output_root.join("Data");
     let mut existing = HashSet::new();
     if !data_root.exists() {
@@ -1216,7 +1249,8 @@ fn collect_existing_decomposed_assets(output_root: &Path) -> Result<HashSet<Stri
             let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
                 continue;
             };
-            if !matches!(extension, "blend" | "png") {
+            let filename = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+            if !matches!(extension, "blend" | "png" | "exr") && !filename.ends_with(".materials.json") {
                 continue;
             }
 
@@ -1231,11 +1265,184 @@ fn collect_existing_decomposed_assets(output_root: &Path) -> Result<HashSet<Stri
                 .to_string_lossy()
                 .replace('\\', "/")
                 .to_ascii_lowercase();
+            if !existing_asset_matches_source_mtime(&path, p4k, &relative)? {
+                continue;
+            }
             existing.insert(relative);
         }
     }
 
     Ok(existing)
+}
+
+fn existing_asset_matches_source_mtime(path: &Path, p4k: &MappedP4k, relative_path: &str) -> Result<bool, AppError> {
+    let Some(source_seconds) = source_modified_unix_seconds(p4k, relative_path) else {
+        return Ok(false);
+    };
+    let modified = path.metadata()?.modified()?;
+    let Ok(asset_seconds) = modified.duration_since(UNIX_EPOCH) else {
+        return Ok(false);
+    };
+    Ok(asset_seconds.as_secs() == source_seconds)
+}
+
+fn apply_source_mtime(path: &Path, p4k: &MappedP4k, relative_path: &str) -> Result<(), AppError> {
+    let Some(seconds) = source_modified_unix_seconds(p4k, relative_path) else {
+        return Ok(());
+    };
+    let file_time = filetime::FileTime::from_unix_time(seconds as i64, 0);
+    filetime::set_file_mtime(path, file_time)?;
+    Ok(())
+}
+
+fn source_modified_unix_seconds(p4k: &MappedP4k, relative_path: &str) -> Option<u64> {
+    source_asset_candidates(relative_path)
+        .into_iter()
+        .find_map(|candidate| p4k.entry_case_insensitive(&candidate).map(|entry| dos_datetime_to_unix_seconds(entry.last_modified)))
+}
+
+fn source_asset_candidates(relative_path: &str) -> Vec<String> {
+    let path = relative_path.replace('/', "\\");
+    if let Some(stem) = path.strip_suffix(".materials.json") {
+        return vec![format!("{}.mtl", strip_numeric_suffix(stem, "_TEX"))];
+    }
+    if let Some(stem) = path.strip_suffix(".blend") {
+        let source_stem = strip_numeric_suffix(stem, "_LOD");
+        return [".cgfm", ".cgam", ".skinm", ".cgf", ".cga", ".skin", ".chr"]
+            .into_iter()
+            .map(|extension| format!("{source_stem}{extension}"))
+            .collect();
+    }
+    if let Some(stem) = path.strip_suffix(".png") {
+        let source_stem = strip_numeric_suffix(stem, "_TEX");
+        return [".dds", ".tif", ".png"]
+            .into_iter()
+            .map(|extension| format!("{source_stem}{extension}"))
+            .collect();
+    }
+    if let Some(stem) = path.strip_suffix(".exr") {
+        return [".dds", ".tif", ".exr"]
+            .into_iter()
+            .map(|extension| format!("{stem}{extension}"))
+            .collect();
+    }
+    Vec::new()
+}
+
+fn strip_numeric_suffix<'a>(value: &'a str, marker: &str) -> &'a str {
+    let Some(pos) = value.rfind(marker) else {
+        return value;
+    };
+    let suffix = &value[pos + marker.len()..];
+    if !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit()) {
+        &value[..pos]
+    } else {
+        value
+    }
+}
+
+fn dos_datetime_to_unix_seconds(value: u32) -> u64 {
+    let time = value & 0xffff;
+    let date = value >> 16;
+    let second = (time & 0x1f) * 2;
+    let minute = (time >> 5) & 0x3f;
+    let hour = (time >> 11) & 0x1f;
+    let day = (date & 0x1f).max(1);
+    let month = ((date >> 5) & 0x0f).clamp(1, 12);
+    let year = 1980 + ((date >> 9) & 0x7f) as i32;
+    (days_from_civil(year, month, day) as u64) * 86_400
+        + (hour as u64) * 3_600
+        + (minute as u64) * 60
+        + second as u64
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+    let year = year - if month <= 2 { 1 } else { 0 };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let month = month as i32;
+    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day as i32 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    (era * 146_097 + doe - 719_468) as i64
+}
+
+fn collect_existing_interior_assets(output_root: &Path) -> Result<HashMap<String, (String, Option<String>)>, AppError> {
+    let packages_root = output_root.join("Packages");
+    let mut existing = HashMap::new();
+    if !packages_root.exists() {
+        return Ok(existing);
+    }
+
+    let mut pending = vec![packages_root];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if !file_type.is_file() || path.file_name().and_then(|name| name.to_str()) != Some("scene.json") {
+                continue;
+            }
+            let bytes = std::fs::read(&path)?;
+            collect_scene_interior_assets(&mut existing, &bytes);
+        }
+    }
+
+    Ok(existing)
+}
+
+fn collect_scene_interior_assets(
+    existing: &mut HashMap<String, (String, Option<String>)>,
+    scene_bytes: &[u8],
+) {
+    let Ok(scene) = serde_json::from_slice::<serde_json::Value>(scene_bytes) else {
+        return;
+    };
+    let Some(interiors) = scene.get("interiors").and_then(|value| value.as_array()) else {
+        return;
+    };
+    for placement in interiors
+        .iter()
+        .filter_map(|interior| interior.get("placements").and_then(|value| value.as_array()))
+        .flatten()
+    {
+        let Some(cgf_path) = placement.get("cgf_path").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let material_path = placement.get("material_path").and_then(|value| value.as_str());
+        let Some(mesh_asset) = placement.get("mesh_asset").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let material_sidecar = placement
+            .get("material_sidecar")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned);
+        let key = interior_asset_lookup_key(cgf_path, material_path);
+        existing.entry(key).or_insert_with(|| (mesh_asset.to_string(), material_sidecar));
+    }
+}
+
+fn interior_asset_lookup_key(cgf_path: &str, material_path: Option<&str>) -> String {
+    format!(
+        "{}|{}",
+        cgf_path.to_ascii_lowercase(),
+        material_path.unwrap_or("").to_ascii_lowercase()
+    )
+}
+
+fn read_reusable_decomposed_asset(
+    output_root: &Path,
+    reusable_asset_paths: &HashSet<String>,
+    relative_path: &str,
+) -> Option<Vec<u8>> {
+    let key = relative_path.replace('\\', "/").to_ascii_lowercase();
+    if !reusable_asset_paths.contains(&key) {
+        return None;
+    }
+    std::fs::read(output_root.join(relative_path)).ok()
 }
 
 /// Start exporting selected entities to bundled files.
@@ -1312,10 +1519,18 @@ pub async fn start_export(
     let existing_asset_paths = if kind == starbreaker_3d::ExportKind::Decomposed
         && !request.overwrite_existing_assets
     {
-        Arc::new(collect_existing_decomposed_assets(Path::new(&request.output_dir))?)
+        Arc::new(collect_existing_decomposed_assets(Path::new(&request.output_dir), &p4k)?)
     } else {
         Arc::new(HashSet::new())
     };
+    let existing_interior_assets = if kind == starbreaker_3d::ExportKind::Decomposed
+        && !request.overwrite_existing_assets
+    {
+        Arc::new(collect_existing_interior_assets(Path::new(&request.output_dir))?)
+    } else {
+        Arc::new(HashMap::new())
+    };
+    let export_session_asset_paths = Arc::new(Mutex::new(HashSet::new()));
     let opts = starbreaker_3d::ExportOptions {
         kind,
         format,
@@ -1447,7 +1662,9 @@ pub async fn start_export(
                         overwrite_existing_assets,
                         object_type_dir,
                         Some(progress_slot.progress.as_ref()),
-                        Some(existing_asset_paths.as_ref()),
+                        existing_asset_paths.as_ref(),
+                        existing_interior_assets.as_ref(),
+                        export_session_asset_paths.as_ref(),
                     ) {
                         Ok(()) => {
                             progress_slot.done.store(true, Ordering::Relaxed);
@@ -1504,13 +1721,23 @@ fn export_single(
     overwrite_existing_assets: bool,
     object_type_dir: Option<&str>,
     progress: Option<&Progress>,
-    existing_asset_paths: Option<&HashSet<String>>,
+    existing_asset_paths: &HashSet<String>,
+    existing_interior_assets: &HashMap<String, (String, Option<String>)>,
+    export_session_asset_paths: &Mutex<HashSet<String>>,
 ) -> Result<(), AppError> {
     let record = db
         .record_by_id(record_id)
         .ok_or_else(|| AppError::Internal("record not found".into()))?;
     let idx = starbreaker_datacore::loadout::EntityIndex::new(db);
     let tree = starbreaker_datacore::loadout::resolve_loadout_indexed(&idx, record);
+    let reusable_asset_paths = {
+        let mut paths = existing_asset_paths.clone();
+        paths.extend(export_session_asset_paths.lock().unwrap().iter().cloned());
+        paths
+    };
+    let existing_asset_loader = |relative_path: &str| {
+        read_reusable_decomposed_asset(output_path, &reusable_asset_paths, relative_path)
+    };
     let result = starbreaker_3d::assemble_glb_with_loadout_with_progress(
         db,
         p4k,
@@ -1525,7 +1752,9 @@ fn export_single(
             ..opts.clone()
         },
         progress,
-        existing_asset_paths,
+        Some(&reusable_asset_paths),
+        Some(existing_interior_assets),
+        Some(&existing_asset_loader),
     )?;
     match result.kind {
         starbreaker_3d::ExportKind::Bundled => {
@@ -1555,7 +1784,13 @@ fn export_single(
                 if let Some(parent) = file_path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                let outcome = write_decomposed_file(file, &file_path, overwrite_existing_assets)?;
+                let outcome = write_decomposed_file(
+                    file,
+                    &file_path,
+                    overwrite_existing_assets,
+                    Some(export_session_asset_paths),
+                    p4k,
+                )?;
                 if let Some(progress) = progress {
                     let fraction = (index + 1) as f32 / total_files as f32;
                     let stage = match outcome {
@@ -1721,7 +1956,7 @@ mod tests {
     }
 
     #[test]
-    fn skip_existing_assets_only_applies_to_meshes_and_textures() {
+    fn skip_existing_assets_applies_to_reusable_shared_assets() {
         let mesh = starbreaker_3d::ExportedFile {
             relative_path: "Data/Objects/Test/root.glb".into(),
             bytes: Vec::new(),
@@ -1740,7 +1975,7 @@ mod tests {
 
         assert!(should_skip_existing_decomposed_asset(&mesh, false));
         assert!(should_skip_existing_decomposed_asset(&texture, false));
-        assert!(!should_skip_existing_decomposed_asset(&material, false));
+        assert!(should_skip_existing_decomposed_asset(&material, false));
         assert!(!should_skip_existing_decomposed_asset(&mesh, true));
     }
 }

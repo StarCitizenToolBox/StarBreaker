@@ -243,6 +243,21 @@ pub fn compress_blend_bytes(raw_blend: &[u8]) -> Vec<u8> {
     }
 }
 
+/// Return uncompressed `.blend` bytes.
+///
+/// Generated StarBreaker `.blend` files are stored as standard Blender 5.x zstd
+/// frames, but tests and some tools may pass raw `.blend` bytes directly.
+pub fn decompress_blend_bytes_if_needed(bytes: &[u8]) -> Result<Vec<u8>, std::io::Error> {
+    const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+    if bytes.starts_with(BLEND_MAGIC) {
+        return Ok(bytes.to_vec());
+    }
+    if bytes.starts_with(&ZSTD_MAGIC) {
+        return zstd::stream::decode_all(bytes);
+    }
+    Ok(bytes.to_vec())
+}
+
 // ── Byte-level field writers ──────────────────────────────────────────────────
 
 pub fn write_ptr(buf: &mut [u8], off: usize, ptr: u64) {

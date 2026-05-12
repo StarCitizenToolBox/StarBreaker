@@ -409,7 +409,7 @@ fn interior_placement_assets_flatten_source_hierarchy() {
         blend_key: "data/interior_asset.blend".to_string(),
     };
 
-    let built = build_native_blend_asset(&job, &mesh_data_map, &HashMap::new()).unwrap();
+    let built = build_native_blend_asset(&job, &mesh_data_map, &HashMap::new(), None).unwrap();
 
     assert!(
         built.source_nodes.iter().all(|node| node.name != "source_offset_node"),
@@ -423,6 +423,47 @@ fn interior_placement_assets_flatten_source_hierarchy() {
         [1.0, 0.0, 0.0, 0.0,]
     );
     assert_eq!(built.linked_mesh_refs[0].source_parent_name.as_deref(), None);
+}
+
+#[test]
+fn existing_native_blend_asset_is_reused_for_scene_link_metadata() {
+    let mesh = Mesh {
+        positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        indices: vec![0, 1, 2],
+        uvs: None,
+        secondary_uvs: None,
+        normals: None,
+        tangents: None,
+        colors: None,
+        submeshes: vec![test_submesh(0, "mat", 0)],
+        model_min: [0.0, 0.0, 0.0],
+        model_max: [1.0, 1.0, 0.0],
+        scaling_min: [0.0, 0.0, 0.0],
+        scaling_max: [1.0, 1.0, 0.0],
+    };
+    let existing_bytes = starbreaker_blend::compress_blend_bytes(&mesh_to_blend(
+        "existing_asset",
+        &mesh,
+        &None,
+        None,
+        None,
+    ));
+    let job = BlendAssetJob {
+        blend_path: "Data/Objects/existing_asset_LOD0.blend".to_string(),
+        mesh_name: "existing_asset_LOD0".to_string(),
+        blend_key: "data/objects/existing_asset_lod0.blend".to_string(),
+    };
+    let loader = |relative_path: &str| {
+        (relative_path == "Data/Objects/existing_asset_LOD0.blend").then(|| existing_bytes.clone())
+    };
+
+    let built = build_native_blend_asset(&job, &HashMap::new(), &HashMap::new(), Some(&loader)).unwrap();
+
+    assert!(built.file.is_none(), "reused assets should not be queued for rewriting");
+    assert_eq!(built.relative_path, "Data/Objects/existing_asset_LOD0.blend");
+    assert_eq!(built.linked_mesh_refs.len(), 1);
+    assert_eq!(built.linked_mesh_refs[0].object_name, "existing_asset");
+    assert_eq!(built.linked_mesh_refs[0].mesh_name, "existing_asset");
 }
 
 #[test]

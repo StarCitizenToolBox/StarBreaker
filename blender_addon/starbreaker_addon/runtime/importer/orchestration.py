@@ -196,7 +196,7 @@ class OrchestrationMixin:
             return
         if material.get(PROP_MATERIAL_IDENTITY):
             return
-        bpy.data.materials.remove(material)
+        self._pending_orphan_materials.add(material)
 
     def _submaterials_by_index(self, sidecar_path: str, sidecar: MaterialSidecar) -> dict[int, SubmaterialRecord]:
         cache_key = sidecar_path or _canonical_material_sidecar_path(sidecar_path, sidecar)

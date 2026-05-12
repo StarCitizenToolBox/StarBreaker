@@ -200,6 +200,10 @@ impl ExportedFileKind {
     pub fn is_mesh_or_texture_asset(self) -> bool {
         matches!(self, Self::MeshAsset | Self::TextureAsset)
     }
+
+    pub fn is_reusable_asset(self) -> bool {
+        matches!(self, Self::MeshAsset | Self::MaterialSidecar | Self::TextureAsset)
+    }
 }
 
 #[derive(Debug, Clone)]
