@@ -12,6 +12,10 @@ Blender API pitfall — **document the fix here before committing**. Keep
 entries short and factual. This file must stay concise to limit token use;
 prefer a one-liner or a compact code block over prose.
 
+- Load-post material auto-refresh must treat local placeholder materials with no
+  node tree as "needs refresh"; saved refreshed materials are local too, so
+  checking only for linked materials is insufficient.
+
 ## Target Blender
 
 - **Latest LTS** and **latest release** — currently Blender 5.1.x.

@@ -691,11 +691,17 @@ class PackageOpsTests(unittest.TestCase):
             ]
             self.assertTrue(self.package_ops.package_root_needs_material_refresh(package_root))
 
-            mesh.material_slots = [FakeSlot(FakeMaterial("local"))]
+            mesh.material_slots = [FakeSlot(FakeMaterial("local_placeholder"))]
+            self.assertTrue(self.package_ops.package_root_needs_material_refresh(package_root))
+
+            local_built = FakeMaterial("local_built")
+            local_built.node_tree = FakeNodeTree(1.0)
+            mesh.material_slots = [FakeSlot(local_built)]
             self.assertFalse(self.package_ops.package_root_needs_material_refresh(package_root))
 
-            mesh.material_slots = [FakeSlot(FakeMaterial("local", starbreaker_material_identity="id"))]
-            mesh.data = types.SimpleNamespace(polygons=object())
+            local_managed = FakeMaterial("local_managed", starbreaker_material_identity="id")
+            local_managed.node_tree = FakeNodeTree(1.0)
+            mesh.material_slots = [FakeSlot(local_managed)]
             self.assertFalse(self.package_ops.package_root_needs_material_refresh(package_root))
         finally:
             self.package_ops._load_package_from_root = original_load

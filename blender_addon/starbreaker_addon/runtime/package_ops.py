@@ -536,8 +536,20 @@ def package_root_needs_material_refresh(package_root: bpy.types.Object) -> bool:
             material = getattr(slot, "material", None)
             if material is None:
                 continue
-            if getattr(material, "library", None) is not None:
+            if _material_slot_needs_refresh(material):
                 return True
+    return False
+
+
+def _material_slot_needs_refresh(material: Any) -> bool:
+    if getattr(material, "library", None) is not None:
+        return True
+    node_tree = getattr(material, "node_tree", None)
+    if node_tree is None:
+        return True
+    nodes = getattr(node_tree, "nodes", None)
+    if nodes is not None and len(nodes) == 0:
+        return True
     return False
 
 
