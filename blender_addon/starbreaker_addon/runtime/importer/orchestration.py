@@ -635,7 +635,15 @@ class OrchestrationMixin:
         anchor_name = interior.name if interior.name.startswith("interior_") else f"interior_{interior.name}"
         anchor = bpy.data.objects.new(anchor_name, None)
         anchor.empty_display_type = "CUBE"
-        anchor.parent = package_root
+        parent = package_root
+        if interior.parent_entity_name:
+            parent_nodes = self.node_index_by_entity_name.get(interior.parent_entity_name, {})
+            parent = (
+                parent_nodes.get(interior.parent_node_name or "")
+                or parent_nodes.get(interior.parent_entity_name)
+                or package_root
+            )
+        anchor.parent = parent
         anchor.matrix_local = _scene_matrix_to_blender(interior.container_transform)
         interior_collection = self._ensure_interior_collection()
         interior_collection.objects.link(anchor)

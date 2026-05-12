@@ -282,6 +282,8 @@ struct InteriorPlacementRecord {
 #[derive(Debug, Clone)]
 struct InteriorContainerRecord {
     name: String,
+    parent_entity_name: Option<String>,
+    parent_node_name: Option<String>,
     palette_id: Option<String>,
     container_transform: [[f32; 4]; 4],
     placements: Vec<InteriorPlacementRecord>,
@@ -1332,6 +1334,8 @@ pub(crate) fn write_decomposed_export(
 
         interior_records.push(InteriorContainerRecord {
             name: container.name.clone(),
+            parent_entity_name: container.parent_entity_name.clone(),
+            parent_node_name: container.parent_node_name.clone(),
             palette_id,
             container_transform: container.container_transform,
             placements,
@@ -1729,6 +1733,8 @@ fn scene_instance_json(instance: &SceneInstanceRecord) -> serde_json::Value {
 fn interior_container_json(container: &InteriorContainerRecord) -> serde_json::Value {
     serde_json::json!({
         "name": container.name,
+        "parent_entity_name": container.parent_entity_name,
+        "parent_node_name": container.parent_node_name,
         "palette_id": container.palette_id,
         "container_transform": container.container_transform,
         "placements": container.placements.iter().map(|placement| {
@@ -4034,6 +4040,8 @@ mod tests {
         };
         let interior = InteriorContainerRecord {
             name: "interior_main".into(),
+            parent_entity_name: Some("child_entity".into()),
+            parent_node_name: Some("child_root".into()),
             palette_id: Some("palette/interior".into()),
             container_transform: [
                 [1.0, 0.0, 0.0, 0.0],
@@ -4079,6 +4087,8 @@ mod tests {
         assert_eq!(value["children"][0]["source_transform_basis"], serde_json::json!("gltf_y_up"));
         assert!(value["children"][0]["local_transform_sc"].is_array());
         assert_eq!(value["children"][0]["resolved_no_rotation"], serde_json::json!(false));
+        assert_eq!(value["interiors"][0]["parent_entity_name"], serde_json::json!("child_entity"));
+        assert_eq!(value["interiors"][0]["parent_node_name"], serde_json::json!("child_root"));
         assert_eq!(value["interiors"][0]["placements"][0]["mesh_asset"], serde_json::json!("Data/Objects/Ships/Test/interior_panel.glb"));
         assert_eq!(value["package_rule"]["package_dir"], serde_json::json!("Packages/ARGO MOLE"));
         assert_eq!(value["package_rule"]["normalized_p4k_relative_paths"], serde_json::json!(true));

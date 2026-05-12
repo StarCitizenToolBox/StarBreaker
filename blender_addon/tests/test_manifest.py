@@ -12,7 +12,7 @@ REPO_ROOT = STARBREAKER_ROOT.parent
 
 sys.path.insert(0, str(ADDON_ROOT))
 
-from starbreaker_addon.manifest import LightRecord, LightState, MaterialSidecar, PackageBundle, SceneInstanceRecord, SceneManifest, TextureReference, infer_export_root
+from starbreaker_addon.manifest import InteriorContainerRecord, LightRecord, LightState, MaterialSidecar, PackageBundle, SceneInstanceRecord, SceneManifest, TextureReference, infer_export_root
 
 
 _STARBREAKER_BIN = STARBREAKER_ROOT / "target/debug/starbreaker"
@@ -199,6 +199,26 @@ class ManifestTests(unittest.TestCase):
         self.assertIsNotNone(instance.local_transform_sc)
         self.assertEqual(instance.local_transform_sc[3], (1.0, 2.0, 3.0, 1.0))
         self.assertTrue(instance.resolved_no_rotation)
+
+    def test_interior_container_parses_child_parent_fields(self) -> None:
+        interior = InteriorContainerRecord.from_value(
+            {
+                "name": "command_module_interior",
+                "parent_entity_name": "DRAK_Command_Module",
+                "parent_node_name": "drak_command_module",
+                "container_transform": [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ],
+                "placements": [],
+                "lights": [],
+            }
+        )
+
+        self.assertEqual(interior.parent_entity_name, "DRAK_Command_Module")
+        self.assertEqual(interior.parent_node_name, "drak_command_module")
 
     def test_scene_manifest_parses_engine_glow_controls(self) -> None:
         manifest = SceneManifest.from_value(

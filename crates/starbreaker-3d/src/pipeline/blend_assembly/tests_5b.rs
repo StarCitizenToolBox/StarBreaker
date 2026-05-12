@@ -7,6 +7,8 @@ fn test_create_scene_blend_with_single_light() {
     let light = ExtractedLight {
         name: "TestLight".to_string(),
         parent_empty_name: None,
+        parent_empty_parent_entity_name: None,
+        parent_empty_parent_node_name: None,
         parent_empty_loc: [0.0, 0.0, 0.0],
         parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
         parent_empty_scale: [1.0, 1.0, 1.0],
@@ -38,6 +40,8 @@ fn test_create_scene_blend_with_multiple_lights() {
         ExtractedLight {
             name: "Ambient".to_string(),
             parent_empty_name: None,
+        parent_empty_parent_entity_name: None,
+        parent_empty_parent_node_name: None,
             parent_empty_loc: [0.0, 0.0, 0.0],
             parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
             parent_empty_scale: [1.0, 1.0, 1.0],
@@ -62,6 +66,8 @@ fn test_create_scene_blend_with_multiple_lights() {
         ExtractedLight {
             name: "Sun".to_string(),
             parent_empty_name: None,
+        parent_empty_parent_entity_name: None,
+        parent_empty_parent_node_name: None,
             parent_empty_loc: [0.0, 0.0, 0.0],
             parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
             parent_empty_scale: [1.0, 1.0, 1.0],
@@ -93,6 +99,8 @@ fn test_create_scene_blend_lights_in_file() {
     let light = ExtractedLight {
         name: "FileTest".to_string(),
         parent_empty_name: None,
+        parent_empty_parent_entity_name: None,
+        parent_empty_parent_node_name: None,
         parent_empty_loc: [0.0, 0.0, 0.0],
         parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
         parent_empty_scale: [1.0, 1.0, 1.0],

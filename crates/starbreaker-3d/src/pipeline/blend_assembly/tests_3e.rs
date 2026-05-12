@@ -51,6 +51,8 @@ fn test_organize_lights_creates_type_collections() {
         ExtractedLight {
             name: "Ambient1".to_string(),
             parent_empty_name: None,
+        parent_empty_parent_entity_name: None,
+        parent_empty_parent_node_name: None,
             parent_empty_loc: [0.0, 0.0, 0.0],
             parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
             parent_empty_scale: [1.0, 1.0, 1.0],
@@ -75,6 +77,8 @@ fn test_organize_lights_creates_type_collections() {
         ExtractedLight {
             name: "Projector1".to_string(),
             parent_empty_name: None,
+        parent_empty_parent_entity_name: None,
+        parent_empty_parent_node_name: None,
             parent_empty_loc: [0.0, 0.0, 0.0],
             parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
             parent_empty_scale: [1.0, 1.0, 1.0],

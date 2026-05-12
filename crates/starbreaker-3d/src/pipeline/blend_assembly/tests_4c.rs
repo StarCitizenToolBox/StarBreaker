@@ -18,6 +18,8 @@ fn test_validate_lights_extraction_single_ambient() {
         ExtractedLight {
             name: "Ambient_001".to_string(),
             parent_empty_name: None,
+        parent_empty_parent_entity_name: None,
+        parent_empty_parent_node_name: None,
             parent_empty_loc: [0.0, 0.0, 0.0],
             parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
             parent_empty_scale: [1.0, 1.0, 1.0],
@@ -53,6 +55,8 @@ fn test_validate_lights_extraction_categorization() {
         ExtractedLight {
             name: "Ambient".to_string(),
             parent_empty_name: None,
+        parent_empty_parent_entity_name: None,
+        parent_empty_parent_node_name: None,
             parent_empty_loc: [0.0, 0.0, 0.0],
             parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
             parent_empty_scale: [1.0, 1.0, 1.0],
@@ -77,6 +81,8 @@ fn test_validate_lights_extraction_categorization() {
         ExtractedLight {
             name: "Projector".to_string(),
             parent_empty_name: None,
+        parent_empty_parent_entity_name: None,
+        parent_empty_parent_node_name: None,
             parent_empty_loc: [0.0, 0.0, 0.0],
             parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
             parent_empty_scale: [1.0, 1.0, 1.0],
@@ -163,6 +169,8 @@ fn test_validate_complete_phase_3_4_export_full() {
         ExtractedLight {
             name: "Light1".to_string(),
             parent_empty_name: None,
+        parent_empty_parent_entity_name: None,
+        parent_empty_parent_node_name: None,
             parent_empty_loc: [0.0, 0.0, 0.0],
             parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
             parent_empty_scale: [1.0, 1.0, 1.0],
@@ -227,6 +235,8 @@ fn test_extracted_light_has_use_temperature_field() {
     let light = ExtractedLight {
         name: "Test".to_string(),
         parent_empty_name: None,
+        parent_empty_parent_entity_name: None,
+        parent_empty_parent_node_name: None,
         parent_empty_loc: [0.0, 0.0, 0.0],
         parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
         parent_empty_scale: [1.0, 1.0, 1.0],
@@ -259,6 +269,8 @@ fn test_extracted_light_temperature_false() {
     let light = ExtractedLight {
         name: "Test".to_string(),
         parent_empty_name: None,
+        parent_empty_parent_entity_name: None,
+        parent_empty_parent_node_name: None,
         parent_empty_loc: [0.0, 0.0, 0.0],
         parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
         parent_empty_scale: [1.0, 1.0, 1.0],
@@ -301,6 +313,8 @@ fn test_temperature_values_range() {
         let light = ExtractedLight {
             name: format!("Light_{}", temp as i32),
             parent_empty_name: None,
+        parent_empty_parent_entity_name: None,
+        parent_empty_parent_node_name: None,
             parent_empty_loc: [0.0, 0.0, 0.0],
             parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
             parent_empty_scale: [1.0, 1.0, 1.0],

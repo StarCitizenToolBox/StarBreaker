@@ -230,11 +230,15 @@ pub fn assemble_glb_with_loadout_with_progress(
 
     // Interior discovery (no mesh loading — JIT during GLB packing).
     let phase_start = Instant::now();
-    let loaded_interiors = if opts.include_interior && !opts.format.is_stl() {
+    let mut loaded_interiors = if opts.include_interior && !opts.format.is_stl() {
         load_interiors(db, p4k, record, opts)
     } else {
         LoadedInteriors::default()
     };
+    if opts.include_interior && !opts.format.is_stl() {
+        let child_interiors = load_child_interiors(db, p4k, &resolved.children, opts);
+        merge_interiors(&mut loaded_interiors, child_interiors);
+    }
     log::info!("[timing] load_interiors: {:.2}s", phase_start.elapsed().as_secs_f32());
 
     log::info!(

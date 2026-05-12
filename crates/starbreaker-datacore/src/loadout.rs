@@ -657,7 +657,9 @@ pub fn resolve_loadout_indexed(idx: &EntityIndex, record: &Record) -> LoadoutTre
     }
 }
 
-const MAX_LOADOUT_DEPTH: usize = 4;
+/// Nested item-port loadouts can stack through parent ship -> docking module ->
+/// vehicle attach -> child vehicle -> turret -> gimbal -> weapon.
+const MAX_LOADOUT_DEPTH: usize = 8;
 
 /// Extract a geometry file path from an inline EntityClassDefinition Value.
 /// Walks: Components[] → SGeometryResourceParams → Geometry.Geometry.Geometry.path

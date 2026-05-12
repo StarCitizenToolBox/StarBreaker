@@ -23,6 +23,7 @@ const AMBIENT_PROXY_DIRECT_FACTOR: f32 = 0.25;
 /// Container reference from DataCore VehicleComponentParams.objectContainers[].
 #[derive(Debug, Clone)]
 pub struct ObjectContainerRef {
+    pub bone_name: Option<String>,
     pub file_name: String,
     pub offset_position: [f32; 3],
     pub offset_rotation: [f32; 3], // Ang3 (degrees)
@@ -62,9 +63,14 @@ fn parse_container_ref(val: &Value) -> Option<ObjectContainerRef> {
         Some(Value::String(s)) => (*s).to_owned(),
         _ => return None,
     };
+    let bone_name = match fields.get("boneName") {
+        Some(Value::String(s)) if !s.is_empty() => Some((*s).to_owned()),
+        _ => None,
+    };
     let (offset_position, offset_rotation) = extract_offset(fields.get("Offset"));
 
     Some(ObjectContainerRef {
+        bone_name,
         file_name,
         offset_position,
         offset_rotation,
@@ -198,6 +204,8 @@ pub fn load_interior_from_socpak(
 
     Ok(InteriorPayload {
         name,
+        parent_entity_name: None,
+        parent_node_name: None,
         meshes,
         lights,
         container_transform,
@@ -260,6 +268,8 @@ fn parse_soc(
 
     Ok((InteriorPayload {
         name: name.to_string(),
+        parent_entity_name: None,
+        parent_node_name: None,
         meshes,
         lights,
         container_transform,

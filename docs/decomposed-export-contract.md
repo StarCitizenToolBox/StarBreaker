@@ -18,7 +18,9 @@ Within that export root:
 - the package directory path under `Packages/<package name>`
 - root entity metadata and asset references
 - child attachment relationships via `parent_entity_name`, `parent_node_name`, `offset_position`, `offset_rotation`, `no_rotation`, and `port_flags`
-- interior container transforms, placement records, and exported light data
+- interior container transforms, optional child-attachment parents
+  (`parent_entity_name`, `parent_node_name`), placement records, and exported
+  light data
 - material sidecar and palette references for every scene instance
 - optional additive `controls.engine_glow` metadata for engine-emission tuning in importers:
   - absolute emission-strength range metadata (`min_strength`, `max_strength`, `default_strength`)

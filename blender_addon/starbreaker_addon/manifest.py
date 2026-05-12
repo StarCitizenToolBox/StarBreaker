@@ -539,6 +539,8 @@ class InteriorPlacementRecord:
 @dataclass(frozen=True)
 class InteriorContainerRecord:
     name: str
+    parent_entity_name: str | None
+    parent_node_name: str | None
     palette_id: str | None
     container_transform: Matrix4
     placements: list[InteriorPlacementRecord]
@@ -550,6 +552,8 @@ class InteriorContainerRecord:
         data = _as_dict(value)
         return cls(
             name=str(data.get("name", "")),
+            parent_entity_name=_as_str(data.get("parent_entity_name")),
+            parent_node_name=_as_str(data.get("parent_node_name")),
             palette_id=_as_str(data.get("palette_id")),
             container_transform=_matrix4(data.get("container_transform")),
             placements=[InteriorPlacementRecord.from_value(item) for item in data.get("placements", [])],

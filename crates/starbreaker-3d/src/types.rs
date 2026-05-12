@@ -617,6 +617,12 @@ pub struct InteriorMesh {
 #[derive(Debug)]
 pub struct InteriorPayload {
     pub name: String,
+    /// Optional scene instance that owns this container when it comes from a
+    /// child entity rather than the root export record.
+    pub parent_entity_name: Option<String>,
+    /// Optional source node/bone inside the parent scene instance that the
+    /// container is authored relative to.
+    pub parent_node_name: Option<String>,
     /// Static geometry placements from IncludedObjects + CryXMLB entities.
     pub meshes: Vec<InteriorMesh>,
     /// Lights from CryXMLB entities.

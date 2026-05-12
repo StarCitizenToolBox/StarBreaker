@@ -43,6 +43,10 @@ pub(crate) struct InteriorCgfEntry {
 /// One interior container's placement data.
 pub(crate) struct InteriorContainerData {
     pub name: String,
+    /// Optional child scene instance that owns this interior container.
+    pub parent_entity_name: Option<String>,
+    /// Optional source node/bone within the parent scene instance.
+    pub parent_node_name: Option<String>,
     /// 4×4 column-major transform positioning this container relative to the hull.
     pub container_transform: [[f32; 4]; 4],
     /// Each entry: (index into unique_cgfs, per-object local transform,
@@ -84,6 +88,91 @@ pub(crate) fn load_interiors(
     }
 
     build_interiors_from_payloads(db, p4k, &payloads, opts.include_lights)
+}
+
+/// Discovery pass for object containers authored on child loadout entities.
+pub(crate) fn load_child_interiors(
+    db: &Database,
+    p4k: &MappedP4k,
+    children: &[crate::types::ResolvedNode],
+    opts: &ExportOptions,
+) -> LoadedInteriors {
+    use crate::socpak;
+
+    let mut payloads = Vec::new();
+    fn collect(
+        db: &Database,
+        p4k: &MappedP4k,
+        child: &crate::types::ResolvedNode,
+        payloads: &mut Vec<crate::types::InteriorPayload>,
+    ) {
+        let containers = socpak::query_object_containers(db, &child.record);
+        if !containers.is_empty() {
+            log::info!(
+                "Discovering {} interior containers for child {}...",
+                containers.len(),
+                child.entity_name
+            );
+            for container in &containers {
+                let container_transform =
+                    socpak::build_container_transform(container.offset_position, container.offset_rotation);
+                match socpak::load_interior_from_socpak(p4k, &container.file_name, container_transform) {
+                    Ok(mut payload) => {
+                        payload.parent_entity_name = Some(child.entity_name.clone());
+                        payload.parent_node_name = container.bone_name.clone();
+                        payloads.push(payload);
+                    }
+                    Err(e) => log::warn!("failed to load {}: {e}", container.file_name),
+                }
+            }
+        }
+        for grandchild in &child.children {
+            collect(db, p4k, grandchild, payloads);
+        }
+    }
+
+    for child in children {
+        collect(db, p4k, child, &mut payloads);
+    }
+
+    build_interiors_from_payloads(db, p4k, &payloads, opts.include_lights)
+}
+
+pub(crate) fn merge_interiors(target: &mut LoadedInteriors, source: LoadedInteriors) {
+    use std::collections::HashMap;
+
+    let mut index_by_key: HashMap<(String, Option<String>), usize> = target
+        .unique_cgfs
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            (
+                (entry.cgf_path.to_ascii_lowercase(), entry.material_path.clone()),
+                index,
+            )
+        })
+        .collect();
+
+    for mut container in source.containers {
+        for placement in &mut container.placements {
+            let entry = &source.unique_cgfs[placement.0];
+            let key = (entry.cgf_path.to_ascii_lowercase(), entry.material_path.clone());
+            let merged_index = if let Some(index) = index_by_key.get(&key).copied() {
+                index
+            } else {
+                let index = target.unique_cgfs.len();
+                target.unique_cgfs.push(InteriorCgfEntry {
+                    cgf_path: entry.cgf_path.clone(),
+                    material_path: entry.material_path.clone(),
+                    name: entry.name.clone(),
+                });
+                index_by_key.insert(key, index);
+                index
+            };
+            placement.0 = merged_index;
+        }
+        target.containers.push(container);
+    }
 }
 
 /// Shared interior building: dedup CGFs, resolve GUIDs, collect placements and lights.
@@ -225,6 +314,8 @@ pub(crate) fn build_interiors_from_payloads(
 
         container_data.push(InteriorContainerData {
             name: payload.name.clone(),
+            parent_entity_name: payload.parent_entity_name.clone(),
+            parent_node_name: payload.parent_node_name.clone(),
             container_transform: payload.container_transform,
             placements,
             lights: if include_lights { payload.lights.clone() } else { Vec::new() },

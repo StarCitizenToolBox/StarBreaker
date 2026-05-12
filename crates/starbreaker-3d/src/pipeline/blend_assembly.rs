@@ -294,11 +294,21 @@ fn lookup_named_ptr(map: &HashMap<String, u64>, name: &str) -> Option<u64> {
         })
 }
 
+fn interior_parent_empty_name(container_name: &str, parent_entity_name: Option<&str>) -> String {
+    if let Some(parent) = parent_entity_name.filter(|name| !name.is_empty()) {
+        format!("interior_{parent}_{container_name}")
+    } else {
+        format!("interior_{container_name}")
+    }
+}
+
 #[derive(Debug, Clone)]
 struct SceneManifestInstance {
     entity_name: String,
     parent_entity_name: Option<String>,
     parent_empty_name: Option<String>,
+    parent_empty_parent_entity_name: Option<String>,
+    parent_empty_parent_node_name: Option<String>,
     parent_empty_loc: [f32; 3],
     parent_empty_quat: [f32; 4],
     parent_empty_scale: [f32; 3],
@@ -492,6 +502,8 @@ fn scene_manifest_instances(manifest_files: &[ExportedFile]) -> Vec<SceneManifes
                 .filter(|name| !name.is_empty())
                 .map(ToOwned::to_owned),
             parent_empty_name: None,
+            parent_empty_parent_entity_name: None,
+            parent_empty_parent_node_name: None,
             parent_empty_loc: [0.0, 0.0, 0.0],
             parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
             parent_empty_scale: [1.0, 1.0, 1.0],
@@ -541,7 +553,20 @@ fn scene_manifest_instances(manifest_files: &[ExportedFile]) -> Vec<SceneManifes
                 .and_then(|v| v.as_str())
                 .filter(|palette| !palette.is_empty())
                 .map(ToOwned::to_owned);
-            let container_name = format!("interior_{interior_name}");
+            let parent_empty_parent_entity_name = interior
+                .get("parent_entity_name")
+                .and_then(|v| v.as_str())
+                .filter(|name| !name.is_empty())
+                .map(ToOwned::to_owned);
+            let container_name = interior_parent_empty_name(
+                &interior_name,
+                parent_empty_parent_entity_name.as_deref(),
+            );
+            let parent_empty_parent_node_name = interior
+                .get("parent_node_name")
+                .and_then(|v| v.as_str())
+                .filter(|name| !name.is_empty())
+                .map(ToOwned::to_owned);
             if let Some(placements) = interior.get("placements").and_then(|v| v.as_array()) {
                 for placement in placements {
                     let Some(mesh_asset) = placement.get("mesh_asset").and_then(|v| v.as_str()) else {
@@ -566,6 +591,8 @@ fn scene_manifest_instances(manifest_files: &[ExportedFile]) -> Vec<SceneManifes
                             .to_string(),
                         parent_entity_name: None,
                         parent_empty_name: Some(container_name.clone()),
+                        parent_empty_parent_entity_name: parent_empty_parent_entity_name.clone(),
+                        parent_empty_parent_node_name: parent_empty_parent_node_name.clone(),
                         parent_empty_loc: container_loc,
                         parent_empty_quat: container_quat,
                         parent_empty_scale: container_scale,
@@ -1082,6 +1109,8 @@ pub fn write_decomposed_export_blend(
                         entity_name: linked_mesh_ref.object_name.clone(),
                         parent_entity_name: None,
                         parent_empty_name: None,
+                        parent_empty_parent_entity_name: None,
+                        parent_empty_parent_node_name: None,
                         parent_empty_loc: [0.0, 0.0, 0.0],
                         parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
                         parent_empty_scale: [1.0, 1.0, 1.0],
@@ -1134,6 +1163,8 @@ pub fn write_decomposed_export_blend(
                         entity_name: manifest_instance.entity_name.clone(),
                         parent_entity_name: manifest_instance.parent_entity_name.clone(),
                         parent_empty_name: manifest_instance.parent_empty_name.clone(),
+                        parent_empty_parent_entity_name: manifest_instance.parent_empty_parent_entity_name.clone(),
+                        parent_empty_parent_node_name: manifest_instance.parent_empty_parent_node_name.clone(),
                         parent_empty_loc: manifest_instance.parent_empty_loc,
                         parent_empty_quat: manifest_instance.parent_empty_quat,
                         parent_empty_scale: manifest_instance.parent_empty_scale,
@@ -3212,6 +3243,8 @@ pub struct LinkedMeshInstance {
     pub entity_name: String,
     pub parent_entity_name: Option<String>,
     pub parent_empty_name: Option<String>,
+    pub parent_empty_parent_entity_name: Option<String>,
+    pub parent_empty_parent_node_name: Option<String>,
     pub parent_empty_loc: [f32; 3],
     pub parent_empty_quat: [f32; 4],
     pub parent_empty_scale: [f32; 3],
@@ -3302,6 +3335,8 @@ pub fn create_scene_blend(
                 entity_name: name.clone(),
                 parent_entity_name: None,
                 parent_empty_name: None,
+                parent_empty_parent_entity_name: None,
+                parent_empty_parent_node_name: None,
                 parent_empty_loc: [0.0, 0.0, 0.0],
                 parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
                 parent_empty_scale: [1.0, 1.0, 1.0],
@@ -3475,6 +3510,8 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
                     empty_ptr,
                     empty_coll_obj_ptr,
                     parent_empty_name.clone(),
+                    instance.parent_empty_parent_entity_name.clone(),
+                    instance.parent_empty_parent_node_name.clone(),
                     instance.parent_empty_loc,
                     instance.parent_empty_quat,
                     instance.parent_empty_scale,
@@ -3688,6 +3725,8 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
                     empty_ptr,
                     empty_coll_obj_ptr,
                     parent_empty_name.clone(),
+                    light.parent_empty_parent_entity_name.clone(),
+                    light.parent_empty_parent_node_name.clone(),
                     light.parent_empty_loc,
                     light.parent_empty_quat,
                     light.parent_empty_scale,
@@ -3737,7 +3776,7 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
     package_coll_obj_ptrs.push((root_collection_object_ptr, package_root_ptr));
     package_coll_obj_ptrs.push((entity_root_collection_object_ptr, entity_root_ptr));
     package_coll_obj_ptrs.extend(light_coll_obj_ptrs.iter().copied());
-    for (empty_ptr, coll_obj_ptr, _, _, _, _, is_interior) in &parent_empty_entries {
+    for (empty_ptr, coll_obj_ptr, _, _, _, _, _, _, is_interior) in &parent_empty_entries {
         if *is_interior {
             interior_coll_obj_ptrs.push((*coll_obj_ptr, *empty_ptr));
         } else {
@@ -3835,10 +3874,52 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
 
     let parent_empty_data = parent_empty_entries
         .iter()
-        .map(|(empty_ptr, _, name, loc, quat, scale, _)| {
+        .map(|(empty_ptr, _, name, parent_entity_name, parent_node_name, loc, quat, scale, _)| {
+            let parent_ptr = parent_node_name
+                .as_ref()
+                .and_then(|node_name| {
+                    parent_entity_name.as_ref().and_then(|entity_name| {
+                        mesh_instances_input
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .find_map(|(parent_idx, candidate)| {
+                                if candidate.entity_name != *entity_name {
+                                    return None;
+                                }
+                                local_source_node_ptrs_by_instance
+                                    .get(parent_idx)
+                                    .and_then(|nodes| lookup_named_ptr(nodes, node_name))
+                                    .or_else(|| {
+                                        source_node_ptrs_by_scene_instance
+                                            .get(&candidate.scene_instance_id)
+                                            .and_then(|nodes| lookup_named_ptr(nodes, node_name))
+                                    })
+                                    .or_else(|| {
+                                        candidate
+                                            .name
+                                            .eq_ignore_ascii_case(node_name)
+                                            .then_some(preallocated_local_object_ptrs[parent_idx])
+                                    })
+                            })
+                    })
+                })
+                .or_else(|| {
+                    parent_entity_name.as_ref().and_then(|entity_name| {
+                        mesh_instances_input
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .find_map(|(parent_idx, candidate)| {
+                                (candidate.entity_name == *entity_name)
+                                    .then_some(preallocated_local_object_ptrs[parent_idx])
+                            })
+                    })
+                })
+                .unwrap_or(entity_root_ptr);
             (
                 *empty_ptr,
-                build_empty_object(name, *loc, *quat, *scale, entity_root_ptr),
+                build_empty_object(name, *loc, *quat, *scale, parent_ptr),
             )
         })
         .collect::<Vec<_>>();
@@ -4282,6 +4363,8 @@ pub struct ExtractedLight {
     /// CryEngine light name
     pub name: String,
     pub parent_empty_name: Option<String>,
+    pub parent_empty_parent_entity_name: Option<String>,
+    pub parent_empty_parent_node_name: Option<String>,
     pub parent_empty_loc: [f32; 3],
     pub parent_empty_quat: [f32; 4],
     pub parent_empty_scale: [f32; 3],
@@ -4493,6 +4576,8 @@ pub fn extract_lights_from_interiors(
     let mut lights = Vec::new();
     
     for container in &interiors.containers {
+        let parent_empty_parent_entity_name = container.parent_entity_name.clone();
+        let parent_empty_parent_node_name = container.parent_node_name.clone();
         for light_info in &container.lights {
             let (parent_empty_loc, parent_empty_quat, parent_empty_scale) =
                 sc_matrix_to_scene_transform(mat4_from_sc_rows(container.container_transform));
@@ -4566,7 +4651,12 @@ pub fn extract_lights_from_interiors(
             let cutoff_distance = if lamp_type == 1 { 0.0 } else { light_info.radius };
             lights.push(ExtractedLight {
                 name: light_info.name.clone(),
-                parent_empty_name: Some(format!("interior_{}", container.name)),
+                parent_empty_name: Some(interior_parent_empty_name(
+                    &container.name,
+                    parent_empty_parent_entity_name.as_deref(),
+                )),
+                parent_empty_parent_entity_name: parent_empty_parent_entity_name.clone(),
+                parent_empty_parent_node_name: parent_empty_parent_node_name.clone(),
                 parent_empty_loc,
                 parent_empty_quat,
                 parent_empty_scale,
