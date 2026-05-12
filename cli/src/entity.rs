@@ -195,17 +195,17 @@ fn source_modified_unix_seconds(p4k: &MappedP4k, relative_path: &str) -> Option<
 fn source_asset_candidates(relative_path: &str) -> Vec<String> {
     let path = relative_path.replace('/', "\\");
     if let Some(stem) = path.strip_suffix(".materials.json") {
-        return vec![format!("{}.mtl", strip_numeric_suffix(stem, "_TEX"))];
+        return vec![format!("{}.mtl", strip_numeric_suffix(stem, "_tex"))];
     }
     if let Some(stem) = path.strip_suffix(".blend") {
-        let source_stem = strip_numeric_suffix(stem, "_LOD");
+        let source_stem = strip_numeric_suffix(stem, "_lod");
         return [".cgfm", ".cgam", ".skinm", ".cgf", ".cga", ".skin", ".chr"]
             .into_iter()
             .map(|extension| format!("{source_stem}{extension}"))
             .collect();
     }
     if let Some(stem) = path.strip_suffix(".png") {
-        let source_stem = strip_numeric_suffix(stem, "_TEX");
+        let source_stem = strip_numeric_suffix(stem, "_tex");
         return [".dds", ".tif", ".png"]
             .into_iter()
             .map(|extension| format!("{source_stem}{extension}"))
@@ -221,7 +221,8 @@ fn source_asset_candidates(relative_path: &str) -> Vec<String> {
 }
 
 fn strip_numeric_suffix<'a>(value: &'a str, marker: &str) -> &'a str {
-    let Some(pos) = value.rfind(marker) else {
+    let lower = value.to_ascii_lowercase();
+    let Some(pos) = lower.rfind(marker) else {
         return value;
     };
     let suffix = &value[pos + marker.len()..];
@@ -255,6 +256,27 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
     let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day as i32 - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     (era * 146_097 + doe - 719_468) as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::source_asset_candidates;
+
+    #[test]
+    fn source_asset_candidates_strip_lod_and_tex_suffixes_case_insensitively() {
+        assert_eq!(
+            source_asset_candidates("data/objects/foo_LOD0.blend")[0],
+            "data\\objects\\foo.cgfm"
+        );
+        assert_eq!(
+            source_asset_candidates("data/textures/foo_tex0.png")[0],
+            "data\\textures\\foo.dds"
+        );
+        assert_eq!(
+            source_asset_candidates("data/materials/foo_TEX0.materials.json")[0],
+            "data\\materials\\foo.mtl"
+        );
+    }
 }
 
 fn collect_existing_interior_assets(output_root: &Path) -> Result<HashMap<String, (String, Option<String>)>> {
@@ -580,7 +602,6 @@ fn export_blend(
             "{export_name}_LOD{}_TEX{}",
             export_opts.lod_level, export_opts.texture_mip
         );
-        prepare_decomposed_output_root(&output_dir, &package_name)?;
 
         let existing_asset_paths = if opts.skip_existing_assets {
             Some(collect_existing_decomposed_assets(&output_dir, &p4k)?)
@@ -592,6 +613,7 @@ fn export_blend(
         } else {
             None
         };
+        prepare_decomposed_output_root(&output_dir, &package_name)?;
 
         let existing_asset_loader =
             |relative_path: &str| existing_asset_paths.as_ref().and_then(|paths| {

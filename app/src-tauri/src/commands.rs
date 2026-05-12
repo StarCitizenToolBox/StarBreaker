@@ -1304,17 +1304,17 @@ fn source_modified_unix_seconds(p4k: &MappedP4k, relative_path: &str) -> Option<
 fn source_asset_candidates(relative_path: &str) -> Vec<String> {
     let path = relative_path.replace('/', "\\");
     if let Some(stem) = path.strip_suffix(".materials.json") {
-        return vec![format!("{}.mtl", strip_numeric_suffix(stem, "_TEX"))];
+        return vec![format!("{}.mtl", strip_numeric_suffix(stem, "_tex"))];
     }
     if let Some(stem) = path.strip_suffix(".blend") {
-        let source_stem = strip_numeric_suffix(stem, "_LOD");
+        let source_stem = strip_numeric_suffix(stem, "_lod");
         return [".cgfm", ".cgam", ".skinm", ".cgf", ".cga", ".skin", ".chr"]
             .into_iter()
             .map(|extension| format!("{source_stem}{extension}"))
             .collect();
     }
     if let Some(stem) = path.strip_suffix(".png") {
-        let source_stem = strip_numeric_suffix(stem, "_TEX");
+        let source_stem = strip_numeric_suffix(stem, "_tex");
         return [".dds", ".tif", ".png"]
             .into_iter()
             .map(|extension| format!("{source_stem}{extension}"))
@@ -1330,7 +1330,8 @@ fn source_asset_candidates(relative_path: &str) -> Vec<String> {
 }
 
 fn strip_numeric_suffix<'a>(value: &'a str, marker: &str) -> &'a str {
-    let Some(pos) = value.rfind(marker) else {
+    let lower = value.to_ascii_lowercase();
+    let Some(pos) = lower.rfind(marker) else {
         return value;
     };
     let suffix = &value[pos + marker.len()..];
@@ -1876,7 +1877,7 @@ mod tests {
     use super::{
         decomposed_package_directory_name, export_entity_name,
         sanitize_export_name, should_skip_existing_decomposed_asset, snapshot_export_progress,
-        ExportProgressSlot,
+        source_asset_candidates, ExportProgressSlot,
     };
     use starbreaker_common::Progress;
     use std::sync::Arc;
@@ -1977,6 +1978,22 @@ mod tests {
         assert!(should_skip_existing_decomposed_asset(&texture, false));
         assert!(should_skip_existing_decomposed_asset(&material, false));
         assert!(!should_skip_existing_decomposed_asset(&mesh, true));
+    }
+
+    #[test]
+    fn source_asset_candidates_strip_lod_and_tex_suffixes_case_insensitively() {
+        assert_eq!(
+            source_asset_candidates("data/objects/foo_LOD0.blend")[0],
+            "data\\objects\\foo.cgfm"
+        );
+        assert_eq!(
+            source_asset_candidates("data/textures/foo_tex0.png")[0],
+            "data\\textures\\foo.dds"
+        );
+        assert_eq!(
+            source_asset_candidates("data/materials/foo_TEX0.materials.json")[0],
+            "data\\materials\\foo.mtl"
+        );
     }
 }
 

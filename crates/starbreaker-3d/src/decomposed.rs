@@ -1174,7 +1174,10 @@ pub(crate) fn write_decomposed_export(
     phase_start = Instant::now();
 
     let mut interior_asset_cache: HashMap<String, (String, Option<String>)> = HashMap::new();
+    let mut failed_interior_asset_cache: HashSet<String> = HashSet::new();
     let mut interior_records = Vec::with_capacity(input.interiors.containers.len());
+    let mut interior_placement_elapsed = std::time::Duration::ZERO;
+    let mut interior_light_elapsed = std::time::Duration::ZERO;
     let container_count = input.interiors.containers.len();
     let total_interior_placements = input
         .interiors
@@ -1189,6 +1192,7 @@ pub(crate) fn write_decomposed_export(
             .as_ref()
             .map(|palette| register_palette(&mut palette_records, palette));
         let mut placements = Vec::with_capacity(container.placements.len());
+        let placement_start = Instant::now();
         for (cgf_idx, transform, placement_palette) in &container.placements {
             let entry = &input.interiors.unique_cgfs[*cgf_idx];
             // Per-placement palette override (loadout-attached children like
@@ -1210,26 +1214,46 @@ pub(crate) fn write_decomposed_export(
                 .as_deref()
                 .map(|path| normalize_source_path(p4k, path));
             let cache_key = interior_asset_lookup_key(&normalized_cgf_path, normalized_material_path.as_deref());
+            if failed_interior_asset_cache.contains(&cache_key) {
+                processed_interior_placements += 1;
+                if total_interior_placements > 0 {
+                    let fraction =
+                        processed_interior_placements as f32 / total_interior_placements as f32;
+                    report_progress(
+                        progress,
+                        CHILD_ASSETS_END + (INTERIOR_ASSETS_END - CHILD_ASSETS_END) * fraction,
+                        "Writing interior assets",
+                    );
+                }
+                continue;
+            }
             let (mesh_asset, material_sidecar) = if let Some(cached) = interior_asset_cache.get(&cache_key) {
                 cached.clone()
             } else {
-                if let Some(reusable) = existing_interior_asset_paths(
+                let existing_reusable = existing_interior_asset_paths(
                     existing_interior_assets,
                     existing_asset_paths,
                     &cache_key,
-                ).or_else(|| reusable_interior_asset_paths(
-                    p4k,
-                    entry,
-                    opts.lod_level,
-                    opts.texture_mip,
-                    opts.format,
-                    existing_asset_paths,
-                )) {
+                );
+                let computed_reusable = if existing_reusable.is_none() {
+                    reusable_interior_asset_paths(
+                        p4k,
+                        entry,
+                        opts.lod_level,
+                        opts.texture_mip,
+                        opts.format,
+                        existing_asset_paths,
+                    )
+                } else {
+                    None
+                };
+                if let Some(reusable) = existing_reusable.or(computed_reusable) {
                     interior_asset_cache.insert(cache_key.clone(), reusable.clone());
                     reusable
                 } else {
                     let Some((mesh, materials, _nmc)) = load_interior_mesh(entry) else {
                         log::warn!("failed to build decomposed interior asset for {}", entry.cgf_path);
+                        failed_interior_asset_cache.insert(cache_key);
                         processed_interior_placements += 1;
                         if total_interior_placements > 0 {
                             let fraction =
@@ -1349,8 +1373,10 @@ pub(crate) fn write_decomposed_export(
                 );
             }
         }
+        interior_placement_elapsed += placement_start.elapsed();
 
         let mut lights = Vec::with_capacity(container.lights.len());
+        let light_start = Instant::now();
         for light in &container.lights {
             // Extract the projector (gobo) texture.
             // ONLY for Projector lights (spot lights). Point lights (Omni) should never have gobos.
@@ -1439,6 +1465,7 @@ pub(crate) fn write_decomposed_export(
                     .collect::<serde_json::Map<_, _>>(),
             }));
         }
+        interior_light_elapsed += light_start.elapsed();
 
         interior_records.push(InteriorContainerRecord {
             name: container.name.clone(),
@@ -1462,6 +1489,14 @@ pub(crate) fn write_decomposed_export(
     if container_count == 0 {
         report_progress(progress, INTERIOR_ASSETS_END, "Writing manifests");
     }
+    log::info!(
+        "[timing][decomposed] interior_placements: {:.2}s",
+        interior_placement_elapsed.as_secs_f32()
+    );
+    log::info!(
+        "[timing][decomposed] interior_lights: {:.2}s",
+        interior_light_elapsed.as_secs_f32()
+    );
     log::info!("[timing][decomposed] interior_assets: {:.2}s", phase_start.elapsed().as_secs_f32());
     phase_start = Instant::now();
 
