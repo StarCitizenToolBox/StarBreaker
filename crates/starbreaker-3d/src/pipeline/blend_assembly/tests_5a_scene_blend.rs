@@ -73,6 +73,10 @@ fn id_block_names(blocks: &[BlendBlock<'_>], code: &[u8; 4]) -> Vec<String> {
         .collect()
 }
 
+fn id_block_name(block: &BlendBlock<'_>) -> String {
+    cstr_at(block.data, 42, 258).to_string()
+}
+
 fn cstr_at(data: &[u8], offset: usize, len: usize) -> &str {
     let raw = &data[offset..offset + len];
     let end = raw.iter().position(|&byte| byte == 0).unwrap_or(raw.len());
@@ -184,6 +188,41 @@ fn mesh_to_blend_exports_secondary_uv_map() {
     assert_ne!(default_uv_ptr, 0, "mesh should persist its render-active UV map name");
     assert!(blocks.iter().any(|block| block.old_ptr == active_uv_ptr && block.data == b"UVMap\0"));
     assert!(blocks.iter().any(|block| block.old_ptr == default_uv_ptr && block.data == b"UVMap\0"));
+}
+
+#[test]
+fn scene_blend_reuses_gobo_image_datablocks_by_path() {
+    let mut first = test_light("LightA");
+    first.lamp_type = 2;
+    first.gobo_path = Some("Data/Textures/lights/shared_gobo_TEX0.png".to_string());
+    let mut second = test_light("LightB");
+    second.lamp_type = 2;
+    second.gobo_path = Some("Data/Textures/lights/shared_gobo_TEX0.png".to_string());
+
+    let bytes = create_scene_blend_package_with_instances(
+        "DRAK Test_LOD0_TEX0",
+        "DRAK Test",
+        &[],
+        &[first, second],
+        &HashMap::new(),
+    )
+    .unwrap();
+    let blocks = parse_blend_blocks(&bytes);
+    let image_blocks = blocks
+        .iter()
+        .filter(|block| block.code == b"IM\0\0")
+        .collect::<Vec<_>>();
+    assert_eq!(image_blocks.len(), 1);
+    assert!(id_block_name(image_blocks[0]).contains("shared_gobo_TEX0.png"));
+
+    let image_ptr = image_blocks[0].old_ptr;
+    let image_node_refs = blocks
+        .iter()
+        .filter(|block| block.sdna == starbreaker_blend::SDNA_IDX_BNODE)
+        .filter(|block| block.data.len() > 0xe0 + 8)
+        .filter(|block| u64::from_le_bytes(block.data[0xd8..0xe0].try_into().unwrap()) == image_ptr)
+        .count();
+    assert_eq!(image_node_refs, 2);
 }
 
 #[test]

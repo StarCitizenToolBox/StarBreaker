@@ -1781,6 +1781,7 @@ pub fn write_light_gobo_node_tree(
     image_ptr: u64,
     image_name: &str,
     image_filepath: &str,
+    write_image_block: bool,
     ptrs: &mut PtrAlloc,
 ) {
     // Node pointers: Image Texture → Emission → Light Output
@@ -1955,20 +1956,22 @@ pub fn write_light_gobo_node_tree(
     write_node_link(out, link_image_emission_ptr, 0, link_emission_output_ptr, image_tex_ptr, emission_ptr, image_color_out_ptr, emission_color_in_ptr);
     write_node_link(out, link_emission_output_ptr, link_image_emission_ptr, 0, emission_ptr, output_ptr, emission_out_ptr, output_surface_in_ptr);
 
-    // Image block — gobo projector textures are data/mask textures (Non-Color),
-    // and require an ImageTile (UDIM 1001) so Blender 5.x can load the file from disk.
-    write_block(
-        out,
-        b"IM\0\0",
-        SDNA_IDX_IMAGE,
-        image_ptr,
-        1,
-        &build_image_with_tile(image_name, image_filepath, image_tile_ptr, "Linear Rec.709"),
-    );
-    // ImageTile block — UDIM tile 1001 required for IMA_SRC_FILE images in Blender 5.x.
-    // Without this tile, Image.tiles ListBase is null and Blender cannot load the file,
-    // resulting in has_data=false and a magenta fallback colour on the gobo light.
-    write_block(out, b"DATA", SDNA_IDX_IMAGE_TILE, image_tile_ptr, 1, &build_image_tile());
+    if write_image_block {
+        // Image block — gobo projector textures are data/mask textures (Non-Color),
+        // and require an ImageTile (UDIM 1001) so Blender 5.x can load the file from disk.
+        write_block(
+            out,
+            b"IM\0\0",
+            SDNA_IDX_IMAGE,
+            image_ptr,
+            1,
+            &build_image_with_tile(image_name, image_filepath, image_tile_ptr, "Linear Rec.709"),
+        );
+        // ImageTile block — UDIM tile 1001 required for IMA_SRC_FILE images in Blender 5.x.
+        // Without this tile, Image.tiles ListBase is null and Blender cannot load the file,
+        // resulting in has_data=false and a magenta fallback colour on the gobo light.
+        write_block(out, b"DATA", SDNA_IDX_IMAGE_TILE, image_tile_ptr, 1, &build_image_tile());
+    }
 }
 
 fn write_shader_node(

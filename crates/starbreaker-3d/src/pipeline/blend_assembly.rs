@@ -4111,6 +4111,7 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
     let mut light_object_idprops = Vec::new();
     let mut light_object_mat_arrays = Vec::new();
     let mut light_object_matbits = Vec::new();
+    let mut gobo_image_by_path: HashMap<String, (u64, String)> = HashMap::new();
     
     for (lamp_ptr, _, _, _, idx) in &light_instances {
         let light = &lights[*idx];
@@ -4130,7 +4131,6 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
         let gobo_blocks = if light.lamp_type == 2 {
             effective_gobo_path.map(|gobo_path| {
                 let node_tree_ptr = ptrs.alloc();
-                let image_ptr = ptrs.alloc();
                 let normalized_path = gobo_image_blend_filepath(package_name, gobo_path);
                 let image_filename = gobo_path
                     .replace('\\', "/")
@@ -4139,15 +4139,24 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
                     .filter(|name| !name.is_empty())
                     .unwrap_or("light_gobo.png")
                     .to_string();
-                let image_name = format!("{}_{}", light.name, image_filename);
-                (node_tree_ptr, image_ptr, image_name, normalized_path)
+                let mut write_image_block = false;
+                let (image_ptr, image_name) = if let Some((ptr, name)) = gobo_image_by_path.get(&normalized_path) {
+                    (*ptr, name.clone())
+                } else {
+                    let image_ptr = ptrs.alloc();
+                    let image_name = format!("gobo_{image_ptr:x}_{image_filename}");
+                    gobo_image_by_path.insert(normalized_path.clone(), (image_ptr, image_name.clone()));
+                    write_image_block = true;
+                    (image_ptr, image_name)
+                };
+                (node_tree_ptr, image_ptr, image_name, normalized_path, write_image_block)
             })
         } else {
             None
         };
         let node_tree_ptr = gobo_blocks
             .as_ref()
-            .map(|(node_tree_ptr, _, _, _)| *node_tree_ptr)
+            .map(|(node_tree_ptr, _, _, _, _)| *node_tree_ptr)
             .unwrap_or(0);
 
         let light_data_props = allocate_idprop_blocks(
@@ -4322,7 +4331,7 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
         if let Some(props) = &light_data_idprops[idx] {
             write_idprop_blocks(&mut out, props);
         }
-        if let Some((node_tree_ptr, image_ptr, image_name, image_filepath)) = gobo_blocks {
+        if let Some((node_tree_ptr, image_ptr, image_name, image_filepath, write_image_block)) = gobo_blocks {
             write_light_gobo_node_tree(
                 &mut out,
                 lamp_block_ptr,
@@ -4330,6 +4339,7 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
                 image_ptr,
                 &image_name,
                 &image_filepath,
+                write_image_block,
                 &mut ptrs,
             );
         }

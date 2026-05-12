@@ -704,6 +704,7 @@ fn light_gobo_node_tree_writes_embedded_data_before_image_id() {
         0x1020,
         "spot_075.dds",
         "//../../Data/Textures/lights/generic/spot_075.dds",
+        true,
         &mut ptrs,
     );
     assert_eq!(&out[0..4], b"DATA");
@@ -728,6 +729,7 @@ fn light_gobo_node_tree_image_tex_node_type_is_143() {
         0x1020,
         "spot.dds",
         "//spot.dds",
+        true,
         &mut ptrs,
     );
     let idname = b"ShaderNodeTexImage";
@@ -754,6 +756,7 @@ fn light_gobo_node_tree_output_node_has_do_output_flag() {
         0x1020,
         "spot.dds",
         "//spot.dds",
+        true,
         &mut ptrs,
     );
     let idname = b"ShaderNodeOutputLight";
@@ -773,7 +776,7 @@ fn light_gobo_node_tree_has_no_texcoord_or_mapping_nodes() {
     // No Texture Coordinate or Mapping nodes should be present.
     let mut out = Vec::new();
     let mut ptrs = PtrAlloc::new(0x2000);
-    write_light_gobo_node_tree(&mut out, 0x1000, 0x1010, 0x1020, "spot.dds", "//spot.dds", &mut ptrs);
+    write_light_gobo_node_tree(&mut out, 0x1000, 0x1010, 0x1020, "spot.dds", "//spot.dds", true, &mut ptrs);
     assert!(
         !out.windows(b"ShaderNodeTexCoord".len()).any(|w| w == b"ShaderNodeTexCoord"),
         "ShaderNodeTexCoord must NOT be present in gobo node tree"
@@ -789,7 +792,7 @@ fn light_gobo_node_tree_has_two_links() {
     // Simple 3-node chain has 2 links: ImageTex.Color→Emission.Color, Emission→LightOutput
     let mut out = Vec::new();
     let mut ptrs = PtrAlloc::new(0x2000);
-    write_light_gobo_node_tree(&mut out, 0x1000, 0x1010, 0x1020, "spot.dds", "//spot.dds", &mut ptrs);
+    write_light_gobo_node_tree(&mut out, 0x1000, 0x1010, 0x1020, "spot.dds", "//spot.dds", true, &mut ptrs);
     // Block header layout: [code:4][sdna_idx:4][old_ptr:8][data_len:4][pad:4][count:4][pad:4] = 32 bytes
     // SDNA index is at bytes 4-7 as u32 le; SDNA_IDX_BNODE_LINK = 470
     const HDR: usize = 32;
@@ -811,7 +814,7 @@ fn light_gobo_node_tree_image_tex_texmapping_scale_is_one() {
     // Zeroed storage → size=(0,0,0) → all UV lookups collapse to edge pixel → black gobo.
     let mut out = Vec::new();
     let mut ptrs = PtrAlloc::new(0x2000);
-    write_light_gobo_node_tree(&mut out, 0x1000, 0x1010, 0x1020, "spot.png", "//spot.png", &mut ptrs);
+    write_light_gobo_node_tree(&mut out, 0x1000, 0x1010, 0x1020, "spot.png", "//spot.png", true, &mut ptrs);
 
     const HDR: usize = 32;
     let storage_pos = out
@@ -864,7 +867,7 @@ fn light_gobo_node_tree_image_tex_iuser_frames_and_sfra() {
     // iuser.frames at offset 960+12=972; iuser.sfra at offset 960+20=980.
     let mut out = Vec::new();
     let mut ptrs = PtrAlloc::new(0x2000);
-    write_light_gobo_node_tree(&mut out, 0x1000, 0x1010, 0x1020, "spot.dds", "//spot.dds", &mut ptrs);
+    write_light_gobo_node_tree(&mut out, 0x1000, 0x1010, 0x1020, "spot.dds", "//spot.dds", true, &mut ptrs);
 
     // Find the NodeTexImage storage DATA block (SDNA_IDX_NODE_TEX_IMAGE = 531)
     const HDR: usize = 32;
@@ -892,7 +895,7 @@ fn light_gobo_node_tree_image_has_tile_block() {
     const HDR: usize = 32;
     let mut out = Vec::new();
     let mut ptrs = PtrAlloc::new(0x2000);
-    write_light_gobo_node_tree(&mut out, 0x1000, 0x1010, 0x1020, "gobo.png", "//gobo.png", &mut ptrs);
+    write_light_gobo_node_tree(&mut out, 0x1000, 0x1010, 0x1020, "gobo.png", "//gobo.png", true, &mut ptrs);
 
     let tile_block_pos = out.windows(HDR).position(|h| {
         &h[0..4] == b"DATA"
@@ -914,7 +917,7 @@ fn light_gobo_node_tree_image_tile_ptr_in_image_block() {
     const HDR: usize = 32;
     let mut out = Vec::new();
     let mut ptrs = PtrAlloc::new(0x2000);
-    write_light_gobo_node_tree(&mut out, 0x1000, 0x1010, 0x1020, "gobo.png", "//gobo.png", &mut ptrs);
+    write_light_gobo_node_tree(&mut out, 0x1000, 0x1010, 0x1020, "gobo.png", "//gobo.png", true, &mut ptrs);
 
     let image_pos = out.windows(HDR).position(|h| {
         &h[0..4] == b"IM\0\0"
