@@ -1021,10 +1021,6 @@ fn prepare_decomposed_output_root(output_root: &Path, package_name: &str) -> Res
 
     let packages_root = output_root.join("Packages");
     let package_root = packages_root.join(package_name);
-    if package_root.exists() {
-        std::fs::remove_dir_all(&package_root)?;
-    }
-
     std::fs::create_dir_all(&package_root)?;
     Ok(())
 }
@@ -1876,12 +1872,13 @@ fn sanitize_filename(name: &str) -> String {
 mod tests {
     use super::{
         decomposed_package_directory_name, export_entity_name,
-        sanitize_export_name, should_skip_existing_decomposed_asset, snapshot_export_progress,
-        source_asset_candidates, ExportProgressSlot,
+        prepare_decomposed_output_root, sanitize_export_name, should_skip_existing_decomposed_asset,
+        snapshot_export_progress, source_asset_candidates, ExportProgressSlot,
     };
     use starbreaker_common::Progress;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn export_entity_name_strips_record_prefix_and_quotes() {
@@ -1928,6 +1925,31 @@ mod tests {
             decomposed_package_directory_name(&files, "Argo Mole"),
             "Argo Mole"
         );
+    }
+
+    #[test]
+    fn prepare_decomposed_output_root_preserves_existing_packages() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("starbreaker_app_prepare_package_test_{unique}"));
+        let target_package = root.join("Packages").join("ship").join("DRAK Buccaneer_LOD0_TEX0");
+        let sibling_package = root.join("Packages").join("ship").join("DRAK Ironclad_LOD0_TEX0");
+        std::fs::create_dir_all(&target_package).unwrap();
+        std::fs::create_dir_all(&sibling_package).unwrap();
+        std::fs::write(target_package.join("scene.json"), b"old").unwrap();
+        std::fs::write(sibling_package.join("scene.json"), b"sibling").unwrap();
+
+        prepare_decomposed_output_root(
+            &root,
+            "ship/DRAK Buccaneer_LOD0_TEX0",
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read(target_package.join("scene.json")).unwrap(), b"old");
+        assert_eq!(std::fs::read(sibling_package.join("scene.json")).unwrap(), b"sibling");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

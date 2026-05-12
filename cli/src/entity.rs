@@ -65,11 +65,6 @@ fn prepare_decomposed_output_root(output_root: &PathBuf, package_name: &str) -> 
 
     let packages_root = output_root.join("Packages");
     let package_root = packages_root.join(package_name);
-    if package_root.exists() {
-        std::fs::remove_dir_all(&package_root)
-            .map_err(|e| CliError::IoPath { source: e, path: package_root.display().to_string() })?;
-    }
-
     std::fs::create_dir_all(&package_root)
         .map_err(|e| CliError::IoPath { source: e, path: package_root.display().to_string() })?;
     Ok(())
@@ -260,7 +255,8 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::source_asset_candidates;
+    use super::{prepare_decomposed_output_root, source_asset_candidates};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn source_asset_candidates_strip_lod_and_tex_suffixes_case_insensitively() {
@@ -276,6 +272,31 @@ mod tests {
             source_asset_candidates("data/materials/foo_TEX0.materials.json")[0],
             "data\\materials\\foo.mtl"
         );
+    }
+
+    #[test]
+    fn prepare_decomposed_output_root_preserves_existing_packages() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("starbreaker_prepare_package_test_{unique}"));
+        let target_package = root.join("Packages").join("ship").join("DRAK Buccaneer_LOD0_TEX0");
+        let sibling_package = root.join("Packages").join("ship").join("DRAK Ironclad_LOD0_TEX0");
+        std::fs::create_dir_all(&target_package).unwrap();
+        std::fs::create_dir_all(&sibling_package).unwrap();
+        std::fs::write(target_package.join("scene.json"), b"old").unwrap();
+        std::fs::write(sibling_package.join("scene.json"), b"sibling").unwrap();
+
+        prepare_decomposed_output_root(
+            &root,
+            "ship/DRAK Buccaneer_LOD0_TEX0",
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read(target_package.join("scene.json")).unwrap(), b"old");
+        assert_eq!(std::fs::read(sibling_package.join("scene.json")).unwrap(), b"sibling");
+        let _ = std::fs::remove_dir_all(root);
     }
 }
 
