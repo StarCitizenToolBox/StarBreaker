@@ -170,6 +170,84 @@ fn resolve_no_rotation_local_matrix(
         .to_cols_array()
 }
 
+fn node_parent_indices(nodes: &[json::Node]) -> Vec<Option<usize>> {
+    let mut parent_of = vec![None; nodes.len()];
+    for (parent_index, node) in nodes.iter().enumerate() {
+        if let Some(children) = &node.children {
+            for child in children {
+                let child_index = child.value();
+                if child_index < parent_of.len() {
+                    parent_of[child_index] = Some(parent_index);
+                }
+            }
+        }
+    }
+    parent_of
+}
+
+fn docking_host_world_matrix(
+    builder: &GlbBuilder,
+    target_idx: usize,
+) -> Option<[f32; 16]> {
+    let parent_of = node_parent_indices(&builder.nodes_json);
+    let parent_idx = parent_of.get(target_idx).and_then(|idx| *idx)?;
+    let siblings = builder.nodes_json.get(parent_idx)?.children.as_ref()?;
+    siblings
+        .iter()
+        .filter_map(|sibling| {
+            let index = sibling.value();
+            let name = builder.nodes_json.get(index)?.name.as_deref()?.to_ascii_lowercase();
+            Some((index, name))
+        })
+        .find(|(_, name)| name.contains("docking_host"))
+        .or_else(|| {
+            siblings
+                .iter()
+                .filter_map(|sibling| {
+                    let index = sibling.value();
+                    let name = builder.nodes_json.get(index)?.name.as_deref()?.to_ascii_lowercase();
+                    Some((index, name))
+                })
+                .find(|(_, name)| name.contains("docking_door"))
+        })
+        .map(|(index, _)| builder.compute_node_world_matrix(index))
+}
+
+fn child_docking_vehicle_translation(nmc: Option<&NodeMeshCombo>) -> Option<glam::Vec3> {
+    nmc?.nodes.iter().find_map(|node| {
+        node.name.to_ascii_lowercase().contains("docking_vehicle").then(|| {
+            glam::Vec3::new(
+                node.bone_to_world[0][3],
+                node.bone_to_world[1][3],
+                node.bone_to_world[2][3],
+            )
+        })
+    })
+}
+
+fn docking_entity_attachment_offset(
+    builder: &GlbBuilder,
+    target_idx: usize,
+    child: &crate::types::EntityPayload,
+) -> Option<glam::Vec3> {
+    // Vehicle docking entity attachments align the child vehicle attach helper
+    // to a sibling docking host/door helper, not to the item-port node origin.
+    if !child
+        .port_flags
+        .split_whitespace()
+        .any(|flag| flag.eq_ignore_ascii_case("Docking_Request_Accepting"))
+    {
+        return None;
+    }
+    let target_world = glam::Mat4::from_cols_array(&builder.compute_node_world_matrix(target_idx));
+    let host_world = glam::Mat4::from_cols_array(&docking_host_world_matrix(builder, target_idx)?);
+    let child_attach = child_docking_vehicle_translation(child.nmc.as_ref())?;
+    let desired_world = (host_world.w_axis
+        - glam::Vec4::new(child_attach.x, child_attach.y, child_attach.z, 0.0))
+    .truncate();
+    Some(target_world.inverse().transform_point3(desired_world))
+}
+
 fn resolve_child_instance_transforms(input: &DecomposedInput) -> Vec<ResolvedChildTransform> {
     let mut builder = GlbBuilder::new();
     let dummy_packed = PackedMeshInfo {
@@ -214,9 +292,13 @@ fn resolve_child_instance_transforms(input: &DecomposedInput) -> Vec<ResolvedChi
                 .or_else(|| builder.node_name_to_idx.get(&child.parent_entity_name.to_lowercase()).copied())
                 .or_else(|| scene_nodes.first().map(|node| node.value() as u32))
                 .unwrap_or(0);
+            let mut offset_position = child.offset_position;
+            if let Some(docking_offset) = docking_entity_attachment_offset(&builder, target_idx as usize, child) {
+                offset_position = [docking_offset.x, docking_offset.y, docking_offset.z];
+            }
             Some(resolve_no_rotation_local_matrix(
                 builder.compute_node_world_matrix(target_idx as usize),
-                child.offset_position,
+                offset_position,
                 child.offset_rotation,
             ))
         } else {
@@ -4198,6 +4280,115 @@ mod tests {
         assert_eq!(resolved[12], 0.0);
         assert_eq!(resolved[13], 0.0);
         assert_eq!(resolved[14], 0.0);
+    }
+
+    fn test_nmc_node(
+        name: &str,
+        parent_index: Option<u16>,
+        bone_to_world: [[f32; 4]; 3],
+    ) -> crate::nmc::NmcNode {
+        crate::nmc::NmcNode {
+            name: name.to_string(),
+            parent_index,
+            world_to_bone: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]],
+            bone_to_world,
+            scale: [1.0, 1.0, 1.0],
+            geometry_type: 0,
+            properties: HashMap::new(),
+        }
+    }
+
+    fn empty_test_mesh() -> Mesh {
+        Mesh {
+            positions: Vec::new(),
+            indices: Vec::new(),
+            uvs: None,
+            secondary_uvs: None,
+            normals: None,
+            tangents: None,
+            colors: None,
+            submeshes: Vec::new(),
+            model_min: [0.0; 3],
+            model_max: [0.0; 3],
+            scaling_min: [0.0; 3],
+            scaling_max: [0.0; 3],
+        }
+    }
+
+    #[test]
+    fn docking_entity_attachment_uses_parent_host_and_child_vehicle_attach_point() {
+        let root_nmc = NodeMeshCombo {
+            nodes: vec![
+                test_nmc_node(
+                    "root",
+                    None,
+                    [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]],
+                ),
+                test_nmc_node(
+                    "hardpoint_docking_module",
+                    Some(0),
+                    [[0.0, -1.0, 0.0, -18.9], [1.0, 0.0, 0.0, -18.38946], [0.0, 0.0, 1.0, 5.51615]],
+                ),
+                test_nmc_node(
+                    "hardpoint_docking_host",
+                    Some(0),
+                    [[1.0, 0.0, 0.0, -19.15725], [0.0, 1.0, 0.0, -18.37498], [0.0, 0.0, 1.0, 7.30487]],
+                ),
+            ],
+            material_indices: Vec::new(),
+        };
+        let child_nmc = NodeMeshCombo {
+            nodes: vec![test_nmc_node(
+                "hardpoint_docking_vehicle",
+                None,
+                [[1.0, 0.0, 0.0, 2.98941], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 1.0474]],
+            )],
+            material_indices: Vec::new(),
+        };
+        let mut builder = GlbBuilder::new();
+        let dummy_packed = PackedMeshInfo {
+            mesh_idx: 0,
+            pos_accessor_idx: 0,
+            uv_accessor_idx: None,
+            secondary_uv_accessor_idx: None,
+            normal_accessor_idx: None,
+            color_accessor_idx: None,
+            tangent_accessor_idx: None,
+            submesh_mat_indices: Vec::new(),
+            submesh_idx_accessors: Vec::new(),
+        };
+        builder.build_nmc_hierarchy(&dummy_packed, &root_nmc, &[], false);
+        let target_idx = *builder
+            .node_name_to_idx
+            .get("hardpoint_docking_module")
+            .expect("target node should exist") as usize;
+        let child = EntityPayload {
+            mesh: empty_test_mesh(),
+            materials: None,
+            textures: None,
+            nmc: Some(child_nmc),
+            palette: None,
+            geometry_path: "Objects/Spaceships/Ships/DRAK/command_module/exterior/test.cga".to_string(),
+            material_path: String::new(),
+            bones: Vec::new(),
+            skeleton_source_path: None,
+            entity_name: "DRAK_Test_Command_Module".to_string(),
+            entity_category: None,
+            parent_node_name: "hardpoint_docking_module".to_string(),
+            parent_entity_name: "root".to_string(),
+            no_rotation: true,
+            offset_position: [0.0; 3],
+            offset_rotation: [0.0; 3],
+            detach_direction: [0.0; 3],
+            port_flags: "Docking_Request_Accepting".to_string(),
+        };
+
+        let offset = docking_entity_attachment_offset(&builder, target_idx, &child)
+            .expect("docking offset should be derived");
+
+        assert!((offset.x - 0.01448).abs() < 0.0001);
+        assert!((offset.y - 3.24666).abs() < 0.0001);
+        assert!((offset.z - 0.74132).abs() < 0.0001);
     }
 
     #[test]

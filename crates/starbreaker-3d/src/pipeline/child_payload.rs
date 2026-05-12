@@ -213,7 +213,7 @@ pub(crate) fn load_child_payload_asset(
                     .is_some_and(|paths| paths.contains(&mesh_asset_path.to_ascii_lowercase()))
                 {
                     let material_path = child.material_path.as_deref().unwrap_or("");
-                    let (_, materials) = load_nmc_and_material(p4k, geometry_path, material_path);
+                    let (nmc, materials) = load_nmc_and_material(p4k, geometry_path, material_path);
                     let skeleton_source_path = resolve_geometry_files(p4k, geometry_path)
                         .ok()
                         .and_then(|resolved| {
@@ -225,7 +225,7 @@ pub(crate) fn load_child_payload_asset(
                         mesh: empty_child_mesh(),
                         materials,
                         textures: None,
-                        nmc: None,
+                        nmc,
                         palette: None,
                         bones: Vec::new(),
                         geometry_path: geometry_path.to_string(),
