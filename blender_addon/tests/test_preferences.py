@@ -22,11 +22,12 @@ def _load_preference_gates() -> tuple:
     source = ui_path.read_text()
     tree = ast_mod.parse(source)
 
-    namespace: dict = {}
+    namespace: dict = {"PROP_PACKAGE_ROOT": "starbreaker_package_root"}
     for node in ast_mod.walk(tree):
         if isinstance(node, ast_mod.FunctionDef) and node.name in (
             "_should_apply_landing_gear",
             "_should_change_viewport",
+            "_should_auto_refresh_package_root",
         ):
             func_source = ast_mod.get_source_segment(source, node)
             if func_source:
@@ -35,12 +36,14 @@ def _load_preference_gates() -> tuple:
     return (
         namespace["_should_apply_landing_gear"],
         namespace["_should_change_viewport"],
+        namespace["_should_auto_refresh_package_root"],
     )
 
 
 (
     _should_apply_landing_gear,
     _should_change_viewport,
+    _should_auto_refresh_package_root,
 ) = _load_preference_gates()
 
 
@@ -54,6 +57,10 @@ class _MockPrefs:
     ) -> None:
         self.landing_gear_retract_after_import = landing_gear_retract_after_import
         self.viewport_change_after_import = viewport_change_after_import
+
+
+class _MockObject(dict):
+    pass
 
 
 class TestPreferenceGates(unittest.TestCase):
@@ -103,6 +110,14 @@ class TestPreferenceGates(unittest.TestCase):
         prefs = _MockPrefs(landing_gear_retract_after_import=False, viewport_change_after_import=False)
         self.assertFalse(_should_apply_landing_gear(prefs))
         self.assertFalse(_should_change_viewport(prefs))
+
+    def test_auto_refresh_requires_package_root_and_refresh_need(self) -> None:
+        package_root = _MockObject(starbreaker_package_root=True)
+        plain_object = _MockObject()
+
+        self.assertTrue(_should_auto_refresh_package_root(package_root, lambda _obj: True))
+        self.assertFalse(_should_auto_refresh_package_root(package_root, lambda _obj: False))
+        self.assertFalse(_should_auto_refresh_package_root(plain_object, lambda _obj: True))
 
 
 if __name__ == "__main__":

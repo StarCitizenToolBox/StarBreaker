@@ -56,6 +56,7 @@ from .runtime import (
     solo_animation_instance,
     package_animation_instances,
     package_animation_mode_map,
+    package_root_needs_material_refresh,
     refresh_materials_for_package_root,
     resolve_package_scene_path,
     update_animation_instance_start_frame,
@@ -1527,6 +1528,16 @@ def _should_change_viewport(prefs: object | None) -> bool:
     return bool(getattr(prefs, "viewport_change_after_import", True))
 
 
+def _should_auto_refresh_package_root(obj: object, needs_material_refresh: object) -> bool:
+    """Return True when load-post should rebuild materials for a package root."""
+    get_prop = getattr(obj, "get", None)
+    if not callable(get_prop) or not bool(get_prop(PROP_PACKAGE_ROOT)):
+        return False
+    if not callable(needs_material_refresh):
+        return False
+    return bool(needs_material_refresh(obj))
+
+
 def _material_refresh_prompt_timer(token: int | None = None) -> float | None:
     global _AUTO_MATERIAL_REFRESH_SESSION
     if token is not None and token != _AUTO_MATERIAL_REFRESH_TOKEN:
@@ -1553,7 +1564,7 @@ def _material_refresh_prompt_timer(token: int | None = None) -> float | None:
         return 0.01
 
     for obj in bpy.data.objects:
-        if not bool(obj.get(PROP_PACKAGE_ROOT)):
+        if not _should_auto_refresh_package_root(obj, package_root_needs_material_refresh):
             continue
         palette_id = obj.get(PROP_PALETTE_ID, "")
         _AUTO_MATERIAL_REFRESH_SESSION = MaterialRefreshSession(
