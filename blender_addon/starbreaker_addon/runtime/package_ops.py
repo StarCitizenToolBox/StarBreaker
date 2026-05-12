@@ -1003,12 +1003,28 @@ def apply_engine_glow_to_package_root(package_root: bpy.types.Object, strength: 
     updated = 0
     seen_materials: set[int] = set()
     override_cache: dict[tuple[str, int], bpy.types.Material] = {}
+    target_sidecars = {key[1] for key in targets_by_instance_and_sidecar}
     for obj in _iter_package_objects(package_root):
+        slots = list(getattr(obj, "material_slots", []))
+        if not slots:
+            continue
+        object_sidecars: set[str] = set()
+        for slot in slots:
+            material = getattr(slot, "material", None)
+            if material is None:
+                continue
+            sidecar = _string_prop(material, PROP_MATERIAL_SIDECAR)
+            if sidecar is None:
+                continue
+            object_sidecars.add(sidecar.replace("\\", "/").casefold())
+        if object_sidecars.isdisjoint(target_sidecars):
+            continue
+
         instance = _scene_instance_from_object(obj)
         instance_asset = _normalize_engine_glow_path(instance.mesh_asset if instance is not None else None)
         if instance_asset is None:
             continue
-        for slot in getattr(obj, "material_slots", []):
+        for slot in slots:
             material = getattr(slot, "material", None)
             if material is None:
                 continue

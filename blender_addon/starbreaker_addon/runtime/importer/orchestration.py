@@ -106,6 +106,10 @@ class OrchestrationMixin:
         self.sidecar_submaterials_by_name: dict[str, dict[str, SubmaterialRecord]] = {}
         self.sidecar_submaterials_by_name_all: dict[str, dict[str, list[SubmaterialRecord]]] = {}
         self.slot_mapping_cache: dict[int, list[int | None] | None] = {}
+        self.material_slot_layout_cache: dict[
+            tuple[int, str, str, str | None, tuple[int | None, ...], tuple[int, tuple[int, ...]] | None],
+            tuple[tuple[bpy.types.Material | None, ...], int],
+        ] = {}
         self.host_channel_cache: dict[tuple[int, tuple[int, ...]], str | None] = {}
         self.host_rgb_cache: dict[tuple[int, tuple[int, ...]], tuple[float, float, float] | None] = {}
         self.progress_callback = progress_callback
@@ -441,6 +445,34 @@ class OrchestrationMixin:
                 while len(mesh_materials) < len(slot_mapping):
                     mesh_materials.append(None)
             source_sidecar_path = _slot_mapping_source_sidecar_path(obj, sidecar_path)
+            layout_key = (
+                data_pointer,
+                sidecar_path,
+                source_sidecar_path,
+                effective_palette_id,
+                tuple(slot_mapping),
+                self._object_material_signature(getattr(obj, "parent", None))
+                if getattr(obj, "parent", None) is not None
+                else None,
+            )
+            material_slot_layout_cache = getattr(self, "material_slot_layout_cache", None)
+            if material_slot_layout_cache is None:
+                material_slot_layout_cache = {}
+                self.material_slot_layout_cache = material_slot_layout_cache
+            cached_layout = material_slot_layout_cache.get(layout_key)
+            if cached_layout is not None:
+                cached_materials, cached_applied = cached_layout
+                if len(obj.material_slots) >= len(cached_materials):
+                    for slot_index, material in enumerate(cached_materials):
+                        slot = obj.material_slots[slot_index]
+                        replaced_material = slot.material
+                        slot.link = "OBJECT"
+                        slot.material = material
+                        if replaced_material is not material:
+                            self._remove_replaced_slot_material(replaced_material)
+                    if effective_palette_id is not None:
+                        obj[PROP_PALETTE_ID] = effective_palette_id
+                    return cached_applied
             source_sidecar = self.package.load_material_sidecar(source_sidecar_path)
             if source_sidecar is None:
                 source_sidecar = sidecar
@@ -491,6 +523,13 @@ class OrchestrationMixin:
             # slots to per-host-channel clones so each decal picks up the
             # palette colour of the nearest paint material on the mesh.
             self._rebind_mesh_decal_for_host(obj, palette)
+            material_slot_layout_cache[layout_key] = (
+                tuple(
+                    obj.material_slots[index].material
+                    for index in range(min(len(slot_mapping), len(obj.material_slots)))
+                ),
+                applied,
+            )
             return applied
         for submaterial in sorted(sidecar.submaterials, key=lambda item: item.index):
             if mesh_materials is not None:
