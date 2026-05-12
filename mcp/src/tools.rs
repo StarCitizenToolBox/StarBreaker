@@ -1,4 +1,5 @@
-use std::sync::{Arc, OnceLock};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 use rmcp::{
     ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -9,8 +10,15 @@ use starbreaker_p4k::MappedP4k;
 
 /// Lazily-loaded game data. Initialized on first tool call.
 struct GameData {
+    p4k_path: PathBuf,
     p4k: Arc<MappedP4k>,
     dcb_bytes: Vec<u8>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct P4kSetDataPathRequest {
+    #[schemars(description = "Absolute path to the Data.p4k file to use for subsequent StarBreaker MCP queries.")]
+    pub path: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -177,8 +185,8 @@ pub struct BlendRunScriptRequest {
 
 
 pub struct StarBreakerMcp {
-    p4k_path: Option<std::path::PathBuf>,
-    data: OnceLock<GameData>,
+    p4k_path: RwLock<Option<PathBuf>>,
+    data: RwLock<Option<Arc<GameData>>>,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
@@ -186,42 +194,74 @@ pub struct StarBreakerMcp {
 impl StarBreakerMcp {
     pub fn new(p4k_path: Option<std::path::PathBuf>) -> Self {
         Self {
-            p4k_path,
-            data: OnceLock::new(),
+            p4k_path: RwLock::new(p4k_path),
+            data: RwLock::new(None),
             tool_router: Self::tool_router(),
         }
     }
 
-    /// Lazily load P4k and DataCore on first access.
-    fn data(&self) -> &GameData {
-        self.data.get_or_init(|| {
-            let start = std::time::Instant::now();
-            let p4k = match &self.p4k_path {
-                Some(path) => starbreaker_p4k::MappedP4k::open(path)
-                    .unwrap_or_else(|e| panic!("Failed to open P4k at {}: {e}", path.display())),
-                None => starbreaker_p4k::open_p4k()
-                    .unwrap_or_else(|e| panic!("Failed to auto-discover P4k: {e}")),
-            };
-            let p4k = Arc::new(p4k);
-            log::info!("P4k loaded in {:.1}s", start.elapsed().as_secs_f32());
+    fn load_game_data(path_override: Option<PathBuf>) -> anyhow::Result<GameData> {
+        let start = std::time::Instant::now();
+        let (p4k_path, p4k) = match path_override {
+            Some(path) => {
+                let p4k = starbreaker_p4k::MappedP4k::open(&path)
+                    .map_err(|e| anyhow::anyhow!("Failed to open P4k at {}: {e}", path.display()))?;
+                (path, p4k)
+            }
+            None => {
+                let (path, source) = starbreaker_p4k::find_p4k()
+                    .map_err(|e| anyhow::anyhow!("Failed to auto-discover P4k: {e}"))?;
+                let p4k = starbreaker_p4k::MappedP4k::open(&path)
+                    .map_err(|e| anyhow::anyhow!("Failed to open auto-discovered P4k at {}: {e}", path.display()))?;
+                log::info!("P4K: {} ({source})", path.display());
+                (path, p4k)
+            }
+        };
+        let p4k = Arc::new(p4k);
+        log::info!("P4k loaded from {} in {:.1}s", p4k_path.display(), start.elapsed().as_secs_f32());
 
-            let dcb_bytes = p4k
-                .read_file("Data\\Game2.dcb")
-                .or_else(|_| p4k.read_file("Data\\Game.dcb"))
-                .expect("Failed to read DataCore from P4k");
-            log::info!("DataCore: {} bytes, loaded in {:.1}s", dcb_bytes.len(), start.elapsed().as_secs_f32());
+        let dcb_bytes = p4k
+            .read_file("Data\\Game2.dcb")
+            .or_else(|_| p4k.read_file("Data\\Game.dcb"))
+            .map_err(|e| anyhow::anyhow!("Failed to read DataCore from {}: {e}", p4k_path.display()))?;
+        log::info!(
+            "DataCore: {} bytes, loaded in {:.1}s",
+            dcb_bytes.len(),
+            start.elapsed().as_secs_f32()
+        );
 
-            GameData { p4k, dcb_bytes }
+        Ok(GameData {
+            p4k_path,
+            p4k,
+            dcb_bytes,
         })
     }
 
-    fn p4k(&self) -> &MappedP4k {
-        &self.data().p4k
+    /// Lazily load P4k and DataCore on first access.
+    fn data(&self) -> Arc<GameData> {
+        if let Some(data) = self.data.read().expect("data lock poisoned").as_ref().cloned() {
+            return data;
+        }
+
+        let mut data_guard = self.data.write().expect("data lock poisoned");
+        if let Some(data) = data_guard.as_ref().cloned() {
+            return data;
+        }
+
+        let p4k_path = self.p4k_path.read().expect("p4k path lock poisoned").clone();
+        let data = Arc::new(
+            Self::load_game_data(p4k_path)
+                .unwrap_or_else(|e| panic!("{e}")),
+        );
+        *data_guard = Some(data.clone());
+        data
     }
 
-    fn db(&self) -> starbreaker_datacore::database::Database<'_> {
-        starbreaker_datacore::database::Database::from_bytes(&self.data().dcb_bytes)
-            .expect("DataCore bytes validated at load")
+    fn switch_p4k_path(&self, path: PathBuf) -> anyhow::Result<Arc<GameData>> {
+        let data = Arc::new(Self::load_game_data(Some(path.clone()))?);
+        *self.p4k_path.write().expect("p4k path lock poisoned") = Some(path);
+        *self.data.write().expect("data lock poisoned") = Some(data.clone());
+        Ok(data)
     }
 
     /// Find an entity record by name substring (shortest match).
@@ -262,11 +302,12 @@ impl StarBreakerMcp {
     /// Read a file from P4k with case-insensitive fallback.
     fn read_p4k_file(&self, path: &str) -> Result<Vec<u8>, String> {
         let p4k_path = Self::normalize_p4k_path(path);
-        self.p4k().read_file(&p4k_path)
+        let data = self.data();
+        data.p4k.read_file(&p4k_path)
             .or_else(|_| {
-                self.p4k().entry_case_insensitive(&p4k_path)
+                data.p4k.entry_case_insensitive(&p4k_path)
                     .ok_or_else(|| format!("File not found in P4k: {p4k_path}"))
-                    .and_then(|entry| self.p4k().read(entry).map_err(|e| format!("Error reading: {e}")))
+                    .and_then(|entry| data.p4k.read(entry).map_err(|e| format!("Error reading: {e}")))
             })
             .map_err(|e| format!("{e}"))
     }
@@ -308,9 +349,39 @@ impl StarBreakerMcp {
 
 #[tool_router]
 impl StarBreakerMcp {
+    #[tool(description = "Return the currently active Data.p4k path used by StarBreaker MCP tools.")]
+    fn p4k_data_status(&self) -> String {
+        let data = self.data();
+        serde_json::to_string_pretty(&serde_json::json!({
+            "p4k_path": data.p4k_path,
+            "entries": data.p4k.entries().len(),
+            "datacore_bytes": data.dcb_bytes.len(),
+        }))
+        .unwrap_or_else(|e| format!("JSON error: {e}"))
+    }
+
+    #[tool(description = "Switch StarBreaker MCP to a different Data.p4k for subsequent tools. The new archive and DataCore are loaded immediately; use p4k_data_status to confirm.")]
+    fn p4k_set_data_path(&self, Parameters(req): Parameters<P4kSetDataPathRequest>) -> String {
+        let path = Path::new(&req.path);
+        if !path.is_file() {
+            return format!("Data.p4k not found or not a file: {}", path.display());
+        }
+        match self.switch_p4k_path(path.to_path_buf()) {
+            Ok(data) => serde_json::to_string_pretty(&serde_json::json!({
+                "p4k_path": data.p4k_path,
+                "entries": data.p4k.entries().len(),
+                "datacore_bytes": data.dcb_bytes.len(),
+            }))
+            .unwrap_or_else(|e| format!("JSON error: {e}")),
+            Err(e) => format!("Failed to switch Data.p4k: {e}"),
+        }
+    }
+
     #[tool(description = "Search DataCore for entity records by name substring. Returns JSON array of matches sorted by name length (best match first).")]
     fn search_entities(&self, Parameters(req): Parameters<SearchEntitiesRequest>) -> String {
-        let db = self.db();
+        let data = self.data();
+        let db = starbreaker_datacore::database::Database::from_bytes(&data.dcb_bytes)
+            .expect("DataCore bytes validated at load");
         let limit = req.limit.unwrap_or(20) as usize;
         let search = req.query.to_lowercase();
 
@@ -350,7 +421,9 @@ impl StarBreakerMcp {
 
     #[tool(description = "Dump the resolved loadout tree for an entity. This is PROCESSED output from StarBreaker's loadout resolver — it resolves entityClassName references and queries geometry paths. For raw DataCore data, use datacore_query with path 'Components[SEntityComponentDefaultLoadoutParams]' instead.")]
     fn entity_loadout(&self, Parameters(req): Parameters<EntityLoadoutRequest>) -> String {
-        let db = self.db();
+        let data = self.data();
+        let db = starbreaker_datacore::database::Database::from_bytes(&data.dcb_bytes)
+            .expect("DataCore bytes validated at load");
         let record = match self.find_entity(&db, &req.name) {
             Some(r) => r,
             None => return format!("No entity found matching '{}'", req.name),
@@ -366,7 +439,9 @@ impl StarBreakerMcp {
 
     #[tool(description = "Dump a full DataCore record as pretty-printed JSON. Accepts a GUID or a name substring (uses shortest match).")]
     fn datacore_record(&self, Parameters(req): Parameters<DatacoreRecordRequest>) -> String {
-        let db = self.db();
+        let data = self.data();
+        let db = starbreaker_datacore::database::Database::from_bytes(&data.dcb_bytes)
+            .expect("DataCore bytes validated at load");
 
         let record = match self.find_record(&db, &req.id) {
             Some(r) => r,
@@ -382,7 +457,9 @@ impl StarBreakerMcp {
 
     #[tool(description = "Query a specific property path on a DataCore record. Returns the JSON value at that path. Example paths: 'Components[VehicleComponentParams].vehicleDefinition', 'Components[SGeometryResourceParams].Geometry.Geometry.Geometry.path'")]
     fn datacore_query(&self, Parameters(req): Parameters<DatacoreQueryRequest>) -> String {
-        let db = self.db();
+        let data = self.data();
+        let db = starbreaker_datacore::database::Database::from_bytes(&data.dcb_bytes)
+            .expect("DataCore bytes validated at load");
 
         let record = match self.find_record(&db, &req.id) {
             Some(r) => r,
@@ -455,7 +532,8 @@ impl StarBreakerMcp {
             Self::normalize_p4k_path(&req.path).trim_end_matches('\\').to_string()
         };
 
-        let entries = self.p4k().list_dir(&path);
+        let data = self.data();
+        let entries = data.p4k.list_dir(&path);
         if entries.is_empty() {
             return format!("No entries found under '{path}'");
         }
@@ -496,7 +574,9 @@ impl StarBreakerMcp {
 
     #[tool(description = "Search all DataCore records by name substring. Unlike search_entities which only searches EntityClassDefinition records, this searches ALL record types. Optionally filter by struct type.")]
     fn search_records(&self, Parameters(req): Parameters<SearchRecordsRequest>) -> String {
-        let db = self.db();
+        let data = self.data();
+        let db = starbreaker_datacore::database::Database::from_bytes(&data.dcb_bytes)
+            .expect("DataCore bytes validated at load");
         let limit = req.limit.unwrap_or(20) as usize;
         let search = req.query.to_lowercase();
 
@@ -729,8 +809,9 @@ impl StarBreakerMcp {
         let limit = req.limit.unwrap_or(50) as usize;
         let query = req.query.to_lowercase();
 
-        let mut results: Vec<_> = self
-            .p4k()
+        let data = self.data();
+        let mut results: Vec<_> = data
+            .p4k
             .entries()
             .iter()
             .filter(|e| e.name.to_lowercase().contains(&query))
@@ -914,7 +995,9 @@ impl StarBreakerMcp {
 
     #[tool(description = "Dump the Mannequin Animation Database (ADB) plus its companion ControllerDef for an entity. Returns structured JSON listing every Mannequin Fragment with group name, GUID, tags, FragTags, BlendOutDuration, OptionWeight, animations, scopes (resolved from the ControllerDef), and procedurals. Use to inspect fragment-scope metadata for animation troubleshooting (Phase 37). Note: the ADB has no per-bone blend-mode flag; use dba_dump's `rot_format_flags`/`pos_format_flags` for per-bone CAF metadata.")]
     fn mannequin_dump(&self, Parameters(req): Parameters<MannequinDumpRequest>) -> String {
-        let db = self.db();
+        let data = self.data();
+        let db = starbreaker_datacore::database::Database::from_bytes(&data.dcb_bytes)
+            .expect("DataCore bytes validated at load");
         let record = match self.find_entity(&db, &req.entity) {
             Some(r) => r,
             None => return format!("No entity matching '{}'", req.entity),
@@ -924,7 +1007,7 @@ impl StarBreakerMcp {
             None => return format!("Entity '{}' has no SAnimationControllerParams", req.entity),
         };
         let value = match starbreaker_3d::animation::dump_mannequin_adb_to_json(
-            self.p4k(),
+            data.p4k.as_ref(),
             &source,
             req.filter.as_deref(),
         ) {
@@ -1535,5 +1618,3 @@ fn format_size(bytes: u64) -> String {
     if bytes < 1024 * 1024 * 1024 { return format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0)); }
     format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
 }
-
-
