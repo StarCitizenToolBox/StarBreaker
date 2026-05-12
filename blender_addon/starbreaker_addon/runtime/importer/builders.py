@@ -1304,6 +1304,14 @@ class BuildersMixin:
             label="Primary Layer",
         )
         
+        if material_channel is None:
+            for node in reversed(nodes):
+                if node.type == 'GROUP' and 'LayerSurface' in node.node_tree.name:
+                    palette_socket = _input_socket(node, "Palette Color")
+                    if palette_socket is not None:
+                        palette_socket.default_value = (0.0, 0.0, 0.0, 1.0)
+                    break
+
         secondary_color_ref = _submaterial_texture_reference(submaterial, slots=("TexSlot9",), roles=("alternate_base_color", "base_color", "diffuse"))
         if secondary_color_ref is not None:
             secondary_color_node = self._image_node(
@@ -1377,6 +1385,7 @@ class BuildersMixin:
         self._set_socket_default(_input_socket(shader_group, "Secondary Normal"), (0.0, 0.0, 1.0))
         self._set_socket_default(_input_socket(shader_group, "Blend Mask"), 0.0)
         self._set_socket_default(_input_socket(shader_group, "POM Strength"), 0.0)
+        self._set_socket_default(_input_socket(shader_group, "Emission Color"), (1.0, 1.0, 1.0, 1.0))
         self._set_socket_default(_input_socket(shader_group, "Emission Strength"), self._illum_emission_strength(submaterial))
 
         self._link_group_input(links, primary.color, shader_group, "Primary Color")

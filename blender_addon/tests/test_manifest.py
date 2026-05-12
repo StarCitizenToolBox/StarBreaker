@@ -12,7 +12,7 @@ REPO_ROOT = STARBREAKER_ROOT.parent
 
 sys.path.insert(0, str(ADDON_ROOT))
 
-from starbreaker_addon.manifest import LightRecord, LightState, MaterialSidecar, PackageBundle, SceneInstanceRecord, TextureReference, infer_export_root
+from starbreaker_addon.manifest import LightRecord, LightState, MaterialSidecar, PackageBundle, SceneInstanceRecord, SceneManifest, TextureReference, infer_export_root
 
 
 _STARBREAKER_BIN = STARBREAKER_ROOT / "target/debug/starbreaker"
@@ -199,6 +199,48 @@ class ManifestTests(unittest.TestCase):
         self.assertIsNotNone(instance.local_transform_sc)
         self.assertEqual(instance.local_transform_sc[3], (1.0, 2.0, 3.0, 1.0))
         self.assertTrue(instance.resolved_no_rotation)
+
+    def test_scene_manifest_parses_engine_glow_controls(self) -> None:
+        manifest = SceneManifest.from_value(
+            {
+                "version": 1,
+                "root_entity": {"entity_name": "Root"},
+                "package_rule": {"package_dir": "Packages/Test", "shared_asset_root": "Data"},
+                "children": [],
+                "interiors": [],
+                "controls": {
+                    "engine_glow": {
+                        "label": "Engine Glow",
+                        "units": "emission_strength",
+                        "min_strength": 0,
+                        "max_strength": 200,
+                        "default_strength": 3,
+                        "targets": [
+                            {
+                                "entity_name": "Test_Thruster",
+                                "geometry_path": "Data/Objects/Ships/Test/thruster.cga",
+                                "mesh_asset": "Data/Objects/Ships/Test/thruster_LOD0.blend",
+                                "material_sidecar": "Data/Objects/Ships/Test/root.materials.json",
+                                "source_material_index": 4,
+                                "submaterial_name": "Glow_Thrusters",
+                            }
+                        ],
+                    }
+                },
+            }
+        )
+        self.assertIsNotNone(manifest.engine_glow_control)
+        assert manifest.engine_glow_control is not None
+        self.assertEqual(manifest.engine_glow_control.default_strength, 3.0)
+        self.assertEqual(
+            manifest.engine_glow_control.targets[0].geometry_path,
+            "Data/Objects/Ships/Test/thruster.cga",
+        )
+        self.assertEqual(
+            manifest.engine_glow_control.targets[0].mesh_asset,
+            "Data/Objects/Ships/Test/thruster_LOD0.blend",
+        )
+        self.assertEqual(manifest.engine_glow_control.targets[0].source_material_index, 4)
 
     def test_light_state_parses_explicit_intensity_semantics(self) -> None:
         state = LightState.from_value(

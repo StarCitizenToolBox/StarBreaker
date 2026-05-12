@@ -24,6 +24,8 @@ import bpy
 from ..manifest import PackageBundle, SceneInstanceRecord
 from ..palette import palette_id_for_livery_instance, resolved_palette_id
 from .constants import (
+    PROP_ENGINE_GLOW_CONTROL_JSON,
+    PROP_ENGINE_GLOW_STRENGTH,
     PROP_INSTANCE_JSON,
     PROP_LIGHT_ACTIVE_STATE,
     PROP_LIGHT_SEMANTIC_KIND,
@@ -249,6 +251,8 @@ def refresh_materials_for_package_root(
         update = getattr(view_layer, "update", None)
         if callable(update):
             update()
+    if engine_glow_control_enabled(package_root):
+        apply_engine_glow_to_package_root(package_root, engine_glow_strength(package_root))
     _purge_orphaned_managed_materials()
     _purge_orphaned_runtime_groups()
     _purge_orphaned_runtime_actions()
@@ -389,6 +393,8 @@ class MaterialRefreshSession:
         try:
             if self.palette_id is not None:
                 self.package_root[PROP_PALETTE_ID] = self.palette_id
+            if engine_glow_control_enabled(self.package_root):
+                apply_engine_glow_to_package_root(self.package_root, engine_glow_strength(self.package_root))
             if self.needs_view_layer_update:
                 view_layer = getattr(self.context, "view_layer", None)
                 update = getattr(view_layer, "update", None) if view_layer is not None else None
@@ -802,6 +808,252 @@ def _string_prop(obj: bpy.types.ID, name: str) -> str | None:
     if isinstance(value, str) and value:
         return value
     return None
+
+
+_ENGINE_GLOW_OVERRIDE_PROP = "starbreaker_engine_glow_override_material"
+_ENGINE_GLOW_OVERRIDE_SIDECAR_PROP = "starbreaker_engine_glow_override_sidecar"
+_ENGINE_GLOW_OVERRIDE_INDEX_PROP = "starbreaker_engine_glow_override_source_index"
+
+
+def _material_source_index(material: bpy.types.Material) -> int | None:
+    payload = material.get(PROP_SUBMATERIAL_JSON)
+    if not isinstance(payload, str):
+        return None
+    try:
+        data = json.loads(payload)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    raw_index = data.get("source_material_index", data.get("index"))
+    try:
+        return int(raw_index)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_engine_glow_path(value: str | None) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    normalized = value.replace("\\", "/")
+    if normalized.startswith("Data/"):
+        return normalized.casefold()
+    return f"Data/{normalized}".casefold()
+
+
+def _engine_glow_targets(package_root: bpy.types.Object) -> dict[tuple[str, str], set[int]]:
+    payload = _string_prop(package_root, PROP_ENGINE_GLOW_CONTROL_JSON)
+    if payload is None:
+        try:
+            package = _load_package_from_root(package_root)
+        except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError, ValueError):
+            package = None
+        control = getattr(getattr(package, "scene", None), "engine_glow_control", None)
+        if control is not None:
+            payload = json.dumps(control.raw, separators=(",", ":"), sort_keys=True)
+            package_root[PROP_ENGINE_GLOW_CONTROL_JSON] = payload
+            if not isinstance(package_root.get(PROP_ENGINE_GLOW_STRENGTH), (int, float)):
+                package_root[PROP_ENGINE_GLOW_STRENGTH] = float(control.default_strength)
+    if payload is None:
+        return {}
+    try:
+        data = json.loads(payload)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    targets = data.get("targets")
+    if not isinstance(targets, list):
+        return {}
+    by_instance_and_sidecar: dict[tuple[str, str], set[int]] = {}
+    for target in targets:
+        if not isinstance(target, dict):
+            continue
+        sidecar = target.get("material_sidecar")
+        if not isinstance(sidecar, str) or not sidecar:
+            continue
+        mesh_asset = _normalize_engine_glow_path(target.get("mesh_asset"))
+        if mesh_asset is None:
+            continue
+        try:
+            source_index = int(target.get("source_material_index", 0))
+        except (TypeError, ValueError):
+            continue
+        key = (mesh_asset, sidecar.replace("\\", "/").casefold())
+        by_instance_and_sidecar.setdefault(key, set()).add(source_index)
+    return by_instance_and_sidecar
+
+
+def engine_glow_control_enabled(package_root: bpy.types.Object) -> bool:
+    return bool(_engine_glow_targets(package_root))
+
+
+def engine_glow_strength(package_root: bpy.types.Object) -> float:
+    value = package_root.get(PROP_ENGINE_GLOW_STRENGTH)
+    if isinstance(value, (int, float)):
+        return float(value)
+    payload = _string_prop(package_root, PROP_ENGINE_GLOW_CONTROL_JSON)
+    if payload is None:
+        _engine_glow_targets(package_root)
+        payload = _string_prop(package_root, PROP_ENGINE_GLOW_CONTROL_JSON)
+    if payload is None:
+        return 3.0
+    try:
+        data = json.loads(payload)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return 3.0
+    if isinstance(data, dict):
+        default_strength = data.get("default_strength", data.get("default_percent"))
+        if isinstance(default_strength, (int, float)):
+            return float(default_strength)
+    return 3.0
+
+
+def _material_for_engine_glow_slot(
+    material: bpy.types.Material,
+    sidecar_key: str,
+    source_index: int,
+    override_cache: dict[tuple[str, int], bpy.types.Material],
+) -> bpy.types.Material:
+    key = (sidecar_key, source_index)
+    existing = override_cache.get(key)
+    if existing is not None:
+        return existing
+    base_name = material.name.split("__engine_glow", 1)[0]
+    existing = _find_engine_glow_override_material(key, base_name)
+    if existing is not None:
+        override_cache[key] = existing
+        return existing
+    if bool(material.get(_ENGINE_GLOW_OVERRIDE_PROP)):
+        material[_ENGINE_GLOW_OVERRIDE_SIDECAR_PROP] = sidecar_key
+        material[_ENGINE_GLOW_OVERRIDE_INDEX_PROP] = int(source_index)
+        override_cache[key] = material
+        return material
+    copy = material.copy()
+    copy.name = f"{material.name}__engine_glow"
+    copy[_ENGINE_GLOW_OVERRIDE_PROP] = True
+    copy[_ENGINE_GLOW_OVERRIDE_SIDECAR_PROP] = sidecar_key
+    copy[_ENGINE_GLOW_OVERRIDE_INDEX_PROP] = int(source_index)
+    override_cache[key] = copy
+    return copy
+
+
+def _find_engine_glow_override_material(key: tuple[str, int], base_name: str) -> bpy.types.Material | None:
+    materials = getattr(getattr(bpy, "data", None), "materials", ())
+    candidates = [
+        material
+        for material in materials
+        if _engine_glow_override_matches(material, key, base_name)
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda material: _engine_glow_override_sort_key(material, base_name))
+    material = candidates[0]
+    material[_ENGINE_GLOW_OVERRIDE_SIDECAR_PROP] = key[0]
+    material[_ENGINE_GLOW_OVERRIDE_INDEX_PROP] = int(key[1])
+    return material
+
+
+def _engine_glow_override_matches(material: bpy.types.Material, key: tuple[str, int], base_name: str) -> bool:
+    if not bool(material.get(_ENGINE_GLOW_OVERRIDE_PROP)):
+        return False
+    stored_sidecar = material.get(_ENGINE_GLOW_OVERRIDE_SIDECAR_PROP)
+    stored_index = material.get(_ENGINE_GLOW_OVERRIDE_INDEX_PROP)
+    if isinstance(stored_sidecar, str) and stored_sidecar == key[0]:
+        try:
+            if int(stored_index) == key[1]:
+                return True
+        except (TypeError, ValueError):
+            pass
+    return material.name.startswith(f"{base_name}__engine_glow")
+
+
+def _engine_glow_override_sort_key(material: bpy.types.Material, base_name: str) -> tuple[int, str]:
+    exact_name = f"{base_name}__engine_glow"
+    return (0 if material.name == exact_name else 1, material.name)
+
+
+def _purge_duplicate_engine_glow_overrides(override_cache: dict[tuple[str, int], bpy.types.Material]) -> None:
+    materials = getattr(getattr(bpy, "data", None), "materials", None)
+    if materials is None:
+        return
+    for key, canonical in override_cache.items():
+        base_name = canonical.name.split("__engine_glow", 1)[0]
+        for material in list(materials):
+            if material is canonical:
+                continue
+            if not _engine_glow_override_matches(material, key, base_name):
+                continue
+            if getattr(material, "users", 0) != 0:
+                continue
+            remove = getattr(materials, "remove", None)
+            if callable(remove):
+                remove(material)
+
+
+def apply_engine_glow_to_package_root(package_root: bpy.types.Object, strength: float) -> int:
+    targets_by_instance_and_sidecar = _engine_glow_targets(package_root)
+    if not targets_by_instance_and_sidecar:
+        return 0
+    strength = float(strength)
+    emission_color = (0.0, 0.0, 0.0, 1.0) if strength == 0.0 else (1.0, 1.0, 1.0, 1.0)
+    updated = 0
+    seen_materials: set[int] = set()
+    override_cache: dict[tuple[str, int], bpy.types.Material] = {}
+    for obj in _iter_package_objects(package_root):
+        instance = _scene_instance_from_object(obj)
+        instance_asset = _normalize_engine_glow_path(instance.mesh_asset if instance is not None else None)
+        if instance_asset is None:
+            continue
+        for slot in getattr(obj, "material_slots", []):
+            material = getattr(slot, "material", None)
+            if material is None:
+                continue
+            sidecar = _string_prop(material, PROP_MATERIAL_SIDECAR)
+            if sidecar is None:
+                continue
+            sidecar_key = sidecar.replace("\\", "/").casefold()
+            target_indices = targets_by_instance_and_sidecar.get((instance_asset, sidecar_key))
+            if not target_indices:
+                continue
+            source_index = _material_source_index(material)
+            if source_index is None or source_index not in target_indices:
+                continue
+            material = _material_for_engine_glow_slot(material, sidecar_key, source_index, override_cache)
+            slot.material = material
+            material_id = id(material)
+            if material_id in seen_materials:
+                continue
+            seen_materials.add(material_id)
+            node_tree = getattr(material, "node_tree", None)
+            if node_tree is None:
+                continue
+            material_changed = False
+            for node in getattr(node_tree, "nodes", []):
+                if getattr(node, "bl_idname", "") != "ShaderNodeGroup":
+                    continue
+                palette_input = getattr(node, "inputs", {}).get("Palette Color")
+                if (
+                    palette_input is not None
+                    and (getattr(node, "label", "") == "Primary Layer" or getattr(node, "name", "") == "Primary Layer")
+                ):
+                    palette_input.default_value = emission_color
+                    material_changed = True
+                strength_input = getattr(node, "inputs", {}).get("Emission Strength")
+                if strength_input is None:
+                    continue
+                strength_input.default_value = strength
+                for color_socket_name in ("Emission Color", "Emission"):
+                    color_input = getattr(node, "inputs", {}).get(color_socket_name)
+                    if color_input is not None:
+                        color_input.default_value = emission_color
+                        break
+                material_changed = True
+            if material_changed:
+                updated += 1
+    package_root[PROP_ENGINE_GLOW_STRENGTH] = float(strength)
+    _purge_duplicate_engine_glow_overrides(override_cache)
+    return updated
 
 
 _LIGHT_STATE_PRIORITY = (

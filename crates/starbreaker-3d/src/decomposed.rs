@@ -9,7 +9,7 @@ use starbreaker_p4k::MappedP4k;
 
 use crate::error::Error;
 use crate::gltf::{offset_to_gltf_matrix, GlbBuilder, PackedMeshInfo};
-use crate::mtl::{MtlFile, SemanticTextureBinding, SubMaterial, TextureSemanticRole, TintPalette};
+use crate::mtl::{MtlFile, SemanticTextureBinding, ShaderFamily, SubMaterial, TextureSemanticRole, TintPalette};
 use crate::nmc::NodeMeshCombo;
 use crate::pipeline::{
     DecomposedExport, ExportFormat, ExportOptions, ExportedFile, ExportedFileKind, InteriorCgfEntry,
@@ -235,6 +235,7 @@ fn resolve_child_instance_transforms(input: &DecomposedInput) -> Vec<ResolvedChi
                 bones: child.bones.clone(),
                 skeleton_source_path: child.skeleton_source_path.clone(),
                 entity_name: child.entity_name.clone(),
+                entity_category: child.entity_category.clone(),
                 parent_node_name: child.parent_node_name.clone(),
                 parent_entity_name: child.parent_entity_name.clone(),
                 no_rotation: child.no_rotation,
@@ -342,6 +343,94 @@ fn package_directory_name(entity_name: &str, lod: u32, mip: u32) -> String {
 
 fn package_relative_path(package_name: &str, file_name: &str) -> String {
     format!("Packages/{package_name}/{file_name}")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EngineGlowTargetRecord {
+    entity_name: String,
+    geometry_path: String,
+    mesh_asset: String,
+    material_sidecar: String,
+    source_material_index: u32,
+    submaterial_name: String,
+    blender_material_name: String,
+}
+
+fn build_thruster_engine_glow_targets(
+    mesh: &Mesh,
+    materials: Option<&MtlFile>,
+    material_sidecar: Option<&str>,
+    sidecar_original_indices: &[u32],
+    entity_name: &str,
+    geometry_path: &str,
+    mesh_asset: &str,
+) -> Vec<EngineGlowTargetRecord> {
+    let Some(materials) = materials else {
+        return Vec::new();
+    };
+    let Some(material_sidecar) = material_sidecar else {
+        return Vec::new();
+    };
+    let source_indices: HashSet<u32> = mesh
+        .submeshes
+        .iter()
+        .map(|submesh| submesh.source_material_id.unwrap_or(submesh.material_id))
+        .collect();
+    if source_indices.is_empty() {
+        return Vec::new();
+    }
+    let source_stem = materials
+        .source_path
+        .as_deref()
+        .unwrap_or(material_sidecar)
+        .rsplit('/')
+        .next()
+        .unwrap_or(material_sidecar)
+        .strip_suffix(".mtl")
+        .unwrap_or(material_sidecar);
+    let blender_material_names = preferred_blender_material_names(&materials.materials, source_stem);
+    materials
+        .materials
+        .iter()
+        .enumerate()
+        .filter_map(|(filtered_index, material)| {
+            let source_index = sidecar_original_indices
+                .get(filtered_index)
+                .copied()
+                .unwrap_or(filtered_index as u32);
+            if !source_indices.contains(&source_index) {
+                return None;
+            }
+            if !is_engine_glow_material(material) {
+                return None;
+            }
+            Some(EngineGlowTargetRecord {
+                entity_name: entity_name.to_string(),
+                geometry_path: normalize_requested_source_path(geometry_path),
+                mesh_asset: mesh_asset.to_string(),
+                material_sidecar: material_sidecar.to_string(),
+                source_material_index: source_index,
+                submaterial_name: material.name.clone(),
+                blender_material_name: blender_material_names
+                    .get(filtered_index)
+                    .cloned()
+                    .unwrap_or_else(|| material.name.clone()),
+            })
+        })
+        .collect()
+}
+
+fn is_engine_glow_material(material: &SubMaterial) -> bool {
+    if !matches!(material.shader_family(), ShaderFamily::Illum | ShaderFamily::HardSurface) {
+        return false;
+    }
+    let emissive_factor = material.emissive_factor();
+    let has_emissive_energy = emissive_factor.iter().any(|component| *component > 0.0) || material.glow > 0.0;
+    let has_emissive_texture = material.texture_slots.iter().any(|slot| {
+        let lowered = slot.path.to_ascii_lowercase();
+        lowered.contains("glow") || lowered.contains("emissive")
+    });
+    has_emissive_energy || has_emissive_texture
 }
 
 fn normalize_package_subdir(subdir: &str) -> Option<String> {
@@ -814,6 +903,7 @@ pub(crate) fn write_decomposed_export(
             &mut mtl_cache,
         )
     });
+    let mut engine_glow_targets = Vec::new();
     let root_palette_id = input
         .root_palette
         .as_ref()
@@ -919,6 +1009,21 @@ pub(crate) fn write_decomposed_export(
                 &mut mtl_cache,
             )
         });
+        if child
+            .entity_category
+            .as_deref()
+            .is_some_and(|category| category.eq_ignore_ascii_case("Thruster"))
+        {
+            engine_glow_targets.extend(build_thruster_engine_glow_targets(
+                &child.mesh,
+                child_material_view.sidecar_materials.as_ref(),
+                material_sidecar.as_deref(),
+                &child_material_view.sidecar_original_indices,
+                &child.entity_name,
+                &child.geometry_path,
+                &mesh_asset,
+            ));
+        }
         let palette_id = child
             .palette
             .as_ref()
@@ -960,6 +1065,21 @@ pub(crate) fn write_decomposed_export(
             );
         }
     }
+    let mut dedupe = HashSet::new();
+    engine_glow_targets.retain(|target| {
+        dedupe.insert((
+            target.geometry_path.clone(),
+            target.mesh_asset.clone(),
+            target.material_sidecar.clone(),
+            target.source_material_index,
+        ))
+    });
+    engine_glow_targets.sort_by(|a, b| {
+        a.geometry_path
+            .cmp(&b.geometry_path)
+            .then(a.material_sidecar.cmp(&b.material_sidecar))
+            .then(a.source_material_index.cmp(&b.source_material_index))
+    });
     if child_count == 0 {
         report_progress(progress, CHILD_ASSETS_END, "Writing interior assets");
     }
@@ -1353,6 +1473,7 @@ pub(crate) fn write_decomposed_export(
         root_animations.as_ref(),
         &child_instances,
         &interior_records,
+        &engine_glow_targets,
         opts,
     );
     report_progress(progress, INTERIOR_ASSETS_END, "Writing manifests");
@@ -1414,6 +1535,7 @@ fn build_scene_manifest_value(
     root_animations: Option<&serde_json::Value>,
     child_instances: &[SceneInstanceRecord],
     interiors: &[InteriorContainerRecord],
+    engine_glow_targets: &[EngineGlowTargetRecord],
     opts: &ExportOptions,
 ) -> serde_json::Value {
     let mut manifest = serde_json::json!({
@@ -1450,6 +1572,29 @@ fn build_scene_manifest_value(
 
     if let Some(animations) = root_animations {
         manifest["root_entity"]["animations"] = animations.clone();
+    }
+    if !engine_glow_targets.is_empty() {
+        manifest["controls"] = serde_json::json!({
+            "engine_glow": {
+                "label": "Engine Glow",
+                "units": "emission_strength",
+                "min_strength": 0.0,
+                "max_strength": 200.0,
+                "default_strength": 3.0,
+                "targets": engine_glow_targets
+                    .iter()
+                    .map(|target| serde_json::json!({
+                        "entity_name": target.entity_name,
+                        "geometry_path": target.geometry_path,
+                        "mesh_asset": target.mesh_asset,
+                        "material_sidecar": target.material_sidecar,
+                        "source_material_index": target.source_material_index,
+                        "submaterial_name": target.submaterial_name,
+                        "blender_material_name": target.blender_material_name,
+                    }))
+                    .collect::<Vec<_>>(),
+            }
+        });
     }
 
     manifest
@@ -3924,6 +4069,7 @@ mod tests {
             None,
             &[child],
             &[interior],
+            &[],
             &ExportOptions::default(),
         );
 
@@ -3936,6 +4082,92 @@ mod tests {
         assert_eq!(value["interiors"][0]["placements"][0]["mesh_asset"], serde_json::json!("Data/Objects/Ships/Test/interior_panel.glb"));
         assert_eq!(value["package_rule"]["package_dir"], serde_json::json!("Packages/ARGO MOLE"));
         assert_eq!(value["package_rule"]["normalized_p4k_relative_paths"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn scene_manifest_includes_engine_glow_controls() {
+        let value = build_scene_manifest_value(
+            "root",
+            "DRAK Clipper",
+            "Data/Objects/Ships/Test/root.skin",
+            "Data/Objects/Ships/Test/root.mtl",
+            "Data/Objects/Ships/Test/root.glb",
+            Some("Data/Objects/Ships/Test/root.materials.json"),
+            Some("palette/root"),
+            None,
+            &[],
+            &[],
+            &[EngineGlowTargetRecord {
+                material_sidecar: "Data/Objects/Ships/Test/root.materials.json".into(),
+                entity_name: "DRAK_Clipper_Thruster_Main".into(),
+                geometry_path: "Data/Objects/Spaceships/Thrusters/DRAK/test_thruster.cga".into(),
+                mesh_asset: "Data/Objects/Spaceships/Thrusters/DRAK/test_thruster_LOD0.blend".into(),
+                source_material_index: 7,
+                submaterial_name: "Glow_Thrusters".into(),
+                blender_material_name: "root:Glow_Thrusters".into(),
+            }],
+            &ExportOptions::default(),
+        );
+
+        assert_eq!(
+            value["controls"]["engine_glow"]["default_strength"],
+            serde_json::json!(3.0)
+        );
+        assert_eq!(
+            value["controls"]["engine_glow"]["targets"][0]["geometry_path"],
+            serde_json::json!("Data/Objects/Spaceships/Thrusters/DRAK/test_thruster.cga")
+        );
+        assert_eq!(
+            value["controls"]["engine_glow"]["targets"][0]["source_material_index"],
+            serde_json::json!(7)
+        );
+    }
+
+    #[test]
+    fn engine_glow_targets_follow_datacore_thruster_entity_material_bindings() {
+        let mut glow_material = sample_submaterial();
+        glow_material.name = "Glow_Thrusters".into();
+        glow_material.shader = "Illum".into();
+        glow_material.glow = 1.0;
+
+        let materials = MtlFile {
+            materials: vec![glow_material],
+            source_path: Some("Data/Objects/Ships/Test/root.mtl".into()),
+            paint_override: None,
+            material_set: Default::default(),
+        };
+        let mesh = sample_mesh(vec![crate::types::SubMesh {
+            material_name: Some("Glow_Thrusters".into()),
+            material_id: 0,
+            source_material_id: Some(5),
+            first_index: 0,
+            num_indices: 3,
+            first_vertex: 0,
+            num_vertices: 3,
+            node_parent_index: 1,
+        }]);
+        let targets = build_thruster_engine_glow_targets(
+            &mesh,
+            Some(&materials),
+            Some("Data/Objects/Ships/Test/root.materials.json"),
+            &[5],
+            "DRAK_Test_Thruster_Main",
+            "Objects/Spaceships/Thrusters/DRAK/test_thruster.cga",
+            "Data/Objects/Spaceships/Thrusters/DRAK/test_thruster_LOD0.blend",
+        );
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].entity_name, "DRAK_Test_Thruster_Main");
+        assert_eq!(
+            targets[0].geometry_path,
+            "Data/Objects/Spaceships/Thrusters/DRAK/test_thruster.cga"
+        );
+        assert_eq!(
+            targets[0].mesh_asset,
+            "Data/Objects/Spaceships/Thrusters/DRAK/test_thruster_LOD0.blend"
+        );
+        assert_eq!(targets[0].source_material_index, 5);
+        assert_eq!(targets[0].submaterial_name, "Glow_Thrusters");
     }
 
     #[test]

@@ -2243,18 +2243,19 @@ class GroupsMixin:
     def _ensure_runtime_illum_group(self) -> bpy.types.ShaderNodeTree:
         self._invalidate_runtime_group_if_unexpected(
             "StarBreaker Runtime Illum",
-            "illum_v4",
+            "illum_v5",
             {
                 "NodeGroupInput": 1,
                 "NodeGroupOutput": 1,
                 "ShaderNodeBsdfPrincipled": 1,
                 "ShaderNodeEmission": 1,
+                "ShaderNodeMixRGB": 2,
                 "ShaderNodeAddShader": 1,
             },
         )
         group_tree, group_input, group_output = self._begin_runtime_shared_group(
             "StarBreaker Runtime Illum",
-            signature="illum_v4",
+            signature="illum_v5",
             inputs=[
                 ("Primary Color", "NodeSocketColor"),
                 ("Primary Alpha", "NodeSocketFloat"),
@@ -2270,11 +2271,12 @@ class GroupsMixin:
                 ("Primary Height", "NodeSocketFloat"),
                 ("Secondary Height", "NodeSocketFloat"),
                 ("POM Strength", "NodeSocketFloat"),
+                ("Emission Color", "NodeSocketColor"),
                 ("Emission Strength", "NodeSocketFloat"),
             ],
             outputs=[("Shader", "NodeSocketShader")],
         )
-        if group_tree.get("starbreaker_runtime_built_signature") == "illum_v4":
+        if group_tree.get("starbreaker_runtime_built_signature") == "illum_v5":
             return group_tree
         nodes = group_tree.nodes
         links = group_tree.links
@@ -2346,7 +2348,13 @@ class GroupsMixin:
 
         emission = nodes.new("ShaderNodeEmission")
         emission.location = (-120, -220)
-        links.new(color_mix.outputs[0], emission.inputs["Color"])
+        emission_color = nodes.new("ShaderNodeMixRGB")
+        emission_color.location = (-340, -220)
+        emission_color.blend_type = "MULTIPLY"
+        emission_color.inputs[0].default_value = 1.0
+        links.new(color_mix.outputs[0], emission_color.inputs[1])
+        links.new(_output_socket(group_input, "Emission Color"), emission_color.inputs[2])
+        links.new(emission_color.outputs[0], emission.inputs["Color"])
         links.new(_output_socket(group_input, "Emission Strength"), emission.inputs["Strength"])
 
         add_shader = nodes.new("ShaderNodeAddShader")
@@ -2355,7 +2363,7 @@ class GroupsMixin:
         links.new(emission.outputs[0], add_shader.inputs[1])
 
         links.new(add_shader.outputs[0], group_output.inputs["Shader"])
-        group_tree["starbreaker_runtime_built_signature"] = "illum_v4"
+        group_tree["starbreaker_runtime_built_signature"] = "illum_v5"
         return group_tree
 
     def _ensure_runtime_parallax_group(

@@ -22,6 +22,8 @@ import mathutils
 
 from ..constants import (
     PACKAGE_ROOT_PREFIX,
+    PROP_ENGINE_GLOW_CONTROL_JSON,
+    PROP_ENGINE_GLOW_STRENGTH,
     PROP_ENTITY_NAME,
     PROP_EXPORT_ROOT,
     PROP_INSTANCE_JSON,
@@ -1050,6 +1052,10 @@ class OrchestrationMixin:
         package_root[PROP_PACKAGE_NAME] = self.package.package_name
         package_root[PROP_PALETTE_ID] = palette_id or self.package.scene.root_entity.palette_id or ""
         package_root[PROP_PALETTE_SCOPE] = uuid.uuid4().hex
+        engine_glow_control = getattr(self.package.scene, "engine_glow_control", None)
+        if engine_glow_control is not None:
+            package_root[PROP_ENGINE_GLOW_CONTROL_JSON] = json.dumps(engine_glow_control.raw, separators=(",", ":"), sort_keys=True)
+            package_root[PROP_ENGINE_GLOW_STRENGTH] = float(engine_glow_control.default_strength)
         self.collection.objects.link(package_root)
         return package_root
 

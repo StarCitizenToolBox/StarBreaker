@@ -625,11 +625,72 @@ class PackageRule:
 
 
 @dataclass(frozen=True)
+class EngineGlowControlTarget:
+    entity_name: str | None
+    geometry_path: str | None
+    mesh_asset: str | None
+    material_sidecar: str | None
+    source_material_index: int
+    submaterial_name: str | None
+    blender_material_name: str | None
+
+    @classmethod
+    def from_value(cls, value: Any) -> EngineGlowControlTarget | None:
+        data = _as_dict(value)
+        sidecar = _normalize_relative_path(_as_str(data.get("material_sidecar")))
+        if sidecar is None:
+            return None
+        return cls(
+            entity_name=_as_str(data.get("entity_name")),
+            geometry_path=_normalize_relative_path(_as_str(data.get("geometry_path"))),
+            mesh_asset=_normalize_relative_path(_as_str(data.get("mesh_asset"))),
+            material_sidecar=sidecar,
+            source_material_index=int(data.get("source_material_index", 0)),
+            submaterial_name=_as_str(data.get("submaterial_name")),
+            blender_material_name=_as_str(data.get("blender_material_name")),
+        )
+
+
+@dataclass(frozen=True)
+class EngineGlowControl:
+    label: str
+    units: str
+    min_strength: float
+    max_strength: float
+    default_strength: float
+    targets: list[EngineGlowControlTarget]
+    raw: JsonDict
+
+    @classmethod
+    def from_value(cls, value: Any) -> EngineGlowControl | None:
+        data = _as_dict(value)
+        if not data:
+            return None
+        targets = [
+            target
+            for target in (EngineGlowControlTarget.from_value(item) for item in data.get("targets", []))
+            if target is not None
+        ]
+        if not targets:
+            return None
+        return cls(
+            label=str(data.get("label", "Engine Glow")),
+            units=str(data.get("units", "emission_strength")),
+            min_strength=float(data.get("min_strength", data.get("min_percent", 0.0))),
+            max_strength=float(data.get("max_strength", data.get("max_percent", 200.0))),
+            default_strength=float(data.get("default_strength", data.get("default_percent", 3.0))),
+            targets=targets,
+            raw=data,
+        )
+
+
+@dataclass(frozen=True)
 class SceneManifest:
     children: list[SceneInstanceRecord]
     interiors: list[InteriorContainerRecord]
     package_rule: PackageRule
     root_entity: SceneInstanceRecord
+    engine_glow_control: EngineGlowControl | None
     version: int
     raw: JsonDict
 
@@ -640,11 +701,13 @@ class SceneManifest:
     @classmethod
     def from_value(cls, value: Any) -> SceneManifest:
         data = _as_dict(value)
+        controls = _as_dict(data.get("controls"))
         return cls(
             children=[SceneInstanceRecord.from_value(item) for item in data.get("children", [])],
             interiors=[InteriorContainerRecord.from_value(item) for item in data.get("interiors", [])],
             package_rule=PackageRule.from_value(data.get("package_rule")),
             root_entity=SceneInstanceRecord.from_value(data.get("root_entity")),
+            engine_glow_control=EngineGlowControl.from_value(controls.get("engine_glow")),
             version=int(data.get("version", 1)),
             raw=data,
         )

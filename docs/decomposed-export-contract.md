@@ -20,6 +20,12 @@ Within that export root:
 - child attachment relationships via `parent_entity_name`, `parent_node_name`, `offset_position`, `offset_rotation`, `no_rotation`, and `port_flags`
 - interior container transforms, placement records, and exported light data
 - material sidecar and palette references for every scene instance
+- optional additive `controls.engine_glow` metadata for engine-emission tuning in importers:
+  - absolute emission-strength range metadata (`min_strength`, `max_strength`, `default_strength`)
+  - `targets[]` keyed by `mesh_asset` + `material_sidecar` + `source_material_index`
+  - `geometry_path` is retained as source evidence for the target entity
+  - target records are emitted only from DataCore `Category = Thruster` child entities
+  - informative target labels (`submaterial_name`, `blender_material_name`)
 
 `port_flags` is the raw source `SItemPortDef.Flags` string for the item port that attached a child. Importers can use this to preserve source visibility semantics; for example, Blender hides attachments by default when the source port includes `invisible` while keeping the objects present for inspection.
 

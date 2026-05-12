@@ -1704,6 +1704,7 @@ fn create_test_input(
             bones: vec![],
             skeleton_source_path: None,
             entity_name: format!("child_{}", i),
+            entity_category: None,
             parent_node_name: "Root".to_string(),
             parent_entity_name: entity_name.to_string(),
             no_rotation: false,

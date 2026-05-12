@@ -194,6 +194,7 @@ pub fn assemble_glb_with_loadout_with_progress(
                     bones: asset.bones,
                     skeleton_source_path: asset.skeleton_source_path,
                     entity_name: gear_path.rsplit('/').next().unwrap_or(gear_path).to_string(),
+                    entity_category: None,
                     parent_node_name: bone_name.clone(),
                     parent_entity_name: resolved.entity_name.clone(),
                     no_rotation: false,

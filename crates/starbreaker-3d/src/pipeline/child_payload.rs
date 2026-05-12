@@ -321,6 +321,7 @@ pub(crate) fn load_child_payloads(
         .enumerate()
         .filter_map(|(spec_index, spec)| {
             let child = &spec.child;
+            let entity_category = entity_record_category(db, &child.record);
             if child.has_geometry {
                 let asset_index = spec_asset_indices[spec_index]?;
                 let loaded = loaded_assets.get(asset_index)?.as_ref()?;
@@ -335,6 +336,7 @@ pub(crate) fn load_child_payloads(
                     bones: loaded.bones.clone(),
                     skeleton_source_path: loaded.skeleton_source_path.clone(),
                     entity_name: child.entity_name.clone(),
+                    entity_category,
                     parent_node_name: spec.parent_node_name.clone(),
                     parent_entity_name: spec.parent_entity_name.clone(),
                     no_rotation: spec.no_rotation,
@@ -355,6 +357,7 @@ pub(crate) fn load_child_payloads(
                     bones: Vec::new(),
                     skeleton_source_path: None,
                     entity_name: child.entity_name.clone(),
+                    entity_category,
                     parent_node_name: spec.parent_node_name.clone(),
                     parent_entity_name: spec.parent_entity_name.clone(),
                     no_rotation: spec.no_rotation,
@@ -368,4 +371,11 @@ pub(crate) fn load_child_payloads(
             }
         })
         .collect()
+}
+
+fn entity_record_category(db: &Database, record: &starbreaker_datacore::types::Record) -> Option<String> {
+    db.compile_path::<String>(record.struct_id(), "Category")
+        .ok()
+        .and_then(|compiled| db.query_single::<String>(&compiled, record).ok().flatten())
+        .filter(|category| !category.is_empty())
 }

@@ -30,12 +30,14 @@ from .runtime import (
     PROP_SURFACE_SHADER_MODE,
     PROP_TEMPLATE_KEY,
     SCENE_POM_DETAIL_PROP,
+    SCENE_ENGINE_GLOW_PROP,
     TEMPLATE_COLLECTION_NAME,
     MaterialRefreshSession,
     apply_pom_detail_mode,
     SCENE_WEAR_STRENGTH_PROP,
     animation_overlap_warnings,
     apply_animation_mode_to_package_root,
+    apply_engine_glow_to_package_root,
     apply_light_state,
     apply_livery_to_selected_package,
     apply_paint_to_selected_package,
@@ -43,6 +45,8 @@ from .runtime import (
     available_package_animation_items,
     package_animation_diagnostics,
     available_light_state_names,
+    engine_glow_control_enabled,
+    engine_glow_strength,
     dump_selected_metadata,
     exterior_palette_ids,
     find_package_root,
@@ -361,6 +365,20 @@ def _update_pom_detail(_: bpy.types.ID, context: bpy.types.Context) -> None:
         return
     try:
         apply_pom_detail_mode(getattr(scene, SCENE_POM_DETAIL_PROP, POM_DETAIL_DEFAULT))
+    except Exception:
+        return
+    _tag_view3d_redraws(context)
+
+
+def _update_engine_glow(_: bpy.types.ID, context: bpy.types.Context) -> None:
+    scene = getattr(context, "scene", None)
+    if scene is None:
+        return
+    package_root = _package_root_from_context(context)
+    if package_root is None or not engine_glow_control_enabled(package_root):
+        return
+    try:
+        apply_engine_glow_to_package_root(package_root, float(getattr(scene, SCENE_ENGINE_GLOW_PROP, 3.0)))
     except Exception:
         return
     _tag_view3d_redraws(context)
@@ -1356,6 +1374,9 @@ class STARBREAKER_PT_tools(Panel):
                 op = row.operator(STARBREAKER_OT_switch_light_state.bl_idname, **kwargs)
                 op.state_name = state_name
                 op.include_strobe = include_strobe
+            if engine_glow_control_enabled(package_root):
+                light_box.label(text=f"Current Engine Glow Strength: {engine_glow_strength(package_root):.1f}")
+                light_box.prop(context.scene, SCENE_ENGINE_GLOW_PROP, text="Engine Glow Strength", slider=True)
 
         if package is not None:
             animation_items = available_package_animation_items(package)
@@ -1634,6 +1655,22 @@ def register() -> None:
     )
     setattr(
         bpy.types.Scene,
+        SCENE_ENGINE_GLOW_PROP,
+        FloatProperty(
+            name="Engine Glow",
+            description=(
+                "Absolute emission strength for DataCore thruster glow materials exported in scene.json controls."
+            ),
+            default=3.0,
+            min=0.0,
+            max=200.0,
+            soft_min=0.0,
+            soft_max=200.0,
+            update=_update_engine_glow,
+        ),
+    )
+    setattr(
+        bpy.types.Scene,
         _SCENE_ANIMATION_FPS_POLICY_PROP,
         EnumProperty(
             name="Animation FPS",
@@ -1669,6 +1706,8 @@ def unregister() -> None:
         delattr(bpy.types.Scene, SCENE_POM_DETAIL_PROP)
     if hasattr(bpy.types.Scene, SCENE_WEAR_STRENGTH_PROP):
         delattr(bpy.types.Scene, SCENE_WEAR_STRENGTH_PROP)
+    if hasattr(bpy.types.Scene, SCENE_ENGINE_GLOW_PROP):
+        delattr(bpy.types.Scene, SCENE_ENGINE_GLOW_PROP)
     if hasattr(bpy.types.Scene, _SCENE_ANIMATION_FPS_POLICY_PROP):
         delattr(bpy.types.Scene, _SCENE_ANIMATION_FPS_POLICY_PROP)
     for prop_name in (

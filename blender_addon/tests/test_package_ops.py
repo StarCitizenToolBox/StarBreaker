@@ -48,11 +48,48 @@ class FakeMaterial(dict):
         super().__init__(props)
         self.name = name
         self.library = library
+        self.node_tree = None
+
+    def copy(self):
+        clone = FakeMaterial(self.name, library=self.library, **dict(self))
+        clone.node_tree = self.node_tree.copy() if self.node_tree is not None else None
+        return clone
 
 
 class FakeSlot:
     def __init__(self, material=None):
         self.material = material
+
+
+class FakeSocket:
+    def __init__(self, default_value: float):
+        self.default_value = default_value
+
+
+class FakeNode:
+    def __init__(self, emission_strength: float, *, label: str = "", include_emission: bool = True):
+        self.bl_idname = "ShaderNodeGroup"
+        self.label = label
+        self.name = label or "Group"
+        self.inputs = {"Palette Color": FakeSocket((0.0, 0.0, 0.0, 1.0))}
+        if include_emission:
+            self.inputs.update(
+                {
+                    "Emission Strength": FakeSocket(emission_strength),
+                    "Emission Color": FakeSocket((1.0, 1.0, 1.0, 1.0)),
+                }
+            )
+
+
+class FakeNodeTree:
+    def __init__(self, emission_strength: float):
+        self.nodes = [
+            FakeNode(emission_strength, label="StarBreaker Illum"),
+            FakeNode(emission_strength, label="Primary Layer", include_emission=False),
+        ]
+
+    def copy(self):
+        return FakeNodeTree(self.nodes[0].inputs["Emission Strength"].default_value)
 
 
 class FakeUVLayer:
@@ -152,7 +189,15 @@ def _load_package_ops() -> tuple[types.ModuleType, types.ModuleType]:
             )
 
     manifest_stub.PackageBundle = PackageBundle
-    manifest_stub.SceneInstanceRecord = type("SceneInstanceRecord", (), {})
+    class SceneInstanceRecord:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+        @classmethod
+        def from_value(cls, value):
+            return cls(**value)
+
+    manifest_stub.SceneInstanceRecord = SceneInstanceRecord
     sys.modules["sb_pkg_test_addon.manifest"] = manifest_stub
 
     palette_stub = types.ModuleType("sb_pkg_test_addon.palette")
@@ -618,6 +663,80 @@ class PackageOpsTests(unittest.TestCase):
             self.assertFalse(self.package_ops.package_root_needs_material_refresh(package_root))
         finally:
             self.package_ops._load_package_from_root = original_load
+
+    def test_apply_engine_glow_to_package_root_updates_targeted_materials(self) -> None:
+        package_root = FakeObject(
+            "Root",
+            starbreaker_package_root=True,
+            starbreaker_engine_glow_control=json.dumps(
+                {
+                    "targets": [
+                        {
+                            "geometry_path": "Data/Objects/Ships/Test/thruster.cga",
+                            "mesh_asset": "Data/Objects/Ships/Test/thruster_LOD0.blend",
+                            "material_sidecar": "Data/Objects/Ships/Test/root.materials.json",
+                            "source_material_index": 4,
+                        }
+                    ]
+                }
+            ),
+        )
+        mesh = FakeObject("mesh")
+        mesh.type = "MESH"
+        mesh.parent = package_root
+        mesh["starbreaker_instance_json"] = json.dumps(
+            {
+                "entity_name": "Test_Thruster",
+                "geometry_path": None,
+                "mesh_asset": "Data/Objects/Ships/Test/thruster_LOD0.blend",
+            }
+        )
+        package_root.children.append(mesh)
+        material = FakeMaterial(
+            "Glow",
+            starbreaker_material_sidecar="Data/Objects/Ships/Test/root.materials.json",
+            starbreaker_submaterial_json=json.dumps({"index": 4}),
+        )
+        material.node_tree = FakeNodeTree(2.0)
+        mesh.material_slots = [FakeSlot(material)]
+        mesh_2 = FakeObject("mesh_2")
+        mesh_2.type = "MESH"
+        mesh_2.parent = package_root
+        mesh_2["starbreaker_instance_json"] = mesh["starbreaker_instance_json"]
+        mesh_2.material_slots = [FakeSlot(material)]
+        package_root.children.append(mesh_2)
+
+        other_mesh = FakeObject("other_mesh")
+        other_mesh.type = "MESH"
+        other_mesh.parent = package_root
+        other_mesh["starbreaker_instance_json"] = json.dumps(
+            {
+                "entity_name": "Test_Hull",
+                "geometry_path": "Data/Objects/Ships/Test/hull.cga",
+                "mesh_asset": "Data/Objects/Ships/Test/hull.blend",
+            }
+        )
+        other_mesh.material_slots = [FakeSlot(material)]
+        package_root.children.append(other_mesh)
+
+        updated = self.package_ops.apply_engine_glow_to_package_root(package_root, 150.0)
+
+        self.assertEqual(updated, 1)
+        self.assertIsNot(mesh.material_slots[0].material, material)
+        self.assertIs(mesh.material_slots[0].material, mesh_2.material_slots[0].material)
+        self.assertIs(other_mesh.material_slots[0].material, material)
+        self.assertAlmostEqual(mesh.material_slots[0].material.node_tree.nodes[0].inputs["Emission Strength"].default_value, 150.0)
+        self.assertEqual(
+            mesh.material_slots[0].material.node_tree.nodes[1].inputs["Palette Color"].default_value,
+            (1.0, 1.0, 1.0, 1.0),
+        )
+        self.assertAlmostEqual(float(package_root.get("starbreaker_engine_glow_strength")), 150.0)
+
+        self.package_ops.apply_engine_glow_to_package_root(package_root, 0.0)
+        self.assertEqual(
+            mesh.material_slots[0].material.node_tree.nodes[1].inputs["Palette Color"].default_value,
+            (0.0, 0.0, 0.0, 1.0),
+        )
 
     def test_resolve_package_relative_scene_path_from_opened_blend_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
