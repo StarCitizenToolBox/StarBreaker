@@ -741,7 +741,24 @@ fn load_single_mesh(
         })?;
     let mesh_bytes = p4k.read(entry).map_err(Error::P4k)?;
 
-    let (nmc, mtl_file) = load_nmc_and_material(p4k, geometry_path, material_path);
+    let (nmc, mut mtl_file) = load_nmc_and_material(p4k, geometry_path, material_path);
+    let mesh = crate::parse_skin_with_options(&mesh_bytes, use_model_bbox)?;
+    if material_path_is_incompatible_with_mesh(&mesh, mtl_file.as_ref()) {
+        let metadata_bytes = p4k
+            .entry_case_insensitive(&p4k_geom_path)
+            .and_then(|entry| p4k.read(entry).ok());
+        if let Some(fallback_mtl) = resolve_material(p4k, "", &p4k_geom_path, metadata_bytes.as_deref()) {
+            if !material_path_is_incompatible_with_mesh(&mesh, Some(&fallback_mtl)) {
+                log::debug!(
+                    "material override '{}' does not cover mesh material ids for {}; using geometry metadata material {}",
+                    material_path,
+                    geometry_path,
+                    fallback_mtl.source_path.as_deref().unwrap_or("<unknown>")
+                );
+                mtl_file = Some(fallback_mtl);
+            }
+        }
+    }
 
     let textures = if !opts.material_mode.include_textures() {
         None
@@ -761,8 +778,66 @@ fn load_single_mesh(
             })
     };
 
-    let mesh = crate::parse_skin_with_options(&mesh_bytes, use_model_bbox)?;
-
     Ok((mesh, mtl_file, textures, nmc))
 }
 
+fn material_path_is_incompatible_with_mesh(mesh: &crate::Mesh, mtl_file: Option<&mtl::MtlFile>) -> bool {
+    let Some(mtl_file) = mtl_file else {
+        return false;
+    };
+    !mesh_material_ids_fit_material_count(mesh, mtl_file.materials.len() as u32)
+}
+
+fn mesh_material_ids_fit_material_count(mesh: &crate::Mesh, material_count: u32) -> bool {
+    mesh.submeshes
+        .iter()
+        .all(|submesh| submesh.material_id < material_count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::SubMesh;
+
+    #[test]
+    fn mesh_material_ids_detect_material_override_that_cannot_cover_mesh() {
+        let mesh = crate::Mesh {
+            positions: Vec::new(),
+            indices: Vec::new(),
+            uvs: None,
+            secondary_uvs: None,
+            normals: None,
+            tangents: None,
+            colors: None,
+            submeshes: vec![
+                SubMesh {
+                    material_name: None,
+                    material_id: 0,
+                    source_material_id: None,
+                    first_index: 0,
+                    num_indices: 3,
+                    first_vertex: 0,
+                    num_vertices: 3,
+                    node_parent_index: 0,
+                },
+                SubMesh {
+                    material_name: None,
+                    material_id: 2,
+                    source_material_id: None,
+                    first_index: 3,
+                    num_indices: 3,
+                    first_vertex: 3,
+                    num_vertices: 3,
+                    node_parent_index: 0,
+                },
+            ],
+            model_min: [0.0; 3],
+            model_max: [0.0; 3],
+            scaling_min: [0.0; 3],
+            scaling_max: [0.0; 3],
+        };
+
+        assert!(mesh_material_ids_fit_material_count(&mesh, 3));
+        assert!(!mesh_material_ids_fit_material_count(&mesh, 2));
+    }
+}

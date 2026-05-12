@@ -270,7 +270,6 @@ fn parse_soc(
 // ── IncludedObjects → InteriorMesh ──────────────────────────────────────────
 
 fn included_objects_to_meshes(io: &IncludedObjects) -> Vec<InteriorMesh> {
-    let material_path = io.material_paths.first().cloned();
     log::debug!(
         "  IncludedObjects: {} CGFs, {} objects, {} materials, {} palettes",
         io.cgf_paths.len(),
@@ -312,7 +311,7 @@ fn included_objects_to_meshes(io: &IncludedObjects) -> Vec<InteriorMesh> {
             let transform = f64_3x4_to_f32_4x4(&obj.transform);
             Some(InteriorMesh {
                 cgf_path,
-                material_path: material_path.clone(),
+                material_path: None,
                 transform,
                 entity_class_guid: None,
             })
@@ -1090,6 +1089,8 @@ pub fn build_container_transform(pos: [f32; 3], rot_deg: [f32; 3]) -> [[f32; 4];
 
 #[cfg(test)]
 mod tests {
+    use crate::included_objects::{IncludedObject, IncludedObjects};
+
     use super::{quat_mul, quat_rotate_vec, semantic_light_kind_for_light};
 
     fn approx_eq3(left: [f64; 3], right: [f64; 3]) {
@@ -1140,6 +1141,28 @@ mod tests {
     fn authored_light_intensity_matches_max_script_scale() {
         assert_eq!(super::authored_light_intensity_to_candela(1.0), 1500.0);
         assert_eq!(super::authored_light_intensity_to_candela(2.5), 3750.0);
+    }
+
+    #[test]
+    fn included_objects_use_geometry_authored_materials() {
+        let io = IncludedObjects {
+            cgf_paths: vec!["objects/props/toolbox.cgf".to_string()],
+            material_paths: vec!["materials/container_default".to_string()],
+            tint_palette_paths: Vec::new(),
+            objects: vec![IncludedObject {
+                cgf_index: 0,
+                unknown2: 0,
+                transform: [[0.0; 3]; 4],
+                vector1: [0.0; 3],
+                vector2: [0.0; 3],
+            }],
+        };
+
+        let meshes = super::included_objects_to_meshes(&io);
+
+        assert_eq!(meshes.len(), 1);
+        assert_eq!(meshes[0].cgf_path, "objects/props/toolbox.cgf");
+        assert_eq!(meshes[0].material_path, None);
     }
 
     #[test]

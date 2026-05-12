@@ -3366,6 +3366,18 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
     decal_mesh_refs: &HashSet<(String, String)>,
 ) -> Result<Vec<u8>, Error> {
     let children_count = mesh_instances_input.len();
+    let mut used_light_names = HashMap::new();
+    let mut light_source_names = HashMap::new();
+    let lights = lights
+        .iter()
+        .map(|light| {
+            let mut scene_light = light.clone();
+            scene_light.name = unique_scene_object_name(&light.name, &mut used_light_names);
+            light_source_names.insert(scene_light.name.clone(), light.name.clone());
+            scene_light
+        })
+        .collect::<Vec<_>>();
+    let lights = lights.as_slice();
     // Build a minimal input structure for compatibility with internal logic
     let mut ptrs = PtrAlloc::new(0x1000);
     
@@ -3949,7 +3961,12 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
         let light = &lights[*idx];
         
         // Check if there's an updated PNG path in the map, otherwise use original gobo_path
+        let source_light_name = light_source_names
+            .get(&light.name)
+            .map(String::as_str)
+            .unwrap_or(light.name.as_str());
         let effective_gobo_path = light_projector_texture_map.get(&light.name)
+            .or_else(|| light_projector_texture_map.get(source_light_name))
             .map(|s| s.as_str())
             .or(light.gobo_path.as_deref());
         
@@ -4007,7 +4024,7 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
         light_data_idprops.push(light_data_props);
         let light_props = allocate_idprop_blocks(
             &mut ptrs,
-            light_object_properties(package_name, &light.name, light.radius_source),
+            light_object_properties(package_name, source_light_name, light.radius_source),
         );
         let light_props_ptr = light_props.as_ref().map(|props| props.root_ptr).unwrap_or(0);
         

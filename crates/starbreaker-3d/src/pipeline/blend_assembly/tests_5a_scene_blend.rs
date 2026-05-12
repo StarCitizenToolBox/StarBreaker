@@ -65,10 +65,45 @@ fn mesh_block_by_name<'a>(blocks: &'a [BlendBlock<'a>], name: &str) -> &'a Blend
         .unwrap_or_else(|| panic!("missing Mesh block named {name}"))
 }
 
+fn id_block_names(blocks: &[BlendBlock<'_>], code: &[u8; 4]) -> Vec<String> {
+    blocks
+        .iter()
+        .filter(|block| block.code == code)
+        .map(|block| cstr_at(block.data, 42, 258).to_string())
+        .collect()
+}
+
 fn cstr_at(data: &[u8], offset: usize, len: usize) -> &str {
     let raw = &data[offset..offset + len];
     let end = raw.iter().position(|&byte| byte == 0).unwrap_or(raw.len());
     std::str::from_utf8(&raw[..end]).unwrap()
+}
+
+fn test_light(name: &str) -> ExtractedLight {
+    ExtractedLight {
+        name: name.to_string(),
+        parent_empty_name: None,
+        parent_empty_loc: [0.0, 0.0, 0.0],
+        parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+        parent_empty_scale: [1.0, 1.0, 1.0],
+        position_blend: [0.0, 0.0, 0.0],
+        rotation_blend: [1.0, 0.0, 0.0, 0.0],
+        color: [1.0, 1.0, 1.0],
+        lamp_type: 0,
+        energy_watts: 100.0,
+        radius: 10.0,
+        cutoff_distance: 10.0,
+        radius_source: 10.0,
+        spot_size: 0.0,
+        spot_blend: 0.0,
+        intensity_candela: 5.0,
+        temperature_k: 3000.0,
+        use_temperature: false,
+        gobo_path: None,
+        active_state: "default".to_string(),
+        states_json: None,
+        semantic_light_kind: "point".to_string(),
+    }
 }
 
 fn test_mesh_with_submeshes(submeshes: Vec<SubMesh>) -> Mesh {
@@ -1633,30 +1668,7 @@ fn test_create_scene_blend_resolves_parent_node_case_insensitively() {
 
 #[test]
 fn test_create_scene_blend_parents_lights_to_entity_wrapper_with_properties() {
-    let light = ExtractedLight {
-        name: "SceneLight".to_string(),
-        parent_empty_name: None,
-        parent_empty_loc: [0.0, 0.0, 0.0],
-        parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
-        parent_empty_scale: [1.0, 1.0, 1.0],
-        position_blend: [0.0, 0.0, 0.0],
-        rotation_blend: [1.0, 0.0, 0.0, 0.0],
-        color: [1.0, 1.0, 1.0],
-        lamp_type: 0,
-        energy_watts: 100.0,
-        radius: 10.0,
-        cutoff_distance: 10.0,
-        radius_source: 10.0,
-        spot_size: 0.0,
-        spot_blend: 0.0,
-        intensity_candela: 5.0,
-        temperature_k: 3000.0,
-        use_temperature: false,
-        gobo_path: None,
-        active_state: "default".to_string(),
-            states_json: None,
-            semantic_light_kind: "point".to_string(),
-    };
+    let light = test_light("SceneLight");
     let blend_bytes = create_scene_blend("LightEntity", 0, "Data/Objects", &[light]).unwrap();
     let blocks = parse_blend_blocks(&blend_bytes);
 
@@ -1669,6 +1681,26 @@ fn test_create_scene_blend_parents_lights_to_entity_wrapper_with_properties() {
     );
     assert_ne!(u64::from_le_bytes(light_object.data[344..352].try_into().unwrap()), 0);
     assert!(blend_bytes.windows(b"starbreaker_source_node_name".len()).any(|w| w == b"starbreaker_source_node_name"));
+}
+
+#[test]
+fn scene_blend_makes_duplicate_light_id_names_unique() {
+    let blend_bytes = create_scene_blend(
+        "LightEntity",
+        0,
+        "Data/Objects",
+        &[test_light("RepeatedLight"), test_light("RepeatedLight")],
+    )
+    .unwrap();
+    let blocks = parse_blend_blocks(&blend_bytes);
+
+    let object_names = id_block_names(&blocks, b"OB\0\0");
+    let lamp_names = id_block_names(&blocks, b"LA\0\0");
+
+    assert_eq!(object_names.iter().filter(|name| name.as_str() == "RepeatedLight").count(), 1);
+    assert!(object_names.iter().any(|name| name == "RepeatedLight_001"));
+    assert_eq!(lamp_names.iter().filter(|name| name.as_str() == "RepeatedLight").count(), 1);
+    assert!(lamp_names.iter().any(|name| name == "RepeatedLight_001"));
 }
 
 /// Helper to create a minimal DecomposedInput for testing
