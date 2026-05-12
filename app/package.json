@@ -7,7 +7,8 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "format": "oxfmt --write src/",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "build-exe": "tauri build --no-bundle --no-sign"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.1",
