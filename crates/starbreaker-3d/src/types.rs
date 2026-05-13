@@ -502,6 +502,8 @@ pub struct EntityPayload {
     pub entity_name: String,
     /// DataCore EntityClassDefinition.Category for this payload, if present.
     pub entity_category: Option<String>,
+    /// DataCore SAttachableComponentParams.AttachDef.Type for this payload, if present.
+    pub attach_def_type: Option<String>,
     /// NMC node name in the parent to attach under.
     pub parent_node_name: String,
     /// Fallback: parent entity name to attach to if parent_node_name isn't found.

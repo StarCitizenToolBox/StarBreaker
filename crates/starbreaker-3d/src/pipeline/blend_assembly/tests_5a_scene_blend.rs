@@ -1855,6 +1855,7 @@ fn create_test_input(
             skeleton_source_path: None,
             entity_name: format!("child_{}", i),
             entity_category: None,
+            attach_def_type: None,
             parent_node_name: "Root".to_string(),
             parent_entity_name: entity_name.to_string(),
             no_rotation: false,

@@ -67,29 +67,47 @@ class FakeSocket:
 
 
 class FakeNode:
-    def __init__(self, emission_strength: float, *, label: str = "", include_emission: bool = True):
+    def __init__(
+        self,
+        emission_strength: float,
+        *,
+        label: str = "",
+        include_emission: bool = True,
+        emission_color=(1.0, 1.0, 1.0, 1.0),
+        palette_color=(0.0, 0.0, 0.0, 1.0),
+    ):
         self.bl_idname = "ShaderNodeGroup"
         self.label = label
         self.name = label or "Group"
-        self.inputs = {"Palette Color": FakeSocket((0.0, 0.0, 0.0, 1.0))}
+        self.inputs = {"Palette Color": FakeSocket(palette_color)}
         if include_emission:
             self.inputs.update(
                 {
                     "Emission Strength": FakeSocket(emission_strength),
-                    "Emission Color": FakeSocket((1.0, 1.0, 1.0, 1.0)),
+                    "Emission Color": FakeSocket(emission_color),
                 }
             )
 
 
 class FakeNodeTree:
-    def __init__(self, emission_strength: float):
+    def __init__(
+        self,
+        emission_strength: float,
+        *,
+        emission_color=(1.0, 1.0, 1.0, 1.0),
+        palette_color=(0.0, 0.0, 0.0, 1.0),
+    ):
         self.nodes = [
-            FakeNode(emission_strength, label="StarBreaker Illum"),
-            FakeNode(emission_strength, label="Primary Layer", include_emission=False),
+            FakeNode(emission_strength, label="StarBreaker Illum", emission_color=emission_color, palette_color=palette_color),
+            FakeNode(emission_strength, label="Primary Layer", include_emission=False, palette_color=palette_color),
         ]
 
     def copy(self):
-        return FakeNodeTree(self.nodes[0].inputs["Emission Strength"].default_value)
+        return FakeNodeTree(
+            self.nodes[0].inputs["Emission Strength"].default_value,
+            emission_color=self.nodes[0].inputs["Emission Color"].default_value,
+            palette_color=self.nodes[1].inputs["Palette Color"].default_value,
+        )
 
 
 class FakeUVLayer:
@@ -737,7 +755,14 @@ class PackageOpsTests(unittest.TestCase):
         material = FakeMaterial(
             "Glow",
             starbreaker_material_sidecar="Data/Objects/Ships/Test/root.materials.json",
-            starbreaker_submaterial_json=json.dumps({"index": 4}),
+            starbreaker_submaterial_json=json.dumps(
+                {
+                    "index": 4,
+                    "authored_attributes": [
+                        {"name": "Emissive", "value": "0.25,0.5,0.75"},
+                    ],
+                }
+            ),
         )
         material.node_tree = FakeNodeTree(2.0)
         mesh.material_slots = [FakeSlot(material)]
@@ -769,15 +794,19 @@ class PackageOpsTests(unittest.TestCase):
         self.assertIs(other_mesh.material_slots[0].material, material)
         self.assertAlmostEqual(mesh.material_slots[0].material.node_tree.nodes[0].inputs["Emission Strength"].default_value, 150.0)
         self.assertEqual(
+            mesh.material_slots[0].material.node_tree.nodes[0].inputs["Emission Color"].default_value,
+            (0.25, 0.5, 0.75, 1.0),
+        )
+        self.assertEqual(
             mesh.material_slots[0].material.node_tree.nodes[1].inputs["Palette Color"].default_value,
-            (1.0, 1.0, 1.0, 1.0),
+            (0.0, 0.0, 0.0, 1.0),
         )
         self.assertAlmostEqual(float(package_root.get("starbreaker_engine_glow_strength")), 150.0)
 
         self.package_ops.apply_engine_glow_to_package_root(package_root, 0.0)
         self.assertEqual(
-            mesh.material_slots[0].material.node_tree.nodes[1].inputs["Palette Color"].default_value,
-            (0.0, 0.0, 0.0, 1.0),
+            mesh.material_slots[0].material.node_tree.nodes[0].inputs["Emission Color"].default_value,
+            (0.25, 0.5, 0.75, 1.0),
         )
 
     def test_resolve_package_relative_scene_path_from_opened_blend_root(self) -> None:

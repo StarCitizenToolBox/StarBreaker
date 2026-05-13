@@ -1205,6 +1205,17 @@ class BuildersMixin:
         )
         if emissive_node is not None:
             self._set_socket_default(_input_socket(shader_group, "Emission Strength"), 1.0)
+        else:
+            authored_emissive = _authored_emissive_triplet(submaterial)
+            if authored_emissive is not None and any(abs(component) > 1e-6 for component in authored_emissive):
+                self._set_socket_default(
+                    _input_socket(shader_group, "Emission Color"),
+                    (*authored_emissive, 1.0),
+                )
+                self._set_socket_default(
+                    _input_socket(shader_group, "Emission Strength"),
+                    max(_float_authored_attribute(submaterial, "Glow"), 1.0),
+                )
 
         surface_shader = _output_socket(shader_group, "Shader")
         self._wire_surface_shader_to_output(nodes, links, surface_shader, output, plan, submaterial)
