@@ -7,11 +7,10 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 on:
-  # Run on every non-main branch push so feature branches get CI without
-  # needing an open PR. Main pushes are covered by the PR that landed them
-  # plus the separate cache-warm workflow.
+  # Run on every branch push so feature branches get CI without needing an
+  # open PR, and main pushes re-warm the `cache-test-*` slot on main's ref
+  # scope (which feature branches then inherit from).
   push:
-    branches-ignore: [main]
     paths:
       - "Cargo.lock"
       - "Cargo.toml"
