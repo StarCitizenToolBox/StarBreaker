@@ -148,6 +148,15 @@ fn helper_node_name_matches(node_name: &str, helper_name: &str) -> bool {
     node_name == helper_name || node_name.ends_with(&format!("_{helper_name}"))
 }
 
+fn interior_container_name_key(path: &str) -> String {
+    path.rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path)
+        .strip_suffix(".socpak")
+        .unwrap_or(path)
+        .to_ascii_lowercase()
+}
+
 fn compose_root_container_transform(
     offset_position: [f32; 3],
     offset_rotation: [f32; 3],
@@ -216,6 +225,7 @@ pub(crate) fn load_child_interiors(
     db: &Database,
     p4k: &MappedP4k,
     children: &[crate::types::ResolvedNode],
+    root_container_names: &std::collections::HashSet<String>,
     opts: &ExportOptions,
 ) -> LoadedInteriors {
     use crate::socpak;
@@ -225,9 +235,14 @@ pub(crate) fn load_child_interiors(
         db: &Database,
         p4k: &MappedP4k,
         child: &crate::types::ResolvedNode,
+        root_container_names: &std::collections::HashSet<String>,
         payloads: &mut Vec<crate::types::InteriorPayload>,
     ) {
-        let containers = socpak::query_object_containers(db, &child.record);
+        let containers = if child.allows_child_object_containers {
+            socpak::query_object_containers(db, &child.record)
+        } else {
+            Vec::new()
+        };
         if !containers.is_empty() {
             log::info!(
                 "Discovering {} interior containers for child {}...",
@@ -235,6 +250,15 @@ pub(crate) fn load_child_interiors(
                 child.entity_name
             );
             for container in &containers {
+                let container_name = interior_container_name_key(&container.file_name);
+                if root_container_names.contains(&container_name) {
+                    log::debug!(
+                        "skipping duplicate child interior container '{}' on child '{}'",
+                        container.file_name,
+                        child.entity_name,
+                    );
+                    continue;
+                }
                 let container_transform =
                     socpak::build_container_transform(container.offset_position, container.offset_rotation);
                 match socpak::load_interior_from_socpak(
@@ -254,12 +278,12 @@ pub(crate) fn load_child_interiors(
             }
         }
         for grandchild in &child.children {
-            collect(db, p4k, grandchild, payloads);
+            collect(db, p4k, grandchild, root_container_names, payloads);
         }
     }
 
     for child in children {
-        collect(db, p4k, child, &mut payloads);
+        collect(db, p4k, child, root_container_names, &mut payloads);
     }
 
     build_interiors_from_payloads(db, p4k, &payloads, opts.include_lights, opts.lod_level)

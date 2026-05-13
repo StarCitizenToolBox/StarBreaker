@@ -244,6 +244,10 @@ pub(crate) struct VehicleXmlPart {
     pub geometry_path: String,
     /// Material path from XML (may be empty).
     pub material_path: String,
+    /// Optional XML sub-part geometry name (e.g. SubPartWheel geometryname="tyre").
+    /// When present, this identifies which authored sub-part should align with
+    /// the attachment helper.
+    pub geometry_name: Option<String>,
     /// Child part names (for treads: the wheel part names attached to this tread).
     pub children: Vec<String>,
 }
@@ -340,6 +344,7 @@ fn collect_vehicle_parts(
                         name: part_name.to_string(),
                         geometry_path: filename.to_string(),
                         material_path: material.to_string(),
+                        geometry_name: None,
                         children: wheel_names,
                     });
                 }
@@ -354,10 +359,16 @@ fn collect_vehicle_parts(
                     xml.node_attributes(child).find(|(k, _)| *k == "filename")
                 {
                     if !filename.is_empty() && !part_name.is_empty() {
+                        let geometry_name = xml
+                            .node_attributes(child)
+                            .find(|(k, _)| *k == "geometryname")
+                            .map(|(_, value)| value.to_string())
+                            .filter(|value| !value.is_empty());
                         parts.push(VehicleXmlPart {
                             name: part_name.to_string(),
                             geometry_path: filename.to_string(),
                             material_path: String::new(),
+                            geometry_name,
                             children: Vec::new(),
                         });
                     }

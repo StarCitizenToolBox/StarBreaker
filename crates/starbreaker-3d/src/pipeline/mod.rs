@@ -638,6 +638,7 @@ mod tests {
             record: dummy_record(),
             geometry_path: has_geometry.then(|| format!("Data/Objects/{entity_name}.skin")),
             material_path: has_geometry.then(|| format!("Data/Objects/{entity_name}.mtl")),
+            allows_child_object_containers: true,
             children,
         }
     }

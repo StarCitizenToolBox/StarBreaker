@@ -6,7 +6,7 @@
 //! loadout tree recursively. `expand_loadout_into_placements` converts the resolved
 //! tree into interior-style CGF placements for decomposed export.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use starbreaker_datacore::database::Database;
 use starbreaker_datacore::types::Record;
@@ -15,6 +15,35 @@ use starbreaker_p4k::MappedP4k;
 use crate::error::Error;
 
 use super::*;
+
+fn vehicle_subpart_anchor_offset(
+    p4k: &MappedP4k,
+    geometry_path: &str,
+    geometry_name: Option<&str>,
+) -> [f32; 3] {
+    let Some(geometry_name) = geometry_name else {
+        return [0.0; 3];
+    };
+    if geometry_name.is_empty() {
+        return [0.0; 3];
+    }
+
+    let Some(nmc) = load_nmc_for_cgf(p4k, geometry_path) else {
+        return [0.0; 3];
+    };
+    let world_transforms = compute_nmc_world_transforms(&nmc);
+    let target = geometry_name.to_ascii_lowercase();
+    let node_index = nmc.nodes.iter().position(|node| {
+        let name = node.name.to_ascii_lowercase();
+        name == target || name.ends_with(&format!("_{target}"))
+    });
+    let Some(node_index) = node_index else {
+        return [0.0; 3];
+    };
+
+    let (_, _, translation) = world_transforms[node_index].to_scale_rotation_translation();
+    [-translation.x, -translation.y, -translation.z]
+}
 
 pub(crate) fn flatten_resolved_tree(
     children: &[crate::types::ResolvedNode],
@@ -104,11 +133,12 @@ pub fn resolve_loadout_meshes(
             .collect();
 
         // Build a lookup from part name → VehicleXmlPart for child wheel attachment.
-        let wheel_lookup: std::collections::HashMap<String, &VehicleXmlPart> = veh_parts
+        let wheel_lookup: HashMap<String, &VehicleXmlPart> = veh_parts
             .iter()
             .filter(|p| p.children.is_empty()) // wheels have no children
             .map(|p| (p.name.to_lowercase(), p))
             .collect();
+        let mut wheel_offset_cache: HashMap<(String, String), [f32; 3]> = HashMap::new();
 
         for part in &veh_parts {
             if existing_names.contains(&part.name.to_lowercase()) {
@@ -129,6 +159,19 @@ pub fn resolve_loadout_meshes(
                 p4k.entry_case_insensitive(&companion).is_some()
             };
             log::debug!("  vehicle part '{}' has_geometry={} path={}", part.name, part_has_geom, p4k_path);
+            let part_offset = if let Some(geometry_name) = part.geometry_name.as_deref() {
+                let cache_key = (p4k_path.to_ascii_lowercase(), geometry_name.to_ascii_lowercase());
+                if let Some(cached) = wheel_offset_cache.get(&cache_key).copied() {
+                    cached
+                } else {
+                    let computed =
+                        vehicle_subpart_anchor_offset(p4k, &part.geometry_path, Some(geometry_name));
+                    wheel_offset_cache.insert(cache_key, computed);
+                    computed
+                }
+            } else {
+                [0.0; 3]
+            };
 
             // Resolve wheel children for treads.
             let mut part_children = Vec::new();
@@ -141,12 +184,28 @@ pub fn resolve_loadout_meshes(
                         let wheel_companion = resolve_companion_path(p4k, &wheel_p4k, opts.lod_level);
                         p4k.entry_case_insensitive(&wheel_companion).is_some()
                     };
+                    let wheel_offset = if let Some(geometry_name) = wheel.geometry_name.as_deref() {
+                        let cache_key = (wheel_p4k.to_ascii_lowercase(), geometry_name.to_ascii_lowercase());
+                        if let Some(cached) = wheel_offset_cache.get(&cache_key).copied() {
+                            cached
+                        } else {
+                            let computed = vehicle_subpart_anchor_offset(
+                                p4k,
+                                &wheel_p4k,
+                                Some(geometry_name),
+                            );
+                            wheel_offset_cache.insert(cache_key, computed);
+                            computed
+                        }
+                    } else {
+                        [0.0; 3]
+                    };
 
                     part_children.push(crate::types::ResolvedNode {
                         entity_name: wheel.name.clone(),
                         attachment_name: wheel.name.clone(),
                         no_rotation: false,
-                        offset_position: [0.0; 3],
+                        offset_position: wheel_offset,
                         offset_rotation: [0.0; 3],
                         detach_direction: [0.0; 3],
                         port_flags: String::new(),
@@ -160,6 +219,7 @@ pub fn resolve_loadout_meshes(
                         } else {
                             Some(wheel.material_path.clone())
                         },
+                        allows_child_object_containers: false,
                         children: Vec::new(),
                     });
                 }
@@ -169,7 +229,7 @@ pub fn resolve_loadout_meshes(
                 entity_name: part.name.clone(),
                 attachment_name: part.name.clone(),
                 no_rotation: false,
-                offset_position: [0.0; 3],
+                offset_position: part_offset,
                 offset_rotation: [0.0; 3],
                 detach_direction: [0.0; 3],
                 port_flags: String::new(),
@@ -183,6 +243,7 @@ pub fn resolve_loadout_meshes(
                 } else {
                     Some(part.material_path.clone())
                 },
+                allows_child_object_containers: false,
                 children: part_children,
             });
         }
@@ -202,6 +263,7 @@ pub fn resolve_loadout_meshes(
         record: *record,
         geometry_path: Some(geometry_path),
         material_path: Some(material_path),
+        allows_child_object_containers: true,
         children,
     })
 }
@@ -250,6 +312,7 @@ pub(crate) fn resolve_children(
                     record: node.record,
                     geometry_path: None,
                     material_path: node.material_path.clone(),
+                    allows_child_object_containers: true,
                     children: Vec::new(),
                 };
             }
@@ -273,6 +336,7 @@ pub(crate) fn resolve_children(
                     record: node.record,
                     geometry_path: None,
                     material_path: node.material_path.clone(),
+                    allows_child_object_containers: true,
                     children: Vec::new(),
                 };
             }
@@ -294,6 +358,7 @@ pub(crate) fn resolve_children(
                     record: node.record,
                     geometry_path: None,
                     material_path: node.material_path.clone(),
+                    allows_child_object_containers: true,
                     children,
                 };
             };
@@ -339,6 +404,7 @@ pub(crate) fn resolve_children(
                 record: node.record,
                 geometry_path: Some(geom_path.clone()),
                 material_path: node.material_path.clone(),
+                allows_child_object_containers: true,
                 children,
             }
         })
@@ -375,4 +441,3 @@ mod tests {
         assert!(!port_flags_mark_invisible("not_invisible"));
     }
 }
-

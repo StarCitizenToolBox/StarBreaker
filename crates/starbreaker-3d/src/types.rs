@@ -435,6 +435,13 @@ pub struct ResolvedNode {
     pub geometry_path: Option<String>,
     /// Material path (for fallback loading).
     pub material_path: Option<String>,
+    /// Whether this node's DataCore record should be queried for child
+    /// object containers during interior discovery.
+    ///
+    /// Vehicle XML synthetic wheel/tread nodes reuse the root record to supply
+    /// geometry, but they are not standalone entity records and must not trigger
+    /// child object-container discovery.
+    pub allows_child_object_containers: bool,
     /// Children in the loadout.
     pub children: Vec<ResolvedNode>,
 }
@@ -457,6 +464,7 @@ impl ResolvedNode {
             record: self.record,
             geometry_path: self.geometry_path.clone(),
             material_path: self.material_path.clone(),
+            allows_child_object_containers: self.allows_child_object_containers,
             children: Vec::new(), // Children handled separately
         }
     }
@@ -477,6 +485,7 @@ impl ResolvedNode {
             record: self.record,
             geometry_path: self.geometry_path.clone(),
             material_path: self.material_path.clone(),
+            allows_child_object_containers: self.allows_child_object_containers,
             children: Vec::new(),
         }
     }
