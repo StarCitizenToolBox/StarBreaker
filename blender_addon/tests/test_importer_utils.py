@@ -61,6 +61,7 @@ for _pkg in ("starbreaker_addon", "starbreaker_addon.runtime", "starbreaker_addo
         sys.modules[_pkg] = _mod
 
 from starbreaker_addon.manifest import MaterialSidecar, SubmaterialRecord
+from starbreaker_addon.runtime.record_utils import _mesh_decal_authored_emission_strength
 from starbreaker_addon.runtime.importer.utils import (
     _canonical_source_name,
     _material_identity,
@@ -245,6 +246,61 @@ class TestRemappedSubmaterialForSlot(unittest.TestCase):
         source = _make_submaterial(0, "ghost")
         result = self._slot(source, 99, {}, {})
         self.assertIsNone(result)
+
+
+# ---------------------------------------------------------------------------
+# Tests for MeshDecal emission gating
+# ---------------------------------------------------------------------------
+
+class TestMeshDecalEmissionStrength(unittest.TestCase):
+    def test_linked_mesh_decal_requires_explicit_glow_signal(self) -> None:
+        linked = SubmaterialRecord.from_value(
+            {
+                "shader_family": "MeshDecal",
+                "authored_attributes": [
+                    {"name": "Emissive", "value": "1,1,1"},
+                ],
+                "texture_slots": [
+                    {
+                        "slot": "TexSlot1",
+                        "role": "base_color",
+                        "source_path": "Data/Textures/vehicles/manufacturer/CRUS/Glows/crus_glows_diff.tif",
+                        "export_path": "Data/Textures/vehicles/manufacturer/CRUS/Glows/crus_glows_diff_TEX0.png",
+                    }
+                ],
+            }
+        )
+        self.assertEqual(_mesh_decal_authored_emission_strength(linked), 0.0)
+
+    def test_unlinked_mesh_decal_keeps_authored_glow(self) -> None:
+        unlinked = SubmaterialRecord.from_value(
+            {
+                "shader_family": "MeshDecal",
+                "authored_attributes": [
+                    {"name": "Emissive", "value": "1,1,1"},
+                    {"name": "Glow", "value": "0.25"},
+                ],
+                "texture_slots": [
+                    {
+                        "slot": "TexSlot1",
+                        "role": "base_color",
+                        "source_path": "Data/Textures/vehicles/manufacturer/CRUS/Glows/crus_glows_diff.tif",
+                        "export_path": "Data/Textures/vehicles/manufacturer/CRUS/Glows/crus_glows_diff_TEX0.png",
+                    }
+                ],
+            }
+        )
+        self.assertAlmostEqual(_mesh_decal_authored_emission_strength(unlinked), 0.25)
+
+    def test_mesh_decal_emissive_texture_still_emits(self) -> None:
+        decal = SubmaterialRecord.from_value({"shader_family": "MeshDecal"})
+        self.assertEqual(
+            _mesh_decal_authored_emission_strength(
+                decal,
+                emissive_texture_path="Data/Textures/test_emissive.png",
+            ),
+            1.0,
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -57,6 +57,7 @@ from ..record_utils import (
     _float_authored_attribute,
     _uses_vertex_color_tint,
     _layer_texture_reference,
+    _mesh_decal_authored_emission_strength,
     _matching_texture_reference,
     _mean_triplet,
     _is_virtual_tint_palette_stencil_decal,
@@ -209,10 +210,14 @@ class MaterialsMixin:
                 continue
             if group_tree.get("starbreaker_mesh_decal_emission_patch_version") != 3:
                 return True
-            if _input_socket(node, "Emission Strength") is None:
+            emission_strength_socket = _input_socket(node, "Emission Strength")
+            if emission_strength_socket is None:
                 return True
             use_vert_col_socket = _input_socket(node, "Use Vert Col")
             if use_vert_col_socket is None:
+                return True
+            expected_emission_strength = self._mesh_decal_emission_strength(submaterial)
+            if abs(float(getattr(emission_strength_socket, "default_value", 0.0)) - expected_emission_strength) > 1e-6:
                 return True
             if bool(getattr(use_vert_col_socket, "default_value", False)) != expected_use_vertex_colors:
                 return True
@@ -924,28 +929,10 @@ class MaterialsMixin:
 
 
     def _mesh_decal_emission_strength(self, submaterial: SubmaterialRecord) -> float:
-        glow_value = _float_authored_attribute(submaterial, "Glow")
-        if glow_value > 0.0:
-            return glow_value
-
-        # MeshDecal frequently carries Emissive=1,1,1 as a neutral authoring
-        # baseline even when the decal is not a light-emitting surface (for
-        # example host-primary POM decals). Gate emission on explicit channels.
-        if self._texture_export_path(submaterial, "emissive"):
-            return 1.0
-
-        emissive = self._authored_emissive_triplet(submaterial)
-        emissive_mean = _mean_triplet(emissive) if emissive is not None else 0.0
-        if emissive_mean <= 0.0:
-            return 0.0
-
-        if submaterial.decoded_feature_flags.has_parallax_occlusion_mapping:
-            return 0.0
-
-        base_color = (self._texture_export_path(submaterial, "base_color") or "").replace("\\", "/").lower()
-        if "/glows/" in base_color or "_glow" in base_color:
-            return 1.0
-        return 0.0
+        return _mesh_decal_authored_emission_strength(
+            submaterial,
+            emissive_texture_path=self._texture_export_path(submaterial, "emissive"),
+        )
 
 
 

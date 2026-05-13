@@ -305,6 +305,19 @@ def _float_authored_attribute(submaterial: SubmaterialRecord, *names: str) -> fl
     return 0.0
 
 
+def _mesh_decal_authored_emission_strength(
+    submaterial: SubmaterialRecord,
+    *,
+    emissive_texture_path: str | None = None,
+) -> float:
+    glow_value = _float_authored_attribute(submaterial, "Glow")
+    if glow_value > 0.0:
+        return glow_value
+    if emissive_texture_path:
+        return 1.0
+    return 0.0
+
+
 def _hard_surface_angle_shift_enabled(submaterial: SubmaterialRecord) -> bool:
     if submaterial.decoded_feature_flags.has_iridescence:
         return True
