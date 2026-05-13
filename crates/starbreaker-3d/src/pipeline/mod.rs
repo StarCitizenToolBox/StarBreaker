@@ -312,13 +312,19 @@ pub fn socpaks_to_glb(
 
     let mut payloads = Vec::new();
     for socpak_path in socpak_paths {
-        match socpak::load_interior_from_socpak(p4k, socpak_path, identity) {
+        match socpak::load_interior_from_socpak(
+            p4k,
+            socpak_path,
+            identity,
+            identity,
+            std::slice::from_ref(&identity),
+        ) {
             Ok(p) => payloads.push(p),
             Err(e) => log::warn!("failed to load {socpak_path}: {e}"),
         }
     }
 
-    let interiors = build_interiors_from_payloads(db, p4k, &payloads, opts.include_lights);
+    let interiors = build_interiors_from_payloads(db, p4k, &payloads, opts.include_lights, opts.lod_level);
 
     let no_tex_opts = ExportOptions {
         material_mode: MaterialMode::Colors,

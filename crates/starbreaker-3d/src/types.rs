@@ -613,6 +613,9 @@ pub struct InteriorMesh {
     /// EntityClassGUID from CryXMLB — used to resolve geometry via DataCore
     /// when no inline PropertiesDataCore geometry path is available.
     pub entity_class_guid: Option<String>,
+    /// Entity class short name from socpak root item-port XML when no GUID is
+    /// authored but the room setup still names a visual entity to spawn.
+    pub entity_class_name: Option<String>,
 }
 
 /// All geometry and lights from a single socpak interior container.

@@ -6,7 +6,7 @@ use rmcp::{
     model::{ServerCapabilities, ServerInfo},
     schemars, tool, tool_router,
 };
-use starbreaker_p4k::MappedP4k;
+use starbreaker_p4k::{MappedP4k, P4kArchive};
 
 /// Lazily-loaded game data. Initialized on first tool call.
 struct GameData {
@@ -104,6 +104,20 @@ pub struct P4kSearchRequest {
     pub query: String,
     #[schemars(description = "Maximum number of results (default 50)")]
     pub limit: Option<u32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SocpakInspectRequest {
+    #[schemars(description = "Path to a .socpak file in P4k (case-insensitive, Data\\ prefix optional)")]
+    pub path: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SocpakReadEntryRequest {
+    #[schemars(description = "Path to a .socpak file in P4k (case-insensitive, Data\\ prefix optional)")]
+    pub path: String,
+    #[schemars(description = "Inner entry path within the .socpak ZIP (case-insensitive). Use the names returned by socpak_inspect.")]
+    pub entry: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -299,8 +313,17 @@ impl StarBreakerMcp {
         }
     }
 
-    /// Read a file from P4k with case-insensitive fallback.
-    fn read_p4k_file(&self, path: &str) -> Result<Vec<u8>, String> {
+    fn split_socpak_entry_path(path: &str) -> Option<(&str, &str)> {
+        let (outer, inner) = path.split_once("::")?;
+        let outer = outer.trim();
+        let inner = inner.trim();
+        if outer.is_empty() || inner.is_empty() {
+            return None;
+        }
+        Some((outer, inner))
+    }
+
+    fn read_p4k_file_direct(&self, path: &str) -> Result<Vec<u8>, String> {
         let p4k_path = Self::normalize_p4k_path(path);
         let data = self.data();
         data.p4k.read_file(&p4k_path)
@@ -312,6 +335,31 @@ impl StarBreakerMcp {
             .map_err(|e| format!("{e}"))
     }
 
+    /// Read a file from P4k with case-insensitive fallback.
+    fn read_p4k_file(&self, path: &str) -> Result<Vec<u8>, String> {
+        if let Some((socpak_path, entry_path)) = Self::split_socpak_entry_path(path) {
+            let socpak_bytes = self.read_p4k_file_direct(socpak_path)?;
+            let archive = P4kArchive::from_bytes(&socpak_bytes)
+                .map_err(|e| format!("Failed to parse socpak ZIP '{}': {e}", socpak_path))?;
+            let requested = entry_path.replace('/', "\\").to_ascii_lowercase();
+            let entry = archive
+                .entries()
+                .iter()
+                .find(|entry| entry.name.replace('/', "\\").to_ascii_lowercase() == requested)
+                .ok_or_else(|| {
+                    format!(
+                        "Entry not found in socpak '{}': {}",
+                        Self::normalize_p4k_path(socpak_path),
+                        entry_path
+                    )
+                })?;
+            return archive
+                .read(entry)
+                .map_err(|e| format!("Failed to read '{}' from '{}': {e}", entry_path, socpak_path));
+        }
+        self.read_p4k_file_direct(path)
+    }
+
     /// Read a file either from disk (if the path exists on disk) or
     /// from P4k. Used by debug tools that may receive either an
     /// extracted scratch file or a P4k-internal path.
@@ -321,6 +369,34 @@ impl StarBreakerMcp {
             return std::fs::read(direct).map_err(|e| format!("disk read failed: {e}"));
         }
         self.read_p4k_file(path)
+    }
+
+    fn decode_archive_entry_bytes(path: &str, data: &[u8]) -> String {
+        let lower = path.to_lowercase();
+        let is_cryxml_ext = lower.ends_with(".xml")
+            || lower.ends_with(".mtl")
+            || lower.ends_with(".chrparams")
+            || lower.ends_with(".cdf")
+            || lower.ends_with(".adb")
+            || lower.ends_with(".comb")
+            || lower.ends_with(".entxml");
+
+        if is_cryxml_ext {
+            if let Ok(xml) = starbreaker_cryxml::from_bytes(data) {
+                return format!("{xml}");
+            }
+            if let Ok(text) = std::str::from_utf8(data) {
+                return text.to_string();
+            }
+        }
+
+        if let Ok(text) = std::str::from_utf8(data) {
+            return text.to_string();
+        }
+
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+        format!("[base64, {} bytes]\n{encoded}", data.len())
     }
 
     /// Find any record by GUID or name substring.
@@ -490,38 +566,13 @@ impl StarBreakerMcp {
         }
     }
 
-    #[tool(description = "Read a file from the P4k archive. CryXML files (.xml, .mtl, .chrparams, .cdf) are auto-decoded to XML. Text files returned as-is. Binary files as base64.")]
+    #[tool(description = "Read a file from the P4k archive. CryXML files (.xml, .mtl, .chrparams, .cdf) are auto-decoded to XML. Text files returned as-is. Binary files as base64. Also supports reading files inside a .socpak archive via 'outer/path.socpak::inner/path.entxml'.")]
     fn p4k_read(&self, Parameters(req): Parameters<P4kReadRequest>) -> String {
         let data = match self.read_p4k_file(&req.path) {
             Ok(d) => d,
             Err(e) => return e,
         };
-
-        let lower = req.path.to_lowercase();
-        let is_cryxml_ext = lower.ends_with(".xml")
-            || lower.ends_with(".mtl")
-            || lower.ends_with(".chrparams")
-            || lower.ends_with(".cdf")
-            || lower.ends_with(".adb")
-            || lower.ends_with(".comb")
-            || lower.ends_with(".entxml");
-
-        if is_cryxml_ext {
-            if let Ok(xml) = starbreaker_cryxml::from_bytes(&data) {
-                return format!("{xml}");
-            }
-            if let Ok(text) = std::str::from_utf8(&data) {
-                return text.to_string();
-            }
-        }
-
-        if let Ok(text) = std::str::from_utf8(&data) {
-            return text.to_string();
-        }
-
-        use base64::Engine;
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
-        format!("[base64, {} bytes]\n{encoded}", data.len())
+        Self::decode_archive_entry_bytes(&req.path, &data)
     }
 
     #[tool(description = "List files and directories under a P4k path. Shows name, compressed/uncompressed size, compression method, and encryption state for each file.")]
@@ -831,6 +882,151 @@ impl StarBreakerMcp {
         }
         let _ = writeln!(out, "\n{} results", results.len());
         out
+    }
+
+    #[tool(description = "Inspect a .socpak file from P4k. Returns nested entry names and per-.soc chunk summaries, including raw IncludedObjects object-type counts so authored object variants inside the container can be identified.")]
+    fn socpak_inspect(&self, Parameters(req): Parameters<SocpakInspectRequest>) -> String {
+        let bytes = match self.read_p4k_file(&req.path) {
+            Ok(d) => d,
+            Err(e) => return e,
+        };
+
+        let archive = match P4kArchive::from_bytes(&bytes) {
+            Ok(a) => a,
+            Err(e) => return format!("Failed to parse socpak ZIP '{}': {e}", req.path),
+        };
+
+        let entries: Vec<serde_json::Value> = archive
+            .entries()
+            .iter()
+            .map(|entry| serde_json::json!({ "name": entry.name }))
+            .collect();
+
+        let soc_files: Vec<serde_json::Value> = archive
+            .entries()
+            .iter()
+            .filter(|entry| entry.name.to_ascii_lowercase().ends_with(".soc"))
+            .map(|entry| {
+                let name = entry.name.clone();
+                let soc_bytes = match archive.read(entry) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        return serde_json::json!({
+                            "name": name,
+                            "error": format!("Failed to read inner .soc: {e}"),
+                        });
+                    }
+                };
+
+                let chunk_file = match starbreaker_chunks::ChunkFile::from_bytes(&soc_bytes) {
+                    Ok(cf) => cf,
+                    Err(e) => {
+                        return serde_json::json!({
+                            "name": name,
+                            "error": format!("Chunk parse failed: {e}"),
+                        });
+                    }
+                };
+
+                match &chunk_file {
+                    starbreaker_chunks::ChunkFile::CrCh(crch) => {
+                        let chunks: Vec<serde_json::Value> = crch
+                            .chunks()
+                            .iter()
+                            .map(|chunk| {
+                                serde_json::json!({
+                                    "type": format!("0x{:04x}", chunk.chunk_type),
+                                    "name": starbreaker_chunks::known_types::crch::name(chunk.chunk_type).unwrap_or("Unknown"),
+                                    "id": chunk.id,
+                                    "version": chunk.version,
+                                    "offset": chunk.offset,
+                                    "size": chunk.size,
+                                })
+                            })
+                            .collect();
+
+                        let included_objects: Vec<serde_json::Value> = crch
+                            .chunks()
+                            .iter()
+                            .filter(|chunk| chunk.chunk_type == starbreaker_chunks::known_types::crch::INCLUDED_OBJECTS)
+                            .map(|chunk| inspect_included_objects_chunk(crch.chunk_data(chunk)))
+                            .collect();
+
+                        serde_json::json!({
+                            "name": name,
+                            "format": "CrCh",
+                            "chunk_count": crch.chunks().len(),
+                            "chunks": chunks,
+                            "included_objects": included_objects,
+                        })
+                    }
+                    starbreaker_chunks::ChunkFile::Ivo(ivo) => {
+                        let chunks: Vec<serde_json::Value> = ivo
+                            .chunks()
+                            .iter()
+                            .map(|chunk| {
+                                serde_json::json!({
+                                    "type": format!("0x{:08x}", chunk.chunk_type),
+                                    "name": starbreaker_chunks::known_types::ivo::name(chunk.chunk_type).unwrap_or("Unknown"),
+                                    "version": chunk.version,
+                                    "offset": chunk.offset,
+                                    "size": chunk.size,
+                                })
+                            })
+                            .collect();
+
+                        serde_json::json!({
+                            "name": name,
+                            "format": "IVO",
+                            "chunk_count": ivo.chunks().len(),
+                            "chunks": chunks,
+                            "included_objects": [],
+                        })
+                    }
+                }
+            })
+            .collect();
+
+        serde_json::to_string_pretty(&serde_json::json!({
+            "path": Self::normalize_p4k_path(&req.path),
+            "entry_count": archive.entries().len(),
+            "entries": entries,
+            "soc_files": soc_files,
+        }))
+        .unwrap_or_else(|e| format!("JSON error: {e}"))
+    }
+
+    #[tool(description = "Read a file from inside a .socpak archive. CryXML sidecars (.xml, .entxml, .mtl, .cdf, etc.) are auto-decoded like p4k_read; text entries are returned as text and binary entries as base64.")]
+    fn socpak_read_entry(&self, Parameters(req): Parameters<SocpakReadEntryRequest>) -> String {
+        let bytes = match self.read_p4k_file(&req.path) {
+            Ok(d) => d,
+            Err(e) => return e,
+        };
+
+        let archive = match P4kArchive::from_bytes(&bytes) {
+            Ok(a) => a,
+            Err(e) => return format!("Failed to parse socpak ZIP '{}': {e}", req.path),
+        };
+
+        let requested = req.entry.replace('/', "\\").to_ascii_lowercase();
+        let Some(entry) = archive
+            .entries()
+            .iter()
+            .find(|entry| entry.name.replace('/', "\\").to_ascii_lowercase() == requested)
+        else {
+            return format!(
+                "Entry not found in socpak '{}': {}",
+                req.path,
+                req.entry
+            );
+        };
+
+        let entry_bytes = match archive.read(entry) {
+            Ok(data) => data,
+            Err(e) => return format!("Failed to read '{}' from '{}': {e}", req.entry, req.path),
+        };
+
+        Self::decode_archive_entry_bytes(&entry.name, &entry_bytes)
     }
 
     #[tool(description = "Summarize a .mtl material file from P4k. Shows each sub-material's index, name, shader, key flags (DECAL, STENCIL, POM, opacity, alpha_test), and texture slots. Much more compact than reading the raw MTL XML.")]
@@ -1617,4 +1813,285 @@ fn format_size(bytes: u64) -> String {
     if bytes < 1024 * 1024 { return format!("{:.1} KB", bytes as f64 / 1024.0); }
     if bytes < 1024 * 1024 * 1024 { return format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0)); }
     format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+}
+
+fn inspect_included_objects_chunk(data: &[u8]) -> serde_json::Value {
+    match starbreaker_3d::IncludedObjects::from_bytes(data) {
+        Ok(io) => {
+            let raw_counts = match raw_included_object_type_counts(data) {
+                Ok(counts) => counts
+                    .into_iter()
+                    .map(|(obj_type, count)| {
+                        serde_json::json!({
+                            "type": format!("0x{obj_type:08x}"),
+                            "count": count,
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+                Err(e) => {
+                    return serde_json::json!({
+                        "error": format!("Raw IncludedObjects scan failed: {e}"),
+                    });
+                }
+            };
+
+            serde_json::json!({
+                "cgf_count": io.cgf_paths.len(),
+                "material_count": io.material_paths.len(),
+                "palette_count": io.tint_palette_paths.len(),
+                "parsed_type1_object_count": io.objects.len(),
+                "raw_object_type_counts": raw_counts,
+                "cgf_sample": io.cgf_paths.iter().take(20).cloned().collect::<Vec<_>>(),
+                "palette_paths": io.tint_palette_paths,
+            })
+        }
+        Err(e) => serde_json::json!({
+            "error": format!("IncludedObjects parse failed: {e}"),
+        }),
+    }
+}
+
+fn raw_included_object_type_counts(
+    data: &[u8],
+) -> Result<std::collections::BTreeMap<u32, usize>, String> {
+    let mut off = 4usize;
+    skip_included_objects_header(data, &mut off)?;
+
+    let len_objects_bytes = read_u32_le(data, &mut off)? as usize;
+    let objects_end = off
+        .checked_add(len_objects_bytes)
+        .ok_or_else(|| "IncludedObjects object section overflow".to_string())?;
+    if objects_end > data.len() {
+        return Err(format!(
+            "IncludedObjects object section truncated: end={objects_end}, len={}",
+            data.len()
+        ));
+    }
+
+    let mut counts = std::collections::BTreeMap::new();
+    while off + 4 <= objects_end {
+        let obj_type = read_u32_at_le(data, off)?;
+        *counts.entry(obj_type).or_insert(0) += 1;
+
+        match obj_type {
+            0x0000_0001 => {
+                let base_size = 168usize;
+                if off + base_size > objects_end {
+                    return Err(format!("Type1 object truncated at offset {off}"));
+                }
+                let unknown3 = read_u64_at_le(data, off + 160)?;
+                let actual_size = if unknown3 == 0 { 184usize } else { 168usize };
+                let mut end = off + actual_size;
+                if end > objects_end {
+                    return Err(format!(
+                        "Type1 object overruns object section at offset {off} (size {actual_size})"
+                    ));
+                }
+                while end + 4 <= objects_end {
+                    let next_type = read_u32_at_le(data, end)?;
+                    if next_type == 0 {
+                        end += 4;
+                    } else {
+                        break;
+                    }
+                }
+                off = end;
+            }
+            0x0000_0007 => off += 152,
+            0x0000_0010 => off += 136,
+            _ => off += 4,
+        }
+
+        if off > objects_end {
+            return Err(format!(
+                "Object scan advanced past end of section: off={off}, end={objects_end}"
+            ));
+        }
+    }
+
+    Ok(counts)
+}
+
+fn skip_included_objects_header(data: &[u8], off: &mut usize) -> Result<(), String> {
+    let num_cgfs = read_u32_le(data, off)? as usize;
+    advance(data, off, num_cgfs * 256, "CGF paths")?;
+
+    let num_materials = read_u16_le(data, off)? as usize;
+    let num_palettes = read_u16_le(data, off)? as usize;
+    advance(data, off, num_materials * 256, "material paths")?;
+    advance(data, off, num_palettes * 256, "palette paths")?;
+    advance(data, off, 28, "unknown header bytes")?;
+    Ok(())
+}
+
+fn advance(data: &[u8], off: &mut usize, len: usize, label: &str) -> Result<(), String> {
+    let end = off
+        .checked_add(len)
+        .ok_or_else(|| format!("Offset overflow while skipping {label}"))?;
+    if end > data.len() {
+        return Err(format!(
+            "IncludedObjects truncated while skipping {label}: need end={end}, len={}",
+            data.len()
+        ));
+    }
+    *off = end;
+    Ok(())
+}
+
+fn read_u16_le(data: &[u8], off: &mut usize) -> Result<u16, String> {
+    let value = read_u16_at_le(data, *off)?;
+    *off += 2;
+    Ok(value)
+}
+
+fn read_u32_le(data: &[u8], off: &mut usize) -> Result<u32, String> {
+    let value = read_u32_at_le(data, *off)?;
+    *off += 4;
+    Ok(value)
+}
+
+fn read_u16_at_le(data: &[u8], idx: usize) -> Result<u16, String> {
+    let bytes: [u8; 2] = data
+        .get(idx..idx + 2)
+        .and_then(|slice| slice.try_into().ok())
+        .ok_or_else(|| format!("Truncated u16 at offset {idx}"))?;
+    Ok(u16::from_le_bytes(bytes))
+}
+
+fn read_u32_at_le(data: &[u8], idx: usize) -> Result<u32, String> {
+    let bytes: [u8; 4] = data
+        .get(idx..idx + 4)
+        .and_then(|slice| slice.try_into().ok())
+        .ok_or_else(|| format!("Truncated u32 at offset {idx}"))?;
+    Ok(u32::from_le_bytes(bytes))
+}
+
+fn read_u64_at_le(data: &[u8], idx: usize) -> Result<u64, String> {
+    let bytes: [u8; 8] = data
+        .get(idx..idx + 8)
+        .and_then(|slice| slice.try_into().ok())
+        .ok_or_else(|| format!("Truncated u64 at offset {idx}"))?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        inspect_included_objects_chunk, raw_included_object_type_counts, StarBreakerMcp,
+    };
+
+    fn build_included_objects_chunk(object_payloads: &[Vec<u8>]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&[0u8; 4]); // padding
+        buf.extend_from_slice(&1u32.to_le_bytes()); // one cgf
+
+        let mut path = b"test.cgf".to_vec();
+        path.resize(256, 0);
+        buf.extend_from_slice(&path);
+
+        buf.extend_from_slice(&0u16.to_le_bytes()); // materials
+        buf.extend_from_slice(&0u16.to_le_bytes()); // palettes
+        buf.extend_from_slice(&[0u8; 28]); // unknown bytes
+
+        let objects: Vec<u8> = object_payloads.iter().flat_map(|payload| payload.clone()).collect();
+        buf.extend_from_slice(&(objects.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&objects);
+        buf
+    }
+
+    fn type1_object(unknown3: u64) -> Vec<u8> {
+        let mut obj = Vec::new();
+        obj.extend_from_slice(&1u32.to_le_bytes());
+        obj.extend_from_slice(&[0u8; 48]); // vector1 + vector2
+        obj.extend_from_slice(&[0u8; 8]); // unknown1
+        obj.extend_from_slice(&0u16.to_le_bytes()); // cgf id
+        obj.extend_from_slice(&0u16.to_le_bytes()); // unknown2
+        for &val in &[
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0f64,
+        ] {
+            obj.extend_from_slice(&val.to_le_bytes());
+        }
+        obj.extend_from_slice(&unknown3.to_le_bytes());
+        if unknown3 == 0 {
+            obj.extend_from_slice(&[0u8; 16]);
+        }
+        obj
+    }
+
+    fn fixed_type_object(obj_type: u32, total_size: usize) -> Vec<u8> {
+        let mut obj = Vec::with_capacity(total_size);
+        obj.extend_from_slice(&obj_type.to_le_bytes());
+        obj.resize(total_size, 0);
+        obj
+    }
+
+    #[test]
+    fn raw_included_object_type_counts_reports_mixed_types() {
+        let data = build_included_objects_chunk(&[
+            type1_object(42),
+            fixed_type_object(0x0000_0007, 152),
+            fixed_type_object(0x0000_0010, 136),
+        ]);
+
+        let counts = raw_included_object_type_counts(&data).expect("raw scan should succeed");
+        assert_eq!(counts.get(&0x0000_0001), Some(&1));
+        assert_eq!(counts.get(&0x0000_0007), Some(&1));
+        assert_eq!(counts.get(&0x0000_0010), Some(&1));
+    }
+
+    #[test]
+    fn inspect_included_objects_chunk_exposes_skipped_types() {
+        let data = build_included_objects_chunk(&[
+            type1_object(0),
+            fixed_type_object(0x0000_0007, 152),
+            fixed_type_object(0x0000_0010, 136),
+        ]);
+
+        let value = inspect_included_objects_chunk(&data);
+        let parsed_count = value
+            .get("parsed_type1_object_count")
+            .and_then(|v| v.as_u64());
+        assert_eq!(parsed_count, Some(1));
+
+        let raw_counts = value
+            .get("raw_object_type_counts")
+            .and_then(|v| v.as_array())
+            .expect("raw counts array");
+        assert!(raw_counts.iter().any(|entry| {
+            entry.get("type").and_then(|v| v.as_str()) == Some("0x00000007")
+                && entry.get("count").and_then(|v| v.as_u64()) == Some(1)
+        }));
+        assert!(raw_counts.iter().any(|entry| {
+            entry.get("type").and_then(|v| v.as_str()) == Some("0x00000010")
+                && entry.get("count").and_then(|v| v.as_u64()) == Some(1)
+        }));
+    }
+
+    #[test]
+    fn decode_archive_entry_bytes_returns_utf8_for_entxml_fallback() {
+        let decoded = StarBreakerMcp::decode_archive_entry_bytes(
+            "top_deck\\entdata\\123.entxml",
+            b"<Entity Name=\"Door\" />",
+        );
+        assert_eq!(decoded, "<Entity Name=\"Door\" />");
+    }
+
+    #[test]
+    fn split_socpak_entry_path_parses_outer_and_inner_paths() {
+        let (outer, inner) = StarBreakerMcp::split_socpak_entry_path(
+            "ObjectContainers/Ships/DRAK/ironclad/top_deck.socpak::top_deck/entdata/1425539375.entxml",
+        )
+        .expect("nested socpak path should parse");
+        assert_eq!(outer, "ObjectContainers/Ships/DRAK/ironclad/top_deck.socpak");
+        assert_eq!(inner, "top_deck/entdata/1425539375.entxml");
+    }
+
+    #[test]
+    fn split_socpak_entry_path_rejects_empty_segments() {
+        assert!(StarBreakerMcp::split_socpak_entry_path("foo.socpak::").is_none());
+        assert!(StarBreakerMcp::split_socpak_entry_path("::inner.entxml").is_none());
+        assert!(StarBreakerMcp::split_socpak_entry_path("plain/path.xml").is_none());
+    }
 }

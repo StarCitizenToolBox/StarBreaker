@@ -1735,7 +1735,7 @@ fn build_scene_manifest_value(
                 "units": "emission_strength",
                 "min_strength": 0.0,
                 "max_strength": 200.0,
-                "default_strength": 3.0,
+                "default_strength": 0.0,
                 "targets": engine_glow_targets
                     .iter()
                     .map(|target| serde_json::json!({
@@ -3292,9 +3292,14 @@ mod tests {
     }
 
     fn sample_mesh(submeshes: Vec<crate::types::SubMesh>) -> Mesh {
+        let index_count = submeshes
+            .iter()
+            .map(|submesh| submesh.first_index + submesh.num_indices)
+            .max()
+            .unwrap_or(0) as usize;
         Mesh {
             positions: Vec::new(),
-            indices: Vec::new(),
+            indices: (0..index_count as u32).collect(),
             uvs: None,
             secondary_uvs: None,
             normals: None,
@@ -4337,7 +4342,7 @@ mod tests {
 
         assert_eq!(
             value["controls"]["engine_glow"]["default_strength"],
-            serde_json::json!(3.0)
+            serde_json::json!(0.0)
         );
         assert_eq!(
             value["controls"]["engine_glow"]["targets"][0]["geometry_path"],

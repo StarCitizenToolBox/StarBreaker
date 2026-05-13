@@ -15,6 +15,7 @@ pub mod chrparams;
 pub mod validation;
 
 pub use error::Error;
+pub use included_objects::{IncludedObject, IncludedObjects};
 pub use pipeline::{
     DecomposedExport, ExportFormat, ExportKind, ExportOptions, ExportResult, ExportedFile,
     ExportedFileKind, MaterialMode,

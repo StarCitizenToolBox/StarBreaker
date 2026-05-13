@@ -667,6 +667,14 @@ class BuildersMixin:
                 param_key = semantic.removeprefix("public_param_")
                 if hasattr(target_socket, "default_value"):
                     resolved = _resolve_public_param_default(submaterial, param_key)
+                    if (
+                        resolved is None
+                        and group_contract.name == "SB_MeshDecal_v1"
+                        and template_plan_for_submaterial(submaterial).template_key == "decal_stencil"
+                        and submaterial.decoded_feature_flags.has_stencil_map
+                        and param_key == "decaldiffuseopacity"
+                    ):
+                        resolved = _resolve_public_param_default(submaterial, "stencilopacity")
                     if resolved is not None:
                         try:
                             target_socket.default_value = resolved
@@ -737,6 +745,14 @@ class BuildersMixin:
                     target_socket.default_value = 1.0
                 elif ("alpha" in semantic or "opacity" in semantic) and hasattr(target_socket, "default_value"):
                     target_socket.default_value = 0.0
+                elif (
+                    group_contract.name == "SB_MeshDecal_v1"
+                    and contract_input.name == "TexSlot1_DecalSource"
+                    and template_plan_for_submaterial(submaterial).template_key == "decal_stencil"
+                    and submaterial.decoded_feature_flags.has_stencil_map
+                    and hasattr(target_socket, "default_value")
+                ):
+                    target_socket.default_value = (1.0, 1.0, 1.0, 1.0)
                 source_socket = self._contract_input_source_socket(
                     nodes,
                     submaterial,
@@ -951,7 +967,7 @@ class BuildersMixin:
             y=-720,
             is_color=False,
         )
-        emissive_ref = _submaterial_texture_reference(submaterial, slots=("TexSlot14",), roles=("emissive",))
+        emissive_ref = _submaterial_texture_reference(submaterial, slots=("TexSlot14",))
         emissive_node = self._image_node(
             nodes,
             emissive_ref.export_path if emissive_ref is not None else None,
@@ -1197,16 +1213,30 @@ class BuildersMixin:
             shader_group,
             "Displacement Height",
         )
+        authored_emissive = _authored_emissive_triplet(submaterial)
+        emission_color_source = emissive_node.outputs[0] if emissive_node is not None else None
+        if emission_color_source is not None and authored_emissive is not None:
+            tint = nodes.new("ShaderNodeRGB")
+            tint.label = "Authored Emissive Tint"
+            tint.location = (-460, -1220)
+            tint.outputs[0].default_value = (*authored_emissive, 1.0)
+            multiply = nodes.new("ShaderNodeMixRGB")
+            multiply.label = "Emissive Texture x Authored Tint"
+            multiply.location = (-220, -1100)
+            multiply.blend_type = "MULTIPLY"
+            multiply.inputs[0].default_value = 1.0
+            links.new(emission_color_source, multiply.inputs[1])
+            links.new(tint.outputs[0], multiply.inputs[2])
+            emission_color_source = multiply.outputs[0]
         self._link_group_input(
             links,
-            emissive_node.outputs[0] if emissive_node is not None else None,
+            emission_color_source,
             shader_group,
             "Emission Color",
         )
         if emissive_node is not None:
-            self._set_socket_default(_input_socket(shader_group, "Emission Strength"), 1.0)
+            self._set_socket_default(_input_socket(shader_group, "Emission Strength"), 0.0)
         else:
-            authored_emissive = _authored_emissive_triplet(submaterial)
             if authored_emissive is not None and any(abs(component) > 1e-6 for component in authored_emissive):
                 self._set_socket_default(
                     _input_socket(shader_group, "Emission Color"),

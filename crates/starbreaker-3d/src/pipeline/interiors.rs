@@ -9,6 +9,7 @@
 //! Public types: `LoadedInteriors`, `InteriorCgfEntry`, `InteriorContainerData`.
 
 use starbreaker_datacore::database::Database;
+use starbreaker_datacore::query::value::Value;
 use starbreaker_datacore::types::Record;
 use starbreaker_p4k::MappedP4k;
 
@@ -78,16 +79,136 @@ pub(crate) fn load_interiors(
     log::info!("Discovering {} interior containers...", containers.len());
 
     let mut payloads = Vec::new();
-    for container in &containers {
-        let container_transform =
-            socpak::build_container_transform(container.offset_position, container.offset_rotation);
-        match socpak::load_interior_from_socpak(p4k, &container.file_name, container_transform) {
+    let root_geom_compiled = db
+        .compile_path::<String>(
+            record.struct_id(),
+            "Components[SGeometryResourceParams].Geometry.Geometry.Geometry.path",
+        )
+        .ok();
+    let root_geometry_path = root_geom_compiled
+        .as_ref()
+        .and_then(|path| db.query_single::<String>(path, record).ok().flatten())
+        .unwrap_or_default();
+    let root_nmc = (!root_geometry_path.is_empty())
+        .then(|| load_nmc_for_cgf(p4k, &root_geometry_path))
+        .flatten();
+    let container_instances: Vec<_> = containers
+        .iter()
+        .map(|container| {
+            let helper_transform =
+                resolve_nmc_helper_transform(root_nmc.as_ref(), container.bone_name.as_deref());
+            let container_transform = compose_root_container_transform_raw(
+                container.offset_position,
+                container.offset_rotation,
+                helper_transform,
+            );
+            let non_item_port_transform = compose_root_container_transform(
+                container.offset_position,
+                container.offset_rotation,
+                helper_transform,
+            );
+            let non_item_port_transform_delta = mat4_to_array(
+                mat4_from_array(&container_transform).inverse()
+                    * mat4_from_array(&non_item_port_transform),
+            );
+            (container, container_transform, non_item_port_transform_delta)
+        })
+        .collect();
+    let mut root_item_port_reference_candidates: std::collections::HashMap<String, Vec<[[f32; 4]; 4]>> =
+        std::collections::HashMap::new();
+    for (container, container_transform, _) in &container_instances {
+        root_item_port_reference_candidates
+            .entry(container.file_name.to_ascii_lowercase())
+            .or_default()
+            .push(*container_transform);
+    }
+    for (container, container_transform, non_item_port_transform_delta) in &container_instances {
+        let reference_candidates = root_item_port_reference_candidates
+            .get(&container.file_name.to_ascii_lowercase())
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        match socpak::load_interior_from_socpak(
+            p4k,
+            &container.file_name,
+            *container_transform,
+            *non_item_port_transform_delta,
+            reference_candidates,
+        ) {
             Ok(p) => payloads.push(p),
             Err(e) => log::warn!("failed to load {}: {e}", container.file_name),
         }
     }
 
-    build_interiors_from_payloads(db, p4k, &payloads, opts.include_lights)
+    build_interiors_from_payloads(db, p4k, &payloads, opts.include_lights, opts.lod_level)
+}
+
+fn helper_node_name_matches(node_name: &str, helper_name: &str) -> bool {
+    let node_name = node_name.to_ascii_lowercase();
+    let helper_name = helper_name.to_ascii_lowercase();
+    node_name == helper_name || node_name.ends_with(&format!("_{helper_name}"))
+}
+
+fn compose_root_container_transform(
+    offset_position: [f32; 3],
+    offset_rotation: [f32; 3],
+    helper_transform: Option<glam::Mat4>,
+) -> [[f32; 4]; 4] {
+    let offset = mat4_from_array(&crate::socpak::build_container_transform(
+        offset_position,
+        offset_rotation,
+    ));
+    let base = match helper_transform {
+        Some(helper_transform) if helper_transform_duplicates_offset(helper_transform, offset) => offset,
+        Some(helper_transform) => helper_transform * offset,
+        None => offset,
+    };
+    mat4_to_array(base)
+}
+
+fn compose_root_container_transform_raw(
+    offset_position: [f32; 3],
+    offset_rotation: [f32; 3],
+    helper_transform: Option<glam::Mat4>,
+) -> [[f32; 4]; 4] {
+    let offset = mat4_from_array(&crate::socpak::build_container_transform(
+        offset_position,
+        offset_rotation,
+    ));
+    let base = helper_transform.unwrap_or(glam::Mat4::IDENTITY) * offset;
+    mat4_to_array(base)
+}
+
+fn helper_transform_duplicates_offset(helper_transform: glam::Mat4, offset_transform: glam::Mat4) -> bool {
+    let (helper_scale, helper_rotation, helper_translation) =
+        helper_transform.to_scale_rotation_translation();
+    let (offset_scale, offset_rotation, offset_translation) =
+        offset_transform.to_scale_rotation_translation();
+    helper_scale.abs_diff_eq(offset_scale, 1e-3)
+        && helper_translation.abs_diff_eq(offset_translation, 1e-2)
+        && helper_rotation.angle_between(offset_rotation).abs() < 1e-2
+}
+
+fn resolve_nmc_helper_transform(
+    nmc: Option<&crate::nmc::NodeMeshCombo>,
+    helper_name: Option<&str>,
+) -> Option<glam::Mat4> {
+    let helper_name = helper_name.filter(|name| !name.is_empty())?;
+    let nmc = nmc?;
+    let helper_index = nmc
+        .nodes
+        .iter()
+        .position(|node| helper_node_name_matches(&node.name, helper_name))?;
+    let helper_world = compute_nmc_world_transforms(nmc);
+    let helper_world = helper_world[helper_index];
+    let (_, rotation, translation) = helper_world.to_scale_rotation_translation();
+    log::debug!(
+        "resolved root hull helper '{}' from NMC node '{}' at translation {:?} rotation {:?}",
+        helper_name,
+        nmc.nodes[helper_index].name,
+        translation,
+        rotation
+    );
+    Some(helper_world)
 }
 
 /// Discovery pass for object containers authored on child loadout entities.
@@ -116,7 +237,13 @@ pub(crate) fn load_child_interiors(
             for container in &containers {
                 let container_transform =
                     socpak::build_container_transform(container.offset_position, container.offset_rotation);
-                match socpak::load_interior_from_socpak(p4k, &container.file_name, container_transform) {
+                match socpak::load_interior_from_socpak(
+                    p4k,
+                    &container.file_name,
+                    container_transform,
+                    glam::Mat4::IDENTITY.to_cols_array_2d(),
+                    std::slice::from_ref(&container_transform),
+                ) {
                     Ok(mut payload) => {
                         payload.parent_entity_name = Some(child.entity_name.clone());
                         payload.parent_node_name = container.bone_name.clone();
@@ -135,7 +262,7 @@ pub(crate) fn load_child_interiors(
         collect(db, p4k, child, &mut payloads);
     }
 
-    build_interiors_from_payloads(db, p4k, &payloads, opts.include_lights)
+    build_interiors_from_payloads(db, p4k, &payloads, opts.include_lights, opts.lod_level)
 }
 
 pub(crate) fn merge_interiors(target: &mut LoadedInteriors, source: LoadedInteriors) {
@@ -182,8 +309,9 @@ pub(crate) fn build_interiors_from_payloads(
     p4k: &MappedP4k,
     payloads: &[crate::types::InteriorPayload],
     include_lights: bool,
+    lod_level: u32,
 ) -> LoadedInteriors {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use starbreaker_common::CigGuid;
     use std::str::FromStr;
 
@@ -213,6 +341,7 @@ pub(crate) fn build_interiors_from_payloads(
         );
 
         let mut placements = Vec::new();
+        let mut placement_keys: HashSet<(String, [u32; 16])> = HashSet::new();
 
         for im in &payload.meshes {
             let (cgf_path, mtl_path) = if !im.cgf_path.is_empty() {
@@ -230,9 +359,34 @@ pub(crate) fn build_interiors_from_payloads(
                         continue;
                     }
                 }
+            } else if let Some(entity_class_name) = &im.entity_class_name {
+                let Some(record) = resolve_named_entity_record(db, entity_class_name) else {
+                    log::debug!("  entity class {entity_class_name} → no geometry found");
+                    continue;
+                };
+                if is_automatic_door_portal_entity(db, record) {
+                    log::debug!("  entity class {entity_class_name} → skipped automatic door portal helper");
+                    continue;
+                }
+                match resolve_record_geometry(
+                    db,
+                    record,
+                    guid_geom_compiled.as_ref(),
+                    guid_mtl_compiled.as_ref(),
+                ) {
+                    Some((geom, mtl)) => (geom, Some(mtl).filter(|s| !s.is_empty())),
+                    None => {
+                        log::debug!("  entity class {entity_class_name} → no geometry found");
+                        continue;
+                    }
+                }
             } else {
                 continue;
             };
+            if is_metadata_only_geometry(p4k, &cgf_path, lod_level) {
+                log::debug!("  skipping metadata-only interior helper geometry {cgf_path}");
+                continue;
+            }
 
             let mesh_idx = *cgf_cache.entry(cgf_path.clone()).or_insert_with(|| {
                 let idx = unique_cgfs.len();
@@ -252,6 +406,13 @@ pub(crate) fn build_interiors_from_payloads(
             });
 
             if let Some(idx) = mesh_idx {
+                let placement_key = (
+                    cgf_path.to_ascii_lowercase(),
+                    transform_bits_key(&im.transform),
+                );
+                if !placement_keys.insert(placement_key) {
+                    continue;
+                }
                 placements.push((idx, im.transform, None));
 
                 // Expand entity loadout attachments. Many interior entities
@@ -335,6 +496,14 @@ pub(crate) fn build_interiors_from_payloads(
     }
 }
 
+fn is_metadata_only_geometry(p4k: &MappedP4k, cgf_path: &str, lod_level: u32) -> bool {
+    let p4k_geom_path = datacore_path_to_p4k(cgf_path);
+    p4k.entry_case_insensitive(&p4k_geom_path).is_some()
+        && p4k
+            .entry_case_insensitive(&resolve_companion_path(p4k, &p4k_geom_path, lod_level))
+            .is_none()
+}
+
 /// Resolve an EntityClassGUID to its geometry + material paths via DataCore.
 pub(crate) fn resolve_guid_geometry(
     db: &Database,
@@ -390,6 +559,117 @@ pub(crate) fn resolve_guid_geometry(
 
     log::debug!("  GUID {guid_str} → {geom_path}");
     Some((geom_path, mtl_path))
+}
+
+fn transform_bits_key(transform: &[[f32; 4]; 4]) -> [u32; 16] {
+    let mut key = [0u32; 16];
+    let mut index = 0;
+    for column in transform {
+        for value in column {
+            key[index] = value.to_bits();
+            index += 1;
+        }
+    }
+    key
+}
+
+fn entity_class_name_matches_record_short_name(entity_class_name: &str, record_short_name: &str) -> bool {
+    let entity_class_name = entity_class_name.to_ascii_lowercase();
+    let record_short_name = record_short_name.to_ascii_lowercase();
+    entity_class_name == record_short_name
+        || entity_class_name.starts_with(&(record_short_name + "_"))
+}
+
+fn resolve_named_entity_record<'db>(
+    db: &'db Database,
+    entity_class_name: &str,
+) -> Option<&'db Record> {
+    let normalized = entity_class_name.to_ascii_lowercase();
+    let entity_si = db.struct_id("EntityClassDefinition")?;
+
+    let mut exact_match = None;
+    let mut prefix_match: Option<(&starbreaker_datacore::types::Record, String)> = None;
+
+    for record in db.records_of_type(entity_si) {
+        let record_name = db.resolve_string2(record.name_offset);
+        let short_name = record_name.rsplit('.').next().unwrap_or(record_name);
+        let short_lower = short_name.to_ascii_lowercase();
+
+        if short_lower == normalized {
+            exact_match = Some(record);
+            break;
+        }
+
+        if entity_class_name_matches_record_short_name(entity_class_name, short_name) {
+            let replace = prefix_match
+                .as_ref()
+                .map(|(_, current)| short_lower.len() > current.len())
+                .unwrap_or(true);
+            if replace {
+                prefix_match = Some((record, short_lower));
+            }
+        }
+    }
+
+    exact_match.or_else(|| prefix_match.map(|(record, _)| record))
+}
+
+fn resolve_record_geometry(
+    db: &Database,
+    record: &Record,
+    geom_compiled: Option<&starbreaker_datacore::query::compile::CompiledPath>,
+    mtl_compiled: Option<&starbreaker_datacore::query::compile::CompiledPath>,
+) -> Option<(String, String)> {
+    let geom_path = match geom_compiled
+        .and_then(|compiled| db.query_single::<String>(compiled, record).ok().flatten())
+        .or_else(|| {
+            let compiled = db
+                .compile_path::<String>(
+                    record.struct_id(),
+                    "Components[SGeometryResourceParams].Geometry.Geometry.Geometry.path",
+                )
+                .ok()?;
+            db.query_single::<String>(&compiled, record).ok().flatten()
+        }) {
+        Some(path) if !path.is_empty() => path,
+        _ => return None,
+    };
+
+    let mtl_path = mtl_compiled
+        .and_then(|compiled| db.query_single::<String>(compiled, record).ok().flatten())
+        .or_else(|| {
+            let compiled = db
+                .compile_path::<String>(
+                    record.struct_id(),
+                    "Components[SGeometryResourceParams].Geometry.Geometry.Material.path",
+                )
+                .ok()?;
+            db.query_single::<String>(&compiled, record).ok().flatten()
+        })
+        .unwrap_or_default();
+
+    Some((geom_path, mtl_path))
+}
+
+fn is_automatic_door_portal_entity(db: &Database, record: &Record) -> bool {
+    let Ok(compiled) = db.compile_path::<Value>(
+        record.struct_id(),
+        "Components[SCItemDoorParams].PortalMode",
+    ) else {
+        return false;
+    };
+    let Ok(values) = db.query::<Value>(&compiled, record) else {
+        return false;
+    };
+    values.iter().any(|value| {
+        matches!(
+            value,
+            Value::Object {
+                type_name: "SCItemDoorPortalModeAutomaticParams",
+                ..
+            }
+        )
+    })
 }
 
 /// Walk a loadout subtree, emitting additional `(cgf_idx, transform)` placements
@@ -688,4 +968,128 @@ pub(crate) fn preload_interior_textures(
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        compose_root_container_transform, entity_class_name_matches_record_short_name,
+        helper_node_name_matches, helper_transform_duplicates_offset, resolve_nmc_helper_transform,
+        transform_bits_key,
+    };
+    use crate::pipeline::nmc_bridge::mat4_from_array;
+
+    #[test]
+    fn helper_node_name_matches_prefixed_helper_suffix() {
+        assert!(helper_node_name_matches(
+            "body_260_helper_crew_quarter_d",
+            "helper_crew_quarter_d"
+        ));
+        assert!(helper_node_name_matches("helper_crew_quarter_d", "helper_crew_quarter_d"));
+        assert!(!helper_node_name_matches(
+            "body_260_helper_crew_quarter_c",
+            "helper_crew_quarter_d"
+        ));
+    }
+
+    #[test]
+    fn compose_root_container_transform_composes_full_helper_transform() {
+        let helper_transform = glam::Mat4::from_rotation_translation(
+            glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+            glam::Vec3::new(1.0, 2.0, 3.0),
+        );
+        let transform = compose_root_container_transform(
+            [2.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            Some(helper_transform),
+        );
+        let transform = mat4_from_array(&transform);
+        let expected = helper_transform
+            * mat4_from_array(&crate::socpak::build_container_transform(
+                [2.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+            ));
+        let actual = transform.to_cols_array();
+        let expected = expected.to_cols_array();
+        for (actual, expected) in actual.iter().zip(expected.iter()) {
+            assert!((actual - expected).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn compose_root_container_transform_skips_duplicate_helper_transform() {
+        let offset = mat4_from_array(&crate::socpak::build_container_transform(
+            [8.0625, -25.4375, 3.625],
+            [0.0, 0.0, 180.0],
+        ));
+        assert!(helper_transform_duplicates_offset(offset, offset));
+        let transform = compose_root_container_transform(
+            [8.0625, -25.4375, 3.625],
+            [0.0, 0.0, 180.0],
+            Some(offset),
+        );
+        let transform = mat4_from_array(&transform);
+        let actual = transform.to_cols_array();
+        let expected = offset.to_cols_array();
+        for (actual, expected) in actual.iter().zip(expected.iter()) {
+            assert!((actual - expected).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn resolve_nmc_helper_transform_reads_helper_node_transform() {
+        let identity = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ];
+        let rotation = glam::Quat::from_rotation_z(std::f32::consts::PI);
+        let transform = glam::Mat4::from_rotation_translation(rotation, glam::Vec3::new(4.0, 5.0, 6.0));
+        let transformed = transform.to_cols_array_2d();
+        let nmc = crate::nmc::NodeMeshCombo {
+            nodes: vec![crate::nmc::NmcNode {
+                name: "helper_crew_quarter_d".to_string(),
+                parent_index: None,
+                world_to_bone: identity,
+                bone_to_world: [
+                    [transformed[0][0], transformed[1][0], transformed[2][0], transformed[3][0]],
+                    [transformed[0][1], transformed[1][1], transformed[2][1], transformed[3][1]],
+                    [transformed[0][2], transformed[1][2], transformed[2][2], transformed[3][2]],
+                ],
+                scale: [1.0, 1.0, 1.0],
+                geometry_type: 2,
+                properties: std::collections::HashMap::new(),
+            }],
+            material_indices: Vec::new(),
+        };
+        let helper_transform =
+            resolve_nmc_helper_transform(Some(&nmc), Some("helper_crew_quarter_d")).unwrap();
+        let (scale, resolved_rotation, translation) =
+            helper_transform.to_scale_rotation_translation();
+        assert!(scale.abs_diff_eq(glam::Vec3::ONE, 1e-5));
+        assert!(translation.abs_diff_eq(glam::Vec3::new(4.0, 5.0, 6.0), 1e-5));
+        assert!(resolved_rotation.angle_between(rotation) < 1e-5);
+    }
+
+    #[test]
+    fn entity_class_name_matches_record_short_name_allows_suffix_specialization() {
+        assert!(entity_class_name_matches_record_short_name(
+            "Door_RN_RoomConnector_Breachable_OpenReverse_Crew_Quarters",
+            "Door_RN_RoomConnector_Breachable_OpenReverse"
+        ));
+        assert!(entity_class_name_matches_record_short_name(
+            "ControlPanel_Screen_DoorControl_Physical_Cutter_OpenNoneNone",
+            "ControlPanel_Screen_DoorControl_Physical_Cutter_OpenNoneNone"
+        ));
+        assert!(!entity_class_name_matches_record_short_name(
+            "Door_RN_NoRoomConnector_Component",
+            "Door_RN_RoomConnector_Breachable_OpenReverse"
+        ));
+    }
+
+    #[test]
+    fn transform_bits_key_matches_identical_transforms() {
+        let transform = glam::Mat4::from_translation(glam::Vec3::new(1.0, 2.0, 3.0)).to_cols_array_2d();
+        assert_eq!(transform_bits_key(&transform), transform_bits_key(&transform));
+    }
 }

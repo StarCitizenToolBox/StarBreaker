@@ -90,25 +90,8 @@ pub(crate) fn bone_world_transform(bone: &crate::skeleton::Bone) -> glam::Mat4 {
     glam::Mat4::from_rotation_translation(rotation, glam::Vec3::from(bone.world_position))
 }
 
-
-pub(crate) fn synthesize_nmc_from_bones(
-    mesh: &crate::types::Mesh,
-    bones: &[crate::skeleton::Bone],
-) -> Option<crate::nmc::NodeMeshCombo> {
-    if bones.is_empty() || mesh.submeshes.is_empty() {
-        return None;
-    }
-
-    let mut referenced_node_indices = std::collections::BTreeSet::new();
-    for submesh in &mesh.submeshes {
-        let index = submesh.node_parent_index as usize;
-        if index >= bones.len() {
-            return None;
-        }
-        referenced_node_indices.insert(index);
-    }
-
-    if referenced_node_indices.len() <= 1 {
+fn node_mesh_combo_from_bones(bones: &[crate::skeleton::Bone]) -> Option<crate::nmc::NodeMeshCombo> {
+    if bones.is_empty() {
         return None;
     }
 
@@ -127,8 +110,7 @@ pub(crate) fn synthesize_nmc_from_bones(
             let parent_index = bone
                 .parent_index
                 .filter(|parent| (*parent as usize) < bones.len() && *parent as usize != index);
-            let relative = if let Some(parent) = parent_index {
-                let _ = parent;
+            let relative = if parent_index.is_some() {
                 glam::Mat4::from_rotation_translation(
                     glam::Quat::from_xyzw(
                         bone.local_rotation[1],
@@ -160,6 +142,31 @@ pub(crate) fn synthesize_nmc_from_bones(
 }
 
 
+pub(crate) fn synthesize_nmc_from_bones(
+    mesh: &crate::types::Mesh,
+    bones: &[crate::skeleton::Bone],
+) -> Option<crate::nmc::NodeMeshCombo> {
+    if bones.is_empty() || mesh.submeshes.is_empty() {
+        return None;
+    }
+
+    let mut referenced_node_indices = std::collections::BTreeSet::new();
+    for submesh in &mesh.submeshes {
+        let index = submesh.node_parent_index as usize;
+        if index >= bones.len() {
+            return None;
+        }
+        referenced_node_indices.insert(index);
+    }
+
+    if referenced_node_indices.len() <= 1 {
+        return None;
+    }
+
+    node_mesh_combo_from_bones(bones)
+}
+
+
 /// Load NMC node table for a CGF/CGA file. The metadata is bundled with the
 /// .cgf itself in Ivo-format files; for split files (.cgf + .cgfm) the table
 /// lives in the .cgfm sidecar.
@@ -177,6 +184,22 @@ pub(crate) fn load_nmc_for_cgf(p4k: &MappedP4k, cgf_path: &str) -> Option<crate:
     if lower.ends_with(".cgf") || lower.ends_with(".cga") {
         let sidecar = format!("{cgf_path}m");
         if let Some(nmc) = try_path(&sidecar) {
+            return Some(nmc);
+        }
+    }
+    let try_skeleton = |path: &str| -> Option<crate::nmc::NodeMeshCombo> {
+        let p4k_path = datacore_path_to_p4k(path);
+        let bytes = p4k.entry_case_insensitive(&p4k_path).and_then(|e| p4k.read(e).ok())?;
+        let bones = crate::skeleton::parse_skeleton(&bytes)?;
+        node_mesh_combo_from_bones(&bones)
+    };
+    if let Some(nmc) = try_skeleton(cgf_path) {
+        return Some(nmc);
+    }
+    let lower = cgf_path.to_lowercase();
+    if lower.ends_with(".cgf") || lower.ends_with(".cga") {
+        let sidecar = format!("{cgf_path}m");
+        if let Some(nmc) = try_skeleton(&sidecar) {
             return Some(nmc);
         }
     }
@@ -299,3 +322,38 @@ pub(crate) fn bake_nmc_into_mesh(
     mesh
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{compute_nmc_world_transforms, load_nmc_for_cgf};
+    use std::path::Path;
+    use starbreaker_p4k::MappedP4k;
+
+    #[test]
+    #[ignore = "diagnostic real-P4K helper dump"]
+    fn print_ironclad_crew_quarter_helpers() {
+        let p4k_path = std::env::var("SC_DATA_P4K").expect("SC_DATA_P4K must be set");
+        let p4k = MappedP4k::open(Path::new(&p4k_path)).expect("failed to open Data.p4k");
+        let nmc = load_nmc_for_cgf(
+            &p4k,
+            "Objects/Spaceships/Ships/DRAK/Ironclad/exterior/drak_ironclad.cga",
+        )
+        .expect("expected Ironclad helper hierarchy");
+        let world = compute_nmc_world_transforms(&nmc);
+        for helper_name in [
+            "helper_crew_quarter_a",
+            "helper_crew_quarter_b",
+            "helper_crew_quarter_c",
+            "helper_crew_quarter_d",
+            "helper_crew_quarter_e",
+            "helper_crew_quarter_f",
+        ] {
+            let index = nmc
+                .nodes
+                .iter()
+                .position(|node| node.name.eq_ignore_ascii_case(helper_name))
+                .unwrap_or_else(|| panic!("missing helper node {helper_name}"));
+            let (_, rotation, translation) = world[index].to_scale_rotation_translation();
+            println!("{helper_name}: translation={translation:?} rotation={rotation:?}");
+        }
+    }
+}
