@@ -1,6 +1,9 @@
 use std::io::{Read, Seek, SeekFrom};
+use std::cmp::Ordering;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::FxHasher;
+use hashbrown::HashTable;
+use std::hash::{Hash, Hasher};
 use starbreaker_common::SpanReader;
 
 use crate::crypto;
@@ -17,7 +20,46 @@ pub struct P4kEntry {
     pub is_encrypted: bool,
     pub offset: u64,
     pub crc32: u32,
+    /// Raw ZIP "last mod" timestamp: lower 16 bits = DOS time (h:m:s/2),
+    /// upper 16 bits = DOS date (year-1980, month, day). Use
+    /// [`Self::last_modified_unix`] to get Unix seconds.
     pub last_modified: u32,
+}
+
+impl P4kEntry {
+    /// Decode the ZIP DOS `last_modified` field into Unix seconds since the
+    /// epoch. Returns 0 if the timestamp is unset or the encoded date is
+    /// invalid (e.g. month 0).
+    pub fn last_modified_unix(&self) -> i64 {
+        if self.last_modified == 0 {
+            return 0;
+        }
+        let time = self.last_modified & 0xFFFF;
+        let date = (self.last_modified >> 16) & 0xFFFF;
+        let year = ((date >> 9) & 0x7F) + 1980;
+        let month = (date >> 5) & 0x0F;
+        let day = date & 0x1F;
+        let hour = (time >> 11) & 0x1F;
+        let minute = (time >> 5) & 0x3F;
+        let second = (time & 0x1F) * 2;
+        if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+            return 0;
+        }
+        let days = days_from_civil(year as i32, month, day);
+        days * 86_400 + (hour as i64) * 3600 + (minute as i64) * 60 + (second as i64)
+    }
+}
+
+/// Howard Hinnant's days-from-civil algorithm. Returns days since 1970-01-01,
+/// negative for earlier dates. Proleptic Gregorian, no time-zone or leap-second
+/// awareness — fine for ZIP DOS dates which are local-time-naive.
+fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = (y - era * 400) as u32;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era as i64 * 146_097 + doe as i64 - 719_468
 }
 
 /// An item returned by `list_dir` — either a file entry or a subdirectory name.
@@ -30,22 +72,24 @@ pub enum DirEntry<'a> {
 pub struct P4kArchive<'a> {
     data: &'a [u8],
     entries: Vec<P4kEntry>,
-    path_index: FxHashMap<String, usize>,
-    lowercase_index: FxHashMap<String, usize>,
-    sorted_index: Vec<u32>, // entry indices sorted by name, for prefix scanning
+    path_index: HashTable<u32>,
+    sorted_index: Vec<u32>,
+    lowercase_names: Vec<String>,
+    sorted_lower_index: Vec<u32>,
 }
 
 impl<'a> P4kArchive<'a> {
     /// Parse a P4k archive from a byte slice.
     pub fn from_bytes(data: &'a [u8]) -> Result<Self, P4kError> {
-        let (entries, path_index, lowercase_index, sorted_index) =
+        let (entries, path_index, sorted_index, lowercase_names, sorted_lower_index) =
             parse_central_directory(data, None)?;
         Ok(P4kArchive {
             data,
             entries,
             path_index,
-            lowercase_index,
             sorted_index,
+            lowercase_names,
+            sorted_lower_index,
         })
     }
 
@@ -120,20 +164,18 @@ impl<'a> P4kArchive<'a> {
         }
     }
 
-    /// Read and decompress an entry using a seekable file handle instead of mmap.
+    /// Read and decompress an entry using positional reads on a borrowed
+    /// `&File`.
     ///
-    /// Each caller should use its own file handle (opened with read + share-read)
-    /// so multiple threads can extract concurrently without page-cache pressure.
-    pub fn read_from_file(
-        file: &mut (impl Read + Seek),
-        entry: &P4kEntry,
-    ) -> Result<Vec<u8>, P4kError> {
-        // Seek to the local file header
-        file.seek(SeekFrom::Start(entry.offset))?;
+    /// Passes the offset explicitly so concurrent callers don't coordinate
+    /// on a cursor — the same `&File` handle is safe to share across threads.
+    /// Two syscalls per read (header + data); no seeks.
+    pub fn read_from_file_at(file: &std::fs::File, entry: &P4kEntry) -> Result<Vec<u8>, P4kError> {
+        use crate::posread::pread_exact;
 
-        // Read the local file header
+        // 1. Local file header
         let mut header_buf = [0u8; size_of::<LocalFileHeader>()];
-        file.read_exact(&mut header_buf)?;
+        pread_exact(file, &mut header_buf, entry.offset)?;
         let local_header: LocalFileHeader =
             *zerocopy::FromBytes::ref_from_bytes(&header_buf).map_err(|_| {
                 P4kError::Parse(starbreaker_common::ParseError::InvalidLayout(
@@ -149,14 +191,14 @@ impl<'a> P4kArchive<'a> {
             });
         }
 
-        // Skip file name and extra field
-        let skip =
-            local_header.file_name_length as u64 + local_header.extra_field_length as u64;
-        file.seek(SeekFrom::Current(skip as i64))?;
+        // 2. Compressed data starts past the variable-length filename + extra field
+        let data_offset = entry.offset
+            + size_of::<LocalFileHeader>() as u64
+            + local_header.file_name_length as u64
+            + local_header.extra_field_length as u64;
 
-        // Read compressed data
         let mut raw = vec![0u8; entry.compressed_size as usize];
-        file.read_exact(&mut raw)?;
+        pread_exact(file, &mut raw, data_offset)?;
 
         let hint = entry.uncompressed_size as usize;
         match (entry.is_encrypted, entry.compression_method) {
@@ -179,14 +221,53 @@ impl<'a> P4kArchive<'a> {
 
     /// Look up an entry by path.
     pub fn entry(&self, path: &str) -> Option<&P4kEntry> {
-        self.path_index.get(path).map(|&i| &self.entries[i])
+        let h = hash_path(path);
+        let i = *self
+            .path_index
+            .find(h, |&j| self.entries[j as usize].name == path)?;
+        Some(&self.entries[i as usize])
+    }
+
+    /// Returns entry indices whose lowercased name contains every
+    /// whitespace-separated token in `query`. Order is unspecified;
+    /// callers sort.
+    pub fn search(&self, query: &str) -> Vec<u32> {
+        use rayon::prelude::*;
+        let tokens: smallvec::SmallVec<[String; 4]> = query
+            .split_ascii_whitespace()
+            .map(str::to_ascii_lowercase)
+            .collect();
+        if tokens.is_empty() {
+            return Vec::new();
+        }
+
+        self.lowercase_names
+            .par_iter()
+            .enumerate()
+            .filter_map(|(i, name)| {
+                tokens
+                    .iter()
+                    .all(|t| name.contains(t.as_str()))
+                    .then_some(i as u32)
+            })
+            .collect()
     }
 
     /// Look up an entry by path, case-insensitively.
+    ///
+    /// Allocates nothing per call: lowercases the needle on the fly during
+    /// the binary search and uses `eq_ignore_ascii_case` for the equality
+    /// check.
     pub fn entry_case_insensitive(&self, path: &str) -> Option<&P4kEntry> {
-        self.lowercase_index
-            .get(&path.to_ascii_lowercase())
-            .map(|&i| &self.entries[i])
+        let pos = self.sorted_lower_index.partition_point(|&i| {
+            cmp_lower_against(&self.lowercase_names[i as usize], path) == Ordering::Less
+        });
+        let idx = *self.sorted_lower_index.get(pos)? as usize;
+        if self.lowercase_names[idx].eq_ignore_ascii_case(path) {
+            Some(&self.entries[idx])
+        } else {
+            None
+        }
     }
 
     /// Number of entries.
@@ -245,14 +326,49 @@ impl<'a> P4kArchive<'a> {
     }
 }
 
+/// Compare a fully-lowercased haystack against a possibly-mixed-case needle,
+/// lowercasing the needle byte-by-byte without allocating.
+///
+/// Used for binary search over `sorted_lower_index`. Correct because
+/// `to_ascii_lowercase` is a no-op on non-ASCII bytes, matching the order
+/// produced by the materialised `lowercase_names` vec.
+#[inline]
+pub(crate) fn cmp_lower_against(haystack_lower: &str, needle_mixed: &str) -> Ordering {
+    let h = haystack_lower.as_bytes();
+    let n = needle_mixed.as_bytes();
+    let len = h.len().min(n.len());
+    for i in 0..len {
+        let nb = n[i].to_ascii_lowercase();
+        match h[i].cmp(&nb) {
+            Ordering::Equal => continue,
+            ord => return ord,
+        }
+    }
+    h.len().cmp(&n.len())
+}
+
 // ── Internal parsing ─────────────────────────────────────────────────────────
 
-/// Parsed central directory: entries, exact-case index, lowercase index, sorted offsets.
+/// Hash a path with FxHash for use as the key in `path_index`.
+#[inline]
+pub(crate) fn hash_path(s: &str) -> u64 {
+    let mut h = FxHasher::default();
+    s.hash(&mut h);
+    h.finish()
+}
+
+/// Parsed central directory:
+/// - entries
+/// - path_index (exact case)
+/// - sorted_index (case-sensitive, for prefix scans)
+/// - lowercase_names (parallel to entries)
+/// - sorted_lower_index (sorted by lowercase_names[i])
 pub(crate) type CentralDirectory = (
     Vec<P4kEntry>,
-    FxHashMap<String, usize>,
-    FxHashMap<String, usize>,
-    Vec<u32>,
+    HashTable<u32>,            // path_index (exact case, keyed by entry index)
+    Vec<u32>,                  // sorted_index (case-sensitive, for prefix scans)
+    Vec<String>,               // lowercase_names (parallel to entries)
+    Vec<u32>,                  // sorted_lower_index (sorted by lowercase_names[i])
 );
 
 /// Location of the central directory within an archive.
@@ -349,29 +465,33 @@ fn parse_entries(
         }
     }
 
-    // Build path index — FxHashMap for exact lookup
-    let mut path_index = FxHashMap::with_capacity_and_hasher(entries.len(), Default::default());
+    // Build path index — HashTable<u32> keyed by entry index, hashing through entries[i].name.
+    // Avoids the full-path String key duplication of FxHashMap<String, usize>.
+    let mut path_index: HashTable<u32> = HashTable::with_capacity(entries.len());
     for (i, entry) in entries.iter().enumerate() {
-        path_index.insert(entry.name.clone(), i);
+        let h = hash_path(&entry.name);
+        path_index.insert_unique(h, i as u32, |&j| hash_path(&entries[j as usize].name));
     }
 
-    // Build lowercase index for case-insensitive lookup
-    let mut lowercase_index =
-        FxHashMap::with_capacity_and_hasher(entries.len(), Default::default());
-    for (i, entry) in entries.iter().enumerate() {
-        lowercase_index.insert(entry.name.to_ascii_lowercase(), i);
-    }
+    // Parallel lowercased view used by search and entry_case_insensitive.
+    let lowercase_names: Vec<String> = entries.iter().map(|e| e.name.to_ascii_lowercase()).collect();
 
-    // Build sorted index for directory listing (prefix scan)
+    // Case-sensitive sorted index for list_dir / list_subdirs.
     let mut sorted_index: Vec<u32> = (0..entries.len() as u32).collect();
     sorted_index.sort_unstable_by(|&a, &b| entries[a as usize].name.cmp(&entries[b as usize].name));
 
-    Ok((entries, path_index, lowercase_index, sorted_index))
+    // Case-insensitive sorted index for entry_case_insensitive.
+    let mut sorted_lower_index: Vec<u32> = (0..entries.len() as u32).collect();
+    sorted_lower_index.sort_unstable_by(|&a, &b| {
+        lowercase_names[a as usize].cmp(&lowercase_names[b as usize])
+    });
+
+    Ok((entries, path_index, sorted_index, lowercase_names, sorted_lower_index))
 }
 
 /// Parse the central directory from raw archive data (in-memory byte slice).
 ///
-/// Returns (entries, path_index, lowercase_index, sorted_index).
+/// Returns (entries, path_index, sorted_index, lowercase_names, sorted_lower_index).
 pub(crate) fn parse_central_directory(
     data: &[u8],
     progress: Option<&starbreaker_common::Progress>,
@@ -450,16 +570,19 @@ fn read_entry(reader: &mut SpanReader, is_zip64: bool) -> Result<P4kEntry, P4kEr
         });
     }
 
-    // Read file name — single allocation, normalize separators in-place
+    // Read file name — copy once, swap '/' to '\' in place, validate UTF-8.
     let name_bytes = reader.read_bytes(header.file_name_length as usize)?;
-    let mut name = String::with_capacity(name_bytes.len());
-    for &b in name_bytes {
-        if b == b'/' {
-            name.push('\\');
-        } else {
-            name.push(b as char);
+    let mut bytes = name_bytes.to_vec();
+    for b in bytes.iter_mut() {
+        if *b == b'/' {
+            *b = b'\\';
         }
     }
+    let name = String::from_utf8(bytes).map_err(|_| {
+        P4kError::Parse(starbreaker_common::ParseError::InvalidLayout(
+            "non-utf8 entry name".to_string(),
+        ))
+    })?;
 
     let mut compressed_size = header.compressed_size as u64;
     let mut uncompressed_size = header.uncompressed_size as u64;
@@ -609,4 +732,344 @@ fn deflate_decompress(data: &[u8], size_hint: usize) -> Result<Vec<u8>, P4kError
         .read_to_end(&mut output)
         .map_err(|e| P4kError::Decompression(format!("deflate: {e}")))?;
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_entry(name: &str) -> P4kEntry {
+        P4kEntry {
+            name: name.to_string(),
+            compressed_size: 0,
+            uncompressed_size: 0,
+            compression_method: 0,
+            is_encrypted: false,
+            offset: 0,
+            crc32: 0,
+            last_modified: 0,
+        }
+    }
+
+    #[test]
+    fn case_insensitive_lookup_finds_mixed_case_entries() {
+        let entries = vec![
+            make_entry("Data\\Foo.MTL"),
+            make_entry("data\\BAR.xml"),
+            make_entry("Other\\baz.dds"),
+        ];
+        let lowercase_names: Vec<String> =
+            entries.iter().map(|e| e.name.to_ascii_lowercase()).collect();
+        let mut sorted_lower_index: Vec<u32> = (0..entries.len() as u32).collect();
+        sorted_lower_index.sort_unstable_by(|&a, &b| {
+            lowercase_names[a as usize].cmp(&lowercase_names[b as usize])
+        });
+
+        let archive = P4kArchive {
+            data: &[],
+            entries,
+            path_index: HashTable::new(),
+            sorted_index: Vec::new(),
+            lowercase_names,
+            sorted_lower_index,
+        };
+
+        assert_eq!(
+            archive.entry_case_insensitive("DATA\\foo.mtl").map(|e| e.name.as_str()),
+            Some("Data\\Foo.MTL")
+        );
+        assert_eq!(
+            archive.entry_case_insensitive("data\\bar.xml").map(|e| e.name.as_str()),
+            Some("data\\BAR.xml")
+        );
+        assert!(archive.entry_case_insensitive("nope").is_none());
+    }
+
+    fn make_archive_for_search() -> P4kArchive<'static> {
+        let entries = vec![
+            make_entry("Data\\Objects\\Spaceships\\Ships\\AEGS\\Hornet\\hornet.cga"),
+            make_entry("Data\\Objects\\Spaceships\\Ships\\AEGS\\Hornet\\hornet_glass.mtl"),
+            make_entry("Data\\Objects\\Spaceships\\Ships\\RSI\\Aurora\\aurora.cga"),
+            make_entry("Data\\Textures\\hornet_diffuse.dds"),
+        ];
+        let lowercase_names: Vec<String> =
+            entries.iter().map(|e| e.name.to_ascii_lowercase()).collect();
+        let mut sorted_lower_index: Vec<u32> = (0..entries.len() as u32).collect();
+        sorted_lower_index.sort_unstable_by(|&a, &b| {
+            lowercase_names[a as usize].cmp(&lowercase_names[b as usize])
+        });
+
+        P4kArchive {
+            data: &[],
+            entries,
+            path_index: HashTable::new(),
+            sorted_index: Vec::new(),
+            lowercase_names,
+            sorted_lower_index,
+        }
+    }
+
+    #[test]
+    fn search_empty_query_returns_empty() {
+        let a = make_archive_for_search();
+        assert!(a.search("").is_empty());
+        assert!(a.search("   ").is_empty());
+    }
+
+    #[test]
+    fn search_single_token_substring_match() {
+        let a = make_archive_for_search();
+        let mut hits: Vec<&str> = a
+            .search("hornet")
+            .into_iter()
+            .map(|i| a.entries[i as usize].name.as_str())
+            .collect();
+        hits.sort();
+        assert_eq!(
+            hits,
+            vec![
+                "Data\\Objects\\Spaceships\\Ships\\AEGS\\Hornet\\hornet.cga",
+                "Data\\Objects\\Spaceships\\Ships\\AEGS\\Hornet\\hornet_glass.mtl",
+                "Data\\Textures\\hornet_diffuse.dds",
+            ]
+        );
+    }
+
+    #[test]
+    fn search_multi_token_is_and() {
+        let a = make_archive_for_search();
+        let mut hits: Vec<&str> = a
+            .search("hornet glass")
+            .into_iter()
+            .map(|i| a.entries[i as usize].name.as_str())
+            .collect();
+        hits.sort();
+        assert_eq!(hits, vec!["Data\\Objects\\Spaceships\\Ships\\AEGS\\Hornet\\hornet_glass.mtl"]);
+    }
+
+    #[test]
+    fn search_is_case_insensitive() {
+        let a = make_archive_for_search();
+        let upper: Vec<u32> = a.search("HORNET");
+        let lower: Vec<u32> = a.search("hornet");
+        let mut u = upper.clone();
+        let mut l = lower.clone();
+        u.sort();
+        l.sort();
+        assert_eq!(u, l);
+    }
+
+    fn entry_with_dos(last_modified: u32) -> P4kEntry {
+        let mut e = make_entry("x");
+        e.last_modified = last_modified;
+        e
+    }
+
+    #[test]
+    fn dos_timestamp_zero_is_zero() {
+        assert_eq!(entry_with_dos(0).last_modified_unix(), 0);
+    }
+
+    #[test]
+    fn dos_timestamp_decodes_known_value() {
+        // 2020-01-01 00:00:00 — easy to verify by hand.
+        // year - 1980 = 40 (0b0101000); month = 1; day = 1.
+        // date = (40 << 9) | (1 << 5) | 1 = 0x5021
+        // time = 0
+        let packed = 0x5021_0000u32;
+        let secs = entry_with_dos(packed).last_modified_unix();
+        // 2020-01-01T00:00:00Z (ZIP times are time-zone-naive; we treat them as UTC).
+        assert_eq!(secs, 1_577_836_800);
+    }
+
+    #[test]
+    fn dos_timestamp_invalid_month_returns_zero() {
+        // month = 0 → invalid
+        let packed = (0x5800u32 << 16) | 0x0000u32;
+        assert_eq!(entry_with_dos(packed).last_modified_unix(), 0);
+    }
+
+    /// Lookup must not allocate even when the needle has uppercase bytes.
+    /// We can't observe allocations directly here, so this test pins
+    /// behavior across casings and around the binary-search boundary.
+    #[test]
+    fn case_insensitive_lookup_handles_mixed_case_and_boundaries() {
+        let entries = vec![
+            make_entry("a"),
+            make_entry("aaa"),
+            make_entry("AAB"), // sort-adjacent to "aaa" lowercased
+            make_entry("z"),
+        ];
+        let lowercase_names: Vec<String> =
+            entries.iter().map(|e| e.name.to_ascii_lowercase()).collect();
+        let mut sorted_lower_index: Vec<u32> = (0..entries.len() as u32).collect();
+        sorted_lower_index.sort_unstable_by(|&a, &b| {
+            lowercase_names[a as usize].cmp(&lowercase_names[b as usize])
+        });
+
+        let archive = P4kArchive {
+            data: &[],
+            entries,
+            path_index: HashTable::new(),
+            sorted_index: Vec::new(),
+            lowercase_names,
+            sorted_lower_index,
+        };
+
+        // Exact case
+        assert_eq!(archive.entry_case_insensitive("a").map(|e| e.name.as_str()), Some("a"));
+        // Upper -> matches lowercase entry
+        assert_eq!(archive.entry_case_insensitive("AAA").map(|e| e.name.as_str()), Some("aaa"));
+        // Lower -> matches uppercase entry
+        assert_eq!(archive.entry_case_insensitive("aab").map(|e| e.name.as_str()), Some("AAB"));
+        // Miss in the middle of the sort range
+        assert!(archive.entry_case_insensitive("aac").is_none());
+        // Miss past the end
+        assert!(archive.entry_case_insensitive("zz").is_none());
+        // Miss before the start
+        assert!(archive.entry_case_insensitive("").is_none());
+    }
+
+    /// Positional reads on a single shared `File` handle must not corrupt
+    /// each other when called concurrently.
+    #[test]
+    fn pread_exact_is_thread_safe() {
+        use std::fs::File;
+        use std::io::Write;
+        use std::sync::Arc;
+        use std::thread;
+
+        // Build a temp file with predictable content: byte at offset i is (i % 251).
+        let mut path = std::env::temp_dir();
+        path.push(format!("starbreaker-pread-{}.bin", std::process::id()));
+        {
+            let mut f = File::create(&path).expect("create temp");
+            let mut buf = vec![0u8; 65_536];
+            for (i, b) in buf.iter_mut().enumerate() {
+                *b = (i % 251) as u8;
+            }
+            f.write_all(&buf).expect("write temp");
+        }
+
+        let f = Arc::new(File::open(&path).expect("open temp"));
+        let mut handles = Vec::new();
+        for t in 0..8 {
+            let f = Arc::clone(&f);
+            handles.push(thread::spawn(move || {
+                let mut buf = [0u8; 17];
+                for k in 0..1000 {
+                    let off = ((t * 1000 + k) * 7) % (65_536 - 17);
+                    crate::posread::pread_exact(&f, &mut buf, off as u64).expect("pread");
+                    for (j, &b) in buf.iter().enumerate() {
+                        assert_eq!(b, ((off + j) % 251) as u8, "mismatch at off={}", off + j);
+                    }
+                }
+            }));
+        }
+        for h in handles { h.join().expect("thread"); }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Build a `P4kArchive<'static>` from a list of entries, matching the
+    /// production index construction.
+    fn build_test_archive(entries: Vec<P4kEntry>) -> P4kArchive<'static> {
+        let lowercase_names: Vec<String> =
+            entries.iter().map(|e| e.name.to_ascii_lowercase()).collect();
+
+        let mut sorted_index: Vec<u32> = (0..entries.len() as u32).collect();
+        sorted_index.sort_unstable_by(|&a, &b| {
+            entries[a as usize].name.cmp(&entries[b as usize].name)
+        });
+
+        let mut sorted_lower_index: Vec<u32> = (0..entries.len() as u32).collect();
+        sorted_lower_index.sort_unstable_by(|&a, &b| {
+            lowercase_names[a as usize].cmp(&lowercase_names[b as usize])
+        });
+
+        let mut path_index: hashbrown::HashTable<u32> =
+            hashbrown::HashTable::with_capacity(entries.len());
+        for (i, e) in entries.iter().enumerate() {
+            let h = hash_path(&e.name);
+            path_index.insert_unique(h, i as u32, |&j| hash_path(&entries[j as usize].name));
+        }
+
+        P4kArchive {
+            data: &[],
+            entries,
+            path_index,
+            sorted_index,
+            lowercase_names,
+            sorted_lower_index,
+        }
+    }
+
+    #[test]
+    fn exact_lookup_roundtrip_all_entries() {
+        let entries = vec![
+            make_entry("Data\\Foo.MTL"),
+            make_entry("data\\BAR.xml"),
+            make_entry("Other\\baz.dds"),
+        ];
+
+        let archive = build_test_archive(entries);
+
+        for e in &archive.entries {
+            assert_eq!(
+                archive.entry(&e.name).map(|x| x.name.as_str()),
+                Some(e.name.as_str()),
+                "exact-case roundtrip failed for {}",
+                e.name
+            );
+        }
+        assert!(archive.entry("Data\\foo.mtl").is_none(), "wrong case must miss");
+        assert!(archive.entry("nope").is_none());
+    }
+
+    #[test]
+    fn read_entry_rejects_non_utf8_name() {
+        // Hand-built non-ZIP64 CentralDirHeader with a 1-byte name 0xFF.
+        // 46-byte CentralDirHeader header + 1-byte name + 0 extra + 0 comment.
+        let mut buf = Vec::with_capacity(46 + 1);
+        // signature
+        buf.extend_from_slice(&CENTRAL_DIR_SIGNATURE.to_le_bytes());
+        // version_made_by, version_needed
+        buf.extend_from_slice(&[0, 0, 0, 0]);
+        // flags
+        buf.extend_from_slice(&[0, 0]);
+        // compression_method = 0 (stored)
+        buf.extend_from_slice(&[0, 0]);
+        // last_modified u32
+        buf.extend_from_slice(&[0, 0, 0, 0]);
+        // crc32 u32
+        buf.extend_from_slice(&[0, 0, 0, 0]);
+        // compressed_size u32
+        buf.extend_from_slice(&[0, 0, 0, 0]);
+        // uncompressed_size u32
+        buf.extend_from_slice(&[0, 0, 0, 0]);
+        // file_name_length u16 = 1
+        buf.extend_from_slice(&[1, 0]);
+        // extra_field_length u16 = 0
+        buf.extend_from_slice(&[0, 0]);
+        // file_comment_length u16 = 0
+        buf.extend_from_slice(&[0, 0]);
+        // disk_number_start u16
+        buf.extend_from_slice(&[0, 0]);
+        // internal_file_attributes u16
+        buf.extend_from_slice(&[0, 0]);
+        // external_file_attributes u32
+        buf.extend_from_slice(&[0, 0, 0, 0]);
+        // local_header_offset u32
+        buf.extend_from_slice(&[0, 0, 0, 0]);
+        // file name: a single non-UTF-8 byte
+        buf.push(0xFF);
+        assert_eq!(buf.len(), 46 + 1);
+
+        let mut reader = SpanReader::new(&buf);
+        let result = read_entry(&mut reader, /*is_zip64=*/ false);
+        assert!(
+            matches!(result, Err(P4kError::Parse(_))),
+            "expected Parse error for non-UTF-8 name, got: {:?}",
+            result
+        );
+    }
 }

@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Download } from "lucide-react";
 import { useDataCoreStore } from "../stores/datacore-store";
 import { ResizeHandle } from "../components/resize-handle";
+import { VirtualizedSearchList } from "../components/virtualized-search-list";
+import { buildTreeFromRows, flattenForVirtualization, type VisibleRow } from "../lib/search-tree";
+import { ContextMenu, useContextMenu, type ContextMenuItem } from "../components/context-menu";
 import { ExtractProgress } from "../components/extract-progress";
 import {
   dcSearch,
@@ -11,10 +13,22 @@ import {
   dcExportJson,
   dcExportXml,
   dcExportFolder,
+  dcExportRecords,
   type TreeEntryDto,
   type SearchResultDto,
   type BacklinkDto,
 } from "../lib/commands";
+
+/** Callbacks drilled down so any row can open a context menu without each
+ *  component having to know about extract state or dialog plumbing. */
+interface DcMenuApi {
+  openFolderMenu: (e: React.MouseEvent, path: string, name: string) => void;
+  openRecordMenu: (e: React.MouseEvent, id: string, name: string) => void;
+  exportSearchResults: (
+    ids: string[],
+    format: "json" | "xml",
+  ) => Promise<void>;
+}
 
 export function DataCoreBrowser() {
   const [navWidth, setNavWidth] = useState(350);
@@ -22,9 +36,117 @@ export function DataCoreBrowser() {
   const searchQuery = useDataCoreStore((s) => s.searchQuery);
   const setSearchQuery = useDataCoreStore((s) => s.setSearchQuery);
   const searching = useDataCoreStore((s) => s.searching);
+  const searchResults = useDataCoreStore((s) => s.searchResults);
+  const ctxMenu = useContextMenu();
+
+  // ── Action helpers ────────────────────────────────────────────────────────
+
+  const exportRecord = useCallback(
+    async (id: string, defaultName: string, format: "json" | "xml") => {
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const path = await save({
+        title: `Export ${format.toUpperCase()}`,
+        defaultPath: `${defaultName}.${format}`,
+        filters: [{ name: format.toUpperCase(), extensions: [format] }],
+      });
+      if (!path) return;
+      try {
+        if (format === "json") await dcExportJson(id, path);
+        else await dcExportXml(id, path);
+      } catch (err) {
+        console.error(`Export ${format} failed:`, err);
+      }
+    },
+    [],
+  );
+
+  const exportFolder = useCallback(
+    async (path: string, name: string, format: "json" | "xml") => {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const dir = await open({
+        title: `Export "${name}" folder as ${format.toUpperCase()}`,
+        directory: true,
+        multiple: false,
+      });
+      if (!dir) return;
+      setExtracting(true);
+      try {
+        await dcExportFolder(path, format, dir);
+      } catch (err) {
+        console.error("Folder export failed:", err);
+      } finally {
+        setExtracting(false);
+      }
+    },
+    [],
+  );
+
+  const exportSearchResults = useCallback(
+    async (ids: string[], format: "json" | "xml") => {
+      if (ids.length === 0) return;
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const dir = await open({
+        title: `Export ${ids.length.toLocaleString()} records as ${format.toUpperCase()}`,
+        directory: true,
+        multiple: false,
+      });
+      if (!dir) return;
+      setExtracting(true);
+      try {
+        await dcExportRecords(ids, format, dir);
+      } catch (err) {
+        console.error("Search-results export failed:", err);
+      } finally {
+        setExtracting(false);
+      }
+    },
+    [],
+  );
+
+  const copyText = useCallback(async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (err) {
+      console.error("Clipboard write failed:", err);
+    }
+  }, []);
+
+  // ── Menu builders ─────────────────────────────────────────────────────────
+
+  const openFolderMenu = useCallback(
+    (e: React.MouseEvent, path: string, name: string) => {
+      const items: ContextMenuItem[] = [
+        { label: "Export folder as JSON…", onClick: () => exportFolder(path, name, "json") },
+        { label: "Export folder as XML…", onClick: () => exportFolder(path, name, "xml") },
+        { label: "Copy path", onClick: () => copyText(path) },
+      ];
+      ctxMenu.open(e, items);
+    },
+    [ctxMenu, exportFolder, copyText],
+  );
+
+  const openRecordMenu = useCallback(
+    (e: React.MouseEvent, id: string, name: string) => {
+      const items: ContextMenuItem[] = [
+        { label: "Export as JSON…", onClick: () => exportRecord(id, name, "json") },
+        { label: "Export as XML…", onClick: () => exportRecord(id, name, "xml") },
+        { label: "Copy ID", onClick: () => copyText(id) },
+      ];
+      ctxMenu.open(e, items);
+    },
+    [ctxMenu, exportRecord, copyText],
+  );
+
+  const menu: DcMenuApi = useMemo(
+    () => ({ openFolderMenu, openRecordMenu, exportSearchResults }),
+    [openFolderMenu, openRecordMenu, exportSearchResults],
+  );
+
+  const hasSearch = searchQuery.trim().length > 0;
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden relative">
+      <ContextMenu state={ctxMenu.state} onClose={ctxMenu.close} />
       <ExtractProgress active={extracting} onDone={() => setExtracting(false)} />
       {/* Toolbar */}
       <div className="flex items-center gap-2 px-3 border-b border-border bg-bg-alt shrink-0" style={{ height: "var(--toolbar-height)" }}>
@@ -38,9 +160,32 @@ export function DataCoreBrowser() {
         {searching && (
           <span className="text-xs text-text-dim shrink-0">Searching...</span>
         )}
+        {hasSearch && !searching && searchResults.length > 0 && (
+          <button
+            type="button"
+            onClick={(e) => {
+              ctxMenu.open(e, [
+                {
+                  label: "Export all as JSON…",
+                  onClick: () =>
+                    exportSearchResults(searchResults.map((r) => r.id), "json"),
+                },
+                {
+                  label: "Export all as XML…",
+                  onClick: () =>
+                    exportSearchResults(searchResults.map((r) => r.id), "xml"),
+                },
+              ]);
+            }}
+            title={`Export the ${searchResults.length.toLocaleString()} currently shown records.`}
+            className="px-2 py-1 text-xs rounded bg-surface text-text-dim hover:text-text hover:bg-surface-hi shrink-0"
+          >
+            Export all matches…
+          </button>
+        )}
       </div>
       <div className="flex-1 flex overflow-hidden">
-        <NavPanel width={navWidth} onExtractStart={() => setExtracting(true)} onExtractEnd={() => setExtracting(false)} />
+        <NavPanel width={navWidth} menu={menu} />
         <ResizeHandle width={navWidth} onResize={setNavWidth} side="right" min={200} max={600} />
         <InspectorPanel />
       </div>
@@ -50,109 +195,32 @@ export function DataCoreBrowser() {
 
 // ── Left panel: combined tree + search ──────────────────────────────────────
 
-function NavPanel({ width, onExtractStart, onExtractEnd }: {
-  width: number;
-  onExtractStart: () => void;
-  onExtractEnd: () => void;
-}) {
+function NavPanel({ width, menu }: { width: number; menu: DcMenuApi }) {
   const searchQuery = useDataCoreStore((s) => s.searchQuery);
   const hasSearch = searchQuery.trim().length > 0;
 
   return (
     <div className="flex flex-col border-r border-border overflow-hidden shrink-0 min-h-0" style={{ width }}>
       <div className={hasSearch ? "hidden" : "flex-1 min-h-0 overflow-hidden"}>
-        <TreePanel onExtractStart={onExtractStart} onExtractEnd={onExtractEnd} />
+        <TreePanel menu={menu} />
       </div>
-      {hasSearch && <SearchResults onExtractStart={onExtractStart} onExtractEnd={onExtractEnd} />}
+      {hasSearch && <SearchResults menu={menu} />}
     </div>
   );
 }
 
-// ── Search results (hierarchical while typing) ───────────────────────────────
+// ── Search results (virtualized flat list while typing) ──────────────────────
 
-interface SearchTreeFolder {
-  kind: "folder";
-  name: string;
-  path: string;
-  children: SearchTreeNode[];
-}
-
-interface SearchTreeRecord {
-  kind: "record";
-  name: string;
-  path: string;
-  structType: string;
-  id: string;
-}
-
-type SearchTreeNode = SearchTreeFolder | SearchTreeRecord;
-
-function searchResultsToTree(results: SearchResultDto[]): SearchTreeNode[] {
-  const root: SearchTreeNode[] = [];
-
-  for (const result of results) {
-    const segments = result.path.split("/").filter(Boolean);
-    const folderSegments = segments.length > 1 ? segments.slice(0, -1) : [];
-    let siblings = root;
-    let currentPath = "";
-
-    for (const segment of folderSegments) {
-      currentPath = currentPath ? `${currentPath}/${segment}` : segment;
-      let folder = siblings.find(
-        (node): node is SearchTreeFolder =>
-          node.kind === "folder" && node.path === currentPath,
-      );
-
-      if (!folder) {
-        folder = {
-          kind: "folder",
-          name: segment,
-          path: currentPath,
-          children: [],
-        };
-        siblings.push(folder);
-      }
-
-      siblings = folder.children;
-    }
-
-    siblings.push({
-      kind: "record",
-      name: result.name,
-      path: result.path,
-      structType: result.struct_type,
-      id: result.id,
-    });
-  }
-
-  const sortNodes = (nodes: SearchTreeNode[]) => {
-    nodes.sort((a, b) => {
-      if (a.kind !== b.kind) return a.kind === "folder" ? -1 : 1;
-      return a.name.localeCompare(b.name);
-    });
-    for (const node of nodes) {
-      if (node.kind === "folder") sortNodes(node.children);
-    }
-  };
-
-  sortNodes(root);
-  return root;
-}
-
-function SearchResults({ onExtractStart, onExtractEnd }: {
-  onExtractStart: () => void;
-  onExtractEnd: () => void;
-}) {
+function SearchResults({ menu }: { menu: DcMenuApi }) {
   const searchQuery = useDataCoreStore((s) => s.searchQuery);
   const searchResults = useDataCoreStore((s) => s.searchResults);
   const setSearchResults = useDataCoreStore((s) => s.setSearchResults);
   const searching = useDataCoreStore((s) => s.searching);
   const setSearching = useDataCoreStore((s) => s.setSearching);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(null);
-  const searchTree = useMemo(
-    () => searchResultsToTree(searchResults),
-    [searchResults],
-  );
+  const selectRecord = useSelectRecord();
+  const [treeMode, setTreeMode] = useState(false);
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
   const doSearch = useCallback(
     (query: string) => {
@@ -162,102 +230,119 @@ function SearchResults({ onExtractStart, onExtractEnd }: {
         .catch((err) => {
           console.error("Search failed:", err);
           setSearchResults([]);
-        });
+        })
+        .finally(() => setSearching(false));
     },
     [setSearchResults, setSearching],
   );
 
   useEffect(() => {
+    setCollapsed(new Set());
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => doSearch(searchQuery), 150);
-    return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
   }, [searchQuery, doSearch]);
+
+  const visibleRows = useMemo(() => {
+    if (!treeMode) return null;
+    const tree = buildTreeFromRows(searchResults, (r) => r.path.split("/").filter(Boolean));
+    return flattenForVirtualization(tree, collapsed);
+  }, [treeMode, searchResults, collapsed]);
 
   return (
     <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
-      <div className="px-2.5 py-1 text-[11px] text-text-dim">
-        {searching ? "Searching..." : `${searchResults.length} results`}
+      <div className="px-2.5 py-1 text-[11px] text-text-dim flex items-center">
+        <span className="flex-1">
+          {searching ? "Searching..." : `${searchResults.length} results`}
+        </span>
+        <button
+          type="button"
+          onClick={() => setTreeMode((v) => !v)}
+          title={treeMode ? "Switch to flat list" : "Switch to tree view"}
+          className="px-2 py-0.5 text-[10px] rounded bg-surface text-text-dim hover:text-text hover:bg-surface-hi shrink-0"
+        >
+          {treeMode ? "Flat" : "Tree"}
+        </button>
       </div>
-      <div className="flex-1 min-h-0 overflow-y-auto">
-        {searchTree.map((node) => (
-          <SearchTreeItem
-            key={node.kind === "folder" ? `f:${node.path}` : `r:${node.id}`}
-            node={node}
-            depth={0}
-            onExtractStart={onExtractStart}
-            onExtractEnd={onExtractEnd}
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function SearchTreeItem({ node, depth, onExtractStart, onExtractEnd }: {
-  node: SearchTreeNode;
-  depth: number;
-  onExtractStart: () => void;
-  onExtractEnd: () => void;
-}) {
-  const selectRecord = useSelectRecord();
-  const [expanded, setExpanded] = useState(true);
-
-  if (node.kind === "folder") {
-    return (
-      <div>
-        <FolderRow
-          name={node.name}
-          path={node.path}
-          depth={depth}
-          expanded={expanded}
-          onToggle={() => setExpanded((e) => !e)}
-          onExtractStart={onExtractStart}
-          onExtractEnd={onExtractEnd}
+      {treeMode && visibleRows ? (
+        <VirtualizedSearchList<VisibleRow<SearchResultDto>>
+          items={visibleRows}
+          rowHeight={24}
+          getKey={(row) => row.key}
+          renderRow={(row) => {
+            if (row.kind === "folder") {
+              return (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setCollapsed((prev) => {
+                      const next = new Set(prev);
+                      const path = row.key.slice(2);
+                      if (next.has(path)) next.delete(path);
+                      else next.add(path);
+                      return next;
+                    })
+                  }
+                  className="w-full h-full text-left flex items-center text-[13px] text-text-dim hover:bg-surface transition-colors"
+                  style={{ paddingLeft: row.depth * 16 + 8 }}
+                >
+                  <span className="w-4 text-[10px]">{row.collapsed ? "▶" : "▼"}</span>
+                  <span className="flex-1 truncate">{row.name}</span>
+                </button>
+              );
+            }
+            return (
+              <button
+                type="button"
+                onClick={() => selectRecord(row.data!.id)}
+                onContextMenu={(e) => menu.openRecordMenu(e, row.data!.id, row.data!.name)}
+                className="w-full h-full text-left flex items-center hover:bg-surface transition-colors"
+                style={{ paddingLeft: row.depth * 16 + 24 }}
+              >
+                <span className="text-[13px] text-text-sub truncate flex-1">{row.name}</span>
+                <span className="text-[10px] text-text-faint pl-2 shrink-0">{row.data!.struct_type}</span>
+              </button>
+            );
+          }}
         />
-        {expanded && node.children.map((child) => (
-          <SearchTreeItem
-            key={child.kind === "folder" ? `f:${child.path}` : `r:${child.id}`}
-            node={child}
-            depth={depth + 1}
-            onExtractStart={onExtractStart}
-            onExtractEnd={onExtractEnd}
-          />
-        ))}
-      </div>
-    );
-  }
-
-  return (
-    <button
-      type="button"
-      onClick={() => selectRecord(node.id)}
-      className="w-full text-left flex items-center h-6 hover:bg-surface transition-colors group"
-      style={{ paddingLeft: depth * 16 + 22 }}
-    >
-      <span className="text-[13px] text-text-sub truncate flex-1">{node.name}</span>
-      <span className="text-[10px] text-text-faint pr-2 shrink-0">{node.structType}</span>
-    </button>
+      ) : (
+        <VirtualizedSearchList<SearchResultDto>
+          items={searchResults}
+          rowHeight={24}
+          getKey={(item) => item.id}
+          renderRow={(item) => (
+            <button
+              type="button"
+              onClick={() => selectRecord(item.id)}
+              onContextMenu={(e) => menu.openRecordMenu(e, item.id, item.name)}
+              className="w-full h-full text-left flex items-center px-2.5 hover:bg-surface transition-colors"
+            >
+              <span className="text-[13px] text-text-sub truncate flex-1">{item.name}</span>
+              <span className="text-[10px] text-text-faint pl-2 shrink-0">{item.struct_type}</span>
+            </button>
+          )}
+        />
+      )}
+    </div>
   );
 }
 
 // ── Tree panel (browse when search is empty) ────────────────────────────────
 
-function TreePanel({ onExtractStart, onExtractEnd }: {
-  onExtractStart: () => void;
-  onExtractEnd: () => void;
-}) {
+function TreePanel({ menu }: { menu: DcMenuApi }) {
   return (
     <div className="h-full min-h-0 overflow-y-auto">
-      <TreeLevel path="" depth={0} onExtractStart={onExtractStart} onExtractEnd={onExtractEnd} />
+      <TreeLevel path="" depth={0} menu={menu} />
     </div>
   );
 }
 
-function TreeLevel({ path, depth, onExtractStart, onExtractEnd }: {
+function TreeLevel({ path, depth, menu }: {
   path: string;
   depth: number;
-  onExtractStart: () => void;
-  onExtractEnd: () => void;
+  menu: DcMenuApi;
 }) {
   const [entries, setEntries] = useState<TreeEntryDto[]>([]);
   const [loading, setLoading] = useState(true);
@@ -299,14 +384,12 @@ function TreeLevel({ path, depth, onExtractStart, onExtractEnd }: {
             <div key={`f:${entry.name}`}>
               <FolderRow
                 name={entry.name}
-                path={childPath}
                 depth={depth}
                 expanded={expanded}
                 onToggle={() => toggleFolder(entry.name)}
-                onExtractStart={onExtractStart}
-                onExtractEnd={onExtractEnd}
+                onContextMenu={(e) => menu.openFolderMenu(e, childPath, entry.name)}
               />
-              {expanded && <TreeLevel path={childPath} depth={depth + 1} onExtractStart={onExtractStart} onExtractEnd={onExtractEnd} />}
+              {expanded && <TreeLevel path={childPath} depth={depth + 1} menu={menu} />}
             </div>
           );
         }
@@ -315,7 +398,8 @@ function TreeLevel({ path, depth, onExtractStart, onExtractEnd }: {
             key={`r:${entry.id}`}
             type="button"
             onClick={() => selectRecord(entry.id)}
-            className="w-full text-left flex items-center h-6 hover:bg-surface transition-colors group"
+            onContextMenu={(e) => menu.openRecordMenu(e, entry.id, entry.name)}
+            className="w-full text-left flex items-center h-6 hover:bg-surface transition-colors"
             style={{ paddingLeft: depth * 16 + 22 }}
           >
             <span className="text-[13px] text-text-sub truncate flex-1">{entry.name}</span>
@@ -327,52 +411,25 @@ function TreeLevel({ path, depth, onExtractStart, onExtractEnd }: {
   );
 }
 
-function FolderRow({ name, path, depth, expanded, onToggle, onExtractStart, onExtractEnd }: {
+function FolderRow({ name, depth, expanded, onToggle, onContextMenu }: {
   name: string;
-  path: string;
   depth: number;
   expanded: boolean;
   onToggle: () => void;
-  onExtractStart: () => void;
-  onExtractEnd: () => void;
+  onContextMenu: (e: React.MouseEvent) => void;
 }) {
-  const handleExport = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    const { open } = await import("@tauri-apps/plugin-dialog");
-    const dir = await open({ title: `Export "${name}" folder`, directory: true, multiple: false });
-    if (!dir) return;
-
-    onExtractStart();
-    try {
-      await dcExportFolder(path, "json", dir);
-    } catch (err) {
-      console.error("Folder export failed:", err);
-    } finally {
-      onExtractEnd();
-    }
-  };
-
   return (
     <button
       type="button"
       onClick={onToggle}
-      className="w-full text-left flex items-center h-6 hover:bg-surface transition-colors group"
+      onContextMenu={onContextMenu}
+      className="w-full text-left flex items-center h-6 hover:bg-surface transition-colors"
       style={{ paddingLeft: depth * 16 + 6 }}
     >
       <span className="text-[10px] w-4 text-text-dim">
         {expanded ? "\u25BC" : "\u25B6"}
       </span>
       <span className="text-[13px] text-text flex-1">{name}</span>
-      <button
-        type="button"
-        onClick={handleExport}
-        title={`Export all records in ${name}/`}
-        className="hidden group-hover:flex items-center justify-center w-5 h-5 mr-1 rounded
-                   text-text-dim hover:text-text hover:bg-surface-hi transition-colors
-                   disabled:opacity-50"
-      >
-        <Download size={12} />
-      </button>
     </button>
   );
 }

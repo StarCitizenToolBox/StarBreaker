@@ -52,6 +52,16 @@ pub enum DirEntryDto {
 pub struct P4kSearchResultDto {
     pub path: String,
     pub uncompressed_size: u64,
+    /// Unix seconds since epoch, decoded from the ZIP DOS timestamp by
+    /// `P4kEntry::last_modified_unix`. 0 means unset / invalid.
+    pub modified_unix: i64,
+}
+
+/// Response envelope for p4k_search: (possibly truncated) results + true total count.
+#[derive(Serialize)]
+pub struct P4kSearchResponseDto {
+    pub results: Vec<P4kSearchResultDto>,
+    pub total: u32,
 }
 
 /// Info returned after opening a P4k.
@@ -230,35 +240,55 @@ pub fn list_dir(state: State<'_, AppState>, path: String) -> Result<Vec<DirEntry
 }
 
 /// Search file paths from the loaded P4k archive.
+///
+/// Multi-token queries use space-separated AND semantics: each token must
+/// appear (case-insensitively) somewhere in the entry path. Returns all
+/// matches; the frontend is expected to virtualize rendering.
+/// `limit`: optional max number of results to materialize. `None` returns all
+/// matches. The `total` field on the response is always the true match count.
 #[tauri::command]
 pub fn p4k_search(
     state: State<'_, AppState>,
     query: String,
-) -> Result<Vec<P4kSearchResultDto>, AppError> {
+    limit: Option<u32>,
+) -> Result<P4kSearchResponseDto, AppError> {
+    use rayon::prelude::*;
+
     let guard = state.p4k.lock();
     let p4k = guard
         .as_ref()
         .ok_or_else(|| AppError::Internal("P4k not loaded".into()))?;
 
-    let query = query.trim().to_ascii_lowercase();
-    if query.is_empty() {
-        return Ok(Vec::new());
-    }
+    let indices = p4k.search(&query);
+    let entries = p4k.entries();
+    let total = indices.len() as u32;
 
-    let mut results: Vec<_> = p4k
-        .entries()
-        .iter()
-        .filter(|entry| entry.name.to_ascii_lowercase().contains(&query))
-        .map(|entry| P4kSearchResultDto {
-            path: entry.name.clone(),
-            uncompressed_size: entry.uncompressed_size,
+    // Sort indices by (name.len(), name) so a truncating `limit` keeps the
+    // shortest paths (more relevant) rather than an arbitrary slice.
+    let mut sorted_indices = indices;
+    sorted_indices.par_sort_by(|&a, &b| {
+        let na = &entries[a as usize].name;
+        let nb = &entries[b as usize].name;
+        na.len().cmp(&nb.len()).then_with(|| na.cmp(nb))
+    });
+
+    let take = match limit {
+        Some(n) => sorted_indices.len().min(n as usize),
+        None => sorted_indices.len(),
+    };
+    let results: Vec<P4kSearchResultDto> = sorted_indices[..take]
+        .par_iter()
+        .map(|&i| {
+            let e = &entries[i as usize];
+            P4kSearchResultDto {
+                path: e.name.clone(),
+                uncompressed_size: e.uncompressed_size,
+                modified_unix: e.last_modified_unix(),
+            }
         })
         .collect();
 
-    results.sort_by(|a, b| a.path.len().cmp(&b.path.len()).then_with(|| a.path.cmp(&b.path)));
-    results.truncate(500);
-
-    Ok(results)
+    Ok(P4kSearchResponseDto { results, total })
 }
       
 #[derive(Clone)]
@@ -2188,6 +2218,73 @@ pub async fn extract_p4k_folder(
         }
 
         Ok::<_, AppError>(count)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("task join error: {e}")))?
+}
+
+/// Extract a list of P4k files to disk, preserving the full P4k path under
+/// the chosen output directory. Used by "Extract all matches" — the frontend
+/// supplies the (possibly filtered, possibly sorted) result paths it wants
+/// extracted. Emits the same `folder-extract-progress` events as
+/// `extract_p4k_folder`. Returns the number of files actually written
+/// (entries that no longer exist or are empty are silently skipped).
+#[tauri::command]
+pub async fn extract_p4k_paths(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    output_dir: String,
+) -> Result<usize, AppError> {
+    let p4k = state
+        .p4k
+        .lock()
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("P4K not loaded".into()))?
+        .clone();
+
+    tokio::task::spawn_blocking(move || {
+        let out = std::path::Path::new(&output_dir);
+        let total = paths.len();
+        let mut written = 0usize;
+
+        for (i, path) in paths.iter().enumerate() {
+            let entry = match p4k.entry(path) {
+                Some(e) => e,
+                None => continue,
+            };
+            if entry.uncompressed_size == 0 {
+                continue;
+            }
+
+            if i % 50 == 0 || i + 1 == total {
+                let short_name = entry
+                    .name
+                    .rsplit('\\')
+                    .next()
+                    .unwrap_or(&entry.name)
+                    .to_string();
+                let _ = app.emit(
+                    "folder-extract-progress",
+                    FolderExtractProgress {
+                        current: i + 1,
+                        total,
+                        name: short_name,
+                    },
+                );
+            }
+
+            let rel = entry.name.replace('\\', "/");
+            let dest = out.join(&rel);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let data = p4k.read(entry)?;
+            std::fs::write(&dest, &data)?;
+            written += 1;
+        }
+
+        Ok::<_, AppError>(written)
     })
     .await
     .map_err(|e| AppError::Internal(format!("task join error: {e}")))?

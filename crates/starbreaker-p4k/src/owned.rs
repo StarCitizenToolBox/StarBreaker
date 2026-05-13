@@ -1,24 +1,27 @@
-use rustc_hash::FxHashMap;
+use hashbrown::HashTable;
+use parking_lot::Mutex;
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use parking_lot::Mutex;
 
-use crate::archive::{DirEntry, P4kArchive, P4kEntry, parse_central_directory_from_file};
+use crate::archive::{DirEntry, P4kArchive, P4kEntry, cmp_lower_against, hash_path, parse_central_directory_from_file};
 use crate::error::P4kError;
 
 /// A P4k archive backed by a pool of file handles.
 ///
-/// Since `P4kEntry` fields are all owned types (`String`, `u64`, etc.),
-/// the entries are parsed once during construction and stored separately
-/// from the file. Individual reads use seek + read on a pooled file handle,
-/// allowing concurrent reads from multiple threads without contention.
+/// Entries are parsed once at construction. Individual reads use positional
+/// I/O (`pread`/`seek_read`) on a handle popped from the pool — each rayon
+/// worker effectively gets its own handle once the pool stabilises, which
+/// avoids the per-file-object lock that Windows takes inside `ReadFile`
+/// when many threads share a single handle. The mutex covers only the
+/// pop/push around each read; the read itself runs without the lock.
 pub struct MappedP4k {
     path: PathBuf,
     file_pool: Mutex<Vec<File>>,
     entries: Vec<P4kEntry>,
-    path_index: FxHashMap<String, usize>,
-    lowercase_index: FxHashMap<String, usize>,
+    path_index: HashTable<u32>,
     sorted_index: Vec<u32>,
+    lowercase_names: Vec<String>,
+    sorted_lower_index: Vec<u32>,
 }
 
 impl MappedP4k {
@@ -35,7 +38,7 @@ impl MappedP4k {
         let path_buf = path.as_ref().to_path_buf();
         let mut file = File::open(&path_buf)?;
 
-        let (entries, path_index, lowercase_index, sorted_index) =
+        let (entries, path_index, sorted_index, lowercase_names, sorted_lower_index) =
             parse_central_directory_from_file(&mut file, progress)?;
 
         Ok(MappedP4k {
@@ -43,8 +46,9 @@ impl MappedP4k {
             file_pool: Mutex::new(vec![file]),
             entries,
             path_index,
-            lowercase_index,
             sorted_index,
+            lowercase_names,
+            sorted_lower_index,
         })
     }
 
@@ -55,20 +59,20 @@ impl MappedP4k {
 
     /// Read and decompress an entry's data.
     ///
-    /// Uses a pooled file handle so concurrent reads from multiple threads
-    /// don't serialize on a single lock.
+    /// Pops a `File` handle from the pool (or opens a new one if empty),
+    /// reads positionally, then returns the handle. The pop/push is the
+    /// only contended path; the read itself runs unlocked. Each concurrent
+    /// caller ends up with its own handle once the pool stabilises.
     pub fn read(&self, entry: &P4kEntry) -> Result<Vec<u8>, P4kError> {
-        // Take a file handle from the pool, or open a new one if empty.
-        let mut file = self
+        let file = self
             .file_pool
             .lock()
             .pop()
             .map(Ok)
             .unwrap_or_else(|| File::open(&self.path))?;
 
-        let result = P4kArchive::read_from_file(&mut file, entry);
+        let result = P4kArchive::read_from_file_at(&file, entry);
 
-        // Return the handle to the pool.
         self.file_pool.lock().push(file);
 
         result
@@ -81,14 +85,52 @@ impl MappedP4k {
 
     /// Look up an entry by path.
     pub fn entry(&self, path: &str) -> Option<&P4kEntry> {
-        self.path_index.get(path).map(|&i| &self.entries[i])
+        let h = hash_path(path);
+        let i = *self
+            .path_index
+            .find(h, |&j| self.entries[j as usize].name == path)?;
+        Some(&self.entries[i as usize])
+    }
+
+    /// Returns entry indices whose lowercased name contains every
+    /// whitespace-separated token in `query`. Order is unspecified;
+    /// callers sort.
+    pub fn search(&self, query: &str) -> Vec<u32> {
+        use rayon::prelude::*;
+        let tokens: smallvec::SmallVec<[String; 4]> = query
+            .split_ascii_whitespace()
+            .map(str::to_ascii_lowercase)
+            .collect();
+        if tokens.is_empty() {
+            return Vec::new();
+        }
+
+        self.lowercase_names
+            .par_iter()
+            .enumerate()
+            .filter_map(|(i, name)| {
+                tokens
+                    .iter()
+                    .all(|t| name.contains(t.as_str()))
+                    .then_some(i as u32)
+            })
+            .collect()
     }
 
     /// Look up an entry by path, case-insensitively.
+    ///
+    /// Allocates nothing per call.
     pub fn entry_case_insensitive(&self, path: &str) -> Option<&P4kEntry> {
-        self.lowercase_index
-            .get(&path.to_ascii_lowercase())
-            .map(|&i| &self.entries[i])
+        use std::cmp::Ordering;
+        let pos = self.sorted_lower_index.partition_point(|&i| {
+            cmp_lower_against(&self.lowercase_names[i as usize], path) == Ordering::Less
+        });
+        let idx = *self.sorted_lower_index.get(pos)? as usize;
+        if self.lowercase_names[idx].eq_ignore_ascii_case(path) {
+            Some(&self.entries[idx])
+        } else {
+            None
+        }
     }
 
     /// Look up and read a file by path (case-insensitive). Returns the decompressed data.

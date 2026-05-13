@@ -23,6 +23,14 @@ export type DirEntry = FileDirEntry | DirectoryDirEntry;
 export interface P4kSearchResult {
   path: string;
   uncompressed_size: number;
+  /** Unix seconds since epoch (decoded from the ZIP DOS timestamp on the
+   *  Rust side). 0 means unset / invalid. */
+  modified_unix: number;
+}
+
+export interface P4kSearchResponse {
+  results: P4kSearchResult[];
+  total: number;
 }
 
 export interface LoadProgress {
@@ -75,8 +83,18 @@ export async function listDir(path: string): Promise<DirEntry[]> {
 }
 
 /** Search file paths from the loaded P4k. */
-export async function p4kSearch(query: string): Promise<P4kSearchResult[]> {
-  return invoke<P4kSearchResult[]>("p4k_search", { query });
+/**
+ * Search the loaded P4k.
+ *
+ * `limit`: max results to materialize (truncates after sort). Omit / pass
+ * `undefined` to load all matches. The response's `total` is always the
+ * true match count regardless of `limit`.
+ */
+export async function p4kSearch(
+  query: string,
+  limit?: number,
+): Promise<P4kSearchResponse> {
+  return invoke<P4kSearchResponse>("p4k_search", { query, limit });
 }
 
 /** List only subdirectory names under a path (fast). */
@@ -300,6 +318,16 @@ export async function dcExportFolder(
   return invoke<number>("dc_export_folder", { pathPrefix, format, outputDir });
 }
 
+/** Export an explicit list of records (by ID) into `outputDir`. Files land
+ *  flat, named after each record's `file_name` field. */
+export async function dcExportRecords(
+  ids: string[],
+  format: "json" | "xml",
+  outputDir: string,
+): Promise<number> {
+  return invoke<number>("dc_export_records", { ids, format, outputDir });
+}
+
 export interface BacklinkDto {
   name: string;
   id: string;
@@ -445,6 +473,13 @@ export async function extractP4kFolder(
   filter?: string,
 ): Promise<number> {
   return invoke<number>("extract_p4k_folder", { pathPrefix, outputDir, filter: filter ?? null });
+}
+
+/** Extract an explicit list of P4k file paths to disk, preserving each file's
+ *  full P4k path under `outputDir`. Emits the same `folder-extract-progress`
+ *  events as `extractP4kFolder`. */
+export async function extractP4kPaths(paths: string[], outputDir: string): Promise<number> {
+  return invoke<number>("extract_p4k_paths", { paths, outputDir });
 }
 
 // ── Raw file access ──

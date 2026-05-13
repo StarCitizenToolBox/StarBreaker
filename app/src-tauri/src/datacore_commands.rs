@@ -93,7 +93,8 @@ pub fn build_record_index(dcb_bytes: &[u8]) -> Vec<RecordEntry> {
 
 // ── Commands ─────────────────────────────────────────────────────────────────
 
-/// Search records by name substring. Returns up to 500 results.
+/// Search records by name. Multi-token queries use space-separated AND
+/// semantics. Returns all matches; the frontend is expected to virtualize.
 #[tauri::command]
 pub fn dc_search(state: State<'_, AppState>, query: String) -> Vec<SearchResultDto> {
     let guard = state.record_index.lock();
@@ -102,25 +103,30 @@ pub fn dc_search(state: State<'_, AppState>, query: String) -> Vec<SearchResultD
         None => return Vec::new(),
     };
 
-    let query_lower = query.to_lowercase();
+    let tokens: Vec<String> = query
+        .split_ascii_whitespace()
+        .map(str::to_ascii_lowercase)
+        .collect();
+    if tokens.is_empty() {
+        return Vec::new();
+    }
 
-    index
+    let mut results: Vec<SearchResultDto> = index
         .iter()
-        .filter(|entry| {
-            if query_lower.is_empty() {
-                true
-            } else {
-                entry.name_lower.contains(&query_lower)
-            }
-        })
-        .take(500)
+        .filter(|entry| tokens.iter().all(|t| entry.name_lower.contains(t.as_str())))
         .map(|entry| SearchResultDto {
             name: entry.name.clone(),
             struct_type: entry.struct_type.clone(),
             path: entry.path.clone(),
             id: entry.id.clone(),
         })
-        .collect()
+        .collect();
+
+    results.sort_by(|a, b| {
+        a.path.len().cmp(&b.path.len()).then_with(|| a.path.cmp(&b.path))
+    });
+
+    results
 }
 
 /// List tree entries (folders + records) at a given path.
@@ -331,6 +337,82 @@ pub async fn dc_export_xml(
         let xml_bytes = starbreaker_datacore::export::to_xml(&db, record)?;
         std::fs::write(&output_path, &xml_bytes)?;
         Ok::<_, AppError>(())
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("task join error: {e}")))?
+}
+
+/// Export an explicit list of records to disk by ID. Used by the
+/// "Export all matches" toolbar action — frontend supplies the (filtered,
+/// possibly capped) record-ID list. Files land flat in `output_dir`, named
+/// after each record's `file_name` field with the extension swapped for the
+/// chosen format. Mirrors `dc_export_folder` semantics; emits the same
+/// `folder-extract-progress` events. Returns the count actually written.
+#[tauri::command]
+pub async fn dc_export_records(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+    format: String,
+    output_dir: String,
+) -> Result<usize, AppError> {
+    let dcb_bytes = {
+        let guard = state.dcb_bytes.lock();
+        guard
+            .as_ref()
+            .ok_or_else(|| AppError::Internal("DataCore not loaded".into()))?
+            .clone()
+    };
+
+    let count = ids.len();
+    let fmt = format.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let db = Database::from_bytes(&dcb_bytes)?;
+        std::fs::create_dir_all(&output_dir)?;
+        let mut written = 0usize;
+
+        for (i, rid) in ids.iter().enumerate() {
+            let guid: CigGuid = match rid.parse() {
+                Ok(g) => g,
+                Err(_) => continue,
+            };
+            let record = match db.record_by_id(&guid) {
+                Some(r) => r,
+                None => continue,
+            };
+
+            let file_name = db.resolve_string(record.file_name_offset);
+            let ext = if fmt == "xml" { "xml" } else { "json" };
+            let out_name = match file_name.rfind('.') {
+                Some(dot) => format!("{}.{ext}", &file_name[..dot]),
+                None => format!("{file_name}.{ext}"),
+            };
+            let out_path = std::path::Path::new(&output_dir).join(&out_name);
+
+            if i % 20 == 0 || i + 1 == count {
+                let short = out_name.rsplit('/').next().unwrap_or(&out_name).to_string();
+                let _ = tauri::Emitter::emit(
+                    &app,
+                    "folder-extract-progress",
+                    crate::commands::FolderExtractProgress {
+                        current: i + 1,
+                        total: count,
+                        name: short,
+                    },
+                );
+            }
+
+            let data = if fmt == "xml" {
+                starbreaker_datacore::export::to_xml(&db, record)?
+            } else {
+                starbreaker_datacore::export::to_json(&db, record)?
+            };
+            std::fs::write(&out_path, &data)?;
+            written += 1;
+        }
+
+        Ok::<_, AppError>(written)
     })
     .await
     .map_err(|e| AppError::Internal(format!("task join error: {e}")))?
