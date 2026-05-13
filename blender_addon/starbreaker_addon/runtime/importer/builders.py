@@ -517,7 +517,7 @@ class BuildersMixin:
     @staticmethod
     def _patch_mesh_decal_template_emission(group: bpy.types.ShaderNodeTree) -> None:
         """Route MeshDecal emissive data into Principled emission."""
-        if group.get("starbreaker_mesh_decal_emission_patch_version") == 3:
+        if group.get("starbreaker_mesh_decal_emission_patch_version") == 4:
             return
 
         nodes = group.nodes
@@ -609,7 +609,77 @@ class BuildersMixin:
                 links.remove(link)
             links.new(multiplier.outputs[0], emission_strength_input)
 
-        group["starbreaker_mesh_decal_emission_patch_version"] = 3
+        # Stencil breakup alpha routing (inside SB_MeshDecal_v1):
+        # alpha = base_alpha * mix(1.0, grime_red, clamp(WearBlendFalloff * 2.0))
+        grime_breakup_socket = _output_socket(group_input, "TexSlot8_GrimeBreakup")
+        wear_falloff_socket = _output_socket(group_input, "Param_WearBlendFalloff")
+        base_alpha_node = nodes.get("Maths.008")
+        principled_alpha = _input_socket(principled, "Alpha")
+        base_alpha_socket = _output_socket(base_alpha_node, "Value") if base_alpha_node is not None else None
+        if (
+            grime_breakup_socket is not None
+            and wear_falloff_socket is not None
+            and base_alpha_socket is not None
+            and principled_alpha is not None
+        ):
+            separate = nodes.get("SB Stencil Breakup Separate")
+            if separate is None or separate.bl_idname != "ShaderNodeSeparateColor":
+                separate = nodes.new("ShaderNodeSeparateColor")
+                separate.name = "SB Stencil Breakup Separate"
+            separate.label = "Stencil Breakup Channel"
+            separate.location = (base_alpha_node.location.x - 420, base_alpha_node.location.y - 280)
+
+            strength_scale = nodes.get("SB Stencil Breakup Strength x2")
+            if strength_scale is None or strength_scale.bl_idname != "ShaderNodeMath":
+                strength_scale = nodes.new("ShaderNodeMath")
+                strength_scale.name = "SB Stencil Breakup Strength x2"
+            strength_scale.label = "Breakup Strength x2 (Clamp)"
+            strength_scale.location = (base_alpha_node.location.x - 420, base_alpha_node.location.y - 120)
+            strength_scale.operation = "MULTIPLY"
+            strength_scale.use_clamp = True
+            strength_scale.inputs[1].default_value = 2.0
+
+            breakup_mix = nodes.get("SB Stencil Breakup Mix")
+            if breakup_mix is None or breakup_mix.bl_idname != "ShaderNodeMix":
+                breakup_mix = nodes.new("ShaderNodeMix")
+                breakup_mix.name = "SB Stencil Breakup Mix"
+            breakup_mix.label = "Stencil Breakup Strength"
+            breakup_mix.location = (base_alpha_node.location.x - 180, base_alpha_node.location.y - 280)
+            if hasattr(breakup_mix, "data_type"):
+                breakup_mix.data_type = "FLOAT"
+            breakup_mix.inputs[2].default_value = 1.0
+
+            alpha_mul = nodes.get("SB Stencil Alpha Wear Multiply")
+            if alpha_mul is None or alpha_mul.bl_idname != "ShaderNodeMath":
+                alpha_mul = nodes.new("ShaderNodeMath")
+                alpha_mul.name = "SB Stencil Alpha Wear Multiply"
+            alpha_mul.label = "Alpha x Breakup"
+            alpha_mul.location = (base_alpha_node.location.x + 220, base_alpha_node.location.y - 120)
+            alpha_mul.operation = "MULTIPLY"
+
+            for link in list(separate.inputs[0].links):
+                links.remove(link)
+            links.new(grime_breakup_socket, separate.inputs[0])
+            for link in list(strength_scale.inputs[0].links):
+                links.remove(link)
+            links.new(wear_falloff_socket, strength_scale.inputs[0])
+            for link in list(breakup_mix.inputs[0].links):
+                links.remove(link)
+            links.new(strength_scale.outputs[0], breakup_mix.inputs[0])
+            for link in list(breakup_mix.inputs[3].links):
+                links.remove(link)
+            links.new(separate.outputs["Red"], breakup_mix.inputs[3])
+            for link in list(alpha_mul.inputs[0].links):
+                links.remove(link)
+            links.new(base_alpha_socket, alpha_mul.inputs[0])
+            for link in list(alpha_mul.inputs[1].links):
+                links.remove(link)
+            links.new(breakup_mix.outputs[0], alpha_mul.inputs[1])
+            for link in list(principled_alpha.links):
+                links.remove(link)
+            links.new(alpha_mul.outputs[0], principled_alpha)
+
+        group["starbreaker_mesh_decal_emission_patch_version"] = 4
 
     def _build_contract_group_material(
         self,
