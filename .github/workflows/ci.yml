@@ -1,12 +1,17 @@
 name: CI
 
+# Per-ref concurrency: a new push to a PR cancels its previous run; main pushes
+# don't cancel each other.
 concurrency:
-  group: ci-cache
-  cancel-in-progress: false
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 on:
+  # Run on every non-main branch push so feature branches get CI without
+  # needing an open PR. Main pushes are covered by the PR that landed them
+  # plus the separate cache-warm workflow.
   push:
-    branches: [main]
+    branches-ignore: [main]
     paths:
       - "Cargo.lock"
       - "Cargo.toml"
@@ -14,6 +19,9 @@ on:
       - "cli/**"
       - "mcp/**"
       - "app/**"
+  # Triggers for both same-repo and fork PRs targeting main. Fork PRs run
+  # with a read-only GITHUB_TOKEN; `swatinem/rust-cache` will read but not
+  # save the cache (GitHub restricts cache writes from forks).
   pull_request:
     branches: [main]
     paths:
@@ -26,7 +34,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  cache-warm:
+  test:
     strategy:
       fail-fast: false
       matrix:
@@ -47,14 +55,13 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      # Test-only cache — separate slot so PRs don't fight the release cache
+      # populated by .github/workflows/cache-warm.yml and consumed by release.yml.
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
-          shared-key: cache-${{ matrix.platform }}
+          shared-key: cache-test-${{ matrix.platform }}
           cache-on-failure: true
 
-      - name: Build workspace (release)
-        run: cargo build --release --workspace
-
-      - name: Test workspace (release)
-        run: cargo test --release --workspace
+      - name: Test workspace
+        run: cargo test --workspace --locked

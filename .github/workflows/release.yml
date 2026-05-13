@@ -41,7 +41,6 @@ jobs:
         with:
           shared-key: cache-${{ matrix.platform }}
           cache-on-failure: true
-          save-if: false
 
       - name: Install frontend dependencies
         working-directory: app
