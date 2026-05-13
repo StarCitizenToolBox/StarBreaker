@@ -139,7 +139,17 @@ pub(crate) fn load_interiors(
         }
     }
 
-    build_interiors_from_payloads(db, p4k, &payloads, opts.include_lights, opts.lod_level)
+    let mut loaded =
+        build_interiors_from_payloads(db, p4k, &payloads, opts.include_lights, opts.lod_level);
+    let removed =
+        remove_root_geometry_duplicate_interior_placements(&mut loaded, &root_geometry_path);
+    if removed > 0 {
+        log::info!(
+            "Skipped {removed} root-geometry duplicate interior placement(s) for '{}'",
+            root_geometry_path
+        );
+    }
+    loaded
 }
 
 fn helper_node_name_matches(node_name: &str, helper_name: &str) -> bool {
@@ -155,6 +165,73 @@ fn interior_container_name_key(path: &str) -> String {
         .strip_suffix(".socpak")
         .unwrap_or(path)
         .to_ascii_lowercase()
+}
+
+fn normalize_geometry_path_key(path: &str) -> String {
+    path.replace('\\', "/").to_ascii_lowercase()
+}
+
+fn remove_root_geometry_duplicate_interior_placements(
+    interiors: &mut LoadedInteriors,
+    root_geometry_path: &str,
+) -> usize {
+    let root_key = normalize_geometry_path_key(root_geometry_path);
+    if root_key.is_empty() {
+        return 0;
+    }
+
+    let mut removed = 0usize;
+    for container in &mut interiors.containers {
+        if container.parent_entity_name.is_some() {
+            continue;
+        }
+        container.placements.retain(|(mesh_index, _, _)| {
+            let duplicate = interiors
+                .unique_cgfs
+                .get(*mesh_index)
+                .is_some_and(|entry| normalize_geometry_path_key(&entry.cgf_path) == root_key);
+            if duplicate {
+                removed += 1;
+            }
+            !duplicate
+        });
+    }
+
+    if removed == 0 {
+        return 0;
+    }
+
+    let mut used_indices = std::collections::HashSet::<usize>::new();
+    for container in &interiors.containers {
+        for (mesh_index, _, _) in &container.placements {
+            used_indices.insert(*mesh_index);
+        }
+    }
+
+    let mut remap = std::collections::HashMap::<usize, usize>::new();
+    let mut compact = Vec::new();
+    for (old_index, entry) in interiors.unique_cgfs.iter().enumerate() {
+        if used_indices.contains(&old_index) {
+            let new_index = compact.len();
+            remap.insert(old_index, new_index);
+            compact.push(InteriorCgfEntry {
+                cgf_path: entry.cgf_path.clone(),
+                material_path: entry.material_path.clone(),
+                name: entry.name.clone(),
+            });
+        }
+    }
+
+    for container in &mut interiors.containers {
+        for (mesh_index, _, _) in &mut container.placements {
+            if let Some(new_index) = remap.get(mesh_index).copied() {
+                *mesh_index = new_index;
+            }
+        }
+    }
+    interiors.unique_cgfs = compact;
+
+    removed
 }
 
 fn compose_root_container_transform(
@@ -998,8 +1075,9 @@ pub(crate) fn preload_interior_textures(
 mod tests {
     use super::{
         compose_root_container_transform, entity_class_name_matches_record_short_name,
-        helper_node_name_matches, helper_transform_duplicates_offset, resolve_nmc_helper_transform,
-        transform_bits_key,
+        helper_node_name_matches, helper_transform_duplicates_offset,
+        remove_root_geometry_duplicate_interior_placements, resolve_nmc_helper_transform,
+        transform_bits_key, InteriorCgfEntry, InteriorContainerData, LoadedInteriors,
     };
     use crate::pipeline::nmc_bridge::mat4_from_array;
 
@@ -1115,5 +1193,53 @@ mod tests {
     fn transform_bits_key_matches_identical_transforms() {
         let transform = glam::Mat4::from_translation(glam::Vec3::new(1.0, 2.0, 3.0)).to_cols_array_2d();
         assert_eq!(transform_bits_key(&transform), transform_bits_key(&transform));
+    }
+
+    #[test]
+    fn root_geometry_duplicate_filter_only_removes_root_container_matches() {
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+        let mut interiors = LoadedInteriors {
+            unique_cgfs: vec![
+                InteriorCgfEntry {
+                    cgf_path: "Data/Objects/Ships/Test/root.cga".to_string(),
+                    material_path: None,
+                    name: "root".to_string(),
+                },
+                InteriorCgfEntry {
+                    cgf_path: "Data/Objects/Ships/Test/door.cga".to_string(),
+                    material_path: None,
+                    name: "door".to_string(),
+                },
+            ],
+            containers: vec![
+                InteriorContainerData {
+                    name: "root_container".to_string(),
+                    parent_entity_name: None,
+                    parent_node_name: None,
+                    container_transform: identity,
+                    placements: vec![(0, identity, None), (1, identity, None)],
+                    lights: Vec::new(),
+                    palette: None,
+                },
+                InteriorContainerData {
+                    name: "child_container".to_string(),
+                    parent_entity_name: Some("child".to_string()),
+                    parent_node_name: Some("helper".to_string()),
+                    container_transform: identity,
+                    placements: vec![(0, identity, None)],
+                    lights: Vec::new(),
+                    palette: None,
+                },
+            ],
+        };
+
+        let removed = remove_root_geometry_duplicate_interior_placements(
+            &mut interiors,
+            "Data/Objects/Ships/Test/root.cga",
+        );
+
+        assert_eq!(removed, 1);
+        assert_eq!(interiors.containers[0].placements.len(), 1);
+        assert_eq!(interiors.containers[1].placements.len(), 1);
     }
 }
