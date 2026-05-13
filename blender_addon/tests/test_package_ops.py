@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import json
 from pathlib import Path
 import sys
+import tempfile
 import types
 import unittest
 
@@ -17,6 +18,8 @@ class FakeObject(dict):
         self.name = name
         self.parent = None
         self.children: list[FakeObject] = []
+        self.type = "EMPTY"
+        self.material_slots = []
 
     @property
     def children_recursive(self) -> list[FakeObject]:
@@ -40,13 +43,103 @@ class FakeObjects(list):
             super().remove(obj)
 
 
+class FakeMaterial(dict):
+    def __init__(self, name: str, *, library=None, **props):
+        super().__init__(props)
+        self.name = name
+        self.library = library
+        self.node_tree = None
+
+    def copy(self):
+        clone = FakeMaterial(self.name, library=self.library, **dict(self))
+        clone.node_tree = self.node_tree.copy() if self.node_tree is not None else None
+        return clone
+
+
+class FakeSlot:
+    def __init__(self, material=None):
+        self.material = material
+
+
+class FakeSocket:
+    def __init__(self, default_value: float):
+        self.default_value = default_value
+
+
+class FakeNode:
+    def __init__(self, emission_strength: float, *, label: str = "", include_emission: bool = True):
+        self.bl_idname = "ShaderNodeGroup"
+        self.label = label
+        self.name = label or "Group"
+        self.inputs = {"Palette Color": FakeSocket((0.0, 0.0, 0.0, 1.0))}
+        if include_emission:
+            self.inputs.update(
+                {
+                    "Emission Strength": FakeSocket(emission_strength),
+                    "Emission Color": FakeSocket((1.0, 1.0, 1.0, 1.0)),
+                }
+            )
+
+
+class FakeNodeTree:
+    def __init__(self, emission_strength: float):
+        self.nodes = [
+            FakeNode(emission_strength, label="StarBreaker Illum"),
+            FakeNode(emission_strength, label="Primary Layer", include_emission=False),
+        ]
+
+    def copy(self):
+        return FakeNodeTree(self.nodes[0].inputs["Emission Strength"].default_value)
+
+
+class FakeUVLayer:
+    def __init__(self, name: str):
+        self.name = name
+        self.active_render = False
+
+
+class FakeUVLayers(list):
+    def __init__(self, names: list[str], active_index: int = -1):
+        super().__init__(FakeUVLayer(name) for name in names)
+        self.active_index = active_index
+
+    @property
+    def active(self):
+        if 0 <= self.active_index < len(self):
+            return self[self.active_index]
+        return None
+
+    def find(self, name: str) -> int:
+        for index, layer in enumerate(self):
+            if layer.name == name:
+                return index
+        return -1
+
+
+class FakeMeshData:
+    def __init__(self, uv_layers: FakeUVLayers | None = None):
+        self.uv_layers = uv_layers or FakeUVLayers([])
+        self.update_tags: list[object] = []
+
+    def update_tag(self, refresh=None):
+        self.update_tags.append(refresh)
+
+
+class FakeViewLayer:
+    def __init__(self):
+        self.update_count = 0
+
+    def update(self):
+        self.update_count += 1
+
+
 def _load_package_ops() -> tuple[types.ModuleType, types.ModuleType]:
     bpy = sys.modules.get("bpy")
     if bpy is None:
         bpy = types.ModuleType("bpy")
         sys.modules["bpy"] = bpy
     bpy.types = types.SimpleNamespace(Context=object, Object=object, ID=object, Light=object)
-    bpy.data = types.SimpleNamespace(objects=FakeObjects(), lights=[])
+    bpy.data = types.SimpleNamespace(objects=FakeObjects(), lights=[], filepath="")
 
     mathutils = sys.modules.get("mathutils")
     if mathutils is None:
@@ -89,10 +182,22 @@ def _load_package_ops() -> tuple[types.ModuleType, types.ModuleType]:
     class PackageBundle:
         @staticmethod
         def load(scene_path):
-            return types.SimpleNamespace(scene_path=Path(scene_path), package_name="Test Package")
+            return types.SimpleNamespace(
+                scene_path=Path(scene_path),
+                package_name="Test Package",
+                load_material_sidecar=lambda _path: None,
+            )
 
     manifest_stub.PackageBundle = PackageBundle
-    manifest_stub.SceneInstanceRecord = type("SceneInstanceRecord", (), {})
+    class SceneInstanceRecord:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+        @classmethod
+        def from_value(cls, value):
+            return cls(**value)
+
+    manifest_stub.SceneInstanceRecord = SceneInstanceRecord
     sys.modules["sb_pkg_test_addon.manifest"] = manifest_stub
 
     palette_stub = types.ModuleType("sb_pkg_test_addon.palette")
@@ -102,6 +207,8 @@ def _load_package_ops() -> tuple[types.ModuleType, types.ModuleType]:
 
     validators_stub = types.ModuleType("sb_pkg_test_runtime.validators")
     validators_stub._purge_orphaned_file_backed_images = lambda: 0
+    validators_stub._purge_orphaned_managed_materials = lambda: 0
+    validators_stub._purge_orphaned_runtime_actions = lambda: 0
     validators_stub._purge_orphaned_runtime_groups = lambda: 0
     sys.modules["sb_pkg_test_runtime.validators"] = validators_stub
 
@@ -109,14 +216,19 @@ def _load_package_ops() -> tuple[types.ModuleType, types.ModuleType]:
     importer_stub.events = []
 
     class PackageImporter:
-        def __init__(self, context, package, progress_callback=None):
+        def __init__(self, context, package, progress_callback=None, package_root=None, create_template_collection=True):
             self.context = context
             self.package = package
             self.progress_callback = progress_callback
+            self.package_root = package_root
 
         def import_scene(self, prefer_cycles=True, palette_id=None):
             importer_stub.events.append(("import", str(self.package.scene_path), prefer_cycles, palette_id))
             return "imported-root"
+
+        def rebuild_object_materials(self, obj, palette_id):
+            importer_stub.events.append(("rebuild", obj.name, palette_id))
+            return 1
 
     importer_stub.PackageImporter = PackageImporter
     sys.modules["sb_pkg_test_runtime.importer"] = importer_stub
@@ -197,6 +309,495 @@ class PackageOpsTests(unittest.TestCase):
             [("import", "/tmp/vulture/scene.json", False, "palette/test")],
         )
 
+    def test_refresh_materials_rebuilds_only_meshes_with_sidecars(self) -> None:
+        @contextmanager
+        def _no_suspend(_context):
+            yield
+
+        @contextmanager
+        def _no_mode(_context):
+            yield
+
+        package_root = FakeObject(
+            "StarBreaker RSI Aurora",
+            starbreaker_package_root=True,
+            starbreaker_scene_path="/tmp/aurora/scene.json",
+        )
+        mesh = FakeObject("hull", starbreaker_material_sidecar="hull.materials.json")
+        mesh.type = "MESH"
+        empty = FakeObject("helper", starbreaker_material_sidecar="helper.materials.json")
+        empty.type = "EMPTY"
+        mesh.parent = package_root
+        empty.parent = package_root
+        package_root.children.extend([mesh, empty])
+
+        importer_stub = sys.modules["sb_pkg_test_runtime.importer"]
+        importer_stub.events = []
+        original_suspend = self.package_ops._suspend_heavy_viewports
+        original_mode = self.package_ops._temporary_object_mode
+        try:
+            self.package_ops._suspend_heavy_viewports = _no_suspend
+            self.package_ops._temporary_object_mode = _no_mode
+            applied = self.package_ops.refresh_materials_for_package_root(
+                types.SimpleNamespace(),
+                package_root,
+                "palette/test",
+            )
+        finally:
+            self.package_ops._suspend_heavy_viewports = original_suspend
+            self.package_ops._temporary_object_mode = original_mode
+
+        self.assertEqual(applied, 1)
+        self.assertEqual(importer_stub.events, [("rebuild", "hull", "palette/test")])
+        self.assertEqual(package_root["starbreaker_palette_id"], "palette/test")
+        self.assertEqual(mesh["starbreaker_palette_id"], "palette/test")
+
+    def test_material_refresh_session_processes_meshes_incrementally(self) -> None:
+        @contextmanager
+        def _no_suspend(_context):
+            yield
+
+        @contextmanager
+        def _no_mode(_context):
+            yield
+
+        package_root = FakeObject(
+            "StarBreaker RSI Aurora",
+            starbreaker_package_root=True,
+            starbreaker_scene_path="/tmp/aurora/scene.json",
+        )
+        mesh_a = FakeObject("hull", starbreaker_material_sidecar="hull.materials.json")
+        mesh_b = FakeObject("wing", starbreaker_material_sidecar="wing.materials.json")
+        for mesh in (mesh_a, mesh_b):
+            mesh.type = "MESH"
+            mesh.data = FakeMeshData(FakeUVLayers(["UVMap"], active_index=-1))
+            mesh.parent = package_root
+            package_root.children.append(mesh)
+
+        importer_stub = sys.modules["sb_pkg_test_runtime.importer"]
+        importer_stub.events = []
+        original_suspend = self.package_ops._suspend_heavy_viewports
+        original_mode = self.package_ops._temporary_object_mode
+        original_perf_counter = self.package_ops.time.perf_counter
+        perf_values = iter([0.0, 1.0, 2.0, 3.0])
+        try:
+            self.package_ops._suspend_heavy_viewports = _no_suspend
+            self.package_ops._temporary_object_mode = _no_mode
+            self.package_ops.time.perf_counter = lambda: next(perf_values)
+            context = types.SimpleNamespace(view_layer=FakeViewLayer())
+            session = self.package_ops.MaterialRefreshSession(
+                context,
+                package_root,
+                "palette/test",
+                purge_orphans=False,
+            )
+
+            self.assertFalse(session.step(budget_seconds=0.001, min_objects=1))
+            self.assertEqual(session.applied, 1)
+            self.assertEqual(session.progress, 0.5)
+
+            self.assertTrue(session.step(budget_seconds=0.001, min_objects=1))
+        finally:
+            self.package_ops._suspend_heavy_viewports = original_suspend
+            self.package_ops._temporary_object_mode = original_mode
+            self.package_ops.time.perf_counter = original_perf_counter
+
+        self.assertEqual(session.applied, 2)
+        self.assertEqual(session.progress, 1.0)
+        self.assertTrue(session.done)
+        self.assertEqual(package_root["starbreaker_palette_id"], "palette/test")
+        self.assertEqual(mesh_a["starbreaker_palette_id"], "palette/test")
+        self.assertEqual(mesh_b["starbreaker_palette_id"], "palette/test")
+        self.assertEqual(context.view_layer.update_count, 1)
+        self.assertEqual(
+            importer_stub.events,
+            [("rebuild", "wing", "palette/test"), ("rebuild", "hull", "palette/test")],
+        )
+
+    def test_material_refresh_session_splits_orphan_cleanup_across_steps(self) -> None:
+        @contextmanager
+        def _no_suspend(_context):
+            yield
+
+        @contextmanager
+        def _no_mode(_context):
+            yield
+
+        package_root = FakeObject(
+            "StarBreaker RSI Aurora",
+            starbreaker_package_root=True,
+            starbreaker_scene_path="/tmp/aurora/scene.json",
+        )
+        mesh = FakeObject("hull", starbreaker_material_sidecar="hull.materials.json")
+        mesh.type = "MESH"
+        mesh.data = FakeMeshData(FakeUVLayers(["UVMap"], active_index=-1))
+        mesh.parent = package_root
+        package_root.children.append(mesh)
+
+        cleanup_events: list[str] = []
+        clock = {"value": 0.0}
+
+        def _cleanup_step(name: str):
+            def _run() -> int:
+                cleanup_events.append(name)
+                clock["value"] += 1.0
+                return 1
+
+            return _run
+
+        original_suspend = self.package_ops._suspend_heavy_viewports
+        original_mode = self.package_ops._temporary_object_mode
+        original_perf_counter = self.package_ops.time.perf_counter
+        original_purges = (
+            self.package_ops._purge_orphaned_managed_materials,
+            self.package_ops._purge_orphaned_runtime_groups,
+            self.package_ops._purge_orphaned_runtime_actions,
+            self.package_ops._purge_orphaned_file_backed_images,
+        )
+        try:
+            self.package_ops._suspend_heavy_viewports = _no_suspend
+            self.package_ops._temporary_object_mode = _no_mode
+            self.package_ops.time.perf_counter = lambda: clock["value"]
+            self.package_ops._purge_orphaned_managed_materials = _cleanup_step("materials")
+            self.package_ops._purge_orphaned_runtime_groups = _cleanup_step("groups")
+            self.package_ops._purge_orphaned_runtime_actions = _cleanup_step("actions")
+            self.package_ops._purge_orphaned_file_backed_images = _cleanup_step("images")
+
+            context = types.SimpleNamespace(view_layer=FakeViewLayer())
+            session = self.package_ops.MaterialRefreshSession(context, package_root)
+
+            self.assertFalse(session.step(budget_seconds=0.1, min_objects=1))
+            self.assertEqual(cleanup_events, ["materials"])
+            self.assertFalse(session.done)
+            self.assertLess(session.progress, 1.0)
+
+            self.assertFalse(session.step(budget_seconds=0.1, min_objects=1))
+            self.assertEqual(cleanup_events, ["materials", "groups"])
+
+            self.assertFalse(session.step(budget_seconds=0.1, min_objects=1))
+            self.assertEqual(cleanup_events, ["materials", "groups", "actions"])
+
+            self.assertTrue(session.step(budget_seconds=0.1, min_objects=1))
+            self.assertEqual(cleanup_events, ["materials", "groups", "actions", "images"])
+            self.assertEqual(session.progress, 1.0)
+        finally:
+            self.package_ops._suspend_heavy_viewports = original_suspend
+            self.package_ops._temporary_object_mode = original_mode
+            self.package_ops.time.perf_counter = original_perf_counter
+            (
+                self.package_ops._purge_orphaned_managed_materials,
+                self.package_ops._purge_orphaned_runtime_groups,
+                self.package_ops._purge_orphaned_runtime_actions,
+                self.package_ops._purge_orphaned_file_backed_images,
+            ) = original_purges
+
+    def test_material_refresh_session_flushes_importer_orphan_queue(self) -> None:
+        @contextmanager
+        def _no_suspend(_context):
+            yield
+
+        @contextmanager
+        def _no_mode(_context):
+            yield
+
+        package_root = FakeObject(
+            "StarBreaker RSI Aurora",
+            starbreaker_package_root=True,
+            starbreaker_scene_path="/tmp/aurora/scene.json",
+        )
+
+        original_suspend = self.package_ops._suspend_heavy_viewports
+        original_mode = self.package_ops._temporary_object_mode
+        try:
+            self.package_ops._suspend_heavy_viewports = _no_suspend
+            self.package_ops._temporary_object_mode = _no_mode
+            context = types.SimpleNamespace(view_layer=FakeViewLayer())
+            session = self.package_ops.MaterialRefreshSession(
+                context,
+                package_root,
+                purge_orphans=False,
+            )
+            flushed = []
+            session.importer._flush_pending_orphan_materials = lambda: flushed.append(True)
+
+            self.assertTrue(session.step())
+        finally:
+            self.package_ops._suspend_heavy_viewports = original_suspend
+            self.package_ops._temporary_object_mode = original_mode
+
+        self.assertEqual(flushed, [True])
+
+    def test_refresh_materials_uses_object_palette_without_explicit_override(self) -> None:
+        @contextmanager
+        def _no_suspend(_context):
+            yield
+
+        @contextmanager
+        def _no_mode(_context):
+            yield
+
+        package_root = FakeObject(
+            "StarBreaker RSI Aurora",
+            starbreaker_package_root=True,
+            starbreaker_scene_path="/tmp/aurora/scene.json",
+            starbreaker_palette_id="palette/root",
+        )
+        mesh = FakeObject(
+            "interior_panel",
+            starbreaker_material_sidecar="interior.materials.json",
+            starbreaker_palette_id="palette/interior",
+        )
+        mesh.type = "MESH"
+        mesh.parent = package_root
+        package_root.children.append(mesh)
+
+        importer_stub = sys.modules["sb_pkg_test_runtime.importer"]
+        importer_stub.events = []
+        original_suspend = self.package_ops._suspend_heavy_viewports
+        original_mode = self.package_ops._temporary_object_mode
+        try:
+            self.package_ops._suspend_heavy_viewports = _no_suspend
+            self.package_ops._temporary_object_mode = _no_mode
+            applied = self.package_ops.refresh_materials_for_package_root(types.SimpleNamespace(), package_root)
+        finally:
+            self.package_ops._suspend_heavy_viewports = original_suspend
+            self.package_ops._temporary_object_mode = original_mode
+
+        self.assertEqual(applied, 1)
+        self.assertEqual(importer_stub.events, [("rebuild", "interior_panel", "palette/interior")])
+        self.assertEqual(package_root["starbreaker_palette_id"], "palette/root")
+        self.assertEqual(mesh["starbreaker_palette_id"], "palette/interior")
+
+    def test_refresh_materials_uses_sidecar_default_palette_when_object_palette_missing(self) -> None:
+        @contextmanager
+        def _no_suspend(_context):
+            yield
+
+        @contextmanager
+        def _no_mode(_context):
+            yield
+
+        package_root = FakeObject(
+            "StarBreaker RSI Aurora",
+            starbreaker_package_root=True,
+            starbreaker_scene_path="/tmp/aurora/scene.json",
+        )
+        mesh = FakeObject(
+            "interior_panel",
+            starbreaker_material_sidecar="interior.materials.json",
+        )
+        mesh.type = "MESH"
+        mesh.parent = package_root
+        package_root.children.append(mesh)
+        sidecar = types.SimpleNamespace(
+            raw={
+                "authored_material_set": {
+                    "attributes": [
+                        {
+                            "name": "DefaultPalette",
+                            "value": "Libs/Foundry/Records/TintPalettes/Brand/RSI/rsi_interior/rsi_interior_default",
+                        }
+                    ]
+                }
+            }
+        )
+        fake_package = types.SimpleNamespace(
+            scene_path=Path("/tmp/aurora/scene.json"),
+            package_name="Test Package",
+            load_material_sidecar=lambda _path: sidecar,
+        )
+
+        importer_stub = sys.modules["sb_pkg_test_runtime.importer"]
+        importer_stub.events = []
+        original_loader = self.package_ops._load_package_from_root
+        original_suspend = self.package_ops._suspend_heavy_viewports
+        original_mode = self.package_ops._temporary_object_mode
+        try:
+            self.package_ops._load_package_from_root = lambda _root: fake_package
+            self.package_ops._suspend_heavy_viewports = _no_suspend
+            self.package_ops._temporary_object_mode = _no_mode
+            applied = self.package_ops.refresh_materials_for_package_root(types.SimpleNamespace(), package_root)
+        finally:
+            self.package_ops._load_package_from_root = original_loader
+            self.package_ops._suspend_heavy_viewports = original_suspend
+            self.package_ops._temporary_object_mode = original_mode
+
+        self.assertEqual(applied, 1)
+        self.assertEqual(importer_stub.events, [("rebuild", "interior_panel", "palette/rsi_interior_default")])
+
+    def test_refresh_materials_sets_active_uv_without_localizing_mesh(self) -> None:
+        @contextmanager
+        def _no_suspend(_context):
+            yield
+
+        @contextmanager
+        def _no_mode(_context):
+            yield
+
+        package_root = FakeObject(
+            "StarBreaker RSI Aurora",
+            starbreaker_package_root=True,
+            starbreaker_scene_path="/tmp/aurora/scene.json",
+        )
+        mesh = FakeObject("wing", starbreaker_material_sidecar="wing.materials.json")
+        mesh.type = "MESH"
+        mesh.data = FakeMeshData(FakeUVLayers(["UVMap.001", "UVMap"]))
+        mesh.update_tags: list[object] = []
+        mesh.update_tag = lambda refresh=None: mesh.update_tags.append(refresh)
+        mesh.parent = package_root
+        package_root.children.append(mesh)
+        view_layer = FakeViewLayer()
+
+        importer_stub = sys.modules["sb_pkg_test_runtime.importer"]
+        importer_stub.events = []
+        original_suspend = self.package_ops._suspend_heavy_viewports
+        original_mode = self.package_ops._temporary_object_mode
+        try:
+            self.package_ops._suspend_heavy_viewports = _no_suspend
+            self.package_ops._temporary_object_mode = _no_mode
+            applied = self.package_ops.refresh_materials_for_package_root(
+                types.SimpleNamespace(view_layer=view_layer),
+                package_root,
+            )
+        finally:
+            self.package_ops._suspend_heavy_viewports = original_suspend
+            self.package_ops._temporary_object_mode = original_mode
+
+        self.assertEqual(applied, 1)
+        self.assertEqual(mesh.data.uv_layers.active.name, "UVMap")
+        self.assertTrue(mesh.data.uv_layers.active.active_render)
+        self.assertEqual(mesh.data.update_tags, [{"DATA"}])
+        self.assertEqual(mesh.update_tags, [{"DATA"}])
+        self.assertEqual(view_layer.update_count, 1)
+
+    def test_package_root_needs_material_refresh_for_empty_or_linked_slots(self) -> None:
+        package_root = FakeObject("Root", starbreaker_package_root=True)
+        mesh = FakeObject("mesh", starbreaker_material_sidecar="mesh.materials.json")
+        mesh.type = "MESH"
+        mesh.parent = package_root
+        package_root.children.append(mesh)
+        sidecar = types.SimpleNamespace(
+            submaterials=[types.SimpleNamespace(index=0, submaterial_name="local")]
+        )
+        package = types.SimpleNamespace(load_material_sidecar=lambda _path: sidecar)
+        original_load = self.package_ops._load_package_from_root
+        try:
+            self.package_ops._load_package_from_root = lambda _root: package
+
+            self.assertTrue(self.package_ops.package_root_needs_material_refresh(package_root))
+
+            mesh.material_slots = [
+                FakeSlot(FakeMaterial("linked", library=object(), starbreaker_material_identity="id"))
+            ]
+            self.assertTrue(self.package_ops.package_root_needs_material_refresh(package_root))
+
+            mesh.material_slots = [FakeSlot(FakeMaterial("local_placeholder"))]
+            self.assertTrue(self.package_ops.package_root_needs_material_refresh(package_root))
+
+            local_built = FakeMaterial("local_built")
+            local_built.node_tree = FakeNodeTree(1.0)
+            mesh.material_slots = [FakeSlot(local_built)]
+            self.assertFalse(self.package_ops.package_root_needs_material_refresh(package_root))
+
+            local_managed = FakeMaterial("local_managed", starbreaker_material_identity="id")
+            local_managed.node_tree = FakeNodeTree(1.0)
+            mesh.material_slots = [FakeSlot(local_managed)]
+            self.assertFalse(self.package_ops.package_root_needs_material_refresh(package_root))
+        finally:
+            self.package_ops._load_package_from_root = original_load
+
+    def test_apply_engine_glow_to_package_root_updates_targeted_materials(self) -> None:
+        package_root = FakeObject(
+            "Root",
+            starbreaker_package_root=True,
+            starbreaker_engine_glow_control=json.dumps(
+                {
+                    "targets": [
+                        {
+                            "geometry_path": "Data/Objects/Ships/Test/thruster.cga",
+                            "mesh_asset": "Data/Objects/Ships/Test/thruster_LOD0.blend",
+                            "material_sidecar": "Data/Objects/Ships/Test/root.materials.json",
+                            "source_material_index": 4,
+                        }
+                    ]
+                }
+            ),
+        )
+        mesh = FakeObject("mesh")
+        mesh.type = "MESH"
+        mesh.parent = package_root
+        mesh["starbreaker_instance_json"] = json.dumps(
+            {
+                "entity_name": "Test_Thruster",
+                "geometry_path": None,
+                "mesh_asset": "Data/Objects/Ships/Test/thruster_LOD0.blend",
+            }
+        )
+        package_root.children.append(mesh)
+        material = FakeMaterial(
+            "Glow",
+            starbreaker_material_sidecar="Data/Objects/Ships/Test/root.materials.json",
+            starbreaker_submaterial_json=json.dumps({"index": 4}),
+        )
+        material.node_tree = FakeNodeTree(2.0)
+        mesh.material_slots = [FakeSlot(material)]
+        mesh_2 = FakeObject("mesh_2")
+        mesh_2.type = "MESH"
+        mesh_2.parent = package_root
+        mesh_2["starbreaker_instance_json"] = mesh["starbreaker_instance_json"]
+        mesh_2.material_slots = [FakeSlot(material)]
+        package_root.children.append(mesh_2)
+
+        other_mesh = FakeObject("other_mesh")
+        other_mesh.type = "MESH"
+        other_mesh.parent = package_root
+        other_mesh["starbreaker_instance_json"] = json.dumps(
+            {
+                "entity_name": "Test_Hull",
+                "geometry_path": "Data/Objects/Ships/Test/hull.cga",
+                "mesh_asset": "Data/Objects/Ships/Test/hull.blend",
+            }
+        )
+        other_mesh.material_slots = [FakeSlot(material)]
+        package_root.children.append(other_mesh)
+
+        updated = self.package_ops.apply_engine_glow_to_package_root(package_root, 150.0)
+
+        self.assertEqual(updated, 1)
+        self.assertIsNot(mesh.material_slots[0].material, material)
+        self.assertIs(mesh.material_slots[0].material, mesh_2.material_slots[0].material)
+        self.assertIs(other_mesh.material_slots[0].material, material)
+        self.assertAlmostEqual(mesh.material_slots[0].material.node_tree.nodes[0].inputs["Emission Strength"].default_value, 150.0)
+        self.assertEqual(
+            mesh.material_slots[0].material.node_tree.nodes[1].inputs["Palette Color"].default_value,
+            (1.0, 1.0, 1.0, 1.0),
+        )
+        self.assertAlmostEqual(float(package_root.get("starbreaker_engine_glow_strength")), 150.0)
+
+        self.package_ops.apply_engine_glow_to_package_root(package_root, 0.0)
+        self.assertEqual(
+            mesh.material_slots[0].material.node_tree.nodes[1].inputs["Palette Color"].default_value,
+            (0.0, 0.0, 0.0, 1.0),
+        )
+
+    def test_resolve_package_relative_scene_path_from_opened_blend_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scene_path = root / "Packages" / "RSI Aurora Mk2_LOD0_TEX0" / "scene.json"
+            scene_path.parent.mkdir(parents=True)
+            scene_path.write_text("{}", encoding="utf-8")
+            self.bpy.data.filepath = str(scene_path.with_suffix(".blend"))
+            package_root = FakeObject(
+                "StarBreaker RSI Aurora",
+                starbreaker_package_root=True,
+                starbreaker_scene_path="Packages/RSI Aurora Mk2_LOD0_TEX0/scene.json",
+            )
+
+            resolved = self.package_ops.resolve_package_scene_path(package_root)
+
+            self.assertEqual(resolved, scene_path)
+        self.bpy.data.filepath = ""
+
     def test_apply_paint_to_package_root_restores_base_sidecar_when_leaving_variant(self) -> None:
         @contextmanager
         def _no_suspend(_context):
@@ -230,7 +831,7 @@ class PackageOpsTests(unittest.TestCase):
         rebuild_calls: list[tuple[str, str | None, str | None]] = []
 
         class FakeImporter:
-            def __init__(self, context, package, package_root=None):
+            def __init__(self, context, package, package_root=None, create_template_collection=True):
                 self.context = context
                 self.package = package
                 self.package_root = package_root
@@ -268,6 +869,144 @@ class PackageOpsTests(unittest.TestCase):
         self.assertEqual(child.get("starbreaker_material_sidecar"), "base.materials.json")
         self.assertNotIn("starbreaker_paint_variant_sidecar", package_root)
         self.assertEqual(rebuild_calls, [("livery_decal_body", "base.materials.json", "palette/rsi_scorpius")])
+
+
+class AnimationDisplayNameTests(unittest.TestCase):
+    """Tests for _animation_display_name and _entity_name_prefix."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.package_ops, _ = _load_package_ops()
+
+    def _clip(self, name: str, **extra) -> dict:
+        return {"name": name, **extra}
+
+    def test_localized_name_takes_priority_over_raw_clip_name(self) -> None:
+        clip = self._clip("test_ship_vtol_deploy", localized_name="VTOL Deploy")
+        result = self.package_ops._animation_display_name(clip, entity_prefix="test_ship")
+        self.assertEqual(result, "VTOL Deploy")
+
+    def test_entity_prefix_stripped_and_humanized(self) -> None:
+        clip = self._clip("test_ship_vtol_deploy")
+        result = self.package_ops._animation_display_name(clip, entity_prefix="test_ship")
+        self.assertEqual(result, "Vtol Deploy")
+
+    def test_entity_prefix_stripped_retract_variant(self) -> None:
+        clip = self._clip("test_ship_vtol_retract")
+        result = self.package_ops._animation_display_name(clip, entity_prefix="test_ship")
+        self.assertEqual(result, "Vtol Retract")
+
+    def test_no_entity_prefix_returns_raw_name(self) -> None:
+        clip = self._clip("test_ship_vtol_deploy")
+        result = self.package_ops._animation_display_name(clip)
+        self.assertEqual(result, "test_ship_vtol_deploy")
+
+    def test_prefix_mismatch_still_humanizes(self) -> None:
+        # Prefix does not match clip name — entire name is humanized.
+        clip = self._clip("other_ship_action")
+        result = self.package_ops._animation_display_name(clip, entity_prefix="test_ship")
+        self.assertEqual(result, "Other Ship Action")
+
+    def test_entity_name_prefix_strips_class_namespace(self) -> None:
+        package = types.SimpleNamespace(
+            scene=types.SimpleNamespace(
+                root_entity=types.SimpleNamespace(entity_name="EntityClassDefinition.Test_Ship")
+            )
+        )
+        result = self.package_ops._entity_name_prefix(package)
+        self.assertEqual(result, "test_ship")
+
+    def test_entity_name_prefix_no_namespace(self) -> None:
+        package = types.SimpleNamespace(
+            scene=types.SimpleNamespace(
+                root_entity=types.SimpleNamespace(entity_name="Other_Ship")
+            )
+        )
+        result = self.package_ops._entity_name_prefix(package)
+        self.assertEqual(result, "other_ship")
+
+    def test_entity_name_prefix_missing_attribute_returns_empty(self) -> None:
+        package = types.SimpleNamespace()
+        result = self.package_ops._entity_name_prefix(package)
+        self.assertEqual(result, "")
+
+    def test_available_package_animation_items_strips_entity_prefix(self) -> None:
+        """Non-fragment clips get entity prefix stripped and humanized."""
+        clips = [
+            {"name": "test_ship_vtol_deploy", "fps": 30, "frame_count": 60,
+             "fragments": [], "sidecar": None, "start_position": None, "start_rotation": None},
+            {"name": "test_ship_vtol_retract", "fps": 30, "frame_count": 60,
+             "fragments": [], "sidecar": None, "start_position": None, "start_rotation": None},
+        ]
+        package = types.SimpleNamespace(
+            scene=types.SimpleNamespace(
+                root_entity=types.SimpleNamespace(
+                    entity_name="EntityClassDefinition.Test_Ship",
+                    raw={"animations": clips},
+                )
+            )
+        )
+        items = self.package_ops.available_package_animation_items(package)
+        item_map = dict(items)
+        self.assertEqual(item_map.get("test_ship_vtol_deploy"), "Vtol Deploy")
+        self.assertEqual(item_map.get("test_ship_vtol_retract"), "Vtol Retract")
+
+    def test_available_package_animation_items_frag_tags_override_clip_name(self) -> None:
+        """Fragment clips with frag_tags use frag_tags-derived names regardless of prefix."""
+        clips = [
+            {
+                "name": "test_ship_wings_deploy",
+                "fps": 30, "frame_count": 120,
+                "sidecar": None, "start_position": None, "start_rotation": None,
+                "fragments": [{"fragment": "Wings", "frag_tags": ["Retract"],
+                               "tags": [], "scopes": [], "animations": [],
+                               "guid": "a", "option_weight": 1.0, "blend_out_duration": 0.2}],
+            },
+            {
+                "name": "test_ship_wings_retract",
+                "fps": 30, "frame_count": 120,
+                "sidecar": None, "start_position": None, "start_rotation": None,
+                "fragments": [{"fragment": "Wings", "frag_tags": ["Deploy"],
+                               "tags": [], "scopes": [], "animations": [],
+                               "guid": "b", "option_weight": 1.0, "blend_out_duration": 0.2}],
+            },
+        ]
+        package = types.SimpleNamespace(
+            scene=types.SimpleNamespace(
+                root_entity=types.SimpleNamespace(
+                    entity_name="EntityClassDefinition.Test_Ship",
+                    raw={"animations": clips},
+                )
+            )
+        )
+        items = self.package_ops.available_package_animation_items(package)
+        item_map = dict(items)
+        self.assertEqual(item_map.get("fragment:0:test_ship_wings_deploy"), "Wings Retract")
+        self.assertEqual(item_map.get("fragment:0:test_ship_wings_retract"), "Wings Deploy")
+
+    def test_animation_insert_label_uses_fragment_display_name(self) -> None:
+        clip = {
+            "name": "test_ship_wings_retract",
+            "fragments": [
+                {
+                    "fragment": "Wings",
+                    "frag_tags": ["Deploy"],
+                    "tags": [],
+                    "scopes": [],
+                    "animations": [],
+                }
+            ],
+        }
+        label = self.package_ops._animation_insert_label(
+            "fragment:0:test_ship_wings_retract",
+            clip,
+        )
+        self.assertEqual(label, "Wings Deploy")
+
+    def test_animation_insert_label_falls_back_to_animation_key(self) -> None:
+        clip = {"name": "test_ship_vtol_deploy", "fragments": []}
+        label = self.package_ops._animation_insert_label("test_ship_vtol_deploy", clip)
+        self.assertEqual(label, "test_ship_vtol_deploy")
 
 
 if __name__ == "__main__":  # pragma: no cover

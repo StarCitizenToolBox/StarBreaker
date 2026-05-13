@@ -4,6 +4,18 @@ Project-wide notes live in [../AGENTS.md](../AGENTS.md). This file covers
 the Blender addon specifically: target versions, layout, deploy flow,
 tests, and hard-won lessons about driving Blender from an agent.
 
+## Agent Self-Maintenance Rule
+
+If you hit a problem during a session that cost real time and isn't already
+covered in this file — wrong operator name, confusing CLI output path, a
+Blender API pitfall — **document the fix here before committing**. Keep
+entries short and factual. This file must stay concise to limit token use;
+prefer a one-liner or a compact code block over prose.
+
+- Load-post material auto-refresh must treat local placeholder materials with no
+  node tree as "needs refresh"; saved refreshed materials are local too, so
+  checking only for linked materials is insufficient.
+
 ## Target Blender
 
 - **Latest LTS** and **latest release** — currently Blender 5.1.x.
@@ -101,9 +113,25 @@ cd StarBreaker/blender_addon
 python3 -m unittest discover -s tests -q
 ```
 
-Baseline: **54 tests ran, 0 failures, 0 errors, 20 skipped**. Keep
+Baseline: **165 tests, 0 failures, 2 skipped** (bpy-dependent). Keep
 this green after every change. Skipped tests require a real `bpy` and
 only run under Blender — do not try to make them pass headless.
+
+**TDD rule:** When a bug is found, write a failing test that reproduces
+it *before* changing any code. Verify the test fails. Then fix the code.
+Verify the test passes. Pure-Python tests (no `bpy` calls) live in
+`tests/` and run immediately. Tests that require a live Blender session
+are decorated with `@unittest.skipUnless(HAVE_BPY, "requires bpy")`.
+Do not mark a test as skip-unless-bpy if it can be tested with stubs.
+
+**Troubleshooting mindset:** Fix the root cause, not the symptom.
+No hard-coding around specific asset names, material paths, or magic
+numbers. When the correct behaviour is ambiguous (channel ordering,
+material slot mapping, UV transform), ask: *how does Star Engine
+handle this?* (Star Engine is CIG's fork of CryEngine / Lumberyard.)
+The answer is usually derivable from the `.mtl`, `.chrparams`, or
+shader data in `Data.p4k` — match that logic rather than inventing
+a heuristic.
 
 ## Driving Blender from an Agent (MCP)
 
@@ -191,6 +219,71 @@ SC_DATA_P4K="…/Data.p4k" \
 
 Point the Blender import operator at the resulting `scene.json`, not
 the outer folder.
+
+**P4K path auto-detection.** The CLI auto-detects `Data.p4k` from
+standard Star Citizen install paths. You do **not** need `SC_DATA_P4K`
+unless you want a non-default install (e.g. PTU instead of LIVE). Omit
+the env-var for routine work.
+
+**Default test target: LOD 0.** Always use `--lod 0` for import
+testing. The resulting package will be named `<entity>_LOD0_TEX0` or
+`<entity>_LOD0_TEX2` depending on available textures. Either is fine
+for validation.
+testing. **Always use TEX0** — the resulting package will be named
+`<entity>_LOD0_TEX0`. Do not target TEX2 packages for validation;
+TEX0 is the canonical test baseline.
+
+**Fresh import — always reset the scene first.** Before importing any
+ship, call:
+```python
+bpy.ops.wm.read_homefile(app_template="")
+```
+This is the **only** reliable way to get a clean slate. Do not use
+hand-rolled cleanup loops — they miss hidden users and leave residue.
+See "ALWAYS reset the scene this way" above for the full rationale.
+
+### MCP animation tools
+
+`starbreaker_addon/runtime/animation_tools.py` provides MCP-friendly
+wrappers — no window-manager context or active-object selection required.
+
+```python
+from starbreaker_addon.runtime import animation_tools
+root = "StarBreaker RSI Scorpius_LOD0_TEX0"
+```
+
+**`get_animation_list(context, root)`** → list of dicts, one per clip.
+Each entry: `short_name` (e.g. `"Canopy"`), `long_name`
+(`"Canopy — canopy_open"`), `fragment`, `clip_names`, `clip_fps`,
+`frame_count`, `bone_count`, `modes`
+(`["none", "snap_first", "snap_last", "action"]`).
+
+**`apply_animation_mode(context, root, animation_name, mode)`**
+Resolves a human name (fragment or clip name) to the internal
+`fragment:<idx>:<clip>` key and applies it. Modes: `"none"`,
+`"snap_first"`, `"snap_last"`, `"action"`. Returns
+`{"status": "ok", "updated_count": N}`.
+
+```python
+animation_tools.apply_animation_mode(bpy.context, root, "Canopy", "snap_first")
+animation_tools.apply_animation_mode(bpy.context, root, "landing_gear_extend", "snap_last")
+```
+
+**`resolve_animation_key(context, root, animation_name)`** — low-level
+helper; returns the raw `fragment:<idx>:<clip>` key for use with
+`apply_animation_mode_to_package_root` directly.
+
+**`clear_animation_mode(context, root, animation_name)`** — shorthand
+for `apply_animation_mode(..., mode="none")`.
+
+To apply using the lower-level API directly (e.g. when you already have
+the fragment key from `scene.json`):
+
+```python
+from starbreaker_addon.runtime.package_ops import apply_animation_mode_to_package_root
+obj = bpy.data.objects.get("StarBreaker RSI Scorpius_LOD0_TEX0")
+apply_animation_mode_to_package_root(bpy.context, obj, "fragment:4:canopy_close", "action")
+```
 
 ### MCP output size
 

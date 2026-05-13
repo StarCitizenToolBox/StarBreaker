@@ -1,8 +1,13 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io::Write;
+use std::net::TcpStream;
 use std::path::Path;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::process::Command;
+use std::time::{Duration, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -13,6 +18,13 @@ use starbreaker_p4k::MappedP4k;
 
 use crate::error::AppError;
 use crate::state::AppState;
+
+/// Minimum Blender version required to install the StarBreaker addon.
+const MIN_BLENDER_MAJOR: u32 = 5;
+const MIN_BLENDER_MINOR: u32 = 0;
+// Latest Clipper decomposed .blend profile spends ~91% of wall time in the
+// exporter and ~9% writing package files to disk.
+const EXPORT_FINAL_WRITE_START: f32 = 0.91;
 
 /// Discovery result returned to the frontend.
 #[derive(Serialize)]
@@ -248,6 +260,622 @@ pub fn p4k_search(
 
     Ok(results)
 }
+      
+#[derive(Clone, Serialize)]
+pub struct BlenderAddonStatusDto {
+    pub state: String,
+    pub current_version: String,
+    pub installed_version: Option<String>,
+    pub addons_path: Option<String>,
+    pub blender_version: Option<String>,
+    pub blender_running: bool,
+    pub message: Option<String>,
+    /// True when Blender installations were found but all are older than 5.0.
+    pub incompatible_blender_found: bool,
+}
+
+#[derive(Clone)]
+struct BlenderAddonTarget {
+    blender_version: String,
+    addons_path: PathBuf,
+}
+
+/// Result of scanning the system for Blender addon directories.
+struct BlenderDiscovery {
+    /// Targets with Blender ≥ 5.0, sorted by version descending.
+    compatible: Vec<BlenderAddonTarget>,
+    /// True when at least one Blender config directory was found but filtered out as < 5.0.
+    has_incompatible: bool,
+}
+
+fn parse_addon_version_from_init(content: &str) -> Option<String> {
+    // Prefer installer-facing VERSION first (e.g. VERSION = "0.2.2+addon.2").
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("VERSION") {
+            continue;
+        }
+        let mut parts = trimmed.splitn(2, '=');
+        let _ = parts.next();
+        if let Some(raw) = parts.next() {
+            let value = raw.trim().trim_matches('"').trim_matches('\'');
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+
+    // Fallback for legacy addon bundles that only expose bl_info["version"].
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.contains("\"version\"") && trimmed.contains('(') && trimmed.contains(')') {
+            let open = trimmed.find('(')?;
+            let close = trimmed[open + 1..].find(')')? + open + 1;
+            let tuple = &trimmed[open + 1..close];
+            let parts: Vec<String> = tuple
+                .split(',')
+                .filter_map(|part| {
+                    let digits: String = part.chars().filter(|ch| ch.is_ascii_digit()).collect();
+                    if digits.is_empty() {
+                        None
+                    } else {
+                        Some(digits)
+                    }
+                })
+                .collect();
+            if !parts.is_empty() {
+                return Some(parts.join("."));
+            }
+        }
+    }
+    None
+}
+
+fn version_sort_key(version: &str) -> Vec<u32> {
+    version
+        .split(|ch: char| !ch.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse::<u32>().ok())
+        .collect()
+}
+
+fn version_meets_minimum(version: &str) -> bool {
+    let parts = version_sort_key(version);
+    match (parts.first(), parts.get(1)) {
+        (Some(&major), Some(&minor)) => {
+            major > MIN_BLENDER_MAJOR
+                || (major == MIN_BLENDER_MAJOR && minor >= MIN_BLENDER_MINOR)
+        }
+        (Some(&major), None) => major > MIN_BLENDER_MAJOR,
+        _ => false,
+    }
+}
+
+/// Blender user profile folders use major.minor (e.g. 5.1), even when
+/// `blender --version` reports a patch component like 5.1.1.
+#[cfg(target_os = "windows")]
+fn blender_profile_version_dir(version: &str) -> String {
+    let parts = version_sort_key(version);
+    match (parts.first(), parts.get(1)) {
+        (Some(major), Some(minor)) => format!("{major}.{minor}"),
+        (Some(major), None) => format!("{major}.0"),
+        _ => version.trim().to_string(),
+    }
+}
+
+/// Return candidate Blender executable paths for a given addons directory.
+/// Walks up the tree looking for a binary, then checks common system locations.
+fn find_blender_binary_candidates(addons_path: &Path) -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    // Walk up (up to 6 levels) from addons_path looking for the binary
+    let mut dir = addons_path.to_path_buf();
+    for _ in 0..6 {
+        if !dir.pop() {
+            break;
+        }
+        #[cfg(target_os = "windows")]
+        candidates.push(dir.join("blender.exe"));
+        #[cfg(not(target_os = "windows"))]
+        candidates.push(dir.join("blender"));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        candidates.push(PathBuf::from("/usr/bin/blender"));
+        candidates.push(PathBuf::from("/usr/local/bin/blender"));
+        candidates.push(PathBuf::from("/opt/blender/blender"));
+        if let Ok(out) = Command::new("which").arg("blender").output() {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !s.is_empty() {
+                    candidates.push(PathBuf::from(s));
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        candidates.push(PathBuf::from(
+            "/Applications/Blender.app/Contents/MacOS/Blender",
+        ));
+        candidates.push(PathBuf::from(
+            "/Applications/Blender.app/Contents/MacOS/blender",
+        ));
+        if let Ok(out) = Command::new("which").arg("blender").output() {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !s.is_empty() {
+                    candidates.push(PathBuf::from(s));
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        for root in &[
+            r"C:\Program Files\Blender Foundation",
+            r"C:\Program Files (x86)\Blender Foundation",
+        ] {
+            if let Ok(entries) = fs::read_dir(root) {
+                for entry in entries.flatten() {
+                    candidates.push(entry.path().join("blender.exe"));
+                }
+            }
+        }
+    }
+
+    candidates.into_iter().filter(|p| p.is_file()).collect()
+}
+
+/// Run `blender --version` and parse the version string from stdout.
+/// Blender prints: "Blender 5.1.0 (hash abcdef built 2026-04-01 ...)"
+fn probe_blender_version(binary: &Path) -> Option<String> {
+    let out = Command::new(binary).arg("--version").output().ok()?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.starts_with("Blender ") {
+            if let Some(ver) = line.split_whitespace().nth(1) {
+                if ver.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+                    return Some(ver.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Determine the actual Blender version for a given addons directory.
+/// Uses the parent directory name when it looks like a dotted version (e.g. "5.1"),
+/// otherwise locates the Blender binary and probes it with `--version`.
+fn detect_blender_version(addons_path: &Path, dir_name: &str) -> Option<String> {
+    let is_dotted_version = !dir_name.is_empty()
+        && !dir_name.starts_with('.')
+        && !dir_name.ends_with('.')
+        && dir_name.contains('.')
+        && dir_name
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '.');
+
+    if is_dotted_version {
+        return Some(dir_name.to_string());
+    }
+
+    // Fall back to probing the binary
+    for binary in find_blender_binary_candidates(addons_path) {
+        if let Some(ver) = probe_blender_version(&binary) {
+            return Some(ver);
+        }
+    }
+    None
+}
+
+fn discover_blender_addon_targets() -> BlenderDiscovery {
+    let mut roots: Vec<PathBuf> = Vec::new();
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            roots.push(PathBuf::from(home).join(".config/blender"));
+        }
+        roots.push(PathBuf::from("/usr/share/blender"));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            roots.push(PathBuf::from(home).join("Library/Application Support/Blender"));
+        }
+        roots.push(PathBuf::from("/Applications/Blender.app/Contents/Resources"));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Addon user data always lives under APPDATA, never Program Files.
+        // Writing to Program Files requires UAC elevation; Blender itself
+        // never installs user addons there.
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            roots.push(PathBuf::from(appdata).join("Blender Foundation/Blender"));
+        }
+    }
+
+    let mut compatible: Vec<BlenderAddonTarget> = Vec::new();
+    let mut has_incompatible = false;
+
+    for root in roots {
+        let entries = match fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let dir_name = entry.file_name().to_string_lossy().to_string();
+            let initial_addons_path = path.join("scripts").join("addons");
+            // Detect the version before checking whether the addons directory
+            // exists.  On a fresh Blender install the user data directory
+            // (e.g. %APPDATA%\Blender Foundation\Blender\5.1\scripts\addons)
+            // may not exist yet — Blender creates it lazily on first launch.
+            // We still want to offer it as an install target so that the
+            // installer can create the directory rather than refusing with
+            // "requires 5.0+ / upgrade Blender" when a compatible version is
+            // installed but the profile directory hasn't been initialised yet.
+            // If the addons directory does not exist *and* the version is not
+            // compatible, skip silently (no has_incompatible flag — we don't
+            // want non-Blender directories to pollute the error state).
+            let blender_version =
+                detect_blender_version(&initial_addons_path, &dir_name).unwrap_or_else(|| dir_name.clone());
+            #[cfg(target_os = "windows")]
+            let profile_dir = blender_profile_version_dir(&blender_version);
+            #[cfg(not(target_os = "windows"))]
+            let profile_dir = dir_name.clone();
+            let addons_path = root.join(&profile_dir).join("scripts").join("addons");
+            let is_compatible = version_meets_minimum(&blender_version);
+            if !addons_path.exists() {
+                // Include the target only if we are confident the version
+                // is compatible.  Skip entries we cannot confirm at all.
+                if is_compatible {
+                    compatible.push(BlenderAddonTarget {
+                        blender_version,
+                        addons_path,
+                    });
+                }
+                // Do NOT set has_incompatible for missing-directory entries;
+                // that would trigger the misleading "upgrade Blender" error.
+                continue;
+            }
+            if is_compatible {
+                compatible.push(BlenderAddonTarget {
+                    blender_version,
+                    addons_path,
+                });
+            } else {
+                has_incompatible = true;
+            }
+        }
+    }
+
+    // Windows: also probe Program Files to discover Blender installations whose
+    // APPDATA profile directory hasn't been created yet (i.e. Blender was installed
+    // but never launched).  We read the version from the binary, then construct the
+    // correct APPDATA-based addon path — we never write to Program Files.
+    #[cfg(target_os = "windows")]
+    {
+        let appdata_blender = std::env::var("APPDATA")
+            .ok()
+            .map(|a| PathBuf::from(a).join("Blender Foundation/Blender"));
+        if let Some(appdata_root) = appdata_blender {
+            for pf_root in &[
+                r"C:\Program Files\Blender Foundation",
+                r"C:\Program Files (x86)\Blender Foundation",
+            ] {
+                let Ok(entries) = fs::read_dir(pf_root) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let pf_path = entry.path();
+                    if !pf_path.is_dir() {
+                        continue;
+                    }
+                    let binary = pf_path.join("blender.exe");
+                    if !binary.is_file() {
+                        continue;
+                    }
+                    let Some(ver) = probe_blender_version(&binary) else {
+                        continue;
+                    };
+                    if !version_meets_minimum(&ver) {
+                        has_incompatible = true;
+                        continue;
+                    }
+                    let profile_dir = blender_profile_version_dir(&ver);
+                    let addons_path = appdata_root
+                        .join(profile_dir)
+                        .join("scripts")
+                        .join("addons");
+                    if !compatible.iter().any(|t| t.addons_path == addons_path) {
+                        compatible.push(BlenderAddonTarget {
+                            blender_version: ver,
+                            addons_path,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    compatible.sort_by(|a, b| {
+        let ka = version_sort_key(&a.blender_version);
+        let kb = version_sort_key(&b.blender_version);
+        kb.cmp(&ka)
+    });
+    compatible.dedup_by(|a, b| a.addons_path == b.addons_path);
+    BlenderDiscovery {
+        compatible,
+        has_incompatible,
+    }
+}
+
+fn addon_source_dir() -> Option<PathBuf> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let candidates = [
+        manifest_dir.join("../blender_addon/starbreaker_addon"),
+        manifest_dir.join("../../blender_addon/starbreaker_addon"),
+    ];
+    for candidate in candidates {
+        if candidate.join("__init__.py").is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn current_addon_version() -> Result<String, AppError> {
+    // Use the build-time version string (derived from git commit count) so
+    // that every new build automatically shows "Update available" to users
+    // who have an older installed copy.  No manual VERSION bump required.
+    Ok(env!("ADDON_BUILD_VERSION").to_string())
+}
+
+fn installed_addon_version(addons_path: &Path) -> Option<String> {
+    let init_path = addons_path.join("starbreaker_addon").join("__init__.py");
+    let content = fs::read_to_string(init_path).ok()?;
+    parse_addon_version_from_init(&content)
+}
+
+fn blender_running() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        return Command::new("pgrep")
+            .args(["-f", "[bB]lender"])
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return Command::new("pgrep")
+            .args(["-f", "[bB]lender"])
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return Command::new("tasklist")
+            .args(["/FI", "IMAGENAME eq blender.exe"])
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).to_ascii_lowercase().contains("blender.exe"))
+            .unwrap_or(false);
+    }
+
+    #[allow(unreachable_code)]
+    false
+}
+
+fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), AppError> {
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let src = entry.path();
+        let dst = destination.join(entry.file_name());
+        if src.is_dir() {
+            copy_dir_recursive(&src, &dst)?;
+        } else {
+            if let Some(parent) = dst.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(&src, &dst)?;
+        }
+    }
+    Ok(())
+}
+
+fn compute_addon_status(
+    target: Option<BlenderAddonTarget>,
+    incompatible_blender_found: bool,
+) -> Result<BlenderAddonStatusDto, AppError> {
+    let current_version = current_addon_version()?;
+    let running = blender_running();
+
+    let Some(target) = target else {
+        let message = if incompatible_blender_found {
+            format!(
+                "Blender was found but requires version {}.{} or newer. \
+                 Please upgrade Blender to use the StarBreaker addon.",
+                MIN_BLENDER_MAJOR, MIN_BLENDER_MINOR
+            )
+        } else {
+            "No Blender installation was detected. Install Blender {}.{}+ or provide a manual target path."
+                .replace("{}.{}", &format!("{}.{}", MIN_BLENDER_MAJOR, MIN_BLENDER_MINOR))
+        };
+        return Ok(BlenderAddonStatusDto {
+            state: "unavailable".to_string(),
+            current_version,
+            installed_version: None,
+            addons_path: None,
+            blender_version: None,
+            blender_running: running,
+            message: Some(message),
+            incompatible_blender_found,
+        });
+    };
+
+    let installed_version = installed_addon_version(&target.addons_path);
+    let state = match installed_version.as_deref() {
+        None => "install",
+        Some(installed) if installed == current_version => "installed",
+        Some(_) => "upgrade",
+    };
+
+    Ok(BlenderAddonStatusDto {
+        state: state.to_string(),
+        current_version,
+        installed_version,
+        addons_path: Some(target.addons_path.to_string_lossy().to_string()),
+        blender_version: Some(target.blender_version),
+        blender_running: running,
+        message: if running {
+            Some(
+                "Blender appears to be running. Restart Blender after install/upgrade to reload the addon."
+                    .to_string(),
+            )
+        } else {
+            None
+        },
+        incompatible_blender_found,
+    })
+}
+
+#[tauri::command]
+pub fn get_blender_addon_status() -> Result<BlenderAddonStatusDto, AppError> {
+    let discovery = discover_blender_addon_targets();
+    let has_incompatible = discovery.has_incompatible;
+    compute_addon_status(discovery.compatible.into_iter().next(), has_incompatible)
+}
+
+#[tauri::command]
+pub fn install_blender_addon(target_path: Option<String>) -> Result<BlenderAddonStatusDto, AppError> {
+    let source_dir = addon_source_dir().ok_or_else(|| {
+        AppError::Internal("Unable to locate bundled starbreaker_addon source directory".into())
+    })?;
+
+    let (target, has_incompatible) = if let Some(path) = target_path {
+        // Manual path: trust the user, version is unknown
+        (
+            BlenderAddonTarget {
+                blender_version: "manual".to_string(),
+                addons_path: PathBuf::from(path),
+            },
+            false,
+        )
+    } else {
+        let discovery = discover_blender_addon_targets();
+        let has_incompatible = discovery.has_incompatible;
+        let target = discovery.compatible.into_iter().next().ok_or_else(|| {
+            if has_incompatible {
+                AppError::Internal(format!(
+                    "Blender found but requires {}.{}+. Please upgrade Blender.",
+                    MIN_BLENDER_MAJOR, MIN_BLENDER_MINOR
+                ))
+            } else {
+                AppError::Internal("No Blender installation found.".into())
+            }
+        })?;
+        (target, has_incompatible)
+    };
+
+    fs::create_dir_all(&target.addons_path)?;
+    let destination = target.addons_path.join("starbreaker_addon");
+    if destination.exists() {
+        let _ = fs::remove_dir_all(destination.join("__pycache__"));
+        fs::remove_dir_all(&destination)?;
+    }
+    copy_dir_recursive(&source_dir, &destination)?;
+
+    // Stamp the installed __init__.py with the build-time version so that
+    // compute_addon_status correctly reports "up to date" after a fresh install
+    // rather than always showing "update available".
+    let init_path = destination.join("__init__.py");
+    if let Ok(content) = fs::read_to_string(&init_path) {
+        let build_version = env!("ADDON_BUILD_VERSION");
+        let patched = content
+            .lines()
+            .map(|line| {
+                let trimmed = line.trim();
+                if trimmed.starts_with("VERSION") && trimmed.contains('=') {
+                    format!("VERSION = \"{}\"", build_version)
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Preserve a trailing newline if the original had one.
+        let patched = if content.ends_with('\n') {
+            patched + "\n"
+        } else {
+            patched
+        };
+        let _ = fs::write(&init_path, patched);
+    }
+
+    let mut status = compute_addon_status(Some(target), has_incompatible)?;
+    if status.blender_running {
+        status.message = Some(
+            "Addon files were installed. Blender is running — restart Blender to load the new version."
+                .to_string(),
+        );
+    }
+    Ok(status)
+}
+
+/// Attempt to reload the StarBreaker addon in the running Blender instance via its
+/// built-in TCP server (port 6264). Falls back gracefully if the server is not running.
+#[tauri::command]
+pub fn reload_blender_addon() -> Result<String, AppError> {
+    if !blender_running() {
+        return Ok(
+            "Blender is not running. The addon will load automatically on next start.".to_string(),
+        );
+    }
+
+    // Blender's built-in Python server listens on 127.0.0.1:6264 when enabled.
+    // The protocol is: send the Python source followed by a newline, then read the response.
+    let snippet = "\
+import importlib, sys, bpy; \
+mod = sys.modules.get('starbreaker_addon'); \
+bpy.ops.preferences.addon_disable(module='starbreaker_addon') if mod else None; \
+[sys.modules.pop(k, None) for k in list(sys.modules) if k.startswith('starbreaker_addon')]; \
+bpy.ops.preferences.addon_enable(module='starbreaker_addon')\
+";
+
+    match TcpStream::connect_timeout(
+        &"127.0.0.1:6264".parse().unwrap(),
+        Duration::from_millis(500),
+    ) {
+        Ok(mut stream) => {
+            let payload = format!("{snippet}\n");
+            match stream.write_all(payload.as_bytes()) {
+                Ok(_) => Ok("Reload command sent to Blender.".to_string()),
+                Err(e) => Ok(format!(
+                    "Connected to Blender but failed to send reload: {e}. Restart Blender manually."
+                )),
+            }
+        }
+        Err(_) => Ok(
+            "Restart Blender to complete the upgrade (Blender's Python server is not enabled)."
+                .to_string(),
+        ),
+    }
+}
 
 // ── DataCore / Export DTOs ──────────────────────────────────────────
 
@@ -416,6 +1044,7 @@ fn bundled_extension(format: starbreaker_3d::ExportFormat) -> &'static str {
     match format {
         starbreaker_3d::ExportFormat::Glb => "glb",
         starbreaker_3d::ExportFormat::Stl => "stl",
+        starbreaker_3d::ExportFormat::Blend => "blend",
     }
 }
 
@@ -431,10 +1060,6 @@ fn prepare_decomposed_output_root(output_root: &Path, package_name: &str) -> Res
 
     let packages_root = output_root.join("Packages");
     let package_root = packages_root.join(package_name);
-    if package_root.exists() {
-        std::fs::remove_dir_all(&package_root)?;
-    }
-
     std::fs::create_dir_all(&package_root)?;
     Ok(())
 }
@@ -467,8 +1092,6 @@ pub struct ExportRequest {
     pub export_kind: String,
     /// "none", "colors", "textures", "all"
     pub material_mode: String,
-    /// "glb" or "stl"
-    pub format: String,
     pub include_attachments: bool,
     pub include_interior: bool,
     pub include_lights: bool,
@@ -476,6 +1099,8 @@ pub struct ExportRequest {
     pub overwrite_existing_assets: bool,
     pub include_nodraw: bool,
     pub include_animations: bool,
+    #[serde(default)]
+    pub include_object_type_directory: bool,
 }
 
 #[derive(Clone)]
@@ -483,6 +1108,7 @@ struct ExportProgressSlot {
     entity_name: String,
     entity_id: String,
     progress: Arc<Progress>,
+    done: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Copy)]
@@ -517,9 +1143,13 @@ fn snapshot_export_progress(slots: &[ExportProgressSlot]) -> ExportProgress {
 
     for slot in slots {
         let (fraction, stage) = slot.progress.get();
-        fraction_sum += fraction;
-        if slot.progress.is_done() || fraction >= 0.9999 {
+        if slot.done.load(Ordering::Relaxed) {
             completed += 1;
+            fraction_sum += 1.0;
+        } else {
+            // Keep running entities slightly below 100% so the aggregate only
+            // reaches 100% after every export slot is marked complete.
+            fraction_sum += fraction.min(0.9999);
         }
 
         let has_activity = fraction > 0.0 || !stage.is_empty();
@@ -573,14 +1203,45 @@ fn should_skip_existing_decomposed_asset(
     file: &starbreaker_3d::ExportedFile,
     overwrite_existing_assets: bool,
 ) -> bool {
-    !overwrite_existing_assets && file.kind.is_mesh_or_texture_asset()
+    !overwrite_existing_assets && file.kind.is_reusable_asset()
 }
 
 fn write_decomposed_file(
     file: &starbreaker_3d::ExportedFile,
     file_path: &Path,
     overwrite_existing_assets: bool,
+    export_session_asset_paths: Option<&Mutex<HashSet<String>>>,
+    p4k: &MappedP4k,
 ) -> Result<DecomposedWriteOutcome, AppError> {
+    let reusable_key = file
+        .kind
+        .is_reusable_asset()
+        .then(|| file.relative_path.replace('\\', "/").to_ascii_lowercase());
+    if let (Some(session_assets), Some(key)) = (export_session_asset_paths, reusable_key.as_deref()) {
+        let mut session_assets = session_assets.lock().unwrap();
+        if session_assets.contains(key) {
+            return Ok(DecomposedWriteOutcome::SkippedExisting);
+        }
+        if file_path.exists() {
+            if !file_path.is_file() {
+                return Err(AppError::Internal(format!(
+                    "decomposed output path '{}' already exists as a directory",
+                    file_path.display(),
+                )));
+            }
+            if should_skip_existing_decomposed_asset(file, overwrite_existing_assets)
+                && existing_asset_matches_source_mtime(file_path, p4k, &file.relative_path)?
+            {
+                session_assets.insert(key.to_string());
+                return Ok(DecomposedWriteOutcome::SkippedExisting);
+            }
+        }
+        std::fs::write(file_path, &file.bytes)?;
+        apply_source_mtime(file_path, p4k, &file.relative_path)?;
+        session_assets.insert(key.to_string());
+        return Ok(DecomposedWriteOutcome::Written);
+    }
+
     if file_path.exists() {
         if !file_path.is_file() {
             return Err(AppError::Internal(format!(
@@ -588,16 +1249,18 @@ fn write_decomposed_file(
                 file_path.display(),
             )));
         }
-        if should_skip_existing_decomposed_asset(file, overwrite_existing_assets) {
+        if should_skip_existing_decomposed_asset(file, overwrite_existing_assets)
+            && existing_asset_matches_source_mtime(file_path, p4k, &file.relative_path)?
+        {
             return Ok(DecomposedWriteOutcome::SkippedExisting);
         }
     }
-
     std::fs::write(file_path, &file.bytes)?;
+    apply_source_mtime(file_path, p4k, &file.relative_path)?;
     Ok(DecomposedWriteOutcome::Written)
 }
 
-fn collect_existing_decomposed_assets(output_root: &Path) -> Result<HashSet<String>, AppError> {
+fn collect_existing_decomposed_assets(output_root: &Path, p4k: &MappedP4k) -> Result<HashSet<String>, AppError> {
     let data_root = output_root.join("Data");
     let mut existing = HashSet::new();
     if !data_root.exists() {
@@ -621,7 +1284,8 @@ fn collect_existing_decomposed_assets(output_root: &Path) -> Result<HashSet<Stri
             let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
                 continue;
             };
-            if !matches!(extension, "glb" | "png") {
+            let filename = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+            if !matches!(extension, "blend" | "png" | "exr") && !filename.ends_with(".materials.json") {
                 continue;
             }
 
@@ -636,11 +1300,185 @@ fn collect_existing_decomposed_assets(output_root: &Path) -> Result<HashSet<Stri
                 .to_string_lossy()
                 .replace('\\', "/")
                 .to_ascii_lowercase();
+            if !existing_asset_matches_source_mtime(&path, p4k, &relative)? {
+                continue;
+            }
             existing.insert(relative);
         }
     }
 
     Ok(existing)
+}
+
+fn existing_asset_matches_source_mtime(path: &Path, p4k: &MappedP4k, relative_path: &str) -> Result<bool, AppError> {
+    let Some(source_seconds) = source_modified_unix_seconds(p4k, relative_path) else {
+        return Ok(false);
+    };
+    let modified = path.metadata()?.modified()?;
+    let Ok(asset_seconds) = modified.duration_since(UNIX_EPOCH) else {
+        return Ok(false);
+    };
+    Ok(asset_seconds.as_secs() == source_seconds)
+}
+
+fn apply_source_mtime(path: &Path, p4k: &MappedP4k, relative_path: &str) -> Result<(), AppError> {
+    let Some(seconds) = source_modified_unix_seconds(p4k, relative_path) else {
+        return Ok(());
+    };
+    let file_time = filetime::FileTime::from_unix_time(seconds as i64, 0);
+    filetime::set_file_mtime(path, file_time)?;
+    Ok(())
+}
+
+fn source_modified_unix_seconds(p4k: &MappedP4k, relative_path: &str) -> Option<u64> {
+    source_asset_candidates(relative_path)
+        .into_iter()
+        .find_map(|candidate| p4k.entry_case_insensitive(&candidate).map(|entry| dos_datetime_to_unix_seconds(entry.last_modified)))
+}
+
+fn source_asset_candidates(relative_path: &str) -> Vec<String> {
+    let path = relative_path.replace('/', "\\");
+    if let Some(stem) = path.strip_suffix(".materials.json") {
+        return vec![format!("{}.mtl", strip_numeric_suffix(stem, "_tex"))];
+    }
+    if let Some(stem) = path.strip_suffix(".blend") {
+        let source_stem = strip_numeric_suffix(stem, "_lod");
+        return [".cgfm", ".cgam", ".skinm", ".cgf", ".cga", ".skin", ".chr"]
+            .into_iter()
+            .map(|extension| format!("{source_stem}{extension}"))
+            .collect();
+    }
+    if let Some(stem) = path.strip_suffix(".png") {
+        let source_stem = strip_numeric_suffix(stem, "_tex");
+        return [".dds", ".tif", ".png"]
+            .into_iter()
+            .map(|extension| format!("{source_stem}{extension}"))
+            .collect();
+    }
+    if let Some(stem) = path.strip_suffix(".exr") {
+        return [".dds", ".tif", ".exr"]
+            .into_iter()
+            .map(|extension| format!("{stem}{extension}"))
+            .collect();
+    }
+    Vec::new()
+}
+
+fn strip_numeric_suffix<'a>(value: &'a str, marker: &str) -> &'a str {
+    let lower = value.to_ascii_lowercase();
+    let Some(pos) = lower.rfind(marker) else {
+        return value;
+    };
+    let suffix = &value[pos + marker.len()..];
+    if !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit()) {
+        &value[..pos]
+    } else {
+        value
+    }
+}
+
+fn dos_datetime_to_unix_seconds(value: u32) -> u64 {
+    let time = value & 0xffff;
+    let date = value >> 16;
+    let second = (time & 0x1f) * 2;
+    let minute = (time >> 5) & 0x3f;
+    let hour = (time >> 11) & 0x1f;
+    let day = (date & 0x1f).max(1);
+    let month = ((date >> 5) & 0x0f).clamp(1, 12);
+    let year = 1980 + ((date >> 9) & 0x7f) as i32;
+    (days_from_civil(year, month, day) as u64) * 86_400
+        + (hour as u64) * 3_600
+        + (minute as u64) * 60
+        + second as u64
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+    let year = year - if month <= 2 { 1 } else { 0 };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let month = month as i32;
+    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day as i32 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    (era * 146_097 + doe - 719_468) as i64
+}
+
+fn collect_existing_interior_assets(output_root: &Path) -> Result<HashMap<String, (String, Option<String>)>, AppError> {
+    let packages_root = output_root.join("Packages");
+    let mut existing = HashMap::new();
+    if !packages_root.exists() {
+        return Ok(existing);
+    }
+
+    let mut pending = vec![packages_root];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if !file_type.is_file() || path.file_name().and_then(|name| name.to_str()) != Some("scene.json") {
+                continue;
+            }
+            let bytes = std::fs::read(&path)?;
+            collect_scene_interior_assets(&mut existing, &bytes);
+        }
+    }
+
+    Ok(existing)
+}
+
+fn collect_scene_interior_assets(
+    existing: &mut HashMap<String, (String, Option<String>)>,
+    scene_bytes: &[u8],
+) {
+    let Ok(scene) = serde_json::from_slice::<serde_json::Value>(scene_bytes) else {
+        return;
+    };
+    let Some(interiors) = scene.get("interiors").and_then(|value| value.as_array()) else {
+        return;
+    };
+    for placement in interiors
+        .iter()
+        .filter_map(|interior| interior.get("placements").and_then(|value| value.as_array()))
+        .flatten()
+    {
+        let Some(cgf_path) = placement.get("cgf_path").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let material_path = placement.get("material_path").and_then(|value| value.as_str());
+        let Some(mesh_asset) = placement.get("mesh_asset").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let material_sidecar = placement
+            .get("material_sidecar")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned);
+        let key = interior_asset_lookup_key(cgf_path, material_path);
+        existing.entry(key).or_insert_with(|| (mesh_asset.to_string(), material_sidecar));
+    }
+}
+
+fn interior_asset_lookup_key(cgf_path: &str, material_path: Option<&str>) -> String {
+    format!(
+        "{}|{}",
+        cgf_path.to_ascii_lowercase(),
+        material_path.unwrap_or("").to_ascii_lowercase()
+    )
+}
+
+fn read_reusable_decomposed_asset(
+    output_root: &Path,
+    reusable_asset_paths: &HashSet<String>,
+    relative_path: &str,
+) -> Option<Vec<u8>> {
+    let key = relative_path.replace('\\', "/").to_ascii_lowercase();
+    if !reusable_asset_paths.contains(&key) {
+        return None;
+    }
+    std::fs::read(output_root.join(relative_path)).ok()
 }
 
 /// Start exporting selected entities to bundled files.
@@ -689,6 +1527,7 @@ pub async fn start_export(
             entity_name: entity_name.clone(),
             entity_id: entity_id.clone(),
             progress: Arc::new(Progress::new()),
+            done: Arc::new(AtomicBool::new(false)),
         })
         .collect();
     let progress_done = Arc::new(AtomicBool::new(false));
@@ -709,17 +1548,25 @@ pub async fn start_export(
         "decomposed" => starbreaker_3d::ExportKind::Decomposed,
         _ => starbreaker_3d::ExportKind::Bundled,
     };
-    let format = match request.format.to_lowercase().as_str() {
-        "stl" => starbreaker_3d::ExportFormat::Stl,
-        _ => starbreaker_3d::ExportFormat::Glb,
+    let format = match kind {
+        starbreaker_3d::ExportKind::Decomposed => starbreaker_3d::ExportFormat::Blend,
+        starbreaker_3d::ExportKind::Bundled => starbreaker_3d::ExportFormat::Glb,
     };
     let existing_asset_paths = if kind == starbreaker_3d::ExportKind::Decomposed
         && !request.overwrite_existing_assets
     {
-        Arc::new(collect_existing_decomposed_assets(Path::new(&request.output_dir))?)
+        Arc::new(collect_existing_decomposed_assets(Path::new(&request.output_dir), &p4k)?)
     } else {
         Arc::new(HashSet::new())
     };
+    let existing_interior_assets = if kind == starbreaker_3d::ExportKind::Decomposed
+        && !request.overwrite_existing_assets
+    {
+        Arc::new(collect_existing_interior_assets(Path::new(&request.output_dir))?)
+    } else {
+        Arc::new(HashMap::new())
+    };
+    let export_session_asset_paths = Arc::new(Mutex::new(HashSet::new()));
     let opts = starbreaker_3d::ExportOptions {
         kind,
         format,
@@ -731,9 +1578,11 @@ pub async fn start_export(
         include_shields: false,
         texture_mip: request.mip,
         lod_level: request.lod,
+        threads: request.threads,
         include_animations: request.include_animations,
         apply_default_animation_pose: !request.include_animations,
         default_animation_tags: vec!["landing_gear_extend".to_string()],
+        decomposed_package_subdir: None,
     };
 
     log::info!(
@@ -751,6 +1600,7 @@ pub async fn start_export(
     let output_dir = request.output_dir;
     let requested_threads = request.threads;
     let overwrite_existing_assets = request.overwrite_existing_assets;
+    let include_object_type_directory = request.include_object_type_directory;
 
     tokio::task::spawn_blocking(move || {
         let db = match starbreaker_datacore::database::Database::from_bytes(&dcb_bytes) {
@@ -823,9 +1673,17 @@ pub async fn start_export(
                         sanitize_filename(export_name),
                         bundled_extension(opts.format),
                     );
+                    let object_type_dir = if include_object_type_directory {
+                        output_object_type_directory_for_record(&db, record_id)
+                    } else {
+                        None
+                    };
                     let output_path = match opts.kind {
                         starbreaker_3d::ExportKind::Bundled => {
-                            std::path::PathBuf::from(&output_dir).join(&filename)
+                            let base_output_dir = object_type_dir
+                                .map(|dir| std::path::PathBuf::from(&output_dir).join(dir))
+                                .unwrap_or_else(|| std::path::PathBuf::from(&output_dir));
+                            base_output_dir.join(&filename)
                         }
                         starbreaker_3d::ExportKind::Decomposed => std::path::PathBuf::from(&output_dir),
                     };
@@ -838,15 +1696,20 @@ pub async fn start_export(
                         &opts,
                         export_name,
                         overwrite_existing_assets,
+                        object_type_dir,
                         Some(progress_slot.progress.as_ref()),
-                        Some(existing_asset_paths.as_ref()),
+                        existing_asset_paths.as_ref(),
+                        existing_interior_assets.as_ref(),
+                        export_session_asset_paths.as_ref(),
                     ) {
                         Ok(()) => {
+                            progress_slot.done.store(true, Ordering::Relaxed);
                             success.fetch_add(1, Ordering::Relaxed);
                             succeeded_ids.lock().unwrap().push(id_str.clone());
                         }
                         Err(e) => {
                             progress_slot.progress.report(1.0, "Failed");
+                            progress_slot.done.store(true, Ordering::Relaxed);
                             let mut snapshot = snapshot_export_progress(&progress_slots);
                             snapshot.entity_name = export_name.clone();
                             snapshot.entity_id = id_str.clone();
@@ -892,22 +1755,42 @@ fn export_single(
     opts: &starbreaker_3d::ExportOptions,
     export_name: &str,
     overwrite_existing_assets: bool,
+    object_type_dir: Option<&str>,
     progress: Option<&Progress>,
-    existing_asset_paths: Option<&HashSet<String>>,
+    existing_asset_paths: &HashSet<String>,
+    existing_interior_assets: &HashMap<String, (String, Option<String>)>,
+    export_session_asset_paths: &Mutex<HashSet<String>>,
 ) -> Result<(), AppError> {
     let record = db
         .record_by_id(record_id)
         .ok_or_else(|| AppError::Internal("record not found".into()))?;
     let idx = starbreaker_datacore::loadout::EntityIndex::new(db);
     let tree = starbreaker_datacore::loadout::resolve_loadout_indexed(&idx, record);
+    let reusable_asset_paths = {
+        let mut paths = existing_asset_paths.clone();
+        paths.extend(export_session_asset_paths.lock().unwrap().iter().cloned());
+        paths
+    };
+    let existing_asset_loader = |relative_path: &str| {
+        read_reusable_decomposed_asset(output_path, &reusable_asset_paths, relative_path)
+    };
     let result = starbreaker_3d::assemble_glb_with_loadout_with_progress(
         db,
         p4k,
         record,
         &tree,
-        opts,
+        &starbreaker_3d::ExportOptions {
+            decomposed_package_subdir: if opts.kind == starbreaker_3d::ExportKind::Decomposed {
+                object_type_dir.map(ToOwned::to_owned)
+            } else {
+                None
+            },
+            ..opts.clone()
+        },
         progress,
-        existing_asset_paths,
+        Some(&reusable_asset_paths),
+        Some(existing_interior_assets),
+        Some(&existing_asset_loader),
     )?;
     match result.kind {
         starbreaker_3d::ExportKind::Bundled => {
@@ -918,7 +1801,7 @@ fn export_single(
                 ))
             })?;
             if let Some(progress) = progress {
-                progress.report(0.95, "Writing bundled file");
+                progress.report(EXPORT_FINAL_WRITE_START, "Writing bundled file");
             }
             std::fs::write(output_path, bundled_bytes)?;
             if let Some(progress) = progress {
@@ -937,14 +1820,23 @@ fn export_single(
                 if let Some(parent) = file_path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                let outcome = write_decomposed_file(file, &file_path, overwrite_existing_assets)?;
+                let outcome = write_decomposed_file(
+                    file,
+                    &file_path,
+                    overwrite_existing_assets,
+                    Some(export_session_asset_paths),
+                    p4k,
+                )?;
                 if let Some(progress) = progress {
                     let fraction = (index + 1) as f32 / total_files as f32;
                     let stage = match outcome {
                         DecomposedWriteOutcome::Written => "Writing package files",
                         DecomposedWriteOutcome::SkippedExisting => "Skipping existing assets",
                     };
-                    progress.report(0.90 + 0.10 * fraction, stage);
+                    progress.report(
+                        EXPORT_FINAL_WRITE_START + (1.0 - EXPORT_FINAL_WRITE_START) * fraction,
+                        stage,
+                    );
                 }
             }
             if let Some(progress) = progress {
@@ -962,6 +1854,23 @@ fn export_entity_name(name: &str) -> String {
         .next()
         .unwrap_or(trimmed)
         .to_string()
+}
+
+fn output_object_type_directory_for_record(
+    db: &starbreaker_datacore::database::Database,
+    record_id: &CigGuid,
+) -> Option<&'static str> {
+    let record = db.record_by_id(record_id)?;
+    let file_path = db.resolve_string(record.file_name_offset).to_ascii_lowercase();
+    if file_path.contains("entities/spaceships") {
+        Some("ship")
+    } else if file_path.contains("entities/groundvehicles") {
+        Some("vehicle")
+    } else if file_path.contains("weapon") {
+        Some("weapon")
+    } else {
+        Some("other")
+    }
 }
 
 fn sanitize_export_name(name: &str) -> String {
@@ -1001,9 +1910,14 @@ fn sanitize_filename(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        decomposed_package_directory_name, export_entity_name, sanitize_export_name,
-        should_skip_existing_decomposed_asset,
+        decomposed_package_directory_name, export_entity_name,
+        prepare_decomposed_output_root, sanitize_export_name, should_skip_existing_decomposed_asset,
+        snapshot_export_progress, source_asset_candidates, ExportProgressSlot,
     };
+    use starbreaker_common::Progress;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn export_entity_name_strips_record_prefix_and_quotes() {
@@ -1053,7 +1967,58 @@ mod tests {
     }
 
     #[test]
-    fn skip_existing_assets_only_applies_to_meshes_and_textures() {
+    fn prepare_decomposed_output_root_preserves_existing_packages() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("starbreaker_app_prepare_package_test_{unique}"));
+        let target_package = root.join("Packages").join("ship").join("DRAK Buccaneer_LOD0_TEX0");
+        let sibling_package = root.join("Packages").join("ship").join("DRAK Ironclad_LOD0_TEX0");
+        std::fs::create_dir_all(&target_package).unwrap();
+        std::fs::create_dir_all(&sibling_package).unwrap();
+        std::fs::write(target_package.join("scene.json"), b"old").unwrap();
+        std::fs::write(sibling_package.join("scene.json"), b"sibling").unwrap();
+
+        prepare_decomposed_output_root(
+            &root,
+            "ship/DRAK Buccaneer_LOD0_TEX0",
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read(target_package.join("scene.json")).unwrap(), b"old");
+        assert_eq!(std::fs::read(sibling_package.join("scene.json")).unwrap(), b"sibling");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn export_progress_stays_below_complete_until_slot_done() {
+        let progress = Arc::new(Progress::new());
+        progress.report(1.0, "Done");
+        let done = Arc::new(AtomicBool::new(false));
+        let slots = vec![ExportProgressSlot {
+            entity_name: "DRAK Clipper".into(),
+            entity_id: "clipper-id".into(),
+            progress: progress.clone(),
+            done: done.clone(),
+        }];
+
+        let running = snapshot_export_progress(&slots);
+        assert_eq!(running.current, 0);
+        assert_eq!(running.total, 1);
+        assert!(running.fraction < 1.0);
+        assert_eq!(running.stage, "Done");
+
+        done.store(true, Ordering::Relaxed);
+
+        let completed = snapshot_export_progress(&slots);
+        assert_eq!(completed.current, 1);
+        assert_eq!(completed.total, 1);
+        assert_eq!(completed.fraction, 1.0);
+    }
+
+    #[test]
+    fn skip_existing_assets_applies_to_reusable_shared_assets() {
         let mesh = starbreaker_3d::ExportedFile {
             relative_path: "Data/Objects/Test/root.glb".into(),
             bytes: Vec::new(),
@@ -1072,8 +2037,24 @@ mod tests {
 
         assert!(should_skip_existing_decomposed_asset(&mesh, false));
         assert!(should_skip_existing_decomposed_asset(&texture, false));
-        assert!(!should_skip_existing_decomposed_asset(&material, false));
+        assert!(should_skip_existing_decomposed_asset(&material, false));
         assert!(!should_skip_existing_decomposed_asset(&mesh, true));
+    }
+
+    #[test]
+    fn source_asset_candidates_strip_lod_and_tex_suffixes_case_insensitively() {
+        assert_eq!(
+            source_asset_candidates("data/objects/foo_LOD0.blend")[0],
+            "data\\objects\\foo.cgfm"
+        );
+        assert_eq!(
+            source_asset_candidates("data/textures/foo_tex0.png")[0],
+            "data\\textures\\foo.dds"
+        );
+        assert_eq!(
+            source_asset_candidates("data/materials/foo_TEX0.materials.json")[0],
+            "data\\materials\\foo.mtl"
+        );
     }
 }
 

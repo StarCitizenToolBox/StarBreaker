@@ -7,7 +7,9 @@ import time
 import bpy
 import blf
 import gpu
-from bpy.props import BoolProperty, EnumProperty, FloatProperty, StringProperty
+import mathutils
+from bpy.app.handlers import persistent
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 from bpy.types import Operator, Panel
 from bpy_extras.io_utils import ImportHelper
 from gpu_extras.batch import batch_for_shader
@@ -21,15 +23,21 @@ from .runtime import (
     PROP_ENTITY_NAME,
     PROP_MATERIAL_SIDECAR,
     PROP_PACKAGE_NAME,
+    PROP_PACKAGE_ROOT,
     PROP_PALETTE_ID,
     PROP_SCENE_PATH,
     PROP_SHADER_FAMILY,
     PROP_SURFACE_SHADER_MODE,
     PROP_TEMPLATE_KEY,
     SCENE_POM_DETAIL_PROP,
+    SCENE_ENGINE_GLOW_PROP,
+    TEMPLATE_COLLECTION_NAME,
+    MaterialRefreshSession,
     apply_pom_detail_mode,
     SCENE_WEAR_STRENGTH_PROP,
+    animation_overlap_warnings,
     apply_animation_mode_to_package_root,
+    apply_engine_glow_to_package_root,
     apply_light_state,
     apply_livery_to_selected_package,
     apply_paint_to_selected_package,
@@ -37,11 +45,21 @@ from .runtime import (
     available_package_animation_items,
     package_animation_diagnostics,
     available_light_state_names,
+    engine_glow_control_enabled,
+    engine_glow_strength,
     dump_selected_metadata,
     exterior_palette_ids,
     find_package_root,
     import_package,
+    delete_animation_instance,
+    set_animation_instance_muted,
+    solo_animation_instance,
+    package_animation_instances,
     package_animation_mode_map,
+    package_root_needs_material_refresh,
+    refresh_materials_for_package_root,
+    resolve_package_scene_path,
+    update_animation_instance_start_frame,
 )
 
 
@@ -52,13 +70,32 @@ _ANIMATION_MODE_ITEMS: tuple[tuple[str, str, str], ...] = (
     ("none", "None", "Leave current transforms (restore bind pose if available)"),
     ("snap_first", "First", "Apply first keyframe pose"),
     ("snap_last", "Last", "Apply last keyframe pose"),
-    ("action", "Insert", "Insert full keyframes as Blender Action"),
+    (
+        "action",
+        "Insert",
+        "Insert full keyframes as Blender Action, anchored at the current timeline frame",
+    ),
 )
+_ANIMATION_FPS_POLICY_ITEMS: tuple[tuple[str, str, str], ...] = (
+    (
+        "adapt_scene",
+        "Adapt To Scene FPS",
+        "Keep scene FPS; scale keyframe times by scene_fps/clip_fps",
+    ),
+    (
+        "match_scene_to_clip",
+        "Match Scene To Clip FPS",
+        "Set scene FPS to clip FPS before inserting keys",
+    ),
+)
+_SCENE_ANIMATION_FPS_POLICY_PROP = "starbreaker_animation_fps_policy"
 _IMPORT_PROGRESS_ACTIVE_PROP = "starbreaker_import_progress_active"
 _IMPORT_PROGRESS_VALUE_PROP = "starbreaker_import_progress_value"
 _IMPORT_PROGRESS_DESCRIPTION_PROP = "starbreaker_import_progress_description"
 _IMPORT_PROGRESS_LAST_UPDATE = 0.0
 _IMPORT_PROGRESS_DRAW_HANDLER = None
+_AUTO_MATERIAL_REFRESH_SESSION: MaterialRefreshSession | None = None
+_AUTO_MATERIAL_REFRESH_TOKEN = 0
 
 
 def _progress_fraction(value: float) -> float:
@@ -75,12 +112,274 @@ def _tag_view3d_redraws(context: bpy.types.Context) -> None:
             area.tag_redraw()
 
 
+def _force_view3d_perspective(context: bpy.types.Context) -> None:
+    window = getattr(context, "window", None)
+    screen = getattr(window, "screen", None)
+    if window is None or screen is None:
+        return
+    for area in screen.areas:
+        if area.type != "VIEW_3D":
+            continue
+        region = next((region for region in area.regions if region.type == "WINDOW"), None)
+        if region is None:
+            continue
+        space = getattr(area, "spaces", None)
+        active_space = space.active if space is not None else None
+        region_3d = getattr(active_space, "region_3d", None)
+        if region_3d is None:
+            continue
+        with context.temp_override(window=window, area=area, region=region):
+            region_3d.view_perspective = "PERSP"
+
+
+def _set_active_object(context: bpy.types.Context, obj: bpy.types.Object | None) -> None:
+    view_layer = getattr(context, "view_layer", None)
+    if view_layer is not None and obj is not None:
+        view_layer.objects.active = obj
+
+
+def _collapse_template_cache_outliner(context: bpy.types.Context) -> None:
+    if bpy.data.collections.get(TEMPLATE_COLLECTION_NAME) is None:
+        return
+    window = getattr(context, "window", None)
+    screen = getattr(window, "screen", None)
+    if window is None or screen is None:
+        return
+    for area in screen.areas:
+        if area.type != "OUTLINER":
+            continue
+        region = next((region for region in area.regions if region.type == "WINDOW"), None)
+        if region is None:
+            continue
+        with context.temp_override(window=window, area=area, region=region):
+            for _ in range(8):
+                try:
+                    bpy.ops.outliner.show_one_level(open=False)
+                except RuntimeError:
+                    break
+
+
+def _frame_package_root_three_quarter(
+    context: bpy.types.Context,
+    package_root: bpy.types.Object,
+) -> None:
+    window = getattr(context, "window", None)
+    screen = getattr(window, "screen", None)
+    if window is None or screen is None:
+        return
+
+    mesh_candidates: list[tuple[bpy.types.Object, float]] = []
+    for obj in package_root.children_recursive:
+        if obj.type != "MESH":
+            continue
+        if not bool(getattr(getattr(obj, "data", None), "polygons", ())):
+            continue
+        if bool(getattr(obj, "hide_viewport", False)):
+            continue
+        if not obj.visible_get(view_layer=context.view_layer):
+            continue
+        corners = [obj.matrix_world @ mathutils.Vector(corner) for corner in obj.bound_box]
+        if not corners:
+            continue
+        min_corner = mathutils.Vector(
+            (
+                min(corner.x for corner in corners),
+                min(corner.y for corner in corners),
+                min(corner.z for corner in corners),
+            )
+        )
+        max_corner = mathutils.Vector(
+            (
+                max(corner.x for corner in corners),
+                max(corner.y for corner in corners),
+                max(corner.z for corner in corners),
+            )
+        )
+        diagonal = (max_corner - min_corner).length
+        if diagonal > 0.0:
+            mesh_candidates.append((obj, diagonal))
+
+    if not mesh_candidates:
+        return
+
+    largest_diagonal = max(diagonal for _, diagonal in mesh_candidates)
+    cutoff = largest_diagonal * 0.08
+    focus_objects = [obj for obj, diagonal in mesh_candidates if diagonal >= cutoff]
+    if not focus_objects:
+        focus_objects = [obj for obj, _ in mesh_candidates]
+
+    world_corners: list[mathutils.Vector] = []
+    for obj in focus_objects:
+        bound_box = getattr(obj, "bound_box", None)
+        if not bound_box:
+            continue
+        matrix_world = obj.matrix_world
+        for corner in bound_box:
+            world_corners.append(matrix_world @ mathutils.Vector(corner))
+    if not world_corners:
+        return
+
+    sorted_x = sorted(corner.x for corner in world_corners)
+    sorted_y = sorted(corner.y for corner in world_corners)
+    sorted_z = sorted(corner.z for corner in world_corners)
+    corner_count = len(world_corners)
+    low_index = max(0, int(corner_count * 0.02))
+    high_index = min(corner_count - 1, int(corner_count * 0.98))
+
+    min_corner = mathutils.Vector(
+        (
+            sorted_x[low_index],
+            sorted_y[low_index],
+            sorted_z[low_index],
+        )
+    )
+    max_corner = mathutils.Vector(
+        (
+            sorted_x[high_index],
+            sorted_y[high_index],
+            sorted_z[high_index],
+        )
+    )
+    focus_center = (min_corner + max_corner) * 0.5
+    diagonal = (max_corner - min_corner).length
+    if diagonal <= 1e-6:
+        diagonal = 1.0
+
+    # Baseline direction tuned from an approved manual viewport angle.
+    view_direction = mathutils.Vector((-0.735, -0.487, -0.650)).normalized()
+    target_rotation = view_direction.to_track_quat("-Z", "Y")
+
+    prioritized_areas: list[bpy.types.Area] = []
+    active_area = getattr(context, "area", None)
+    if active_area is not None and active_area.type == "VIEW_3D":
+        prioritized_areas.append(active_area)
+    prioritized_areas.extend(
+        area for area in screen.areas if area.type == "VIEW_3D" and area is not active_area
+    )
+
+    for area in prioritized_areas:
+        region = next((region for region in area.regions if region.type == "WINDOW"), None)
+        if region is None:
+            continue
+        with context.temp_override(window=window, area=area, region=region):
+            bpy.ops.object.select_all(action="DESELECT")
+            for obj in focus_objects:
+                obj.select_set(True)
+            _set_active_object(context, focus_objects[0])
+            space = getattr(area, "spaces", None)
+            active_space = space.active if space is not None else None
+            region_3d = getattr(active_space, "region_3d", None)
+            if region_3d is not None:
+                region_3d.view_perspective = "PERSP"
+                for _ in range(3):
+                    if region_3d.view_perspective == "PERSP":
+                        break
+                    try:
+                        bpy.ops.view3d.view_persportho()
+                    except RuntimeError:
+                        break
+                    region_3d.view_perspective = "PERSP"
+                region_3d.view_rotation = target_rotation
+                region_3d.view_location = focus_center
+
+                lens_mm = float(getattr(active_space, "lens", 50.0))
+                lens_scale = max(lens_mm, 1.0) / 50.0
+                # Deterministic fit: scales with lens so 100mm does not over-zoom.
+                region_3d.view_distance = max(diagonal * 0.95 * lens_scale, diagonal * 0.78)
+
+
+def _finalize_import_view(context: bpy.types.Context, package_root: bpy.types.Object) -> None:
+    _collapse_template_cache_outliner(context)
+    _frame_package_root_three_quarter(context, package_root)
+    _force_view3d_perspective(context)
+    bpy.ops.object.select_all(action="DESELECT")
+    package_root.select_set(True)
+    _set_active_object(context, package_root)
+
+
+def _auto_apply_landing_gear_snap_last(
+    context: bpy.types.Context,
+    package_root: bpy.types.Object,
+) -> None:
+    scene_path = package_root.get(PROP_SCENE_PATH)
+    if not isinstance(scene_path, str) or not scene_path:
+        return
+
+    try:
+        package = PackageBundle.load(scene_path)
+    except Exception:
+        return
+
+    try:
+        animation_items = available_package_animation_items(package)
+    except Exception:
+        return
+    if not animation_items:
+        return
+
+    def _animation_score(name: str, display_name: str) -> int:
+        text = f"{name} {display_name}".lower()
+        has_landing_gear = "landing" in text and "gear" in text
+        if not has_landing_gear:
+            return -1
+
+        score = 0
+        if "retract" in text:
+            score += 100
+        if "stow" in text or "stowed" in text:
+            score += 80
+        if "close" in text or "closed" in text:
+            score += 60
+        if "up" in text:
+            score += 40
+
+        if "deploy" in text or "deployed" in text:
+            score -= 60
+        if "extend" in text or "extended" in text:
+            score -= 60
+        if "open" in text or "opened" in text:
+            score -= 40
+        if "down" in text:
+            score -= 20
+        return score
+
+    best_name: str | None = None
+    best_score = -1
+    for animation_name, animation_display_name in animation_items:
+        score = _animation_score(animation_name, animation_display_name)
+        if score > best_score:
+            best_score = score
+            best_name = animation_name
+
+    if best_name is None or best_score < 0:
+        return
+
+    try:
+        apply_animation_mode_to_package_root(context, package_root, best_name, "snap_last")
+    except Exception:
+        return
+
+
 def _update_pom_detail(_: bpy.types.ID, context: bpy.types.Context) -> None:
     scene = getattr(context, "scene", None)
     if scene is None:
         return
     try:
         apply_pom_detail_mode(getattr(scene, SCENE_POM_DETAIL_PROP, POM_DETAIL_DEFAULT))
+    except Exception:
+        return
+    _tag_view3d_redraws(context)
+
+
+def _update_engine_glow(_: bpy.types.ID, context: bpy.types.Context) -> None:
+    scene = getattr(context, "scene", None)
+    if scene is None:
+        return
+    package_root = _package_root_from_context(context)
+    if package_root is None or not engine_glow_control_enabled(package_root):
+        return
+    try:
+        apply_engine_glow_to_package_root(package_root, float(getattr(scene, SCENE_ENGINE_GLOW_PROP, 3.0)))
     except Exception:
         return
     _tag_view3d_redraws(context)
@@ -184,6 +483,7 @@ def _update_import_progress(
     description: str,
     *,
     force: bool = False,
+    redraw: bool = True,
 ) -> None:
     global _IMPORT_PROGRESS_LAST_UPDATE
     now = time.monotonic()
@@ -198,10 +498,11 @@ def _update_import_progress(
         window_manager.progress_update(int(round(clamped * 100.0)))
     except Exception:
         pass
-    try:
-        bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=1)
-    except Exception:
-        pass
+    if redraw:
+        try:
+            bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=1)
+        except Exception:
+            pass
     _tag_view3d_redraws(context)
 
 
@@ -212,6 +513,46 @@ def _end_import_progress(context: bpy.types.Context, description: str) -> None:
     _tag_view3d_redraws(context)
     try:
         window_manager.progress_end()
+    except Exception:
+        pass
+
+
+def _init_instance_start_props(
+    context: bpy.types.Context,
+    package_root: bpy.types.Object,  # noqa: ARG001 — kept for future use
+    instances: list[dict],
+) -> None:
+    """Initialise inline-frame scene props for all tracked animation instances.
+
+    Must be called from an operator execute context, never from a draw callback.
+    """
+    for instance in instances:
+        instance_id = str(instance.get("id", ""))
+        if not instance_id:
+            continue
+        start = int(round(float(instance.get("start_frame", 1.0))))
+        key = f"starbreaker_anim_start_{instance_id}"
+        if context.scene.get(key) is None:
+            context.scene[key] = start
+
+
+def _schedule_init_scene_prop(key: str, value: int) -> None:
+    """Defer a scene custom-property write to outside the draw callback.
+
+    Writing to ID classes during a draw call raises a Blender context error.
+    Using a zero-interval timer pushes the write to the next event loop tick.
+    """
+    def _init() -> None:
+        try:
+            scene = bpy.context.scene
+            if key not in scene:
+                scene[key] = value
+        except Exception:
+            pass
+        return None
+
+    try:
+        bpy.app.timers.register(_init, first_interval=0.0, persistent=False)
     except Exception:
         pass
 
@@ -231,11 +572,8 @@ def _selected_package(context: bpy.types.Context) -> PackageBundle | None:
     package_root = _package_root_from_context(context)
     if package_root is None:
         return None
-    scene_path = package_root.get(PROP_SCENE_PATH)
-    if not isinstance(scene_path, str) or not scene_path:
-        return None
     try:
-        return PackageBundle.load(scene_path)
+        return PackageBundle.load(str(resolve_package_scene_path(package_root)))
     except Exception:
         return None
 
@@ -396,6 +734,11 @@ class STARBREAKER_OT_import_decomposed_package(Operator, ImportHelper):
             self.cancel(context)
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
+        prefs = _get_prefs()
+        if _should_apply_landing_gear(prefs):
+            _auto_apply_landing_gear_snap_last(context, package_root)
+        if _should_change_viewport(prefs):
+            _finalize_import_view(context, package_root)
         _end_import_progress(context, f"Imported {package_root.get(PROP_PACKAGE_NAME, package_name)}")
         self.cancel(context)
         self.report({"INFO"}, f"Imported {package_root.get(PROP_PACKAGE_NAME, package_name)}")
@@ -448,6 +791,11 @@ class STARBREAKER_OT_import_progress_popup(Operator):
                     self.cancel(context)
                     self.report({"ERROR"}, str(exc))
                     return {"CANCELLED"}
+                prefs = _get_prefs()
+                if _should_apply_landing_gear(prefs):
+                    _auto_apply_landing_gear_snap_last(context, package_root)
+                if _should_change_viewport(prefs):
+                    _finalize_import_view(context, package_root)
                 _end_import_progress(
                     context,
                     f"Imported {package_root.get(PROP_PACKAGE_NAME, self.package_name or Path(self.filepath).parent.name)}",
@@ -488,6 +836,47 @@ class STARBREAKER_OT_import_progress_popup(Operator):
         percent.label(text=f"{int(round(fraction * 100.0))}%")
         layout.label(text=description)
 
+class STARBREAKER_OT_refresh_materials(Operator):
+    bl_idname = "starbreaker.refresh_materials"
+    bl_label = "Refresh Materials"
+    bl_options = {"REGISTER", "UNDO"}
+    bl_description = "Rebuild StarBreaker materials without reimporting meshes, empties, or lights"
+
+    package_root_name: StringProperty(options={"HIDDEN"}, default="")  # type: ignore[assignment]
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return _package_root_from_context(context) is not None or any(
+            bool(obj.get(PROP_PACKAGE_ROOT)) for obj in bpy.data.objects
+        )
+
+    def _package_root(self, context: bpy.types.Context) -> bpy.types.Object | None:
+        if self.package_root_name:
+            candidate = bpy.data.objects.get(self.package_root_name)
+            if candidate is not None and bool(candidate.get(PROP_PACKAGE_ROOT)):
+                return candidate
+        return _package_root_from_context(context)
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        package_root = self._package_root(context)
+        if package_root is None:
+            self.report({"ERROR"}, "Select an imported StarBreaker object first")
+            return {"CANCELLED"}
+        palette_id = package_root.get(PROP_PALETTE_ID, "")
+        try:
+            applied = refresh_materials_for_package_root(
+                context,
+                package_root,
+                palette_id if isinstance(palette_id, str) and palette_id else None,
+            )
+        except Exception as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"Refreshed {applied} material slot group(s)")
+        return {"FINISHED"}
+
+    def invoke(self, context: bpy.types.Context, event: bpy.types.Event) -> set[str]:
+        return self.execute(context)
+
 
 class STARBREAKER_OT_apply_paint(Operator):
     bl_idname = "starbreaker.apply_paint"
@@ -514,10 +903,15 @@ class STARBREAKER_OT_apply_paint(Operator):
             current_palette_id = package_root.get(PROP_PALETTE_ID, "") if package_root is not None else ""
             item_ids = _paint_items(self, context)
             valid_ids = {item_id for item_id, _, _ in item_ids if item_id}
+            selected_paint_id = ""
             if isinstance(current_palette_id, str) and current_palette_id in valid_ids:
-                self.paint_id = current_palette_id
+                selected_paint_id = current_palette_id
             else:
-                self.paint_id = _first_valid_item_id(item_ids)
+                selected_paint_id = _first_valid_item_id(item_ids)
+            if not selected_paint_id:
+                self.report({"ERROR"}, "No paint options are available for this package")
+                return {"CANCELLED"}
+            self.paint_id = selected_paint_id
         return context.window_manager.invoke_props_dialog(self)
 
 
@@ -590,13 +984,14 @@ class STARBREAKER_OT_switch_light_state(Operator):
     )
 
     state_name: StringProperty(name="State")  # type: ignore[assignment]
+    include_strobe: BoolProperty(name="Include Strobe", default=True)  # type: ignore[assignment]
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         name = (self.state_name or "").strip()
         if not name:
             self.report({"ERROR"}, "No state name provided")
             return {"CANCELLED"}
-        count = apply_light_state(name)
+        count = apply_light_state(name, include_strobe=bool(self.include_strobe))
         self.report({"INFO"}, f"Applied '{name}' to {count} light(s)")
         return {"FINISHED"}
 
@@ -630,6 +1025,11 @@ class STARBREAKER_OT_apply_animation_mode(Operator):
 
     animation_name: StringProperty(name="Animation")  # type: ignore[assignment]
     mode: EnumProperty(name="Mode", items=_ANIMATION_MODE_ITEMS)  # type: ignore[assignment]
+    fps_policy: EnumProperty(  # type: ignore[assignment]
+        name="FPS Policy",
+        items=_ANIMATION_FPS_POLICY_ITEMS,
+        default="adapt_scene",
+    )
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
@@ -644,12 +1044,201 @@ class STARBREAKER_OT_apply_animation_mode(Operator):
         if not name:
             self.report({"ERROR"}, "No animation selected")
             return {"CANCELLED"}
+        package = _selected_package(context)
+        warnings: list[str] = []
+        if package is not None and self.mode == "action":
+            warnings = animation_overlap_warnings(
+                package_root,
+                name,
+                float(getattr(context.scene, "frame_current", 1.0)),
+                context_scene=context.scene,
+                fps_policy=self.fps_policy,
+                package=package,
+            )
         try:
-            updated = apply_animation_mode_to_package_root(context, package_root, name, self.mode)
+            updated = apply_animation_mode_to_package_root(
+                context,
+                package_root,
+                name,
+                self.mode,
+                fps_policy=self.fps_policy,
+            )
         except Exception as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
+        if warnings:
+            head = "; ".join(warnings[:2])
+            if len(warnings) > 2:
+                head = f"{head}; +{len(warnings) - 2} more overlap(s)"
+            self.report({"WARNING"}, head)
+        # After inserting, make sure the inline-frame scene props are
+        # pre-initialised so that the panel draw never needs to mutate
+        # ID data (which Blender forbids during draw callbacks).
+        if self.mode == "action" and package is not None:
+            try:
+                _init_instance_start_props(
+                    context,
+                    package_root,
+                    package_animation_instances(package_root, package),
+                )
+            except Exception:
+                pass
         self.report({"INFO"}, f"{name}: {self.mode} ({updated} object(s) updated)")
+        return {"FINISHED"}
+
+
+class STARBREAKER_OT_edit_animation_instance(Operator):
+    bl_idname = "starbreaker.apply_animation_instance_start_frame"
+    bl_label = "Apply Animation Instance Start Frame"
+    bl_options = {"REGISTER", "UNDO"}
+    bl_description = "Apply the inline start-frame value for this animation instance"
+
+    instance_id: StringProperty(name="Instance Id")  # type: ignore[assignment]
+    scene_prop_key: StringProperty(name="Scene Prop Key")  # type: ignore[assignment]
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return find_package_root(context.active_object) is not None
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        package_root = _package_root_from_context(context)
+        package = _selected_package(context)
+        if package_root is None or package is None:
+            self.report({"ERROR"}, "Select an imported StarBreaker object first")
+            return {"CANCELLED"}
+
+        raw_value = context.scene.get(self.scene_prop_key, None)
+        if raw_value is None:
+            self.report({"ERROR"}, "Missing inline frame value")
+            return {"CANCELLED"}
+        try:
+            start_frame = float(raw_value)
+        except Exception:
+            self.report({"ERROR"}, "Inline frame value must be numeric")
+            return {"CANCELLED"}
+
+        updated = update_animation_instance_start_frame(
+            package_root,
+            self.instance_id,
+            start_frame,
+            package=package,
+        )
+        if not updated:
+            self.report({"ERROR"}, "Animation instance not found")
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"Moved to frame {int(round(start_frame))}")
+        return {"FINISHED"}
+
+
+class STARBREAKER_OT_delete_animation_instance(Operator):
+    """Delete this animation instance without confirmation"""
+
+    bl_idname = "starbreaker.delete_animation_instance"
+    bl_label = "Delete Instance"
+    bl_options = {"REGISTER", "UNDO"}
+    bl_description = "Remove this animation instance and its NLA strips"
+
+    instance_id: StringProperty(name="Instance Id")  # type: ignore[assignment]
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return find_package_root(context.active_object) is not None
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        package_root = _package_root_from_context(context)
+        package = _selected_package(context)
+        if package_root is None or package is None:
+            self.report({"ERROR"}, "Select an imported StarBreaker object first")
+            return {"CANCELLED"}
+        deleted = delete_animation_instance(package_root, self.instance_id, package=package)
+        if not deleted:
+            self.report({"ERROR"}, "Animation instance not found")
+            return {"CANCELLED"}
+        self.report({"INFO"}, "Deleted animation instance")
+        return {"FINISHED"}
+
+
+def _nla_track_mute_state(package_root: bpy.types.Object, track_name: str) -> bool:
+    """Return True when the named NLA track is muted on any object in the package."""
+    for obj in [package_root, *package_root.children_recursive]:
+        if not obj.animation_data:
+            continue
+        for track in obj.animation_data.nla_tracks:
+            if track.name == track_name:
+                return track.mute
+    return False
+
+
+def _set_nla_track_mute(
+    package_root: bpy.types.Object, track_name: str, mute: bool
+) -> None:
+    """Set .mute on every NLA track named *track_name* across the package."""
+    for obj in [package_root, *package_root.children_recursive]:
+        if not obj.animation_data:
+            continue
+        for track in obj.animation_data.nla_tracks:
+            if track.name == track_name:
+                track.mute = mute
+
+
+class STARBREAKER_OT_mute_animation_instance(Operator):
+    """Toggle mute on the NLA strips for this animation instance"""
+
+    bl_idname = "starbreaker.mute_animation_instance"
+    bl_label = "Toggle Mute"
+    bl_options = {"REGISTER", "UNDO"}
+    bl_description = "Mute or unmute this animation instance's NLA strips"
+
+    instance_id: StringProperty(name="Instance Id")  # type: ignore[assignment]
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return find_package_root(context.active_object) is not None
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        package_root = _package_root_from_context(context)
+        package = _selected_package(context)
+        if package_root is None:
+            self.report({"ERROR"}, "Select an imported StarBreaker object first")
+            return {"CANCELLED"}
+        if package is None:
+            self.report({"ERROR"}, "No package selected")
+            return {"CANCELLED"}
+        muted = set_animation_instance_muted(package_root, self.instance_id, None, package=package)
+        if muted is None:
+            self.report({"ERROR"}, "Animation instance not found")
+            return {"CANCELLED"}
+        self.report({"INFO"}, "Muted animation instance" if muted else "Unmuted animation instance")
+        return {"FINISHED"}
+
+
+class STARBREAKER_OT_solo_animation_instance(Operator):
+    """Solo this animation instance — mute all others"""
+
+    bl_idname = "starbreaker.solo_animation_instance"
+    bl_label = "Solo Instance"
+    bl_options = {"REGISTER", "UNDO"}
+    bl_description = "Unmute this instance and mute all other animation instances"
+
+    instance_id: StringProperty(name="Instance Id")  # type: ignore[assignment]
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return find_package_root(context.active_object) is not None
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        package_root = _package_root_from_context(context)
+        package = _selected_package(context)
+        if package_root is None:
+            self.report({"ERROR"}, "Select an imported StarBreaker object first")
+            return {"CANCELLED"}
+        if package is None:
+            self.report({"ERROR"}, "No package selected")
+            return {"CANCELLED"}
+        if not solo_animation_instance(package_root, self.instance_id, package=package):
+            self.report({"ERROR"}, "Animation instance not found")
+            return {"CANCELLED"}
+        self.report({"INFO"}, "Soloed animation instance")
         return {"FINISHED"}
 
 
@@ -715,7 +1304,6 @@ class STARBREAKER_PT_tools(Panel):
 
     def draw(self, context: bpy.types.Context) -> None:
         layout = self.layout
-        layout.operator(STARBREAKER_OT_import_decomposed_package.bl_idname, icon="IMPORT")
 
         obj = context.active_object
         package_root = _package_root_from_context(context)
@@ -734,17 +1322,13 @@ class STARBREAKER_PT_tools(Panel):
 
         actions = layout.row(align=True)
         actions.operator_menu_enum(STARBREAKER_OT_apply_paint.bl_idname, "paint_id", text="Apply Paint", icon="BRUSH_DATA")
+        actions.operator(STARBREAKER_OT_refresh_materials.bl_idname, text="Refresh Materials", icon="MATERIAL")
         layout.operator(STARBREAKER_OT_dump_metadata.bl_idname, icon="TEXT")
 
         tuning = layout.box()
         tuning.prop(context.scene, SCENE_POM_DETAIL_PROP, text="POM Detail")
         tuning.label(text="Layered Wear")
         tuning.prop(context.scene, SCENE_WEAR_STRENGTH_PROP, slider=True)
-
-        if package is not None:
-            available = layout.box()
-            available.label(text=f"Palettes: {', '.join(sorted(package.palettes.keys()))}")
-            available.label(text=f"Liveries: {', '.join(sorted(package.liveries.keys()))}")
 
         if obj is not None and obj.active_material is not None:
             material = obj.active_material
@@ -759,7 +1343,6 @@ class STARBREAKER_PT_tools(Panel):
         if state_names:
             light_box = layout.box()
             light_box.label(text="Light States")
-            row = light_box.row(align=True)
             _SHORT = {
                 "defaultState": "Default",
                 "auxiliaryState": "Auxiliary",
@@ -767,67 +1350,287 @@ class STARBREAKER_PT_tools(Panel):
                 "cinematicState": "Cinematic",
                 "offState": "Off",
             }
+            _ICONS = {
+                "defaultState": "CHECKMARK",
+                "auxiliaryState": "LIGHT",
+                "emergencyState": "ERROR",
+                "cinematicState": "RESTRICT_RENDER_OFF",
+                "offState": "HIDE_ON",
+                "emergencyState_strobe": "LIGHT_SUN",
+            }
+            button_specs: list[tuple[str, str, bool, str]] = []
             for name in state_names:
-                op = row.operator(
-                    STARBREAKER_OT_switch_light_state.bl_idname,
-                    text=_SHORT.get(name, name),
-                )
-                op.state_name = name
+                if name == "emergencyState":
+                    button_specs.append(("Emergency", name, False, _ICONS["emergencyState"]))
+                    button_specs.append(("Emergency + Strobe", name, True, _ICONS["emergencyState_strobe"]))
+                else:
+                    button_specs.append((_SHORT.get(name, name), name, True, _ICONS.get(name, "NONE")))
+
+            split = (len(button_specs) + 1) // 2
+            top_row = light_box.row(align=True)
+            bottom_row = light_box.row(align=True)
+            for index, (label, state_name, include_strobe, icon_name) in enumerate(button_specs):
+                row = top_row if index < split else bottom_row
+                kwargs = {"text": label}
+                if icon_name != "NONE":
+                    kwargs["icon"] = icon_name
+                op = row.operator(STARBREAKER_OT_switch_light_state.bl_idname, **kwargs)
+                op.state_name = state_name
+                op.include_strobe = include_strobe
+            if engine_glow_control_enabled(package_root):
+                light_box.label(text=f"Current Engine Glow Strength: {engine_glow_strength(package_root):.1f}")
+                light_box.prop(context.scene, SCENE_ENGINE_GLOW_PROP, text="Engine Glow Strength", slider=True)
 
         if package is not None:
             animation_items = available_package_animation_items(package)
             animation_box = layout.box()
             animation_box.label(text="Animations")
+            animation_box.label(text=f"{len(animation_items)} clip(s)")
             if not animation_items:
                 animation_box.label(text="No animations exported in this scene.json")
             else:
-                mode_map = package_animation_mode_map(package_root)
-                for animation_name, animation_display_name in animation_items:
-                    name_row = animation_box.row(align=True)
-                    name_row.label(text=animation_display_name)
-                    diag = name_row.operator(
-                        STARBREAKER_OT_dump_animation_diagnostics.bl_idname,
-                        text="Diag",
-                        icon="INFO",
-                    )
-                    diag.animation_name = animation_name
-                    current_mode = mode_map.get(animation_name, "none")
-                    buttons_row = animation_box.row(align=True)
-                    for mode_id, mode_label, _ in _ANIMATION_MODE_ITEMS:
-                        op = buttons_row.operator(
-                            STARBREAKER_OT_apply_animation_mode.bl_idname,
-                            text=mode_label,
-                            depress=(current_mode == mode_id),
-                        )
-                        op.animation_name = animation_name
-                        op.mode = mode_id
+                animation_box.prop(context.scene, _SCENE_ANIMATION_FPS_POLICY_PROP, text="FPS")
+                try:
+                    mode_map = package_animation_mode_map(package_root)
+                    instances = package_animation_instances(package_root, package, persist=False)
+                    instances_by_animation: dict[str, list[dict[str, object]]] = {}
+                    for instance in instances:
+                        key = str(instance.get("animation_name", ""))
+                        if not key:
+                            continue
+                        instances_by_animation.setdefault(key, []).append(instance)
+                    for values in instances_by_animation.values():
+                        values.sort(key=lambda item: float(item.get("start_frame", 1.0)))
+                    fps_policy = getattr(context.scene, _SCENE_ANIMATION_FPS_POLICY_PROP, "adapt_scene")
+                    for animation_name, animation_display_name in animation_items:
+                        animation_box.label(text=animation_display_name)
+                        current_mode = mode_map.get(animation_name, "none")
+                        buttons_row = animation_box.row(align=True)
+                        for mode_id, mode_label, _ in _ANIMATION_MODE_ITEMS:
+                            op = buttons_row.operator(
+                                STARBREAKER_OT_apply_animation_mode.bl_idname,
+                                text=mode_label,
+                                depress=(current_mode == mode_id),
+                            )
+                            op.animation_name = animation_name
+                            op.mode = mode_id
+                            op.fps_policy = fps_policy
+
+                        instance_entries = instances_by_animation.get(animation_name, [])
+                        if instance_entries:
+                            for instance in instance_entries:
+                                start = int(round(float(instance.get("start_frame", 1.0))))
+                                instance_id = str(instance.get("id", ""))
+                                track_name = f"{animation_name}@{start}"
+                                is_muted = _nla_track_mute_state(package_root, track_name)
+
+                                row = animation_box.row(align=True)
+                                row.label(text=animation_display_name)
+
+                                # Inline frame number control (replaces old dialog workflow).
+                                scene_prop_key = f"starbreaker_anim_start_{instance_id}"
+                                if context.scene.get(scene_prop_key) is None:
+                                    # Writing to ID classes is forbidden during draw.
+                                    # Defer the initialisation to a timer and show a
+                                    # read-only label for this one redraw cycle.
+                                    _schedule_init_scene_prop(scene_prop_key, int(start))
+                                    row.label(text=f"@{start}")
+                                else:
+                                    row.prop(context.scene, f'["{scene_prop_key}"]', text="@")
+
+                                apply_op = row.operator(
+                                    STARBREAKER_OT_edit_animation_instance.bl_idname,
+                                    text="",
+                                    icon="CHECKMARK",
+                                )
+                                apply_op.instance_id = instance_id
+                                apply_op.scene_prop_key = scene_prop_key
+
+                                # Mute toggle
+                                mute_op = row.operator(
+                                    STARBREAKER_OT_mute_animation_instance.bl_idname,
+                                    text="",
+                                    icon="HIDE_ON" if is_muted else "HIDE_OFF",
+                                    depress=is_muted,
+                                )
+                                mute_op.instance_id = instance_id
+
+                                # Solo
+                                solo_op = row.operator(
+                                    STARBREAKER_OT_solo_animation_instance.bl_idname,
+                                    text="",
+                                    icon="EVENT_S",
+                                )
+                                solo_op.instance_id = instance_id
+
+                                # Delete
+                                del_op = row.operator(
+                                    STARBREAKER_OT_delete_animation_instance.bl_idname,
+                                    text="",
+                                    icon="TRASH",
+                                )
+                                del_op.instance_id = instance_id
+                except Exception as exc:
+                    animation_box.label(text=f"Animation UI error: {exc}")
+
+
+# ── Addon Preferences ────────────────────────────────────────────────────────
+
+class STARBREAKER_AP_preferences(bpy.types.AddonPreferences):
+    """User-configurable post-import behaviour for the StarBreaker addon."""
+
+    bl_idname = "starbreaker_addon"
+
+    viewport_change_after_import: BoolProperty(  # type: ignore[assignment]
+        name="Adjust viewport after import",
+        description=(
+            "Frame the imported package in the 3D viewport and switch to "
+            "perspective view after a successful import."
+        ),
+        default=True,
+    )
+
+    landing_gear_retract_after_import: BoolProperty(  # type: ignore[assignment]
+        name="Retract landing gear after import",
+        description=(
+            "Automatically apply the best landing-gear retracted pose when a "
+            "package is imported, so ships appear ready-for-flight by default."
+        ),
+        default=True,
+    )
+
+    def draw(self, context: bpy.types.Context) -> None:
+        layout = self.layout
+        layout.label(text="Post-import behaviour:")
+        layout.prop(self, "landing_gear_retract_after_import")
+        layout.prop(self, "viewport_change_after_import")
+
+
+def _get_prefs() -> STARBREAKER_AP_preferences | None:
+    """Return the addon preferences object, or None when not available."""
+    addon_entry = bpy.context.preferences.addons.get("starbreaker_addon")
+    if addon_entry is None:
+        return None
+    return getattr(addon_entry, "preferences", None)
+
+
+def _should_apply_landing_gear(prefs: object | None) -> bool:
+    """Pure gate — return True when landing-gear retract should run after import."""
+    if prefs is None:
+        return True
+    return bool(getattr(prefs, "landing_gear_retract_after_import", True))
+
+
+def _should_change_viewport(prefs: object | None) -> bool:
+    """Pure gate — return True when viewport framing should run after import."""
+    if prefs is None:
+        return True
+    return bool(getattr(prefs, "viewport_change_after_import", True))
+
+
+def _should_auto_refresh_package_root(obj: object, needs_material_refresh: object) -> bool:
+    """Return True when load-post should rebuild materials for a package root."""
+    get_prop = getattr(obj, "get", None)
+    if not callable(get_prop) or not bool(get_prop(PROP_PACKAGE_ROOT)):
+        return False
+    if not callable(needs_material_refresh):
+        return False
+    return bool(needs_material_refresh(obj))
+
+
+def _material_refresh_prompt_timer(token: int | None = None) -> float | None:
+    global _AUTO_MATERIAL_REFRESH_SESSION
+    if token is not None and token != _AUTO_MATERIAL_REFRESH_TOKEN:
+        return None
+    context = bpy.context
+    if _AUTO_MATERIAL_REFRESH_SESSION is not None:
+        session = _AUTO_MATERIAL_REFRESH_SESSION
+        done = session.step(budget_seconds=0.04, min_objects=2)
+        package_name = session.package_root.get(PROP_PACKAGE_NAME, session.package.package_name)
+        _update_import_progress(
+            context,
+            session.progress,
+            f"Refreshing materials for {package_name}",
+            force=done,
+            redraw=False,
+        )
+        if done:
+            _end_import_progress(
+                context,
+                f"Refreshed {session.applied} material slots for {package_name}",
+            )
+            _AUTO_MATERIAL_REFRESH_SESSION = None
+            return None
+        return 0.01
+
+    for obj in bpy.data.objects:
+        if not _should_auto_refresh_package_root(obj, package_root_needs_material_refresh):
+            continue
+        palette_id = obj.get(PROP_PALETTE_ID, "")
+        _AUTO_MATERIAL_REFRESH_SESSION = MaterialRefreshSession(
+            context,
+            obj,
+            palette_id if isinstance(palette_id, str) and palette_id else None,
+        )
+        _begin_import_progress(
+            context,
+            f"Refreshing materials for {obj.get(PROP_PACKAGE_NAME, obj.name)}",
+        )
+        return 0.01
+    return None
+
+
+@persistent
+def _starbreaker_load_post(_dummy: object) -> None:
+    global _AUTO_MATERIAL_REFRESH_SESSION, _AUTO_MATERIAL_REFRESH_TOKEN
+    _AUTO_MATERIAL_REFRESH_SESSION = None
+    _AUTO_MATERIAL_REFRESH_TOKEN += 1
+    token = _AUTO_MATERIAL_REFRESH_TOKEN
+    bpy.app.timers.register(
+        lambda: _material_refresh_prompt_timer(token),
+        first_interval=0.5,
+        persistent=False,
+    )
 
 
 CLASSES = [
-    STARBREAKER_OT_import_decomposed_package,
-    STARBREAKER_OT_import_progress_popup,
+    STARBREAKER_AP_preferences,
+    STARBREAKER_OT_refresh_materials,
     STARBREAKER_OT_apply_paint,
     STARBREAKER_OT_apply_palette,
     STARBREAKER_OT_apply_livery,
     STARBREAKER_OT_switch_light_state,
     STARBREAKER_OT_dump_metadata,
     STARBREAKER_OT_apply_animation_mode,
+    STARBREAKER_OT_edit_animation_instance,
+    STARBREAKER_OT_delete_animation_instance,
+    STARBREAKER_OT_mute_animation_instance,
+    STARBREAKER_OT_solo_animation_instance,
     STARBREAKER_OT_dump_animation_diagnostics,
     STARBREAKER_PT_tools,
 ]
 
 
 def register() -> None:
-    setattr(bpy.types.WindowManager, _IMPORT_PROGRESS_ACTIVE_PROP, BoolProperty(default=False))
+    setattr(
+        bpy.types.WindowManager,
+        _IMPORT_PROGRESS_ACTIVE_PROP,
+        BoolProperty(name="StarBreaker Import Active", default=False),
+    )
     setattr(
         bpy.types.WindowManager,
         _IMPORT_PROGRESS_VALUE_PROP,
-        FloatProperty(default=0.0, min=0.0, max=1.0),
+        FloatProperty(
+            name="StarBreaker Import Progress",
+            default=0.0,
+            min=0.0,
+            max=1.0,
+        ),
     )
     setattr(
         bpy.types.WindowManager,
         _IMPORT_PROGRESS_DESCRIPTION_PROP,
-        StringProperty(default="Preparing import"),
+        StringProperty(name="StarBreaker Import Progress Description", default=""),
     )
     setattr(
         bpy.types.Scene,
@@ -864,17 +1667,63 @@ def register() -> None:
             soft_max=2.0,
         ),
     )
+    setattr(
+        bpy.types.Scene,
+        SCENE_ENGINE_GLOW_PROP,
+        FloatProperty(
+            name="Engine Glow",
+            description=(
+                "Absolute emission strength for DataCore thruster glow materials exported in scene.json controls."
+            ),
+            default=3.0,
+            min=0.0,
+            max=200.0,
+            soft_min=0.0,
+            soft_max=200.0,
+            update=_update_engine_glow,
+        ),
+    )
+    setattr(
+        bpy.types.Scene,
+        _SCENE_ANIMATION_FPS_POLICY_PROP,
+        EnumProperty(
+            name="Animation FPS",
+            description=(
+                "How to reconcile clip FPS with scene FPS when inserting animation actions. "
+                "Snap modes are unaffected."
+            ),
+            items=_ANIMATION_FPS_POLICY_ITEMS,
+            default="adapt_scene",
+        ),
+    )
     for cls in CLASSES:
         bpy.utils.register_class(cls)
+    for handler in list(bpy.app.handlers.load_post):
+        if (
+            handler is not _starbreaker_load_post
+            and getattr(handler, "__name__", "") == _starbreaker_load_post.__name__
+        ):
+            bpy.app.handlers.load_post.remove(handler)
+    if _starbreaker_load_post not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_starbreaker_load_post)
 
 
 def unregister() -> None:
-    _remove_import_progress_overlay()
+    if _starbreaker_load_post in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_starbreaker_load_post)
     for cls in reversed(CLASSES):
         try:
             bpy.utils.unregister_class(cls)
         except RuntimeError:
             pass
+    if hasattr(bpy.types.Scene, SCENE_POM_DETAIL_PROP):
+        delattr(bpy.types.Scene, SCENE_POM_DETAIL_PROP)
+    if hasattr(bpy.types.Scene, SCENE_WEAR_STRENGTH_PROP):
+        delattr(bpy.types.Scene, SCENE_WEAR_STRENGTH_PROP)
+    if hasattr(bpy.types.Scene, SCENE_ENGINE_GLOW_PROP):
+        delattr(bpy.types.Scene, SCENE_ENGINE_GLOW_PROP)
+    if hasattr(bpy.types.Scene, _SCENE_ANIMATION_FPS_POLICY_PROP):
+        delattr(bpy.types.Scene, _SCENE_ANIMATION_FPS_POLICY_PROP)
     for prop_name in (
         _IMPORT_PROGRESS_ACTIVE_PROP,
         _IMPORT_PROGRESS_VALUE_PROP,
@@ -882,7 +1731,3 @@ def unregister() -> None:
     ):
         if hasattr(bpy.types.WindowManager, prop_name):
             delattr(bpy.types.WindowManager, prop_name)
-    if hasattr(bpy.types.Scene, SCENE_POM_DETAIL_PROP):
-        delattr(bpy.types.Scene, SCENE_POM_DETAIL_PROP)
-    if hasattr(bpy.types.Scene, SCENE_WEAR_STRENGTH_PROP):
-        delattr(bpy.types.Scene, SCENE_WEAR_STRENGTH_PROP)

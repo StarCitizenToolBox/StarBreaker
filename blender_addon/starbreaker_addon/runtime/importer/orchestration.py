@@ -22,6 +22,8 @@ import mathutils
 
 from ..constants import (
     PACKAGE_ROOT_PREFIX,
+    PROP_ENGINE_GLOW_CONTROL_JSON,
+    PROP_ENGINE_GLOW_STRENGTH,
     PROP_ENTITY_NAME,
     PROP_EXPORT_ROOT,
     PROP_INSTANCE_JSON,
@@ -62,6 +64,7 @@ from .types import ImportedTemplate, _bake_bitangent_sign_attribute
 from .utils import (
     _canonical_material_sidecar_path,
     _canonical_source_name,
+    _gltf_matrix_to_blender_basis,
     _remapped_submaterial_for_slot,
     _scene_attachment_offset_to_blender,
     _scene_light_quaternion_to_blender,
@@ -81,11 +84,12 @@ class OrchestrationMixin:
         package: PackageBundle,
         package_root: bpy.types.Object | None = None,
         progress_callback: Callable[[float, str], None] | None = None,
+        create_template_collection: bool = True,
     ) -> None:
         self.context = context
         self.package = package
         self.collection = self._ensure_collection(package.package_name)
-        self.template_collection = self._ensure_template_collection()
+        self.template_collection = self._ensure_template_collection() if create_template_collection else None
         self.package_root = package_root
         self.exterior_material_sidecars = _exterior_material_sidecars(package)
         self.template_cache: dict[str, ImportedTemplate] = {}
@@ -95,14 +99,51 @@ class OrchestrationMixin:
         self.import_palette_override: str | None = None
         self.import_paint_variant_sidecar: str | None = None
         self.runtime_shared_groups_ready = False
+        self.material_identity_cache: dict[tuple[str, int, str], str] = {}
         self.material_identity_index: dict[str, bpy.types.Material] = {}
         self.material_identity_index_ready = False
         self.sidecar_submaterials_by_index: dict[str, dict[int, SubmaterialRecord]] = {}
         self.sidecar_submaterials_by_name: dict[str, dict[str, SubmaterialRecord]] = {}
+        self.sidecar_submaterials_by_name_all: dict[str, dict[str, list[SubmaterialRecord]]] = {}
         self.slot_mapping_cache: dict[int, list[int | None] | None] = {}
+        self.material_slot_layout_cache: dict[
+            tuple[int, str, str, str | None, tuple[int | None, ...], tuple[int, tuple[int, ...]] | None],
+            tuple[tuple[bpy.types.Material | None, ...], int],
+        ] = {}
+        self.host_channel_cache: dict[tuple[int, tuple[int, ...]], str | None] = {}
+        self.host_rgb_cache: dict[tuple[int, tuple[int, ...]], tuple[float, float, float] | None] = {}
         self.progress_callback = progress_callback
         self._progress_total_steps = 1
         self._progress_completed_steps = 0
+        # Phase A perf fix: defer view_layer.update() between template clones.
+        # The original per-template update was costing ~67s on a Clipper import
+        # because each interior placement (~600+) triggered a full depsgraph
+        # evaluation. We now batch-flush only when subsequent code is about to
+        # read matrix_world (the start of instantiate_scene_instance) or after
+        # finishing a placement loop. See ``_flush_pending_view_layer_update``.
+        self._pending_view_layer_update = False
+        # Phase B perf fix: defer ``bpy.data.materials.remove`` until end of
+        # import. Removing per-template was costing ~8s on a Clipper because
+        # each call triggers internal RNA bookkeeping. ``bpy.data.batch_remove``
+        # is much cheaper for bulk removal at the end. See
+        # ``_flush_pending_orphan_materials``.
+        self._pending_orphan_materials: set[bpy.types.Material] = set()
+
+    def _flush_pending_view_layer_update(self) -> None:
+        if self._pending_view_layer_update:
+            self.context.view_layer.update()
+            self._pending_view_layer_update = False
+
+    def _flush_pending_orphan_materials(self) -> None:
+        if not self._pending_orphan_materials:
+            return
+        # Re-check users at flush time; intervening work may have re-bound
+        # materials we previously marked orphan, and the per-template path
+        # also accepts "users == 0" as the contract.
+        orphans = [m for m in self._pending_orphan_materials if m and m.users == 0]
+        self._pending_orphan_materials.clear()
+        if orphans:
+            bpy.data.batch_remove(ids=orphans)
 
     def _start_progress(self, total_steps: int, description: str) -> None:
         self._progress_total_steps = max(int(total_steps), 1)
@@ -152,23 +193,50 @@ class OrchestrationMixin:
                 self.material_identity_index[material_identity] = material
         self.material_identity_index_ready = True
 
+    def _remove_replaced_slot_material(self, material: bpy.types.Material | None) -> None:
+        if material is None or getattr(material, "library", None) is not None:
+            return
+        if material.users != 0:
+            return
+        if material.get(PROP_MATERIAL_IDENTITY):
+            return
+        self._pending_orphan_materials.add(material)
+
     def _submaterials_by_index(self, sidecar_path: str, sidecar: MaterialSidecar) -> dict[int, SubmaterialRecord]:
-        canonical_path = _canonical_material_sidecar_path(sidecar_path, sidecar)
-        cached = self.sidecar_submaterials_by_index.get(canonical_path)
+        cache_key = sidecar_path or _canonical_material_sidecar_path(sidecar_path, sidecar)
+        cached = self.sidecar_submaterials_by_index.get(cache_key)
         if cached is not None:
             return cached
         indexed = {submaterial.index: submaterial for submaterial in sidecar.submaterials}
-        self.sidecar_submaterials_by_index[canonical_path] = indexed
+        self.sidecar_submaterials_by_index[cache_key] = indexed
         return indexed
 
     def _submaterials_by_unique_name(self, sidecar_path: str, sidecar: MaterialSidecar) -> dict[str, SubmaterialRecord]:
-        canonical_path = _canonical_material_sidecar_path(sidecar_path, sidecar)
-        cached = self.sidecar_submaterials_by_name.get(canonical_path)
+        cache_key = sidecar_path or _canonical_material_sidecar_path(sidecar_path, sidecar)
+        cached = self.sidecar_submaterials_by_name.get(cache_key)
         if cached is not None:
             return cached
         indexed = _unique_submaterials_by_name(sidecar)
-        self.sidecar_submaterials_by_name[canonical_path] = indexed
+        self.sidecar_submaterials_by_name[cache_key] = indexed
         return indexed
+
+    def _submaterials_by_name_all(
+        self,
+        sidecar_path: str,
+        sidecar: MaterialSidecar,
+    ) -> dict[str, list[SubmaterialRecord]]:
+        cache_key = sidecar_path or _canonical_material_sidecar_path(sidecar_path, sidecar)
+        cached = self.sidecar_submaterials_by_name_all.get(cache_key)
+        if cached is not None:
+            return cached
+        grouped: dict[str, list[SubmaterialRecord]] = {}
+        for submaterial in sidecar.submaterials:
+            submaterial_name = submaterial.submaterial_name.strip()
+            if not submaterial_name:
+                continue
+            grouped.setdefault(submaterial_name, []).append(submaterial)
+        self.sidecar_submaterials_by_name_all[cache_key] = grouped
+        return grouped
 
     def _effective_palette_id(self, palette_id: str | None) -> str | None:
         inherited_palette_id = None
@@ -192,36 +260,39 @@ class OrchestrationMixin:
             inherited_palette_id or self.package.scene.root_entity.palette_id,
         )
 
-    # Material sidecar path fragments that identify an "interior
-    # subsystem" entity (seats, dashboards, cabin trim). Child
-    # entities with palette_id=None whose material path contains one
-    # of these markers should inherit the package's interior palette
-    # rather than the root exterior palette — this mirrors the
-    # in-game behaviour where interior geometry picks up the cabin
-    # palette regardless of where the entity lives in the scene tree.
-    _INTERIOR_MATERIAL_PATTERNS = ("_int_master", "/interior/", "/Interior/")
-
-    def _interior_palette_id(self) -> str | None:
-        for interior in self.package.scene.interiors:
-            pid = getattr(interior, "palette_id", None)
-            if pid:
-                return pid
-        return None
-
     def _palette_id_for_instance(self, record: SceneInstanceRecord) -> str | None:
         """Return the effective palette_id request for a
-        ``SceneInstanceRecord``, preferring the explicit per-instance
-        ``palette_id`` and otherwise routing interior-subsystem
-        children to the package's interior palette.
+        ``SceneInstanceRecord``, preferring explicit per-instance
+        ``palette_id`` and falling back to sidecar-authored
+        ``DefaultPalette`` metadata when available.
         """
         if record.palette_id:
             return record.palette_id
-        material_path = record.material_path or record.material_sidecar or ""
-        if any(marker in material_path for marker in self._INTERIOR_MATERIAL_PATTERNS):
-            interior_pid = self._interior_palette_id()
-            if interior_pid:
-                return interior_pid
-        return record.palette_id
+        if record.material_sidecar:
+            return self._sidecar_default_palette_id(record.material_sidecar)
+        return None
+
+    def _sidecar_default_palette_id(self, sidecar_path: str) -> str | None:
+        load_sidecar = getattr(self.package, "load_material_sidecar", None)
+        if not callable(load_sidecar):
+            return None
+        sidecar = load_sidecar(sidecar_path)
+        if sidecar is None:
+            return None
+        attributes = (
+            getattr(sidecar, "raw", {})
+            .get("authored_material_set", {})
+            .get("attributes", [])
+        )
+        for attribute in attributes:
+            name = str(attribute.get("name", ""))
+            if name.lower() != "defaultpalette":
+                continue
+            value = str(attribute.get("value", "")).replace("\\", "/").strip()
+            source_name = value.rsplit("/", 1)[-1].strip().lower()
+            if source_name:
+                return f"palette/{source_name}"
+        return None
 
     def import_scene(self, prefer_cycles: bool = True, palette_id: str | None = None) -> bpy.types.Object:
         total_steps = (
@@ -274,6 +345,11 @@ class OrchestrationMixin:
             self._advance_progress(f"Preparing {interior.name}")
             self.import_interior_container(interior, scene_root_parent)
 
+        # Final flush in case anything else deferred a depsgraph update.
+        self._flush_pending_view_layer_update()
+        # Drain the per-template orphan-material queue with a single
+        # ``bpy.data.batch_remove`` instead of N per-template ``remove`` calls.
+        self._flush_pending_orphan_materials()
         self._emit_progress(f"Finalizing {self.package.package_name}")
         return package_root
 
@@ -308,29 +384,124 @@ class OrchestrationMixin:
         if data_pointer not in self.slot_mapping_cache:
             slot_mapping = _slot_mapping_for_object(obj)
             self.slot_mapping_cache[data_pointer] = slot_mapping
+        target_submaterials_by_name = self._submaterials_by_unique_name(sidecar_path, sidecar)
+        target_submaterials_by_name_all = self._submaterials_by_name_all(sidecar_path, sidecar)
+        if slot_mapping is None:
+            inferred_slot_mapping: list[int | None] = []
+            inferred_matches = 0
+            if mesh_materials is not None:
+                for slot_material in mesh_materials:
+                    if slot_material is None:
+                        inferred_slot_mapping.append(None)
+                        continue
+                    canonical_slot_name = _canonical_source_name(slot_material.name)
+                    if canonical_slot_name is None:
+                        inferred_slot_mapping.append(None)
+                        continue
+                    matched_submaterial = target_submaterials_by_name.get(canonical_slot_name)
+                    if matched_submaterial is None:
+                        candidates = target_submaterials_by_name_all.get(canonical_slot_name)
+                        if candidates:
+                            matched_submaterial = min(
+                                candidates,
+                                key=lambda item: abs(item.index - len(inferred_slot_mapping)),
+                            )
+                    if matched_submaterial is None:
+                        inferred_slot_mapping.append(None)
+                        continue
+                    inferred_slot_mapping.append(matched_submaterial.index)
+                    inferred_matches += 1
+            if inferred_matches > 0:
+                slot_mapping = inferred_slot_mapping
+        if slot_mapping is None:
+            inferred_slot_mapping: list[int | None] = []
+            inferred_matches = 0
+            for slot_index, slot in enumerate(obj.material_slots):
+                slot_material = slot.material
+                if slot_material is None:
+                    inferred_slot_mapping.append(None)
+                    continue
+                canonical_slot_name = _canonical_source_name(slot_material.name)
+                if canonical_slot_name is None:
+                    inferred_slot_mapping.append(None)
+                    continue
+                matched_submaterial = target_submaterials_by_name.get(canonical_slot_name)
+                if matched_submaterial is None:
+                    candidates = target_submaterials_by_name_all.get(canonical_slot_name)
+                    if candidates:
+                        matched_submaterial = min(
+                            candidates,
+                            key=lambda item: abs(item.index - slot_index),
+                        )
+                if matched_submaterial is None:
+                    inferred_slot_mapping.append(None)
+                    continue
+                inferred_slot_mapping.append(matched_submaterial.index)
+                inferred_matches += 1
+            if inferred_matches > 0:
+                slot_mapping = inferred_slot_mapping
         if slot_mapping is not None:
             if mesh_materials is not None:
                 while len(mesh_materials) < len(slot_mapping):
                     mesh_materials.append(None)
             source_sidecar_path = _slot_mapping_source_sidecar_path(obj, sidecar_path)
+            layout_key = (
+                data_pointer,
+                sidecar_path,
+                source_sidecar_path,
+                effective_palette_id,
+                tuple(slot_mapping),
+                self._object_material_signature(getattr(obj, "parent", None))
+                if getattr(obj, "parent", None) is not None
+                else None,
+            )
+            material_slot_layout_cache = getattr(self, "material_slot_layout_cache", None)
+            if material_slot_layout_cache is None:
+                material_slot_layout_cache = {}
+                self.material_slot_layout_cache = material_slot_layout_cache
+            cached_layout = material_slot_layout_cache.get(layout_key)
+            if cached_layout is not None:
+                cached_materials, cached_applied = cached_layout
+                if len(obj.material_slots) >= len(cached_materials):
+                    for slot_index, material in enumerate(cached_materials):
+                        slot = obj.material_slots[slot_index]
+                        replaced_material = slot.material
+                        slot.link = "OBJECT"
+                        slot.material = material
+                        if replaced_material is not material:
+                            self._remove_replaced_slot_material(replaced_material)
+                    if effective_palette_id is not None:
+                        obj[PROP_PALETTE_ID] = effective_palette_id
+                    return cached_applied
             source_sidecar = self.package.load_material_sidecar(source_sidecar_path)
             if source_sidecar is None:
                 source_sidecar = sidecar
             source_submaterials_by_index = self._submaterials_by_index(source_sidecar_path, source_sidecar)
             target_submaterials_by_index = self._submaterials_by_index(sidecar_path, sidecar)
-            target_submaterials_by_name = self._submaterials_by_unique_name(sidecar_path, sidecar)
             for slot_index, mapped_index in enumerate(slot_mapping):
                 fallback_index = mapped_index if mapped_index is not None else slot_index
                 source_submaterial = source_submaterials_by_index.get(fallback_index)
+                slot_material = (
+                    obj.material_slots[slot_index].material
+                    if slot_index < len(obj.material_slots)
+                    else None
+                )
                 submaterial = _remapped_submaterial_for_slot(
                     source_submaterial,
                     fallback_index,
                     target_submaterials_by_index,
                     target_submaterials_by_name,
+                    target_submaterials_by_name_all,
                 )
+                if submaterial is None and slot_material is not None:
+                    canonical_slot_name = _canonical_source_name(slot_material.name)
+                    if canonical_slot_name is not None:
+                        submaterial = target_submaterials_by_name.get(canonical_slot_name)
                 if submaterial is None:
+                    if mapped_index is None and slot_material is None:
+                        continue
                     print(
-                        f"StarBreaker: missing sidecar submaterial index {mapped_index} for {obj.name}"
+                        f"StarBreaker: missing sidecar submaterial index {fallback_index} for {obj.name}"
                     )
                     continue
                 if slot_index >= len(obj.material_slots):
@@ -340,8 +511,11 @@ class OrchestrationMixin:
                     continue
                 material = self.material_for_submaterial(sidecar_path, sidecar, submaterial, palette)
                 slot = obj.material_slots[slot_index]
+                replaced_material = slot.material
                 slot.link = "OBJECT"
                 slot.material = material
+                if replaced_material is not material:
+                    self._remove_replaced_slot_material(replaced_material)
                 applied += 1
             if effective_palette_id is not None:
                 obj[PROP_PALETTE_ID] = effective_palette_id
@@ -349,8 +523,13 @@ class OrchestrationMixin:
             # slots to per-host-channel clones so each decal picks up the
             # palette colour of the nearest paint material on the mesh.
             self._rebind_mesh_decal_for_host(obj, palette)
-            # Phase 30: lift decal faces off the host geometry.
-            self._apply_decal_offset_modifier(obj)
+            material_slot_layout_cache[layout_key] = (
+                tuple(
+                    obj.material_slots[index].material
+                    for index in range(min(len(slot_mapping), len(obj.material_slots)))
+                ),
+                applied,
+            )
             return applied
         for submaterial in sorted(sidecar.submaterials, key=lambda item: item.index):
             if mesh_materials is not None:
@@ -363,8 +542,11 @@ class OrchestrationMixin:
                 continue
             material = self.material_for_submaterial(sidecar_path, sidecar, submaterial, palette)
             slot = obj.material_slots[submaterial.index]
+            replaced_material = slot.material
             slot.link = "OBJECT"
             slot.material = material
+            if replaced_material is not material:
+                self._remove_replaced_slot_material(replaced_material)
             applied += 1
         if effective_palette_id is not None:
             obj[PROP_PALETTE_ID] = effective_palette_id
@@ -372,8 +554,6 @@ class OrchestrationMixin:
         # slots to per-host-channel clones so each decal picks up the
         # palette colour of the nearest paint material on the mesh.
         self._rebind_mesh_decal_for_host(obj, palette)
-        # Phase 30: lift decal faces off the host geometry.
-        self._apply_decal_offset_modifier(obj)
         return applied
 
     def apply_palette_to_package_root(self, package_root: bpy.types.Object, palette_id: str | None) -> int:
@@ -416,6 +596,10 @@ class OrchestrationMixin:
         parent: bpy.types.Object,
         parent_node: bpy.types.Object | None = None,
     ) -> tuple[bpy.types.Object, list[bpy.types.Object]]:
+        # If a previous instantiate_template deferred a view_layer.update(),
+        # flush it now — we may be about to read ``parent_node.matrix_world``.
+        if parent_node is not None:
+            self._flush_pending_view_layer_update()
         effective_palette_id = self._effective_palette_id(self._palette_id_for_instance(record))
         anchor = bpy.data.objects.new(record.entity_name, None)
         anchor.empty_display_type = "PLAIN_AXES"
@@ -426,6 +610,8 @@ class OrchestrationMixin:
         anchor.rotation_mode = "QUATERNION"
         if record.local_transform_sc is not None and record.source_transform_basis == "cryengine_z_up":
             anchor.matrix_basis = _scene_matrix_to_blender(record.local_transform_sc)
+        elif record.local_transform_sc is not None and record.source_transform_basis == "gltf_y_up":
+            anchor.matrix_basis = _gltf_matrix_to_blender_basis(record.local_transform_sc)
         else:
             parent_world_matrix = None
             if parent_node is not None:
@@ -488,7 +674,15 @@ class OrchestrationMixin:
         anchor_name = interior.name if interior.name.startswith("interior_") else f"interior_{interior.name}"
         anchor = bpy.data.objects.new(anchor_name, None)
         anchor.empty_display_type = "CUBE"
-        anchor.parent = package_root
+        parent = package_root
+        if interior.parent_entity_name:
+            parent_nodes = self.node_index_by_entity_name.get(interior.parent_entity_name, {})
+            parent = (
+                parent_nodes.get(interior.parent_node_name or "")
+                or parent_nodes.get(interior.parent_entity_name)
+                or package_root
+            )
+        anchor.parent = parent
         anchor.matrix_local = _scene_matrix_to_blender(interior.container_transform)
         interior_collection = self._ensure_interior_collection()
         interior_collection.objects.link(anchor)
@@ -543,6 +737,9 @@ class OrchestrationMixin:
         for light in interior.lights:
             self.create_light(light, anchor)
 
+        # Flush any deferred view_layer.update() once at the end of the
+        # placement loop instead of per placement.
+        self._flush_pending_view_layer_update()
         return anchor
 
     def create_light(self, light: Any, parent: bpy.types.Object) -> bpy.types.Object:
@@ -559,6 +756,7 @@ class OrchestrationMixin:
             getattr(active_state, "intensity_candela_proxy", None) if active_state is not None else None
         )
         light_intensity_candela_proxy = getattr(light, "intensity_candela_proxy", None)
+        semantic_light_kind = str(getattr(light, "semantic_light_kind", "") or "").strip().lower()
         light_data = bpy.data.lights.new(name=light.name or "StarBreaker Light", type=blender_light_type)
         light_data.energy = _light_energy_to_blender(
             active_intensity_candela_proxy
@@ -568,8 +766,10 @@ class OrchestrationMixin:
             else 0.0,
             blender_light_type,
             intensity_raw=active_intensity_raw,
+            semantic_light_kind=semantic_light_kind,
         )
         light_data.color = light.color
+        light_data["starbreaker_light_semantic_kind"] = semantic_light_kind
         if blender_light_type != "SUN" and hasattr(light_data, "cutoff_distance"):
             light_data.cutoff_distance = light.radius
         if blender_light_type == "AREA":
@@ -586,10 +786,11 @@ class OrchestrationMixin:
             inner_ratio = min(max(inner_angle / outer_angle, 0.0), 1.0)
             light_data.spot_blend = 1.0 - inner_ratio
         # Phase 25: give point/spot lights a non-zero shadow soft size so
-        # shadow edges aren't pin-sharp. Star Citizen doesn't publish a
-        # dedicated emitter radius, so fall back to a small floor.
+        # shadow edges aren't pin-sharp. Map from authored attenuation
+        # radius to avoid a fixed constant across all fixtures.
         if blender_light_type in {"POINT", "SPOT"} and hasattr(light_data, "shadow_soft_size"):
-            light_data.shadow_soft_size = max(float(getattr(light_data, "shadow_soft_size", 0.0) or 0.0), 0.02)
+            light_data.shadow_soft_size = (max(float(light.radius or 0.0), 0.0) * 0.05)
+            light_data.shadow_soft_size = min(max(light_data.shadow_soft_size, 0.01), 0.5)
 
         self._wire_light_gobo(light_data, light)
 
@@ -602,10 +803,14 @@ class OrchestrationMixin:
             light_data[PROP_LIGHT_STATES_JSON] = _json.dumps(
                 {
                     name: {
+                        "intensity_raw": s.intensity_raw,
                         "intensity_cd": s.intensity_cd,
+                        "intensity_candela_proxy": s.intensity_candela_proxy,
                         "temperature": s.temperature,
                         "use_temperature": s.use_temperature,
                         "color": list(s.color),
+                        "light_style": int(getattr(s, "light_style", 0) or 0),
+                        "preset_tag": getattr(s, "preset_tag", None),
                     }
                     for name, s in states.items()
                 }
@@ -616,9 +821,36 @@ class OrchestrationMixin:
         light_object.parent = parent
         light_object.location = _scene_position_to_blender(light.position)
         light_object.rotation_mode = "QUATERNION"
-        light_object.rotation_quaternion = _scene_light_quaternion_to_blender(light.rotation)
+        direction_quaternion = None
+        if blender_light_type in {"SPOT", "SUN"}:
+            direction_quaternion = self._scene_light_direction_to_blender(getattr(light, "direction_sc", None))
+        light_object.rotation_quaternion = direction_quaternion or _scene_light_quaternion_to_blender(light.rotation)
         self.collection.objects.link(light_object)
         return light_object
+
+    def _scene_light_direction_to_blender(
+        self,
+        direction_sc: tuple[float, float, float] | None,
+    ) -> mathutils.Quaternion | None:
+        if direction_sc is None:
+            return None
+        dx, dy, dz = _scene_position_to_blender(direction_sc)
+        length = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if length <= 1e-8:
+            return None
+        target = (dx / length, dy / length, dz / length)
+        source = (0.0, 0.0, -1.0)
+        dot = source[0] * target[0] + source[1] * target[1] + source[2] * target[2]
+        if dot > 0.999999:
+            return mathutils.Quaternion((1.0, 0.0, 0.0, 0.0))
+        if dot < -0.999999:
+            return mathutils.Quaternion((0.0, 0.0, 1.0, 0.0))
+        cross = (
+            source[1] * target[2] - source[2] * target[1],
+            source[2] * target[0] - source[0] * target[2],
+            source[0] * target[1] - source[1] * target[0],
+        )
+        return mathutils.Quaternion((1.0 + dot, cross[0], cross[1], cross[2])).normalized()
 
     def _wire_light_gobo(self, light_data: bpy.types.Light, light: Any) -> None:
         """Enable and author a gobo shader graph on ``light_data`` if ``light``
@@ -696,8 +928,20 @@ class OrchestrationMixin:
         if cached is not None:
             return cached
 
+        # Phase R3 perf fix: pass ``import_select_created_objects=False``
+        # to skip the Blender glTF addon's post-import O(n) selection
+        # pass directly via the official op param (replacing the prior
+        # monkey-patch on ``BlenderScene.select_imported_objects``). With
+        # hundreds of small template imports against a growing scene the
+        # selection step was costing ~24s on a Clipper import; the
+        # StarBreaker addon never reads selection state.
         before = {obj.as_pointer() for obj in bpy.data.objects}
-        result = bpy.ops.import_scene.gltf(filepath=str(asset_path), import_pack_images=False, merge_vertices=False)
+        result = bpy.ops.import_scene.gltf(
+            filepath=str(asset_path),
+            import_pack_images=False,
+            merge_vertices=False,
+            import_select_created_objects=False,
+        )
         if "FINISHED" not in result:
             raise RuntimeError(f"Failed to import {asset_path}")
 
@@ -713,6 +957,8 @@ class OrchestrationMixin:
         for obj in imported:
             for collection in list(obj.users_collection):
                 collection.objects.unlink(obj)
+            if self.template_collection is None:
+                raise RuntimeError("Template collection was not created; cannot import mesh templates during materials-only refresh")
             self.template_collection.objects.link(obj)
             obj.hide_set(True)
             obj.hide_render = True
@@ -729,29 +975,6 @@ class OrchestrationMixin:
                 continue
             if _bake_bitangent_sign_attribute(mesh):
                 baked_meshes.add(mesh.as_pointer())
-
-        # Phase 19 — glTF meshes coming out of the Rust exporter carry
-        # per-vertex normals that the exporter reconstructs from the
-        # source mesh. The reconstruction does not weight shared-vertex
-        # normals by face area, which leaves subtle flat-spots on every
-        # curved panel once Blender averages them at runtime. Attaching
-        # a default Weighted Normal modifier (Face Area / weight 50 /
-        # threshold 0.01) to every imported mesh object restores the
-        # expected rounded shading without mutating the mesh data, so
-        # it composes cleanly with any later edits. ``source.copy()``
-        # in ``_duplicate_object_tree`` carries the modifier stack into
-        # every clone, so adding it once here covers every instance.
-        for obj in imported:
-            if getattr(obj, "type", None) != "MESH":
-                continue
-            if obj.data is None or not obj.data.polygons:
-                continue
-            if any(m.type == "WEIGHTED_NORMAL" for m in obj.modifiers):
-                continue
-            modifier = obj.modifiers.new(name="StarBreaker Weighted Normal", type="WEIGHTED_NORMAL")
-            modifier.mode = "FACE_AREA"
-            modifier.weight = 50
-            modifier.thresh = 0.01
 
         template = ImportedTemplate(mesh_asset=mesh_asset, root_names=[obj.name for obj in root_objects])
         self.template_cache[asset_key] = template
@@ -783,7 +1006,9 @@ class OrchestrationMixin:
                 needs_view_layer_update = True
             clones.append(clone)
         if needs_view_layer_update:
-            self.context.view_layer.update()
+            # Defer to a batched flush. See ``_flush_pending_view_layer_update``
+            # and the docstring above on ``_pending_view_layer_update``.
+            self._pending_view_layer_update = True
         return list(mapping.values()) or clones
 
     def _duplicate_object_tree(
@@ -874,6 +1099,10 @@ class OrchestrationMixin:
         package_root[PROP_PACKAGE_NAME] = self.package.package_name
         package_root[PROP_PALETTE_ID] = palette_id or self.package.scene.root_entity.palette_id or ""
         package_root[PROP_PALETTE_SCOPE] = uuid.uuid4().hex
+        engine_glow_control = getattr(self.package.scene, "engine_glow_control", None)
+        if engine_glow_control is not None:
+            package_root[PROP_ENGINE_GLOW_CONTROL_JSON] = json.dumps(engine_glow_control.raw, separators=(",", ":"), sort_keys=True)
+            package_root[PROP_ENGINE_GLOW_STRENGTH] = float(engine_glow_control.default_strength)
         self.collection.objects.link(package_root)
         return package_root
 

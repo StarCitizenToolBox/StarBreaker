@@ -15,11 +15,15 @@ use starbreaker_p4k::{MappedP4k, P4kArchive};
 use crate::error::Error;
 use crate::types::{InteriorMesh, InteriorPayload, LightInfo, LightStateInfo};
 
+const LIGHT_AUTHORED_INTENSITY_SCALE: f32 = 1500.0;
+const AMBIENT_PROXY_DIRECT_FACTOR: f32 = 0.25;
+
 // ── DataCore query ──────────────────────────────────────────────────────────
 
 /// Container reference from DataCore VehicleComponentParams.objectContainers[].
 #[derive(Debug, Clone)]
 pub struct ObjectContainerRef {
+    pub bone_name: Option<String>,
     pub file_name: String,
     pub offset_position: [f32; 3],
     pub offset_rotation: [f32; 3], // Ang3 (degrees)
@@ -59,13 +63,34 @@ fn parse_container_ref(val: &Value) -> Option<ObjectContainerRef> {
         Some(Value::String(s)) => (*s).to_owned(),
         _ => return None,
     };
+    let bone_name = match fields.get("boneName") {
+        Some(Value::String(s)) if !s.is_empty() => Some((*s).to_owned()),
+        _ => None,
+    };
     let (offset_position, offset_rotation) = extract_offset(fields.get("Offset"));
 
     Some(ObjectContainerRef {
+        bone_name,
         file_name,
         offset_position,
         offset_rotation,
     })
+}
+
+fn authored_light_intensity_to_candela(intensity_raw: f32) -> f32 {
+    intensity_raw * LIGHT_AUTHORED_INTENSITY_SCALE
+}
+
+fn authored_light_intensity_to_candela_semantic(
+    intensity_raw: f32,
+    semantic_light_kind: &str,
+    glow_multiplier: f32,
+) -> f32 {
+    let base = authored_light_intensity_to_candela(intensity_raw);
+    if semantic_light_kind.eq_ignore_ascii_case("ambient_proxy") {
+        return base * glow_multiplier.max(0.0) * AMBIENT_PROXY_DIRECT_FACTOR;
+    }
+    base
 }
 
 fn extract_offset(offset_val: Option<&&Value>) -> ([f32; 3], [f32; 3]) {
@@ -179,6 +204,8 @@ pub fn load_interior_from_socpak(
 
     Ok(InteriorPayload {
         name,
+        parent_entity_name: None,
+        parent_node_name: None,
         meshes,
         lights,
         container_transform,
@@ -241,6 +268,8 @@ fn parse_soc(
 
     Ok((InteriorPayload {
         name: name.to_string(),
+        parent_entity_name: None,
+        parent_node_name: None,
         meshes,
         lights,
         container_transform,
@@ -251,7 +280,6 @@ fn parse_soc(
 // ── IncludedObjects → InteriorMesh ──────────────────────────────────────────
 
 fn included_objects_to_meshes(io: &IncludedObjects) -> Vec<InteriorMesh> {
-    let material_path = io.material_paths.first().cloned();
     log::debug!(
         "  IncludedObjects: {} CGFs, {} objects, {} materials, {} palettes",
         io.cgf_paths.len(),
@@ -293,7 +321,7 @@ fn included_objects_to_meshes(io: &IncludedObjects) -> Vec<InteriorMesh> {
             let transform = f64_3x4_to_f32_4x4(&obj.transform);
             Some(InteriorMesh {
                 cgf_path,
-                material_path: material_path.clone(),
+                material_path: None,
                 transform,
                 entity_class_guid: None,
             })
@@ -331,7 +359,11 @@ const SKIP_ENTITY_CLASSES: &[&str] = &[
     "GreenZone",
     "Hazard",
     "Hint",
-    "Ladder",
+    // NOTE: do NOT skip "Ladder" — in CryEngine the `Ladder` entity is an
+    // interactive ladder with real visible geometry, not a non-visual area
+    // trigger. Skipping it dropped `drak_clipper_lift_access_ladder_01.cgf`,
+    // `drak_clipper_lift_access_ladder_hatch_01.cga`, and
+    // `drak_clipper_cargo_hold_ladder_01.cgf` from the Clipper interior export.
     "LandingArea",
     "LedgeObject",
     "LocationManager",
@@ -417,7 +449,8 @@ fn process_entity_children(
             || entity_class == "LightGroup"
             || entity_class == "LightGroupPoweredItem"
         {
-            let parsed_lights = parse_light_entities(xml, entity, &attrs, &pos, &rot, entity_class);
+            let parsed_lights =
+                parse_light_entities(xml, entity, &attrs, &pos, &rot, &scale, entity_class);
             lights.extend(parsed_lights);
             continue;
         }
@@ -494,6 +527,7 @@ fn parse_light_entities(
     attrs: &HashMap<&str, &str>,
     pos: &[f64],
     rot: &[f64],
+    scale: &[f64],
     entity_class: &str,
 ) -> Vec<LightInfo> {
     let base_name = attrs.get("Name").unwrap_or(&"Light").to_string();
@@ -508,11 +542,16 @@ fn parse_light_entities(
         rot.get(2).copied().unwrap_or(0.0),
         rot.get(3).copied().unwrap_or(0.0),
     ];
+    let base_scale = [
+        scale.first().copied().unwrap_or(1.0),
+        scale.get(1).copied().unwrap_or(1.0),
+        scale.get(2).copied().unwrap_or(1.0),
+    ];
 
-    if entity_class == "LightGroup" {
+    if entity_class == "LightGroup" || has_light_group_component(xml, entity) {
         // LightGroup: EntityComponentLightGroup > BakedInLights > Light[]
         // Each Light child has its own EntityComponentLight
-        return parse_light_group(xml, entity, &base_name, &base_pos, &base_rot);
+        return parse_light_group(xml, entity, &base_name, &base_pos, &base_rot, &base_scale);
     }
 
     // Single Light: PropertiesDataCore > EntityComponentLight
@@ -524,32 +563,25 @@ fn parse_light_entities(
         }
     }
 
-    // Fallback: basic light with entity-level Radius
-    let radius = attrs
-        .get("Radius")
-        .and_then(|s| s.parse::<f32>().ok())
-        .unwrap_or(5.0);
-    vec![LightInfo {
-        name: base_name,
-        position: base_pos,
-        transform_basis: "cryengine_z_up".to_string(),
-        rotation: base_rot,
-        direction_sc: [1.0, 0.0, 0.0],
-        color: [1.0, 0.95, 0.9],
-        light_type: "Omni".to_string(),
-        semantic_light_kind: "point".to_string(),
-        intensity_raw: 1.0,
-        intensity_unit: "cryengine_authored_intensity".to_string(),
-        intensity_candela_proxy: 200.0,
-        intensity: 200.0,
-        radius,
-        radius_m: radius,
-        inner_angle: None,
-        outer_angle: None,
-        projector_texture: None,
-        active_state: String::new(),
-        states: std::collections::BTreeMap::new(),
-    }]
+    // No light component/group payload means this entity is not an authored
+    // runtime light source for export.
+    Vec::new()
+}
+
+fn has_light_group_component(xml: &CryXml, entity: &starbreaker_cryxml::CryXmlNode) -> bool {
+    for child in xml.node_children(entity) {
+        if xml.node_tag(child) == "EntityComponentLightGroup" {
+            return true;
+        }
+        if xml.node_tag(child) == "PropertiesDataCore"
+            && xml
+                .node_children(child)
+                .any(|component| xml.node_tag(component) == "EntityComponentLightGroup")
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Find PropertiesDataCore > EntityComponentLight in a CryXML entity.
@@ -577,6 +609,7 @@ fn parse_light_group(
     base_name: &str,
     base_pos: &[f64; 3],
     base_rot: &[f64; 4],
+    base_scale: &[f64; 3],
 ) -> Vec<LightInfo> {
     let mut lights = Vec::new();
 
@@ -612,10 +645,15 @@ fn parse_light_group(
 
                 // Each baked-in Light node has a RelativeXForm child with
                 // per-light translation/rotation offsets relative to the group.
-                let (rel_translation, rel_rotation) =
+                let (rel_translation, rel_rotation, rel_scale) =
                     extract_relative_xform(xml, light_node);
+                let rel_translation_scaled = [
+                    rel_translation[0] * base_scale[0] * rel_scale[0],
+                    rel_translation[1] * base_scale[1] * rel_scale[1],
+                    rel_translation[2] * base_scale[2] * rel_scale[2],
+                ];
                 let rel_translation_world =
-                    quat_rotate_vec(base_rot, &rel_translation);
+                    quat_rotate_vec(base_rot, &rel_translation_scaled);
 
                 // Combine group position with per-light offset
                 let light_pos = [
@@ -658,8 +696,8 @@ fn parse_light_group(
             semantic_light_kind: "point".to_string(),
             intensity_raw: 1.0,
             intensity_unit: "cryengine_authored_intensity".to_string(),
-            intensity_candela_proxy: 200.0,
-            intensity: 200.0,
+            intensity_candela_proxy: authored_light_intensity_to_candela(1.0),
+            intensity: authored_light_intensity_to_candela(1.0),
             radius: 5.0,
             radius_m: 5.0,
             inner_angle: None,
@@ -710,6 +748,7 @@ fn build_light_info_from_component(
         .copied()
         .unwrap_or("Omni")
         .to_string();
+    let semantic_light_kind = semantic_light_kind_for_light(&light_type, None, None);
 
     // CryEngine light components expose several runtime states
     // (`offState` / `defaultState` / `auxiliaryState` / `emergencyState` /
@@ -732,6 +771,16 @@ fn build_light_info_from_component(
         "cinematicState",
     ];
 
+    let glow_multiplier = xml
+        .node_children(component)
+        .find(|c| xml.node_tag(c) == "miscParams")
+        .and_then(|misc| {
+            xml.node_attributes(misc)
+                .find(|(k, _)| *k == "glowMultiplier")
+                .and_then(|(_, v)| v.parse::<f32>().ok())
+        })
+        .unwrap_or(1.0);
+
     let read_state = |tag: &str| -> Option<LightStateInfo> {
         let node = xml
             .node_children(component)
@@ -748,6 +797,11 @@ fn build_light_info_from_component(
             .get("temperature")
             .and_then(|s| s.parse::<f32>().ok())
             .unwrap_or(6500.0);
+        let light_style = a
+            .get("lightStyle")
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(0);
+        let preset_tag = a.get("presetTag").copied().unwrap_or("").to_string();
         let (cr, cg, cb) = xml
             .node_children(node)
             .find(|c| xml.node_tag(c) == "color")
@@ -768,11 +822,21 @@ fn build_light_info_from_component(
         Some(LightStateInfo {
             intensity_raw,
             intensity_unit: "cryengine_authored_intensity".to_string(),
-            intensity_cd: intensity_raw * 200.0,
-            intensity_candela_proxy: intensity_raw * 200.0,
+            intensity_cd: authored_light_intensity_to_candela_semantic(
+                intensity_raw,
+                semantic_light_kind,
+                glow_multiplier,
+            ),
+            intensity_candela_proxy: authored_light_intensity_to_candela_semantic(
+                intensity_raw,
+                semantic_light_kind,
+                glow_multiplier,
+            ),
             temperature,
             use_temperature,
             color: [cr, cg, cb],
+            light_style,
+            preset_tag,
         })
     };
 
@@ -850,9 +914,13 @@ fn build_light_info_from_component(
         (None, None)
     };
 
-    // CryEngine intensity → glTF candela.
-    let candela = intensity_raw * 200.0;
+    // CryEngine authored intensity → exported candela proxy.
     let semantic_light_kind = semantic_light_kind_for_light(&light_type, inner_angle, outer_angle);
+    let candela = authored_light_intensity_to_candela_semantic(
+        intensity_raw,
+        semantic_light_kind,
+        glow_multiplier,
+    );
     let direction_sc = quat_rotate_vec(rot, &[1.0, 0.0, 0.0]);
 
     log::debug!(
@@ -928,11 +996,11 @@ fn kelvin_to_rgb(kelvin: f32) -> [f32; 3] {
 }
 
 /// Extract translation and rotation from a baked-in Light node's RelativeXForm child.
-/// Returns `([tx,ty,tz], [qw,qx,qy,qz])` — identity if absent.
+/// Returns `([tx,ty,tz], [qw,qx,qy,qz], [sx,sy,sz])` — identity if absent.
 fn extract_relative_xform(
     xml: &CryXml,
     light_node: &starbreaker_cryxml::CryXmlNode,
-) -> ([f64; 3], [f64; 4]) {
+) -> ([f64; 3], [f64; 4], [f64; 3]) {
     for child in xml.node_children(light_node) {
         if xml.node_tag(child) != "RelativeXForm" {
             continue;
@@ -940,6 +1008,7 @@ fn extract_relative_xform(
         let attrs: HashMap<&str, &str> = xml.node_attributes(child).collect();
         let translation = parse_csv_f64(attrs.get("translation").copied().unwrap_or("0,0,0"));
         let rotation = parse_csv_f64(attrs.get("rotation").copied().unwrap_or("1,0,0,0"));
+        let scale = parse_csv_f64(attrs.get("scale").copied().unwrap_or("1,1,1"));
         return (
             [
                 translation.first().copied().unwrap_or(0.0),
@@ -952,9 +1021,14 @@ fn extract_relative_xform(
                 rotation.get(2).copied().unwrap_or(0.0),
                 rotation.get(3).copied().unwrap_or(0.0),
             ],
+            [
+                scale.first().copied().unwrap_or(1.0),
+                scale.get(1).copied().unwrap_or(1.0),
+                scale.get(2).copied().unwrap_or(1.0),
+            ],
         );
     }
-    ([0.0; 3], [1.0, 0.0, 0.0, 0.0])
+    ([0.0; 3], [1.0, 0.0, 0.0, 0.0], [1.0; 3])
 }
 
 // ── Math helpers ────────────────────────────────────────────────────────────
@@ -1025,6 +1099,8 @@ pub fn build_container_transform(pos: [f32; 3], rot_deg: [f32; 3]) -> [[f32; 4];
 
 #[cfg(test)]
 mod tests {
+    use crate::included_objects::{IncludedObject, IncludedObjects};
+
     use super::{quat_mul, quat_rotate_vec, semantic_light_kind_for_light};
 
     fn approx_eq3(left: [f64; 3], right: [f64; 3]) {
@@ -1069,5 +1145,40 @@ mod tests {
     #[test]
     fn semantic_light_kind_maps_unknown_angled_light_to_spot() {
         assert_eq!(semantic_light_kind_for_light("Unknown", Some(1.0), Some(2.0)), "spot");
+    }
+
+    #[test]
+    fn authored_light_intensity_matches_max_script_scale() {
+        assert_eq!(super::authored_light_intensity_to_candela(1.0), 1500.0);
+        assert_eq!(super::authored_light_intensity_to_candela(2.5), 3750.0);
+    }
+
+    #[test]
+    fn included_objects_use_geometry_authored_materials() {
+        let io = IncludedObjects {
+            cgf_paths: vec!["objects/props/toolbox.cgf".to_string()],
+            material_paths: vec!["materials/container_default".to_string()],
+            tint_palette_paths: Vec::new(),
+            objects: vec![IncludedObject {
+                cgf_index: 0,
+                unknown2: 0,
+                transform: [[0.0; 3]; 4],
+                vector1: [0.0; 3],
+                vector2: [0.0; 3],
+            }],
+        };
+
+        let meshes = super::included_objects_to_meshes(&io);
+
+        assert_eq!(meshes.len(), 1);
+        assert_eq!(meshes[0].cgf_path, "objects/props/toolbox.cgf");
+        assert_eq!(meshes[0].material_path, None);
+    }
+
+    #[test]
+    fn ambient_proxy_intensity_applies_glow_and_proxy_factor() {
+        let candela =
+            super::authored_light_intensity_to_candela_semantic(10.0, "ambient_proxy", 0.2);
+        assert_eq!(candela, 750.0);
     }
 }

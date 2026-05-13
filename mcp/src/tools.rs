@@ -1,4 +1,5 @@
-use std::sync::{Arc, OnceLock};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 use rmcp::{
     ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -9,8 +10,15 @@ use starbreaker_p4k::MappedP4k;
 
 /// Lazily-loaded game data. Initialized on first tool call.
 struct GameData {
+    p4k_path: PathBuf,
     p4k: Arc<MappedP4k>,
     dcb_bytes: Vec<u8>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct P4kSetDataPathRequest {
+    #[schemars(description = "Absolute path to the Data.p4k file to use for subsequent StarBreaker MCP queries.")]
+    pub path: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -126,10 +134,59 @@ pub struct MannequinDumpRequest {
     pub filter: Option<String>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct BlendSdnaRequest {
+    #[schemars(description = "Absolute filesystem path to a .blend file (can be zstd-compressed Blender 5.x or uncompressed).")]
+    pub path: String,
+    #[schemars(description = "Optional struct name to look up (e.g. 'Object', 'Mesh', 'Light'). If omitted returns all struct names.")]
+    pub struct_name: Option<String>,
+    #[schemars(description = "Maximum recursion depth for nested struct fields (default 1, 0 = top-level only).")]
+    pub max_depth: Option<u32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct BlendBlockInspectRequest {
+    #[schemars(description = "Absolute filesystem path to a .blend file.")]
+    pub path: String,
+    #[schemars(description = "SDNA struct type name to filter blocks by (e.g. 'Object', 'Lamp'). If omitted, returns an overview of all block types.")]
+    pub sdna_type: Option<String>,
+    #[schemars(description = "Maximum bytes of raw hex to show per block (default 256, 0 = no hex dump).")]
+    pub max_bytes: Option<u32>,
+    #[schemars(description = "Maximum number of blocks to show (default 10).")]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct BlendPythonDiffRequest {
+    #[schemars(description = "Absolute filesystem path to the .blend file to modify.")]
+    pub blend_path: String,
+    #[schemars(description = "Python script to run BEFORE saving (sets up a baseline). Pass empty string to skip baseline creation.")]
+    pub before_script: String,
+    #[schemars(description = "Python script to run AFTER loading the baseline (applies the change under test). Required.")]
+    pub after_script: String,
+    #[schemars(description = "Optional SDNA struct name to restrict the diff to blocks of that type (e.g. 'NodeTexImage'). If omitted, all changed blocks are shown.")]
+    pub sdna_filter: Option<String>,
+    #[schemars(description = "Override path to the Blender binary. Falls back to BLENDER_BIN env var, then PATH.")]
+    pub blender_bin: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct BlendRunScriptRequest {
+    #[schemars(description = "Absolute filesystem path to a .blend file to open with Blender.")]
+    pub blend_path: String,
+    #[schemars(description = "Python script body to execute in headless Blender after opening the file. \
+        Wrap your output in print() calls. Output between __BLEND_SCRIPT_OUTPUT_START__ and \
+        __BLEND_SCRIPT_OUTPUT_END__ sentinels is returned; if sentinels are absent the full \
+        stdout+stderr is returned.")]
+    pub script: String,
+    #[schemars(description = "Override path to the Blender binary. Falls back to BLENDER_BIN env var, then PATH.")]
+    pub blender_bin: Option<String>,
+}
+
 
 pub struct StarBreakerMcp {
-    p4k_path: Option<std::path::PathBuf>,
-    data: OnceLock<GameData>,
+    p4k_path: RwLock<Option<PathBuf>>,
+    data: RwLock<Option<Arc<GameData>>>,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
@@ -137,42 +194,74 @@ pub struct StarBreakerMcp {
 impl StarBreakerMcp {
     pub fn new(p4k_path: Option<std::path::PathBuf>) -> Self {
         Self {
-            p4k_path,
-            data: OnceLock::new(),
+            p4k_path: RwLock::new(p4k_path),
+            data: RwLock::new(None),
             tool_router: Self::tool_router(),
         }
     }
 
-    /// Lazily load P4k and DataCore on first access.
-    fn data(&self) -> &GameData {
-        self.data.get_or_init(|| {
-            let start = std::time::Instant::now();
-            let p4k = match &self.p4k_path {
-                Some(path) => starbreaker_p4k::MappedP4k::open(path)
-                    .unwrap_or_else(|e| panic!("Failed to open P4k at {}: {e}", path.display())),
-                None => starbreaker_p4k::open_p4k()
-                    .unwrap_or_else(|e| panic!("Failed to auto-discover P4k: {e}")),
-            };
-            let p4k = Arc::new(p4k);
-            log::info!("P4k loaded in {:.1}s", start.elapsed().as_secs_f32());
+    fn load_game_data(path_override: Option<PathBuf>) -> anyhow::Result<GameData> {
+        let start = std::time::Instant::now();
+        let (p4k_path, p4k) = match path_override {
+            Some(path) => {
+                let p4k = starbreaker_p4k::MappedP4k::open(&path)
+                    .map_err(|e| anyhow::anyhow!("Failed to open P4k at {}: {e}", path.display()))?;
+                (path, p4k)
+            }
+            None => {
+                let (path, source) = starbreaker_p4k::find_p4k()
+                    .map_err(|e| anyhow::anyhow!("Failed to auto-discover P4k: {e}"))?;
+                let p4k = starbreaker_p4k::MappedP4k::open(&path)
+                    .map_err(|e| anyhow::anyhow!("Failed to open auto-discovered P4k at {}: {e}", path.display()))?;
+                log::info!("P4K: {} ({source})", path.display());
+                (path, p4k)
+            }
+        };
+        let p4k = Arc::new(p4k);
+        log::info!("P4k loaded from {} in {:.1}s", p4k_path.display(), start.elapsed().as_secs_f32());
 
-            let dcb_bytes = p4k
-                .read_file("Data\\Game2.dcb")
-                .or_else(|_| p4k.read_file("Data\\Game.dcb"))
-                .expect("Failed to read DataCore from P4k");
-            log::info!("DataCore: {} bytes, loaded in {:.1}s", dcb_bytes.len(), start.elapsed().as_secs_f32());
+        let dcb_bytes = p4k
+            .read_file("Data\\Game2.dcb")
+            .or_else(|_| p4k.read_file("Data\\Game.dcb"))
+            .map_err(|e| anyhow::anyhow!("Failed to read DataCore from {}: {e}", p4k_path.display()))?;
+        log::info!(
+            "DataCore: {} bytes, loaded in {:.1}s",
+            dcb_bytes.len(),
+            start.elapsed().as_secs_f32()
+        );
 
-            GameData { p4k, dcb_bytes }
+        Ok(GameData {
+            p4k_path,
+            p4k,
+            dcb_bytes,
         })
     }
 
-    fn p4k(&self) -> &MappedP4k {
-        &self.data().p4k
+    /// Lazily load P4k and DataCore on first access.
+    fn data(&self) -> Arc<GameData> {
+        if let Some(data) = self.data.read().expect("data lock poisoned").as_ref().cloned() {
+            return data;
+        }
+
+        let mut data_guard = self.data.write().expect("data lock poisoned");
+        if let Some(data) = data_guard.as_ref().cloned() {
+            return data;
+        }
+
+        let p4k_path = self.p4k_path.read().expect("p4k path lock poisoned").clone();
+        let data = Arc::new(
+            Self::load_game_data(p4k_path)
+                .unwrap_or_else(|e| panic!("{e}")),
+        );
+        *data_guard = Some(data.clone());
+        data
     }
 
-    fn db(&self) -> starbreaker_datacore::database::Database<'_> {
-        starbreaker_datacore::database::Database::from_bytes(&self.data().dcb_bytes)
-            .expect("DataCore bytes validated at load")
+    fn switch_p4k_path(&self, path: PathBuf) -> anyhow::Result<Arc<GameData>> {
+        let data = Arc::new(Self::load_game_data(Some(path.clone()))?);
+        *self.p4k_path.write().expect("p4k path lock poisoned") = Some(path);
+        *self.data.write().expect("data lock poisoned") = Some(data.clone());
+        Ok(data)
     }
 
     /// Find an entity record by name substring (shortest match).
@@ -213,11 +302,12 @@ impl StarBreakerMcp {
     /// Read a file from P4k with case-insensitive fallback.
     fn read_p4k_file(&self, path: &str) -> Result<Vec<u8>, String> {
         let p4k_path = Self::normalize_p4k_path(path);
-        self.p4k().read_file(&p4k_path)
+        let data = self.data();
+        data.p4k.read_file(&p4k_path)
             .or_else(|_| {
-                self.p4k().entry_case_insensitive(&p4k_path)
+                data.p4k.entry_case_insensitive(&p4k_path)
                     .ok_or_else(|| format!("File not found in P4k: {p4k_path}"))
-                    .and_then(|entry| self.p4k().read(entry).map_err(|e| format!("Error reading: {e}")))
+                    .and_then(|entry| data.p4k.read(entry).map_err(|e| format!("Error reading: {e}")))
             })
             .map_err(|e| format!("{e}"))
     }
@@ -259,9 +349,39 @@ impl StarBreakerMcp {
 
 #[tool_router]
 impl StarBreakerMcp {
+    #[tool(description = "Return the currently active Data.p4k path used by StarBreaker MCP tools.")]
+    fn p4k_data_status(&self) -> String {
+        let data = self.data();
+        serde_json::to_string_pretty(&serde_json::json!({
+            "p4k_path": data.p4k_path,
+            "entries": data.p4k.entries().len(),
+            "datacore_bytes": data.dcb_bytes.len(),
+        }))
+        .unwrap_or_else(|e| format!("JSON error: {e}"))
+    }
+
+    #[tool(description = "Switch StarBreaker MCP to a different Data.p4k for subsequent tools. The new archive and DataCore are loaded immediately; use p4k_data_status to confirm.")]
+    fn p4k_set_data_path(&self, Parameters(req): Parameters<P4kSetDataPathRequest>) -> String {
+        let path = Path::new(&req.path);
+        if !path.is_file() {
+            return format!("Data.p4k not found or not a file: {}", path.display());
+        }
+        match self.switch_p4k_path(path.to_path_buf()) {
+            Ok(data) => serde_json::to_string_pretty(&serde_json::json!({
+                "p4k_path": data.p4k_path,
+                "entries": data.p4k.entries().len(),
+                "datacore_bytes": data.dcb_bytes.len(),
+            }))
+            .unwrap_or_else(|e| format!("JSON error: {e}")),
+            Err(e) => format!("Failed to switch Data.p4k: {e}"),
+        }
+    }
+
     #[tool(description = "Search DataCore for entity records by name substring. Returns JSON array of matches sorted by name length (best match first).")]
     fn search_entities(&self, Parameters(req): Parameters<SearchEntitiesRequest>) -> String {
-        let db = self.db();
+        let data = self.data();
+        let db = starbreaker_datacore::database::Database::from_bytes(&data.dcb_bytes)
+            .expect("DataCore bytes validated at load");
         let limit = req.limit.unwrap_or(20) as usize;
         let search = req.query.to_lowercase();
 
@@ -301,7 +421,9 @@ impl StarBreakerMcp {
 
     #[tool(description = "Dump the resolved loadout tree for an entity. This is PROCESSED output from StarBreaker's loadout resolver — it resolves entityClassName references and queries geometry paths. For raw DataCore data, use datacore_query with path 'Components[SEntityComponentDefaultLoadoutParams]' instead.")]
     fn entity_loadout(&self, Parameters(req): Parameters<EntityLoadoutRequest>) -> String {
-        let db = self.db();
+        let data = self.data();
+        let db = starbreaker_datacore::database::Database::from_bytes(&data.dcb_bytes)
+            .expect("DataCore bytes validated at load");
         let record = match self.find_entity(&db, &req.name) {
             Some(r) => r,
             None => return format!("No entity found matching '{}'", req.name),
@@ -317,7 +439,9 @@ impl StarBreakerMcp {
 
     #[tool(description = "Dump a full DataCore record as pretty-printed JSON. Accepts a GUID or a name substring (uses shortest match).")]
     fn datacore_record(&self, Parameters(req): Parameters<DatacoreRecordRequest>) -> String {
-        let db = self.db();
+        let data = self.data();
+        let db = starbreaker_datacore::database::Database::from_bytes(&data.dcb_bytes)
+            .expect("DataCore bytes validated at load");
 
         let record = match self.find_record(&db, &req.id) {
             Some(r) => r,
@@ -333,7 +457,9 @@ impl StarBreakerMcp {
 
     #[tool(description = "Query a specific property path on a DataCore record. Returns the JSON value at that path. Example paths: 'Components[VehicleComponentParams].vehicleDefinition', 'Components[SGeometryResourceParams].Geometry.Geometry.Geometry.path'")]
     fn datacore_query(&self, Parameters(req): Parameters<DatacoreQueryRequest>) -> String {
-        let db = self.db();
+        let data = self.data();
+        let db = starbreaker_datacore::database::Database::from_bytes(&data.dcb_bytes)
+            .expect("DataCore bytes validated at load");
 
         let record = match self.find_record(&db, &req.id) {
             Some(r) => r,
@@ -406,7 +532,8 @@ impl StarBreakerMcp {
             Self::normalize_p4k_path(&req.path).trim_end_matches('\\').to_string()
         };
 
-        let entries = self.p4k().list_dir(&path);
+        let data = self.data();
+        let entries = data.p4k.list_dir(&path);
         if entries.is_empty() {
             return format!("No entries found under '{path}'");
         }
@@ -447,7 +574,9 @@ impl StarBreakerMcp {
 
     #[tool(description = "Search all DataCore records by name substring. Unlike search_entities which only searches EntityClassDefinition records, this searches ALL record types. Optionally filter by struct type.")]
     fn search_records(&self, Parameters(req): Parameters<SearchRecordsRequest>) -> String {
-        let db = self.db();
+        let data = self.data();
+        let db = starbreaker_datacore::database::Database::from_bytes(&data.dcb_bytes)
+            .expect("DataCore bytes validated at load");
         let limit = req.limit.unwrap_or(20) as usize;
         let search = req.query.to_lowercase();
 
@@ -680,8 +809,9 @@ impl StarBreakerMcp {
         let limit = req.limit.unwrap_or(50) as usize;
         let query = req.query.to_lowercase();
 
-        let mut results: Vec<_> = self
-            .p4k()
+        let data = self.data();
+        let mut results: Vec<_> = data
+            .p4k
             .entries()
             .iter()
             .filter(|e| e.name.to_lowercase().contains(&query))
@@ -865,7 +995,9 @@ impl StarBreakerMcp {
 
     #[tool(description = "Dump the Mannequin Animation Database (ADB) plus its companion ControllerDef for an entity. Returns structured JSON listing every Mannequin Fragment with group name, GUID, tags, FragTags, BlendOutDuration, OptionWeight, animations, scopes (resolved from the ControllerDef), and procedurals. Use to inspect fragment-scope metadata for animation troubleshooting (Phase 37). Note: the ADB has no per-bone blend-mode flag; use dba_dump's `rot_format_flags`/`pos_format_flags` for per-bone CAF metadata.")]
     fn mannequin_dump(&self, Parameters(req): Parameters<MannequinDumpRequest>) -> String {
-        let db = self.db();
+        let data = self.data();
+        let db = starbreaker_datacore::database::Database::from_bytes(&data.dcb_bytes)
+            .expect("DataCore bytes validated at load");
         let record = match self.find_entity(&db, &req.entity) {
             Some(r) => r,
             None => return format!("No entity matching '{}'", req.entity),
@@ -875,7 +1007,7 @@ impl StarBreakerMcp {
             None => return format!("Entity '{}' has no SAnimationControllerParams", req.entity),
         };
         let value = match starbreaker_3d::animation::dump_mannequin_adb_to_json(
-            self.p4k(),
+            data.p4k.as_ref(),
             &source,
             req.filter.as_deref(),
         ) {
@@ -888,8 +1020,485 @@ impl StarBreakerMcp {
         }
     }
 
-}
+    #[tool(description = "Parse the DNA1/SDNA block from a .blend file and show struct field layouts with absolute byte offsets. Accepts an absolute filesystem path to a .blend file (zstd-compressed Blender 5.x or uncompressed). Optionally filter to a single struct name; otherwise returns a list of all struct names and sizes.")]
+    fn blend_sdna(&self, Parameters(req): Parameters<BlendSdnaRequest>) -> String {
+        use crate::blend_debug::{decompress_blend, parse_blend_blocks, parse_sdna, format_struct_layout};
 
+        let raw = match std::fs::read(&req.path) {
+            Ok(b) => b,
+            Err(e) => return format!("failed to read {}: {e}", req.path),
+        };
+        let data = match decompress_blend(&raw) {
+            Ok(d) => d,
+            Err(e) => return format!("decompress failed: {e}"),
+        };
+        let blocks = match parse_blend_blocks(&data) {
+            Ok(r) => r,
+            Err(e) => return format!("block parse failed: {e}"),
+        };
+        let dna1 = match blocks.iter().find(|b| &b.code == b"DNA1") {
+            Some(b) => b,
+            None => return "No DNA1 block found in file".to_string(),
+        };
+        let dna_data = &data[dna1.data_offset..dna1.data_offset + dna1.data_len];
+        let sdna = match parse_sdna(dna_data, 8) {
+            Ok(s) => s,
+            Err(e) => return format!("SDNA parse failed: {e}"),
+        };
+        let max_depth = req.max_depth.unwrap_or(1) as usize;
+
+        if let Some(name) = &req.struct_name {
+            match sdna.find_struct(name) {
+                Some((idx, s)) => {
+                    let mut out = format!(
+                        "Struct #{idx}: {} ({} bytes, {} fields)\n",
+                        s.name, s.size, s.fields.len()
+                    );
+                    format_struct_layout(&sdna, s, 0, 0, max_depth, &mut out);
+                    out
+                }
+                None => {
+                    let available: Vec<&str> = sdna.structs.iter()
+                        .filter(|s| s.name.to_lowercase().contains(&name.to_lowercase()))
+                        .map(|s| s.name.as_str())
+                        .collect();
+                    if available.is_empty() {
+                        format!("Struct '{name}' not found. There are {} structs total.", sdna.structs.len())
+                    } else {
+                        format!("Struct '{name}' not found exactly. Similar names: {}", available.join(", "))
+                    }
+                }
+            }
+        } else {
+            let mut out = format!(
+                "{} structs, ptr_size=8\n\n",
+                sdna.structs.len()
+            );
+            for (i, s) in sdna.structs.iter().enumerate() {
+                out.push_str(&format!("  [{i:4}] {} ({} bytes, {} fields)\n", s.name, s.size, s.fields.len()));
+            }
+            out
+        }
+    }
+
+    #[tool(description = "Hex dump specific blocks from a .blend file filtered by SDNA struct type. Accepts an absolute filesystem path. If sdna_type is omitted, returns a summary table of all block types with counts and sizes.")]
+    fn blend_block_inspect(&self, Parameters(req): Parameters<BlendBlockInspectRequest>) -> String {
+        use crate::blend_debug::{decompress_blend, parse_blend_blocks, parse_sdna, hex_dump};
+
+        let raw = match std::fs::read(&req.path) {
+            Ok(b) => b,
+            Err(e) => return format!("failed to read {}: {e}", req.path),
+        };
+        let data = match decompress_blend(&raw) {
+            Ok(d) => d,
+            Err(e) => return format!("decompress failed: {e}"),
+        };
+        let blocks = match parse_blend_blocks(&data) {
+            Ok(r) => r,
+            Err(e) => return format!("block parse failed: {e}"),
+        };
+        let dna1 = blocks.iter().find(|b| &b.code == b"DNA1");
+        let sdna = dna1.and_then(|b| {
+            let dna_data = &data[b.data_offset..b.data_offset + b.data_len];
+            parse_sdna(dna_data, 8).ok()
+        });
+
+        let max_bytes = req.max_bytes.unwrap_or(256) as usize;
+        let limit = req.limit.unwrap_or(10) as usize;
+
+        if let Some(filter) = &req.sdna_type {
+            // Find the SDNA struct index for this type
+            let target_sdna_idx = sdna.as_ref().and_then(|s| s.find_struct(filter).map(|(i, _)| i));
+
+            let matching: Vec<_> = blocks.iter()
+                .filter(|b| {
+                    if let Some(idx) = target_sdna_idx {
+                        b.sdna_index as usize == idx
+                    } else {
+                        // Fallback: no SDNA, can't filter
+                        false
+                    }
+                })
+                .collect();
+
+            if matching.is_empty() {
+                let all_types: std::collections::BTreeMap<String, usize> = {
+                    let mut map = std::collections::BTreeMap::new();
+                    for b in &blocks {
+                        if let Some(ref s) = sdna {
+                            if (b.sdna_index as usize) < s.structs.len() {
+                                *map.entry(s.structs[b.sdna_index as usize].name.clone()).or_default() += 1;
+                            }
+                        }
+                    }
+                    map
+                };
+                return format!(
+                    "No blocks with SDNA type '{}' found.\nAvailable types: {}\n",
+                    filter,
+                    all_types.keys().cloned().collect::<Vec<_>>().join(", ")
+                );
+            }
+
+            let mut out = format!(
+                "{} block(s) with SDNA type '{}' (showing up to {limit}):\n\n",
+                matching.len(), filter
+            );
+            for b in matching.iter().take(limit) {
+                out.push_str(&format!(
+                    "Block code={} old_ptr={:#018x} sdna={} count={} data_len={}\n",
+                    b.code_str(), b.old_ptr, b.sdna_index, b.count, b.data_len
+                ));
+                if max_bytes > 0 && b.data_len > 0 {
+                    let end = (b.data_offset + max_bytes.min(b.data_len)).min(data.len());
+                    out.push_str(&hex_dump(&data[b.data_offset..end], b.data_offset));
+                }
+                out.push('\n');
+            }
+            out
+        } else {
+            // Summary of all block types
+            let mut type_counts: std::collections::BTreeMap<String, (usize, usize)> =
+                std::collections::BTreeMap::new();
+            for b in &blocks {
+                let type_name = if let Some(ref s) = sdna {
+                    if (b.sdna_index as usize) < s.structs.len() {
+                        s.structs[b.sdna_index as usize].name.clone()
+                    } else {
+                        b.code_str()
+                    }
+                } else {
+                    b.code_str()
+                };
+                let e = type_counts.entry(type_name).or_default();
+                e.0 += 1;
+                e.1 += b.data_len;
+            }
+            let mut out = format!(
+                "{} total blocks in {}:\n\n",
+                blocks.len(), req.path
+            );
+            out.push_str(&format!("{:<40} {:>8} {:>14}\n", "Type", "Count", "Total bytes"));
+            out.push_str(&format!("{}\n", "-".repeat(65)));
+            for (name, (count, total_bytes)) in &type_counts {
+                out.push_str(&format!("{:<40} {:>8} {:>14}\n", name, count, total_bytes));
+            }
+            out
+        }
+    }
+
+    #[tool(description = "Run headless Blender with a before/after Python script pair, save .blend files, decompress them, and show a binary diff of changed bytes with offsets and SDNA struct names. Useful for reverse-engineering Blender binary format changes.")]
+    fn blend_python_diff(&self, Parameters(req): Parameters<BlendPythonDiffRequest>) -> String {
+        use crate::blend_debug::{decompress_blend, parse_blend_blocks, parse_sdna, hex_dump, find_blender_bin};
+        use std::process::Command;
+
+        let blender = match find_blender_bin(req.blender_bin.as_deref()) {
+            Ok(b) => b,
+            Err(e) => return format!("Blender not found: {e}"),
+        };
+
+        let tmp = std::env::temp_dir().join(format!(
+            "blend_python_diff_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        ));
+        if let Err(e) = std::fs::create_dir_all(&tmp) {
+            return format!("failed to create temp dir: {e}");
+        }
+
+        let before_blend = tmp.join("before.blend");
+        let after_blend = tmp.join("after.blend");
+        let before_py = tmp.join("before.py");
+        let after_py = tmp.join("after.py");
+
+        let before_data: Vec<u8>;
+        let after_data: Vec<u8>;
+
+        // Run "before" script
+        if !req.before_script.is_empty() {
+            let script = format!(
+                "import bpy\nbpy.ops.wm.open_mainfile(filepath=r'{}')\n{}\nbpy.ops.wm.save_as_mainfile(filepath=r'{}')\n",
+                req.blend_path,
+                req.before_script,
+                before_blend.display()
+            );
+            if let Err(e) = std::fs::write(&before_py, &script) {
+                return format!("failed to write before script: {e}");
+            }
+            let status = Command::new(&blender)
+                .args(["--background", "--python"])
+                .arg(&before_py)
+                .output();
+            match status {
+                Ok(out) if !out.status.success() => {
+                    let _ = std::fs::remove_dir_all(&tmp);
+                    return format!(
+                        "Before Blender run failed:\nstdout: {}\nstderr: {}",
+                        String::from_utf8_lossy(&out.stdout),
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&tmp);
+                    return format!("Failed to run Blender: {e}");
+                }
+                _ => {}
+            }
+            before_data = match std::fs::read(&before_blend) {
+                Ok(b) => b,
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&tmp);
+                    return format!("before.blend not written: {e}");
+                }
+            };
+        } else {
+            before_data = match std::fs::read(&req.blend_path) {
+                Ok(b) => b,
+                Err(e) => return format!("failed to read input blend: {e}"),
+            };
+        }
+
+        // Run "after" script
+        {
+            let input_path = if !req.before_script.is_empty() {
+                before_blend.to_string_lossy().to_string()
+            } else {
+                req.blend_path.clone()
+            };
+            let script = format!(
+                "import bpy\nbpy.ops.wm.open_mainfile(filepath=r'{input_path}')\n{}\nbpy.ops.wm.save_as_mainfile(filepath=r'{}')\n",
+                req.after_script,
+                after_blend.display()
+            );
+            if let Err(e) = std::fs::write(&after_py, &script) {
+                return format!("failed to write after script: {e}");
+            }
+            let status = Command::new(&blender)
+                .args(["--background", "--python"])
+                .arg(&after_py)
+                .output();
+            match status {
+                Ok(out) if !out.status.success() => {
+                    let _ = std::fs::remove_dir_all(&tmp);
+                    return format!(
+                        "After Blender run failed:\nstdout: {}\nstderr: {}",
+                        String::from_utf8_lossy(&out.stdout),
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&tmp);
+                    return format!("Failed to run Blender: {e}");
+                }
+                _ => {}
+            }
+            after_data = match std::fs::read(&after_blend) {
+                Ok(b) => b,
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&tmp);
+                    return format!("after.blend not written: {e}");
+                }
+            };
+        }
+
+        // Decompress both
+        let before_decomp = match decompress_blend(&before_data) {
+            Ok(d) => d,
+            Err(e) => { let _ = std::fs::remove_dir_all(&tmp); return format!("before decompress: {e}"); }
+        };
+        let after_decomp = match decompress_blend(&after_data) {
+            Ok(d) => d,
+            Err(e) => { let _ = std::fs::remove_dir_all(&tmp); return format!("after decompress: {e}"); }
+        };
+
+        // Parse both block layouts + SDNA for name resolution
+        let after_blocks = parse_blend_blocks(&after_decomp).unwrap_or_default();
+        let sdna = after_blocks.iter().find(|b| &b.code == b"DNA1").and_then(|b| {
+            let dna_data = &after_decomp[b.data_offset..b.data_offset + b.data_len];
+            parse_sdna(dna_data, 8).ok()
+        });
+
+        // Diff changed bytes across blocks
+        let before_blocks = parse_blend_blocks(&before_decomp).unwrap_or_default();
+
+        let mut out = String::new();
+        out.push_str(&format!(
+            "blend_python_diff: before={} bytes, after={} bytes\n\n",
+            before_decomp.len(), after_decomp.len()
+        ));
+
+        let mut diff_count = 0;
+        for (idx, b_block) in after_blocks.iter().enumerate() {
+            if &b_block.code == b"DNA1" || &b_block.code == b"ENDB" { continue; }
+
+            // Resolve SDNA name
+            let type_name = sdna.as_ref().and_then(|s| {
+                s.structs.get(b_block.sdna_index as usize).map(|st| st.name.as_str())
+            }).unwrap_or("?");
+
+            // Apply filter
+            if let Some(ref filter) = req.sdna_filter {
+                if !type_name.to_lowercase().contains(&filter.to_lowercase()) {
+                    continue;
+                }
+            }
+
+            // Find matching block in before by old_ptr or position
+            let matching_before = before_blocks.iter().find(|bb| bb.old_ptr == b_block.old_ptr)
+                .or_else(|| before_blocks.get(idx));
+
+            let b_data = if b_block.data_offset + b_block.data_len <= after_decomp.len() {
+                &after_decomp[b_block.data_offset..b_block.data_offset + b_block.data_len]
+            } else {
+                continue;
+            };
+
+            if let Some(a_block) = matching_before {
+                if a_block.data_offset + a_block.data_len > before_decomp.len() { continue; }
+                let a_data = &before_decomp[a_block.data_offset..a_block.data_offset + a_block.data_len];
+                if a_data == b_data { continue; }
+
+                diff_count += 1;
+                out.push_str(&format!(
+                    "CHANGED block #{idx}: code={} type={} ptr={:#018x} sdna={} count={}\n",
+                    b_block.code_str(), type_name, b_block.old_ptr, b_block.sdna_index, b_block.count
+                ));
+                // Show changed byte ranges
+                let min_len = a_data.len().min(b_data.len());
+                let mut range_start = None;
+                let mut changed_ranges: Vec<(usize, usize)> = Vec::new();
+                for byte_idx in 0..min_len {
+                    if a_data[byte_idx] != b_data[byte_idx] {
+                        match range_start {
+                            None => range_start = Some(byte_idx),
+                            Some(_) => {}
+                        }
+                    } else if let Some(start) = range_start.take() {
+                        changed_ranges.push((start, byte_idx));
+                    }
+                }
+                if let Some(start) = range_start.take() {
+                    changed_ranges.push((start, min_len));
+                }
+
+                for (start, end) in &changed_ranges {
+                    let ctx_start = start.saturating_sub(8);
+                    let ctx_end = (end + 8).min(min_len);
+                    out.push_str(&format!("  Bytes [{start}..{end}] changed (showing context [{ctx_start}..{ctx_end}]):\n"));
+                    out.push_str("  BEFORE:\n");
+                    out.push_str(&hex_dump(&a_data[ctx_start..ctx_end], ctx_start));
+                    out.push_str("  AFTER:\n");
+                    out.push_str(&hex_dump(&b_data[ctx_start..ctx_end], ctx_start));
+                }
+            } else {
+                diff_count += 1;
+                out.push_str(&format!(
+                    "NEW block #{idx}: code={} type={} ptr={:#018x}\n",
+                    b_block.code_str(), type_name, b_block.old_ptr
+                ));
+                out.push_str(&hex_dump(&b_data[..b_data.len().min(256)], 0));
+            }
+        }
+
+        if diff_count == 0 {
+            out.push_str("No changed blocks detected.\n");
+        } else {
+            out.push_str(&format!("\nTotal changed/new blocks: {diff_count}\n"));
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        out
+    }
+
+    /// Run an arbitrary Python script against a `.blend` file in headless Blender.
+    ///
+    /// Opens `blend_path` with `blender --background --python <script>` and returns the
+    /// script's printed output.  If the script wraps output with `__BLEND_SCRIPT_OUTPUT_START__`
+    /// and `__BLEND_SCRIPT_OUTPUT_END__` sentinels, only the content between them is returned
+    /// (filtering Blender startup noise). If sentinels are absent, full stdout+stderr is returned.
+    /// `import bpy` is always available in Blender scripts — no need to import it explicitly.
+    #[tool(description = "Run an arbitrary Python script against a .blend file in headless Blender. \
+        Opens blend_path with `blender --background --python script` and returns printed output. \
+        Wrap important output with print('__BLEND_SCRIPT_OUTPUT_START__') / print('__BLEND_SCRIPT_OUTPUT_END__') \
+        sentinels to filter out Blender startup noise. If sentinels are absent, full stdout+stderr is returned. \
+        `import bpy` is always available — no need to import it explicitly in your script.")]
+    fn blend_run_script(&self, Parameters(req): Parameters<BlendRunScriptRequest>) -> String {
+        use crate::blend_debug::find_blender_bin;
+        use std::io::Write as _;
+
+        let blender_bin = match find_blender_bin(req.blender_bin.as_deref()) {
+            Ok(b) => b,
+            Err(e) => return format!("blender binary not found: {e}"),
+        };
+
+        let blend_path = std::path::Path::new(&req.blend_path);
+        if !blend_path.exists() {
+            return format!("blend file not found: {}", req.blend_path);
+        }
+
+        // Temp dir for the script file
+        let tmp = std::path::PathBuf::from(format!(
+            "/tmp/blend_run_script_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        ));
+        if let Err(e) = std::fs::create_dir_all(&tmp) {
+            return format!("failed to create temp dir: {e}");
+        }
+
+        let script_path = tmp.join("script.py");
+        if let Err(e) = std::fs::File::create(&script_path)
+            .and_then(|mut f| f.write_all(req.script.as_bytes()))
+        {
+            let _ = std::fs::remove_dir_all(&tmp);
+            return format!("failed to write script: {e}");
+        }
+
+        let output = std::process::Command::new(&blender_bin)
+            .args([
+                "--background",
+                &req.blend_path,
+                "--python",
+                script_path.to_str().unwrap_or(""),
+            ])
+            .output();
+
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let output = match output {
+            Ok(o) => o,
+            Err(e) => return format!("failed to run blender: {e}"),
+        };
+
+        let full = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // Extract between sentinels if present
+        const START: &str = "__BLEND_SCRIPT_OUTPUT_START__";
+        const END: &str = "__BLEND_SCRIPT_OUTPUT_END__";
+        if let (Some(start_pos), Some(end_pos)) = (full.find(START), full.rfind(END)) {
+            let content_start = start_pos + START.len();
+            if content_start < end_pos {
+                return full[content_start..end_pos].trim().to_string();
+            }
+        }
+
+        // Fallback: return everything (script likely errored)
+        if !output.status.success() {
+            format!("blender exited with status {}\n\n{full}", output.status)
+        } else {
+            full
+        }
+    }
+
+}
 #[rmcp::tool_handler]
 impl ServerHandler for StarBreakerMcp {
     fn get_info(&self) -> ServerInfo {
@@ -1009,5 +1618,3 @@ fn format_size(bytes: u64) -> String {
     if bytes < 1024 * 1024 * 1024 { return format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0)); }
     format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
 }
-
-

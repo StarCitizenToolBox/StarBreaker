@@ -1,6 +1,7 @@
 use clap::Parser;
 use rmcp::ServiceExt;
 
+mod blend_debug;
 mod tools;
 
 #[derive(Parser)]

@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import json
 import math
-from contextlib import contextmanager
+import re
+import time
+import uuid
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, Callable
 
@@ -21,18 +24,34 @@ import bpy
 from ..manifest import PackageBundle, SceneInstanceRecord
 from ..palette import palette_id_for_livery_instance, resolved_palette_id
 from .constants import (
+    PROP_ENGINE_GLOW_CONTROL_JSON,
+    PROP_ENGINE_GLOW_STRENGTH,
     PROP_INSTANCE_JSON,
     PROP_LIGHT_ACTIVE_STATE,
+    PROP_LIGHT_SEMANTIC_KIND,
     PROP_LIGHT_STATES_JSON,
+    PROP_MATERIAL_IDENTITY,
     PROP_MATERIAL_SIDECAR,
+    PROP_MESH_ASSET,
     PROP_PACKAGE_ROOT,
     PROP_PAINT_VARIANT_SIDECAR,
     PROP_PALETTE_ID,
     PROP_SCENE_PATH,
     PROP_SOURCE_NODE_NAME,
     PROP_SUBMATERIAL_JSON,
+    PROP_TEMPLATE_PATH,
 )
-from .validators import _purge_orphaned_file_backed_images, _purge_orphaned_runtime_groups
+from .animation_fps import (
+    FPS_POLICY_ADAPT_SCENE,
+    describe_reconciliation,
+    reconcile_animation_fps,
+)
+from .validators import (
+    _purge_orphaned_file_backed_images,
+    _purge_orphaned_managed_materials,
+    _purge_orphaned_runtime_actions,
+    _purge_orphaned_runtime_groups,
+)
 
 
 def import_package(
@@ -203,6 +222,353 @@ def apply_livery_to_selected_package(context: bpy.types.Context, livery_id: str)
     return apply_livery_to_package_root(context, package_root, livery_id)
 
 
+def refresh_materials_for_package_root(
+    context: bpy.types.Context,
+    package_root: bpy.types.Object,
+    palette_id: str | None = None,
+) -> int:
+    from .importer import PackageImporter
+
+    package = _load_package_from_root(package_root)
+    importer = PackageImporter(context, package, package_root=package_root, create_template_collection=False)
+    applied = 0
+    needs_view_layer_update = False
+    with _suspend_heavy_viewports(context), _temporary_object_mode(context):
+        for obj in _iter_package_objects(package_root):
+            if getattr(obj, "type", None) != "MESH":
+                continue
+            if _string_prop(obj, PROP_MATERIAL_SIDECAR) is None:
+                continue
+            object_palette_id = _material_refresh_palette_id(package, obj, palette_id)
+            applied += importer.rebuild_object_materials(obj, object_palette_id)
+            needs_view_layer_update = _refresh_mesh_material_evaluation(obj) or needs_view_layer_update
+            if palette_id is not None:
+                obj[PROP_PALETTE_ID] = palette_id
+        if palette_id is not None:
+            package_root[PROP_PALETTE_ID] = palette_id
+    if needs_view_layer_update:
+        view_layer = getattr(context, "view_layer", None)
+        update = getattr(view_layer, "update", None)
+        if callable(update):
+            update()
+    if engine_glow_control_enabled(package_root):
+        apply_engine_glow_to_package_root(package_root, engine_glow_strength(package_root))
+    _purge_orphaned_managed_materials()
+    _purge_orphaned_runtime_groups()
+    _purge_orphaned_runtime_actions()
+    _purge_orphaned_file_backed_images()
+    return applied
+
+
+class MaterialRefreshSession:
+    """Incremental material refresh for post-file-open timer execution."""
+
+    def __init__(
+        self,
+        context: bpy.types.Context,
+        package_root: bpy.types.Object,
+        palette_id: str | None = None,
+        *,
+        purge_orphans: bool = True,
+    ) -> None:
+        from .importer import PackageImporter
+
+        self.context = context
+        self.package_root = package_root
+        self.package = _load_package_from_root(package_root)
+        self.importer = PackageImporter(
+            context,
+            self.package,
+            package_root=package_root,
+            create_template_collection=False,
+        )
+        self.palette_id = palette_id
+        self.objects = [
+            obj
+            for obj in _iter_package_objects(package_root)
+            if (
+                getattr(obj, "type", None) == "MESH"
+                and _string_prop(obj, PROP_MATERIAL_SIDECAR) is not None
+            )
+        ]
+        self.index = 0
+        self.applied = 0
+        self.needs_view_layer_update = False
+        self.done = False
+        self.purge_orphans = purge_orphans
+        self._objects_finalized = False
+        self._cleanup_steps: list[Callable[[], int]] = (
+            [
+                _purge_orphaned_managed_materials,
+                _purge_orphaned_runtime_groups,
+                _purge_orphaned_runtime_actions,
+                _purge_orphaned_file_backed_images,
+            ]
+            if purge_orphans
+            else []
+        )
+        self._cleanup_index = 0
+        self.default_palette_cache: dict[str, str | None] = {}
+        self._context_stack = ExitStack()
+        self._context_stack.enter_context(_suspend_heavy_viewports(context))
+        self._context_stack.enter_context(_temporary_object_mode(context))
+
+    @property
+    def total(self) -> int:
+        return len(self.objects)
+
+    @property
+    def progress(self) -> float:
+        if self.done:
+            return 1.0
+        if self.total == 0:
+            object_progress = 1.0
+        else:
+            object_progress = min(1.0, self.index / self.total)
+        if not self._cleanup_steps:
+            return object_progress
+        if not self._objects_finalized:
+            return min(0.95, object_progress * 0.95)
+        cleanup_progress = self._cleanup_index / len(self._cleanup_steps)
+        return min(0.99, 0.95 + cleanup_progress * 0.05)
+
+    def step(self, budget_seconds: float = 0.05, min_objects: int = 1) -> bool:
+        if self.done:
+            return True
+
+        deadline = time.perf_counter() + max(0.001, budget_seconds)
+        processed = 0
+        while not self._objects_finalized and self.index < len(self.objects):
+            obj = self.objects[self.index]
+            self.index += 1
+            processed += 1
+
+            if getattr(obj, "type", None) != "MESH":
+                if processed >= min_objects and time.perf_counter() >= deadline:
+                    break
+                continue
+            if _string_prop(obj, PROP_MATERIAL_SIDECAR) is None:
+                if processed >= min_objects and time.perf_counter() >= deadline:
+                    break
+                continue
+
+            object_palette_id = _material_refresh_palette_id(
+                self.package,
+                obj,
+                self.palette_id,
+                self.default_palette_cache,
+            )
+            self.applied += self.importer.rebuild_object_materials(obj, object_palette_id)
+            self.needs_view_layer_update = _refresh_mesh_material_evaluation(obj) or self.needs_view_layer_update
+            if self.palette_id is not None:
+                obj[PROP_PALETTE_ID] = self.palette_id
+
+            if processed >= min_objects and time.perf_counter() >= deadline:
+                break
+
+        if not self._objects_finalized and self.index >= len(self.objects):
+            self._finish_objects()
+            if not self._cleanup_steps:
+                self.done = True
+                return True
+            if processed >= min_objects and time.perf_counter() >= deadline:
+                return False
+
+        while self._cleanup_index < len(self._cleanup_steps):
+            self._cleanup_steps[self._cleanup_index]()
+            self._cleanup_index += 1
+            if self._cleanup_index >= len(self._cleanup_steps):
+                break
+            if time.perf_counter() >= deadline:
+                return False
+
+        if self._objects_finalized:
+            self.done = True
+            return True
+        return False
+
+    def _finish_objects(self) -> None:
+        if self._objects_finalized:
+            return
+        try:
+            flush_orphans = getattr(self.importer, "_flush_pending_orphan_materials", None)
+            if callable(flush_orphans):
+                flush_orphans()
+            if self.palette_id is not None:
+                self.package_root[PROP_PALETTE_ID] = self.palette_id
+            if engine_glow_control_enabled(self.package_root):
+                apply_engine_glow_to_package_root(self.package_root, engine_glow_strength(self.package_root))
+            if self.needs_view_layer_update:
+                view_layer = getattr(self.context, "view_layer", None)
+                update = getattr(view_layer, "update", None) if view_layer is not None else None
+                if callable(update):
+                    update()
+            self._objects_finalized = True
+        finally:
+            self._context_stack.close()
+
+    def finish(self) -> None:
+        if self.done:
+            return
+        self._finish_objects()
+        while self._cleanup_index < len(self._cleanup_steps):
+            self._cleanup_steps[self._cleanup_index]()
+            self._cleanup_index += 1
+        self.done = True
+
+
+def _material_refresh_palette_id(
+    package: PackageBundle,
+    obj: bpy.types.Object,
+    explicit_palette_id: str | None,
+    default_palette_cache: dict[str, str | None] | None = None,
+) -> str | None:
+    if explicit_palette_id is not None:
+        return explicit_palette_id
+    object_palette_id = _string_prop(obj, PROP_PALETTE_ID)
+    if object_palette_id is not None:
+        return object_palette_id
+    sidecar_path = _string_prop(obj, PROP_MATERIAL_SIDECAR)
+    if sidecar_path is None:
+        return None
+    if default_palette_cache is not None and sidecar_path in default_palette_cache:
+        return default_palette_cache[sidecar_path]
+    palette_id = _sidecar_default_palette_id(package, sidecar_path)
+    if default_palette_cache is not None:
+        default_palette_cache[sidecar_path] = palette_id
+    return palette_id
+
+
+def _sidecar_default_palette_id(package: PackageBundle, sidecar_path: str) -> str | None:
+    load_sidecar = getattr(package, "load_material_sidecar", None)
+    if not callable(load_sidecar):
+        return None
+    sidecar = load_sidecar(sidecar_path)
+    if sidecar is None:
+        return None
+    attributes = (
+        getattr(sidecar, "raw", {})
+        .get("authored_material_set", {})
+        .get("attributes", [])
+    )
+    for attribute in attributes:
+        name = str(attribute.get("name", ""))
+        if not name.lower() == "defaultpalette":
+            continue
+        value = str(attribute.get("value", "")).replace("\\", "/").strip()
+        source_name = value.rsplit("/", 1)[-1].strip().lower()
+        if source_name:
+            return f"palette/{source_name}"
+    return None
+
+
+def _refresh_mesh_material_evaluation(
+    obj: bpy.types.Object,
+    _context: bpy.types.Context | None = None,
+) -> bool:
+    data = getattr(obj, "data", None)
+    changed = _ensure_active_uv_layer(data)
+    data_tagged = _tag_id_for_refresh(data)
+    object_tagged = _tag_id_for_refresh(obj)
+    return changed or data_tagged or object_tagged
+
+
+def _ensure_active_uv_layer(mesh: Any) -> bool:
+    uv_layers = getattr(mesh, "uv_layers", None)
+    if uv_layers is None or len(uv_layers) == 0:
+        return False
+    preferred_index = _uv_layer_index(uv_layers, "UVMap")
+    target_index = preferred_index if preferred_index is not None else 0
+    changed = False
+    active = getattr(uv_layers, "active", None)
+    active_index = int(getattr(uv_layers, "active_index", -1))
+    if active is None or active_index != target_index:
+        uv_layers.active_index = target_index
+        changed = True
+    target_layer = uv_layers[target_index]
+    if hasattr(target_layer, "active_render") and not bool(getattr(target_layer, "active_render")):
+        target_layer.active_render = True
+        changed = True
+    return changed
+
+
+def _uv_layer_index(uv_layers: Any, name: str) -> int | None:
+    find = getattr(uv_layers, "find", None)
+    if callable(find):
+        index = int(find(name))
+        if index >= 0:
+            return index
+    for index, layer in enumerate(uv_layers):
+        if getattr(layer, "name", None) == name:
+            return index
+    return None
+
+
+def _tag_id_for_refresh(data_block: Any) -> bool:
+    update_tag = getattr(data_block, "update_tag", None)
+    if not callable(update_tag):
+        return False
+    try:
+        update_tag(refresh={"DATA"})
+    except (RuntimeError, TypeError):
+        update_tag()
+    return True
+
+
+def package_root_needs_material_refresh(package_root: bpy.types.Object) -> bool:
+    package: PackageBundle | None = None
+    sidecar_cache: dict[str, Any] = {}
+    for obj in _iter_package_objects(package_root):
+        if getattr(obj, "type", None) != "MESH":
+            continue
+        sidecar_path = _string_prop(obj, PROP_MATERIAL_SIDECAR)
+        if sidecar_path is None:
+            continue
+        material_slots = getattr(obj, "material_slots", ())
+        if len(material_slots) == 0:
+            if package is None:
+                package = _load_package_from_root(package_root)
+            sidecar = _material_refresh_sidecar(package, sidecar_cache, sidecar_path)
+            if _sidecar_has_submaterial_index(sidecar, 0):
+                return True
+            continue
+        for slot in material_slots:
+            material = getattr(slot, "material", None)
+            if material is None:
+                continue
+            if _material_slot_needs_refresh(material):
+                return True
+    return False
+
+
+def _material_slot_needs_refresh(material: Any) -> bool:
+    if getattr(material, "library", None) is not None:
+        return True
+    node_tree = getattr(material, "node_tree", None)
+    if node_tree is None:
+        return True
+    nodes = getattr(node_tree, "nodes", None)
+    if nodes is not None and len(nodes) == 0:
+        return True
+    return False
+
+
+def _material_refresh_sidecar(
+    package: PackageBundle,
+    cache: dict[str, Any],
+    sidecar_path: str,
+) -> Any:
+    if sidecar_path not in cache:
+        cache[sidecar_path] = package.load_material_sidecar(sidecar_path)
+    return cache[sidecar_path]
+
+
+def _sidecar_has_submaterial_index(sidecar: Any, index: int) -> bool:
+    if sidecar is None:
+        return False
+    return any(int(getattr(submaterial, "index", -1)) == index for submaterial in sidecar.submaterials)
+
+
 def dump_selected_metadata(context: bpy.types.Context) -> list[str]:
     obj = context.active_object
     if obj is None:
@@ -230,7 +596,7 @@ def apply_palette_to_package_root(context: bpy.types.Context, package_root: bpy.
     from .importer import PackageImporter
 
     package = _load_package_from_root(package_root)
-    importer = PackageImporter(context, package, package_root=package_root)
+    importer = PackageImporter(context, package, package_root=package_root, create_template_collection=False)
     with _suspend_heavy_viewports(context), _temporary_object_mode(context):
         return importer.apply_palette_to_package_root(package_root, palette_id)
 
@@ -261,7 +627,7 @@ def apply_paint_to_package_root(context: bpy.types.Context, package_root: bpy.ty
     base_exterior = _exterior_material_sidecars(package)
     check_sidecars = effective_exterior or base_exterior
 
-    importer = PackageImporter(context, package, package_root=package_root)
+    importer = PackageImporter(context, package, package_root=package_root, create_template_collection=False)
     applied = 0
     with _suspend_heavy_viewports(context), _temporary_object_mode(context):
         for obj in _iter_package_objects(package_root):
@@ -294,7 +660,7 @@ def apply_livery_to_package_root(context: bpy.types.Context, package_root: bpy.t
     from .importer import PackageImporter
 
     package = _load_package_from_root(package_root)
-    importer = PackageImporter(context, package, package_root=package_root)
+    importer = PackageImporter(context, package, package_root=package_root, create_template_collection=False)
     applied = 0
     with _suspend_heavy_viewports(context), _temporary_object_mode(context):
         for obj in _iter_package_objects(package_root):
@@ -399,21 +765,43 @@ def _temporary_object_mode(context: bpy.types.Context):
             switched = _mode_set("OBJECT")
         yield
     finally:
-        if not switched or active_object is None or view_layer is None:
-            return
-        try:
-            if view_layer.objects.active is not active_object:
-                view_layer.objects.active = active_object
-            _mode_set(original_mode)
-        except Exception:
-            pass
+        if switched and active_object is not None and view_layer is not None:
+            try:
+                if view_layer.objects.active is not active_object:
+                    view_layer.objects.active = active_object
+                _mode_set(original_mode)
+            except Exception:
+                pass
 
 
 def _load_package_from_root(package_root: bpy.types.Object) -> PackageBundle:
+    scene_path = resolve_package_scene_path(package_root)
+    return PackageBundle.load(scene_path)
+
+
+def resolve_package_scene_path(package_root: bpy.types.Object) -> Path:
     scene_path = _string_prop(package_root, PROP_SCENE_PATH)
     if scene_path is None:
         raise RuntimeError("Selected object is missing StarBreaker scene metadata")
-    return PackageBundle.load(scene_path)
+    raw_path = Path(scene_path)
+    if raw_path.is_absolute():
+        return raw_path
+
+    blend_file = Path(bpy.data.filepath) if getattr(bpy.data, "filepath", "") else None
+    search_roots: list[Path] = []
+    if blend_file is not None:
+        blend_parent = blend_file.parent
+        search_roots.append(blend_parent)
+        search_roots.extend(blend_parent.parents)
+    search_roots.append(Path.cwd())
+
+    for root in search_roots:
+        candidate = (root / raw_path).resolve()
+        if candidate.is_file():
+            return candidate
+    if blend_file is not None:
+        return (blend_file.parent / raw_path).resolve()
+    return raw_path.resolve()
 
 
 def _scene_instance_from_object(obj: bpy.types.Object) -> SceneInstanceRecord | None:
@@ -435,6 +823,268 @@ def _string_prop(obj: bpy.types.ID, name: str) -> str | None:
     if isinstance(value, str) and value:
         return value
     return None
+
+
+_ENGINE_GLOW_OVERRIDE_PROP = "starbreaker_engine_glow_override_material"
+_ENGINE_GLOW_OVERRIDE_SIDECAR_PROP = "starbreaker_engine_glow_override_sidecar"
+_ENGINE_GLOW_OVERRIDE_INDEX_PROP = "starbreaker_engine_glow_override_source_index"
+
+
+def _material_source_index(material: bpy.types.Material) -> int | None:
+    payload = material.get(PROP_SUBMATERIAL_JSON)
+    if not isinstance(payload, str):
+        return None
+    try:
+        data = json.loads(payload)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    raw_index = data.get("source_material_index", data.get("index"))
+    try:
+        return int(raw_index)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_engine_glow_path(value: str | None) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    normalized = value.replace("\\", "/")
+    if normalized.startswith("Data/"):
+        return normalized.casefold()
+    return f"Data/{normalized}".casefold()
+
+
+def _engine_glow_targets(package_root: bpy.types.Object) -> dict[tuple[str, str], set[int]]:
+    payload = _string_prop(package_root, PROP_ENGINE_GLOW_CONTROL_JSON)
+    if payload is None:
+        try:
+            package = _load_package_from_root(package_root)
+        except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError, ValueError):
+            package = None
+        control = getattr(getattr(package, "scene", None), "engine_glow_control", None)
+        if control is not None:
+            payload = json.dumps(control.raw, separators=(",", ":"), sort_keys=True)
+            package_root[PROP_ENGINE_GLOW_CONTROL_JSON] = payload
+            if not isinstance(package_root.get(PROP_ENGINE_GLOW_STRENGTH), (int, float)):
+                package_root[PROP_ENGINE_GLOW_STRENGTH] = float(control.default_strength)
+    if payload is None:
+        return {}
+    try:
+        data = json.loads(payload)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    targets = data.get("targets")
+    if not isinstance(targets, list):
+        return {}
+    by_instance_and_sidecar: dict[tuple[str, str], set[int]] = {}
+    for target in targets:
+        if not isinstance(target, dict):
+            continue
+        sidecar = target.get("material_sidecar")
+        if not isinstance(sidecar, str) or not sidecar:
+            continue
+        mesh_asset = _normalize_engine_glow_path(target.get("mesh_asset"))
+        if mesh_asset is None:
+            continue
+        try:
+            source_index = int(target.get("source_material_index", 0))
+        except (TypeError, ValueError):
+            continue
+        key = (mesh_asset, sidecar.replace("\\", "/").casefold())
+        by_instance_and_sidecar.setdefault(key, set()).add(source_index)
+    return by_instance_and_sidecar
+
+
+def engine_glow_control_enabled(package_root: bpy.types.Object) -> bool:
+    return bool(_engine_glow_targets(package_root))
+
+
+def engine_glow_strength(package_root: bpy.types.Object) -> float:
+    value = package_root.get(PROP_ENGINE_GLOW_STRENGTH)
+    if isinstance(value, (int, float)):
+        return float(value)
+    payload = _string_prop(package_root, PROP_ENGINE_GLOW_CONTROL_JSON)
+    if payload is None:
+        _engine_glow_targets(package_root)
+        payload = _string_prop(package_root, PROP_ENGINE_GLOW_CONTROL_JSON)
+    if payload is None:
+        return 3.0
+    try:
+        data = json.loads(payload)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return 3.0
+    if isinstance(data, dict):
+        default_strength = data.get("default_strength", data.get("default_percent"))
+        if isinstance(default_strength, (int, float)):
+            return float(default_strength)
+    return 3.0
+
+
+def _material_for_engine_glow_slot(
+    material: bpy.types.Material,
+    sidecar_key: str,
+    source_index: int,
+    override_cache: dict[tuple[str, int], bpy.types.Material],
+) -> bpy.types.Material:
+    key = (sidecar_key, source_index)
+    existing = override_cache.get(key)
+    if existing is not None:
+        return existing
+    base_name = material.name.split("__engine_glow", 1)[0]
+    existing = _find_engine_glow_override_material(key, base_name)
+    if existing is not None:
+        override_cache[key] = existing
+        return existing
+    if bool(material.get(_ENGINE_GLOW_OVERRIDE_PROP)):
+        material[_ENGINE_GLOW_OVERRIDE_SIDECAR_PROP] = sidecar_key
+        material[_ENGINE_GLOW_OVERRIDE_INDEX_PROP] = int(source_index)
+        override_cache[key] = material
+        return material
+    copy = material.copy()
+    copy.name = f"{material.name}__engine_glow"
+    copy[_ENGINE_GLOW_OVERRIDE_PROP] = True
+    copy[_ENGINE_GLOW_OVERRIDE_SIDECAR_PROP] = sidecar_key
+    copy[_ENGINE_GLOW_OVERRIDE_INDEX_PROP] = int(source_index)
+    override_cache[key] = copy
+    return copy
+
+
+def _find_engine_glow_override_material(key: tuple[str, int], base_name: str) -> bpy.types.Material | None:
+    materials = getattr(getattr(bpy, "data", None), "materials", ())
+    candidates = [
+        material
+        for material in materials
+        if _engine_glow_override_matches(material, key, base_name)
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda material: _engine_glow_override_sort_key(material, base_name))
+    material = candidates[0]
+    material[_ENGINE_GLOW_OVERRIDE_SIDECAR_PROP] = key[0]
+    material[_ENGINE_GLOW_OVERRIDE_INDEX_PROP] = int(key[1])
+    return material
+
+
+def _engine_glow_override_matches(material: bpy.types.Material, key: tuple[str, int], base_name: str) -> bool:
+    if not bool(material.get(_ENGINE_GLOW_OVERRIDE_PROP)):
+        return False
+    stored_sidecar = material.get(_ENGINE_GLOW_OVERRIDE_SIDECAR_PROP)
+    stored_index = material.get(_ENGINE_GLOW_OVERRIDE_INDEX_PROP)
+    if isinstance(stored_sidecar, str) and stored_sidecar == key[0]:
+        try:
+            if int(stored_index) == key[1]:
+                return True
+        except (TypeError, ValueError):
+            pass
+    return material.name.startswith(f"{base_name}__engine_glow")
+
+
+def _engine_glow_override_sort_key(material: bpy.types.Material, base_name: str) -> tuple[int, str]:
+    exact_name = f"{base_name}__engine_glow"
+    return (0 if material.name == exact_name else 1, material.name)
+
+
+def _purge_duplicate_engine_glow_overrides(override_cache: dict[tuple[str, int], bpy.types.Material]) -> None:
+    materials = getattr(getattr(bpy, "data", None), "materials", None)
+    if materials is None:
+        return
+    for key, canonical in override_cache.items():
+        base_name = canonical.name.split("__engine_glow", 1)[0]
+        for material in list(materials):
+            if material is canonical:
+                continue
+            if not _engine_glow_override_matches(material, key, base_name):
+                continue
+            if getattr(material, "users", 0) != 0:
+                continue
+            remove = getattr(materials, "remove", None)
+            if callable(remove):
+                remove(material)
+
+
+def apply_engine_glow_to_package_root(package_root: bpy.types.Object, strength: float) -> int:
+    targets_by_instance_and_sidecar = _engine_glow_targets(package_root)
+    if not targets_by_instance_and_sidecar:
+        return 0
+    strength = float(strength)
+    emission_color = (0.0, 0.0, 0.0, 1.0) if strength == 0.0 else (1.0, 1.0, 1.0, 1.0)
+    updated = 0
+    seen_materials: set[int] = set()
+    override_cache: dict[tuple[str, int], bpy.types.Material] = {}
+    target_sidecars = {key[1] for key in targets_by_instance_and_sidecar}
+    for obj in _iter_package_objects(package_root):
+        slots = list(getattr(obj, "material_slots", []))
+        if not slots:
+            continue
+        object_sidecars: set[str] = set()
+        for slot in slots:
+            material = getattr(slot, "material", None)
+            if material is None:
+                continue
+            sidecar = _string_prop(material, PROP_MATERIAL_SIDECAR)
+            if sidecar is None:
+                continue
+            object_sidecars.add(sidecar.replace("\\", "/").casefold())
+        if object_sidecars.isdisjoint(target_sidecars):
+            continue
+
+        instance = _scene_instance_from_object(obj)
+        instance_asset = _normalize_engine_glow_path(instance.mesh_asset if instance is not None else None)
+        if instance_asset is None:
+            continue
+        for slot in slots:
+            material = getattr(slot, "material", None)
+            if material is None:
+                continue
+            sidecar = _string_prop(material, PROP_MATERIAL_SIDECAR)
+            if sidecar is None:
+                continue
+            sidecar_key = sidecar.replace("\\", "/").casefold()
+            target_indices = targets_by_instance_and_sidecar.get((instance_asset, sidecar_key))
+            if not target_indices:
+                continue
+            source_index = _material_source_index(material)
+            if source_index is None or source_index not in target_indices:
+                continue
+            material = _material_for_engine_glow_slot(material, sidecar_key, source_index, override_cache)
+            slot.material = material
+            material_id = id(material)
+            if material_id in seen_materials:
+                continue
+            seen_materials.add(material_id)
+            node_tree = getattr(material, "node_tree", None)
+            if node_tree is None:
+                continue
+            material_changed = False
+            for node in getattr(node_tree, "nodes", []):
+                if getattr(node, "bl_idname", "") != "ShaderNodeGroup":
+                    continue
+                palette_input = getattr(node, "inputs", {}).get("Palette Color")
+                if (
+                    palette_input is not None
+                    and (getattr(node, "label", "") == "Primary Layer" or getattr(node, "name", "") == "Primary Layer")
+                ):
+                    palette_input.default_value = emission_color
+                    material_changed = True
+                strength_input = getattr(node, "inputs", {}).get("Emission Strength")
+                if strength_input is None:
+                    continue
+                strength_input.default_value = strength
+                for color_socket_name in ("Emission Color", "Emission"):
+                    color_input = getattr(node, "inputs", {}).get(color_socket_name)
+                    if color_input is not None:
+                        color_input.default_value = emission_color
+                        break
+                material_changed = True
+            if material_changed:
+                updated += 1
+    package_root[PROP_ENGINE_GLOW_STRENGTH] = float(strength)
+    _purge_duplicate_engine_glow_overrides(override_cache)
+    return updated
 
 
 _LIGHT_STATE_PRIORITY = (
@@ -510,7 +1160,18 @@ def available_light_state_names() -> list[str]:
     return ordered
 
 
-def _apply_state_to_light(light: bpy.types.Light, state_name: str) -> bool:
+def _is_strobe_state_payload(state: dict[str, Any]) -> bool:
+    light_style = int(state.get("light_style") or 0)
+    preset_tag = str(state.get("preset_tag") or "").strip().lower()
+    return light_style in {4, 28} or preset_tag == "fast"
+
+
+def _apply_state_to_light(
+    light: bpy.types.Light,
+    state_name: str,
+    *,
+    include_strobe: bool = True,
+) -> bool:
     """Apply the ``state_name`` snapshot to ``light`` in-place. Returns True
     if the light had the named state and was updated, False otherwise."""
     import json as _json
@@ -529,6 +1190,11 @@ def _apply_state_to_light(light: bpy.types.Light, state_name: str) -> bool:
     if not isinstance(state, dict):
         return False
 
+    if state_name == "emergencyState" and not include_strobe and _is_strobe_state_payload(state):
+        light.energy = 0.0
+        light[PROP_LIGHT_ACTIVE_STATE] = state_name
+        return True
+
     intensity_candela_proxy = state.get("intensity_candela_proxy")
     if intensity_candela_proxy is None:
         intensity_candela_proxy = state.get("intensity_cd")
@@ -543,6 +1209,7 @@ def _apply_state_to_light(light: bpy.types.Light, state_name: str) -> bool:
         float(intensity_candela_proxy) if intensity_candela_proxy is not None else 0.0,
         light.type,
         intensity_raw=float(intensity_raw) if intensity_raw is not None else None,
+        semantic_light_kind=_string_prop(light, PROP_LIGHT_SEMANTIC_KIND),
     )
 
     if use_temperature:
@@ -561,21 +1228,137 @@ def _apply_state_to_light(light: bpy.types.Light, state_name: str) -> bool:
     return True
 
 
-def apply_light_state(state_name: str) -> int:
+def apply_light_state(state_name: str, *, include_strobe: bool = True) -> int:
     """Switch every StarBreaker light in the current .blend to the named
     state. Lights that lack the requested state keep their current values.
     Returns the number of lights that were updated."""
     updated = 0
     for light in _iter_starbreaker_lights():
-        if _apply_state_to_light(light, state_name):
+        if _apply_state_to_light(light, state_name, include_strobe=include_strobe):
             updated += 1
     return updated
 
 
 _ANIMATION_MODES_PROP = "starbreaker_animation_modes"
 _ANIMATION_BIND_TRS_PROP = "starbreaker_animation_bind_trs"
+_ANIMATION_INSTANCES_PROP = "starbreaker_animation_instances_v1"
+_ANIMATION_INSTANCE_ID_PROP = "starbreaker_animation_instance_id"
+_ANIMATION_INSTANCE_NAME_PROP = "starbreaker_animation_name"
 _FRAGMENT_ANIMATION_PREFIX = "fragment:"
 
+
+def _ensure_str_list(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    return [str(value) for value in values if isinstance(value, str)]
+
+
+def _animation_instance_from_value(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    instance_id = value.get("id")
+    animation_name = value.get("animation_name")
+    if not isinstance(instance_id, str) or not instance_id:
+        return None
+    if not isinstance(animation_name, str) or not animation_name:
+        return None
+    try:
+        start_frame = float(value.get("start_frame", 1.0))
+    except (TypeError, ValueError):
+        start_frame = 1.0
+    try:
+        duration_frames = max(0.0, float(value.get("duration_frames", 0.0)))
+    except (TypeError, ValueError):
+        duration_frames = 0.0
+    driven_hashes = sorted(set(_ensure_str_list(value.get("driven_hashes"))))
+    return {
+        "id": instance_id,
+        "animation_name": animation_name,
+        "start_frame": start_frame,
+        "duration_frames": duration_frames,
+        "driven_hashes": driven_hashes,
+    }
+
+
+def _load_animation_instances(package_root: bpy.types.Object) -> list[dict[str, Any]]:
+    payload = package_root.get(_ANIMATION_INSTANCES_PROP)
+    if not isinstance(payload, str) or not payload:
+        return []
+    try:
+        loaded = json.loads(payload)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(loaded, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for value in loaded:
+        parsed = _animation_instance_from_value(value)
+        if parsed is not None:
+            result.append(parsed)
+    return result
+
+
+def _store_animation_instances(package_root: bpy.types.Object, instances: list[dict[str, Any]]) -> None:
+    package_root[_ANIMATION_INSTANCES_PROP] = json.dumps(instances, separators=(",", ":"), sort_keys=True)
+
+
+def _instance_end_frame(instance: dict[str, Any]) -> float:
+    return float(instance.get("start_frame", 1.0)) + float(instance.get("duration_frames", 0.0))
+
+
+def _intervals_overlap(start_a: float, end_a: float, start_b: float, end_b: float) -> bool:
+    return max(start_a, start_b) < min(end_a, end_b)
+
+
+def _animation_overlap_warnings(
+    animation_name: str,
+    start_frame: float,
+    duration_frames: float,
+    driven_hashes: set[str],
+    existing_instances: list[dict[str, Any]],
+) -> list[str]:
+    end_frame = start_frame + duration_frames
+    warnings: list[str] = []
+    if duration_frames <= 0.0 or not driven_hashes:
+        return warnings
+    for existing in existing_instances:
+        existing_name = str(existing.get("animation_name", ""))
+        existing_hashes = set(_ensure_str_list(existing.get("driven_hashes")))
+        if not (driven_hashes & existing_hashes):
+            continue
+        existing_start = float(existing.get("start_frame", 1.0))
+        existing_end = _instance_end_frame(existing)
+        if not _intervals_overlap(start_frame, end_frame, existing_start, existing_end):
+            continue
+        warnings.append(
+            (
+                f"{animation_name} overlaps {existing_name} "
+                f"({int(round(existing_start))}-{int(round(existing_end))}) "
+                f"on {len(driven_hashes & existing_hashes)} shared channels"
+            )
+        )
+    return warnings
+
+
+def _clip_duration_frames(clip: dict[str, Any], frame_scale: float) -> float:
+    trim_frame = _clip_cyclic_transition_target_frame(clip)
+    bones = _normalized_bone_channels(clip)
+    channel_times: list[float] = []
+    for channel_variants in bones.values():
+        for channel in channel_variants:
+            if not isinstance(channel, dict):
+                continue
+            rotations = channel.get("rotation") if isinstance(channel.get("rotation"), list) else []
+            positions = channel.get("position") if isinstance(channel.get("position"), list) else []
+            rotation_times = _channel_times(channel, "rotation_time", len(rotations))
+            position_times = _channel_times(channel, "position_time", len(positions))
+            for sample_time in [*rotation_times, *position_times]:
+                if trim_frame is not None and sample_time > trim_frame:
+                    continue
+                channel_times.append(float(sample_time))
+    if not channel_times:
+        return 0.0
+    return max(channel_times) * frame_scale
 
 def available_package_animation_names(package: PackageBundle) -> list[str]:
     """Return animation names exported on the package root entity."""
@@ -586,7 +1369,9 @@ def available_package_animation_items(package: PackageBundle) -> list[tuple[str,
     """Return ``(clip_name, display_name)`` pairs for exported animations.
 
     ``clip_name`` is the canonical sidecar key used for lookups. ``display_name``
-    prefers localized metadata when present, then falls back to a shortened path.
+    prefers localized metadata when present, then falls back to the clip name
+    with the entity prefix stripped and humanized (e.g. ``ship_vtol_deploy``
+    → ``"Vtol Deploy"``).
     """
     clips = _animation_clips(package)
     preferred_exact_names = {
@@ -594,6 +1379,7 @@ def available_package_animation_items(package: PackageBundle) -> list[tuple[str,
         for clip in clips
         if _is_preferred_package_animation_name(str(clip.get("name", "")).strip())
     }
+    entity_prefix = _entity_name_prefix(package)
 
     fragment_items: dict[tuple[str, str], tuple[int, str, str]] = {}
     items: list[tuple[str, str]] = []
@@ -610,7 +1396,7 @@ def available_package_animation_items(package: PackageBundle) -> list[tuple[str,
             continue
         if preferred_exact_names and clip_name not in preferred_exact_names:
             continue
-        items.append((clip_name, _animation_display_name(clip)))
+        items.append((clip_name, _animation_display_name(clip, entity_prefix=entity_prefix)))
     items.extend((key, display_name) for _, key, display_name in fragment_items.values())
     return items
 
@@ -659,6 +1445,22 @@ def _fragment_animation_variants(clip: dict[str, Any]) -> list[tuple[str, str, i
     return variants
 
 
+def _animation_insert_label(animation_name: str | None, clip: dict[str, Any]) -> str:
+    """Return the visible label used for inserted Action/NLA strip names.
+
+    Keeps internal IDs canonical (raw clip/fragment key) but surfaces the
+    same human-readable fragment labels shown in the animation UI.
+    """
+
+    key = (animation_name or "").strip()
+    if key:
+        for variant_key, display_name, _, _ in _fragment_animation_variants(clip):
+            if variant_key == key and display_name:
+                return display_name
+        return key
+    return str(clip.get("name", "animation")).strip() or "animation"
+
+
 def _fragment_tags(fragment: dict[str, Any], key: str) -> list[str]:
     value = fragment.get(key)
     if isinstance(value, list):
@@ -689,6 +1491,77 @@ def _fragment_reverse_playback(fragment: dict[str, Any] | None) -> bool:
     return saw_animation
 
 
+def _fragment_semantic_reverse_playback(fragment: dict[str, Any] | None) -> bool:
+    """Infer reverse playback from fragment-tag/clip-name semantic mismatch.
+
+    Some Mannequin fragments encode transition intent via tags (Deploy,
+    Retract, Open, Close, etc.) but omit an explicit ``speed`` key. When the
+    referenced animation name carries the opposite semantic token (for example
+    ``frag_tags=["Deploy"]`` with ``..._retract``), engine-authored content
+    expects reverse playback even though speed metadata is absent.
+
+    This fallback is metadata-driven and only applies when no explicit speed is
+    authored on fragment animations.
+    """
+
+    if not isinstance(fragment, dict):
+        return False
+
+    animations = fragment.get("animations")
+    if not isinstance(animations, list) or not animations:
+        return False
+
+    # Explicit speed metadata is authoritative.
+    for animation in animations:
+        if isinstance(animation, dict) and "speed" in animation:
+            return False
+
+    tags = {tag.lower() for key in ("frag_tags", "tags") for tag in _fragment_tags(fragment, key)}
+    if not tags:
+        return False
+
+    semantic_pairs = (
+        ("deploy", "retract"),
+        ("open", "close"),
+        ("extend", "retract"),
+        ("unstow", "stow"),
+    )
+
+    forward_signal = False
+    reverse_signal = False
+    for animation in animations:
+        if not isinstance(animation, dict):
+            continue
+        raw_name = str(animation.get("name", "")).strip().lower()
+        if not raw_name:
+            continue
+        name = raw_name.rsplit("/", 1)[-1]
+        if "." in name:
+            name = name.split(".", 1)[0]
+        tokens = {token for token in re.split(r"[^a-z0-9]+", name) if token}
+        if not tokens:
+            continue
+
+        for positive, negative in semantic_pairs:
+            if positive in tags:
+                if positive in tokens:
+                    forward_signal = True
+                if negative in tokens:
+                    reverse_signal = True
+            if negative in tags:
+                if negative in tokens:
+                    forward_signal = True
+                if positive in tokens:
+                    reverse_signal = True
+
+    # Only flip when all semantic evidence points to an inverse pairing.
+    return reverse_signal and not forward_signal
+
+
+def _effective_fragment_reverse_playback(fragment: dict[str, Any] | None) -> bool:
+    return _fragment_reverse_playback(fragment) or _fragment_semantic_reverse_playback(fragment)
+
+
 def _fragment_endpoint_policy(fragment: dict[str, Any] | None, mode: str) -> str | None:
     """Map a Mannequin fragment + snap mode to a transition state policy.
 
@@ -698,10 +1571,10 @@ def _fragment_endpoint_policy(fragment: dict[str, Any] | None, mode: str) -> str
     another ("end"). We resolve start/end purely in clip-time:
 
     * ``start`` = first clip sample (clip-time = 0).
-    * ``end`` = the per-channel "other endpoint": the last sample for
-      non-cyclic channels, or the mid-clip extreme for cyclic channels
-      (those whose first and last samples coincide, e.g. Scorpius front
-      landing-gear which is bound in the stowed pose and arcs back to it).
+        * ``end`` = the per-channel "other endpoint": the last sample for
+            non-cyclic channels, or the mid-clip extreme for cyclic channels
+            (those whose first and last samples coincide, e.g. a front
+            landing-gear channel bound in the stowed pose that arcs back to it).
 
     For a forward fragment, ``snap_first`` -> ``start`` and ``snap_last`` ->
     ``end``. For a reverse-playback fragment (``speed = -1``), playback
@@ -728,7 +1601,7 @@ def _fragment_endpoint_policy(fragment: dict[str, Any] | None, mode: str) -> str
     if not (tags & transition_tags):
         return None
 
-    reverse = not _positive_speed_fragment(fragment)
+    reverse = _effective_fragment_reverse_playback(fragment)
     if normalized_mode == "snap_first":
         return "transition_end" if reverse else "transition_start"
     return "transition_start" if reverse else "transition_end"
@@ -760,6 +1633,441 @@ def package_animation_mode_map(package_root: bpy.types.Object) -> dict[str, str]
         if isinstance(key, str) and isinstance(value, str):
             result[key] = value
     return result
+
+
+def _iter_instance_actions(package_root: bpy.types.Object, instance_id: str) -> list[Any]:
+    actions: list[Any] = []
+    # Check live action references on each object
+    for obj in _iter_package_objects(package_root):
+        animation_data = getattr(obj, "animation_data", None)
+        action = getattr(animation_data, "action", None) if animation_data is not None else None
+        if action is None:
+            continue
+        try:
+            action_instance_id = action.get(_ANIMATION_INSTANCE_ID_PROP)
+        except Exception:
+            action_instance_id = None
+        if action_instance_id == instance_id:
+            actions.append(action)
+    # Also scan bpy.data.actions (live action is cleared to None for NLA-driven playback)
+    pkg_prefix = f"SB_{package_root.name}_"
+    for action in bpy.data.actions:
+        if not action.name.startswith(pkg_prefix):
+            continue
+        try:
+            action_instance_id = action.get(_ANIMATION_INSTANCE_ID_PROP)
+        except Exception:
+            action_instance_id = None
+        if action_instance_id == instance_id and action not in actions:
+            actions.append(action)
+    return actions
+
+
+def _iter_instance_strips(
+    package_root: bpy.types.Object,
+    instance_id: str,
+    instances: list[dict[str, Any]] | None = None,
+    fallback_track_name: str | None = None,
+) -> list[Any]:
+    # Build fallback track name and animation name prefix for matching
+    fallback_anim_prefix: str | None = None
+    if instances is not None or fallback_track_name is not None:
+        if fallback_track_name is None and instances is not None:
+            inst_meta = next((i for i in instances if i.get("id") == instance_id), None)
+            if inst_meta is not None:
+                anim_name = inst_meta.get("animation_name", "")
+                start = int(round(float(inst_meta.get("start_frame", 0))))
+                fallback_track_name = f"{anim_name}@{start}"
+        if fallback_track_name is not None:
+            fallback_anim_prefix = fallback_track_name.rsplit("@", 1)[0] + "@"
+    strips: list[Any] = []
+    for obj in _iter_package_objects(package_root):
+        animation_data = getattr(obj, "animation_data", None)
+        tracks = getattr(animation_data, "nla_tracks", None) if animation_data is not None else None
+        if tracks is None:
+            continue
+        for track in tracks:
+            for strip in track.strips:
+                matched = False
+                try:
+                    strip_instance_id = strip.get(_ANIMATION_INSTANCE_ID_PROP)
+                    if strip_instance_id == instance_id:
+                        matched = True
+                except Exception:
+                    pass
+                if not matched and fallback_track_name is not None and track.name == fallback_track_name:
+                    matched = True
+                # Last resort: match by animation name prefix (handles stale @N in track name)
+                if not matched and fallback_anim_prefix is not None and track.name.startswith(fallback_anim_prefix):
+                    matched = True
+                if matched:
+                    strips.append(strip)
+    return strips
+
+
+def _shift_action_frames(action: Any, delta: float) -> None:
+    if abs(delta) < 1e-9:
+        return
+    for fcurve in _action_fcurves(action):
+        keyframe_points = getattr(fcurve, "keyframe_points", None)
+        if keyframe_points is None:
+            continue
+        for keyframe in keyframe_points:
+            try:
+                keyframe.co.x = float(keyframe.co.x) + delta
+                keyframe.handle_left.x = float(keyframe.handle_left.x) + delta
+                keyframe.handle_right.x = float(keyframe.handle_right.x) + delta
+            except Exception:
+                continue
+        try:
+            fcurve.update()
+        except Exception:
+            continue
+
+
+def _resync_animation_instances_from_scene(
+    package_root: bpy.types.Object,
+    package: PackageBundle,
+    persist: bool = True,
+) -> list[dict[str, Any]]:
+    instances = _load_animation_instances(package_root)
+    by_id: dict[str, dict[str, Any]] = {
+        instance["id"]: dict(instance)
+        for instance in instances
+        if isinstance(instance.get("id"), str)
+    }
+    seen_ids: set[str] = set()
+
+    for obj in _iter_package_objects(package_root):
+        animation_data = getattr(obj, "animation_data", None)
+        if animation_data is None:
+            continue
+
+        action = getattr(animation_data, "action", None)
+        if action is not None:
+            try:
+                instance_id = action.get(_ANIMATION_INSTANCE_ID_PROP)
+                animation_name = action.get(_ANIMATION_INSTANCE_NAME_PROP)
+            except Exception:
+                instance_id, animation_name = None, None
+            if isinstance(instance_id, str) and instance_id and isinstance(animation_name, str) and animation_name:
+                seen_ids.add(instance_id)
+                clip = _find_animation_clip(package, animation_name)
+                if clip is None:
+                    continue
+                entry = by_id.get(instance_id)
+                if entry is None:
+                    entry = {
+                        "id": instance_id,
+                        "animation_name": animation_name,
+                        "start_frame": 1.0,
+                        "duration_frames": 0.0,
+                        "driven_hashes": sorted(_clip_bone_hashes(clip)),
+                    }
+                    by_id[instance_id] = entry
+                try:
+                    frame_low, frame_high = action.frame_range
+                    entry["start_frame"] = float(frame_low)
+                    entry["duration_frames"] = max(0.0, float(frame_high) - float(frame_low))
+                except Exception:
+                    pass
+
+        tracks = getattr(animation_data, "nla_tracks", None)
+        if tracks is None:
+            continue
+        for track in tracks:
+            for strip in track.strips:
+                try:
+                    instance_id = strip.get(_ANIMATION_INSTANCE_ID_PROP)
+                    animation_name = strip.get(_ANIMATION_INSTANCE_NAME_PROP)
+                except Exception:
+                    instance_id, animation_name = None, None
+                if not (isinstance(instance_id, str) and instance_id and isinstance(animation_name, str) and animation_name):
+                    continue
+                seen_ids.add(instance_id)
+                clip = _find_animation_clip(package, animation_name)
+                if clip is None:
+                    continue
+                entry = by_id.get(instance_id)
+                if entry is None:
+                    entry = {
+                        "id": instance_id,
+                        "animation_name": animation_name,
+                        "start_frame": float(getattr(strip, "frame_start", 1.0)),
+                        "duration_frames": max(0.0, float(getattr(strip, "frame_end", 1.0)) - float(getattr(strip, "frame_start", 1.0))),
+                        "driven_hashes": sorted(_clip_bone_hashes(clip)),
+                    }
+                    by_id[instance_id] = entry
+                else:
+                    strip_start = float(getattr(strip, "frame_start", entry.get("start_frame", 1.0)))
+                    entry["start_frame"] = min(float(entry.get("start_frame", strip_start)), strip_start)
+                    strip_duration = max(
+                        0.0,
+                        float(getattr(strip, "frame_end", strip_start)) - strip_start,
+                    )
+                    entry["duration_frames"] = max(float(entry.get("duration_frames", 0.0)), strip_duration)
+
+    resynced = [instance for instance_id, instance in by_id.items() if instance_id in seen_ids]
+
+    # When NLA-driven playback is active (anim.action == None) and NlaStrip
+    # IDProperties are not supported, seen_ids may be empty even though valid
+    # instances exist.  In that case, scan bpy.data.actions for actions tagged
+    # with instance IDs that belong to this package root, so the stored
+    # instances are confirmed to still have live data in the scene.
+    if not seen_ids:
+        pkg_prefix = f"SB_{package_root.name}_"
+        for action in bpy.data.actions:
+            if not action.name.startswith(pkg_prefix):
+                continue
+            try:
+                instance_id = action.get(_ANIMATION_INSTANCE_ID_PROP)
+            except Exception:
+                continue
+            if isinstance(instance_id, str) and instance_id and instance_id in by_id:
+                seen_ids.add(instance_id)
+        resynced = [instance for instance_id, instance in by_id.items() if instance_id in seen_ids]
+    resynced.sort(key=lambda item: (str(item.get("animation_name", "")), float(item.get("start_frame", 1.0))))
+    if persist:
+        _store_animation_instances(package_root, resynced)
+    return resynced
+
+
+def package_animation_instances(
+    package_root: bpy.types.Object,
+    package: PackageBundle | None = None,
+    persist: bool = True,
+) -> list[dict[str, Any]]:
+    if package is None:
+        package = _load_package_from_root(package_root)
+    return _resync_animation_instances_from_scene(package_root, package, persist=persist)
+
+
+def animation_overlap_warnings(
+    package_root: bpy.types.Object,
+    animation_name: str,
+    start_frame: float,
+    context_scene: Any | None = None,
+    fps_policy: str = FPS_POLICY_ADAPT_SCENE,
+    package: PackageBundle | None = None,
+) -> list[str]:
+    if package is None:
+        package = _load_package_from_root(package_root)
+    clip = _find_animation_clip(package, animation_name)
+    if clip is None:
+        return []
+    scene = context_scene if context_scene is not None else getattr(bpy.context, "scene", None)
+    if scene is None:
+        frame_scale = 1.0
+    else:
+        frame_scale = reconcile_animation_fps(scene, clip.get("fps"), fps_policy).frame_scale
+    duration_frames = _clip_duration_frames(clip, frame_scale)
+    instances = package_animation_instances(package_root, package)
+    return _animation_overlap_warnings(
+        animation_name,
+        float(start_frame),
+        duration_frames,
+        _clip_bone_hashes(clip),
+        instances,
+    )
+
+
+def update_animation_instance_start_frame(
+    package_root: bpy.types.Object,
+    instance_id: str,
+    start_frame: float,
+    package: PackageBundle | None = None,
+) -> bool:
+    if package is None:
+        package = _load_package_from_root(package_root)
+    instances = package_animation_instances(package_root, package)
+    target = next((instance for instance in instances if instance.get("id") == instance_id), None)
+    if target is None:
+        return False
+    old_start = float(target.get("start_frame", 1.0))
+    new_start = float(start_frame)
+    delta = new_start - old_start
+    if abs(delta) < 1e-9:
+        return True
+    anim_name = target.get("animation_name", "")
+    old_track_name = f"{anim_name}@{int(round(old_start))}"
+    new_track_name = f"{anim_name}@{int(round(new_start))}"
+    for action in _iter_instance_actions(package_root, instance_id):
+        _shift_action_frames(action, delta)
+    for strip in _iter_instance_strips(package_root, instance_id, fallback_track_name=old_track_name):
+        try:
+            strip.frame_start = float(strip.frame_start) + delta
+            strip.frame_end = float(strip.frame_end) + delta
+        except Exception:
+            continue
+    # Rename NLA tracks so future lookups find them under the new start frame
+    for obj in _iter_package_objects(package_root):
+        animation_data = getattr(obj, "animation_data", None)
+        tracks = getattr(animation_data, "nla_tracks", None) if animation_data is not None else None
+        if tracks is None:
+            continue
+        for track in tracks:
+            if track.name == old_track_name:
+                try:
+                    track.name = new_track_name
+                except Exception:
+                    pass
+    for instance in instances:
+        if instance.get("id") == instance_id:
+            instance["start_frame"] = new_start
+            break
+    _store_animation_instances(package_root, instances)
+    return True
+
+
+def delete_animation_instance(
+    package_root: bpy.types.Object,
+    instance_id: str,
+    package: PackageBundle | None = None,
+) -> bool:
+    if package is None:
+        package = _load_package_from_root(package_root)
+    instances = package_animation_instances(package_root, package)
+    before = len(instances)
+    instances_before = list(instances)
+    instances = [instance for instance in instances if instance.get("id") != instance_id]
+    if len(instances) == before:
+        return False
+
+    for action in _iter_instance_actions(package_root, instance_id):
+        for obj in _iter_package_objects(package_root):
+            animation_data = getattr(obj, "animation_data", None)
+            if animation_data is not None and getattr(animation_data, "action", None) is action:
+                try:
+                    animation_data.action = None
+                except Exception:
+                    pass
+        try:
+            bpy.data.actions.remove(action, do_unlink=True)
+        except Exception:
+            pass
+
+    for obj in _iter_package_objects(package_root):
+        animation_data = getattr(obj, "animation_data", None)
+        tracks = getattr(animation_data, "nla_tracks", None) if animation_data is not None else None
+        if tracks is None:
+            continue
+        for track in list(tracks):
+            # Match by IDProperty (may fail on NlaStrip) or by track name pattern
+            track_matches = False
+            for strip in list(track.strips):
+                try:
+                    strip_instance_id = strip.get(_ANIMATION_INSTANCE_ID_PROP)
+                except Exception:
+                    strip_instance_id = None
+                if strip_instance_id == instance_id:
+                    track_matches = True
+                    break
+            # Fallback: match track by name "animation_name@start_frame"
+            if not track_matches:
+                track_name = track.name
+                track_matches = any(
+                    track_name == f"{inst.get('animation_name')}@{int(round(inst.get('start_frame', 0)))}"
+                    for inst in [next((i for i in instances_before if i.get('id') == instance_id), None)]
+                    if inst is not None
+                )
+            if not track_matches:
+                continue
+            for strip in list(track.strips):
+                try:
+                    track.strips.remove(strip)
+                except Exception:
+                    pass
+            try:
+                tracks.remove(track)
+            except Exception:
+                pass
+
+    _store_animation_instances(package_root, instances)
+    return True
+
+
+def set_animation_instance_muted(
+    package_root: bpy.types.Object,
+    instance_id: str,
+    muted: bool | None = None,
+    package: PackageBundle | None = None,
+) -> bool | None:
+    """Mute/unmute one animation instance by id.
+
+    Returns:
+      - ``True`` when the instance is muted after the call
+      - ``False`` when the instance is unmuted after the call
+      - ``None`` when the instance could not be resolved
+    """
+    if package is None:
+        package = _load_package_from_root(package_root)
+    instances = package_animation_instances(package_root, package)
+    target = next((instance for instance in instances if instance.get("id") == instance_id), None)
+    if target is None:
+        return None
+
+    track_name = f"{target.get('animation_name', '')}@{int(round(float(target.get('start_frame', 1.0))))}"
+    current_state: bool | None = None
+    tracks: list[Any] = []
+    for obj in _iter_package_objects(package_root):
+        animation_data = getattr(obj, "animation_data", None)
+        nla_tracks = getattr(animation_data, "nla_tracks", None) if animation_data is not None else None
+        if nla_tracks is None:
+            continue
+        for track in nla_tracks:
+            if track.name == track_name:
+                tracks.append(track)
+                if current_state is None:
+                    current_state = bool(track.mute)
+
+    if not tracks:
+        return None
+
+    next_state = (not bool(current_state)) if muted is None else bool(muted)
+    for track in tracks:
+        try:
+            track.mute = next_state
+        except Exception:
+            continue
+    return next_state
+
+
+def solo_animation_instance(
+    package_root: bpy.types.Object,
+    instance_id: str,
+    package: PackageBundle | None = None,
+) -> bool:
+    """Solo one animation instance by muting all other tracked instance tracks."""
+    if package is None:
+        package = _load_package_from_root(package_root)
+    instances = package_animation_instances(package_root, package)
+    target = next((instance for instance in instances if instance.get("id") == instance_id), None)
+    if target is None:
+        return False
+
+    track_names = {
+        f"{instance.get('animation_name', '')}@{int(round(float(instance.get('start_frame', 1.0))))}"
+        for instance in instances
+    }
+    target_track_name = f"{target.get('animation_name', '')}@{int(round(float(target.get('start_frame', 1.0))))}"
+
+    target_seen = False
+    for obj in _iter_package_objects(package_root):
+        animation_data = getattr(obj, "animation_data", None)
+        nla_tracks = getattr(animation_data, "nla_tracks", None) if animation_data is not None else None
+        if nla_tracks is None:
+            continue
+        for track in nla_tracks:
+            if track.name not in track_names:
+                continue
+            should_mute = track.name != target_track_name
+            if track.name == target_track_name:
+                target_seen = True
+            try:
+                track.mute = should_mute
+            except Exception:
+                continue
+    return target_seen
 
 
 def package_animation_diagnostics(
@@ -836,6 +2144,7 @@ def apply_animation_mode_to_package_root(
     package_root: bpy.types.Object,
     animation_name: str,
     mode: str,
+    fps_policy: str = FPS_POLICY_ADAPT_SCENE,
 ) -> int:
     """Apply one animation in one of: none, snap_first, snap_last, action."""
     package = _load_package_from_root(package_root)
@@ -843,7 +2152,7 @@ def apply_animation_mode_to_package_root(
     if selection is None:
         raise RuntimeError(f"Animation '{animation_name}' not found in package sidecar")
     clip, fragment = selection
-    reverse_playback = _fragment_reverse_playback(fragment)
+    reverse_playback = _effective_fragment_reverse_playback(fragment)
 
     normalized_mode = mode.strip().lower()
     if normalized_mode not in {"none", "snap_first", "snap_last", "action"}:
@@ -886,8 +2195,10 @@ def apply_animation_mode_to_package_root(
                     package,
                     other_clip,
                     other_mode,
+                    animation_name=other_name,
                     fragment=other_fragment,
-                    reverse_playback=_fragment_reverse_playback(other_fragment),
+                    reverse_playback=_effective_fragment_reverse_playback(other_fragment),
+                    fps_policy=fps_policy,
                 )
 
     updated = _apply_animation_mode_for_clip(
@@ -896,13 +2207,41 @@ def apply_animation_mode_to_package_root(
         package,
         clip,
         normalized_mode,
+        animation_name=animation_name,
         fragment=fragment,
         reverse_playback=reverse_playback,
+        fps_policy=fps_policy,
     )
 
     mode_map[animation_name] = normalized_mode
     package_root[_ANIMATION_MODES_PROP] = json.dumps(mode_map, separators=(",", ":"), sort_keys=True)
     return updated
+
+
+def insert_animation_clip_at_frame(
+    context: bpy.types.Context,
+    package_root: bpy.types.Object,
+    animation_name: str,
+    frame: float | None = None,
+    fps_policy: str = FPS_POLICY_ADAPT_SCENE,
+) -> int:
+    """Insert *animation_name* onto the NLA timeline at *frame*.
+
+    If *frame* is ``None`` the current scene frame is used (identical to the
+    UI "Insert" button behaviour).  Returns the number of objects updated.
+    Uses the same internal path as ``apply_animation_mode_to_package_root``
+    with ``mode='action'`` so all instance tracking, NLA strip creation, and
+    multi-clip switching logic applies.
+    """
+    if frame is not None:
+        context.scene.frame_set(int(round(float(frame))))
+    return apply_animation_mode_to_package_root(
+        context,
+        package_root,
+        animation_name,
+        "action",
+        fps_policy=fps_policy,
+    )
 
 
 def _apply_animation_mode_for_clip(
@@ -911,8 +2250,10 @@ def _apply_animation_mode_for_clip(
     package: PackageBundle,
     clip: dict[str, Any],
     mode: str,
+    animation_name: str | None = None,
     fragment: dict[str, Any] | None = None,
     reverse_playback: bool = False,
+    fps_policy: str = FPS_POLICY_ADAPT_SCENE,
 ) -> int:
     normalized_mode = mode.strip().lower()
     if normalized_mode == "none":
@@ -924,7 +2265,7 @@ def _apply_animation_mode_for_clip(
         )
         sample_frame_index = (-1 if frame_index == 0 else 0) if reverse_playback and endpoint_policy == "literal" else frame_index
         cyclic_target_frame = _clip_cyclic_transition_target_frame(clip)
-        target_frame = cyclic_target_frame if normalized_mode == "snap_last" and not reverse_playback else None
+        target_frame = cyclic_target_frame if endpoint_policy == "transition_end" else None
         updated = _apply_animation_pose(
             package_root,
             clip,
@@ -937,20 +2278,40 @@ def _apply_animation_mode_for_clip(
             paired = _paired_clip_for_snap(package, clip, frame_index)
             if paired is not None:
                 paired_clip, paired_frame_index = paired
-                paired_policy = _snap_endpoint_policy(str(paired_clip.get("name", "")), normalized_mode)
+                paired_fragment = paired_clip.get("source_fragment") if isinstance(paired_clip, dict) else None
+                if not isinstance(paired_fragment, dict):
+                    paired_fragment = None
+                paired_policy = _fragment_endpoint_policy(paired_fragment, normalized_mode) or _snap_endpoint_policy(
+                    str(paired_clip.get("name", "")), normalized_mode
+                )
+                paired_reverse = _effective_fragment_reverse_playback(paired_fragment)
+                paired_sample_frame_index = (
+                    (-1 if paired_frame_index == 0 else 0)
+                    if paired_reverse and paired_policy == "literal"
+                    else paired_frame_index
+                )
                 paired_cyclic_target_frame = _clip_cyclic_transition_target_frame(paired_clip)
-                paired_target_frame = paired_cyclic_target_frame if normalized_mode == "snap_last" else None
+                paired_target_frame = (
+                    paired_cyclic_target_frame if paired_policy == "transition_end" else None
+                )
                 updated = _apply_animation_pose(
                     package_root,
                     paired_clip,
-                    paired_frame_index,
+                    paired_sample_frame_index,
                     paired_policy,
                     target_frame=paired_target_frame,
                     anchor_frame=paired_cyclic_target_frame,
                 )
         return updated
     if normalized_mode == "action":
-        return _insert_animation_action(context, package_root, clip, reverse_playback=reverse_playback)
+        return _insert_animation_action(
+            context,
+            package_root,
+            clip,
+            animation_name=animation_name,
+            reverse_playback=reverse_playback,
+            fps_policy=fps_policy,
+        )
     raise RuntimeError(f"Unsupported animation mode: {mode}")
 
 
@@ -980,7 +2341,33 @@ def _strip_animation_prefix(name: str) -> str:
     return normalized
 
 
-def _animation_display_name(clip: dict[str, Any]) -> str:
+def _entity_name_prefix(package: PackageBundle) -> str:
+    """Derive a lowercase entity name prefix for stripping from clip names.
+
+    Returns e.g. ``"my_ship"`` from
+    ``entity_name="EntityClassDefinition.My_Ship"``.
+    """
+    try:
+        entity_name = package.scene.root_entity.entity_name
+    except AttributeError:
+        return ""
+    if not entity_name:
+        return ""
+    if "." in entity_name:
+        entity_name = entity_name.rsplit(".", 1)[-1]
+    return entity_name.lower()
+
+
+def _animation_display_name(
+    clip: dict[str, Any], entity_prefix: str | None = None
+) -> str:
+    """Return a human-readable display name for an animation clip.
+
+    Checks localization keys first.  When the fallback raw clip name is used
+    and *entity_prefix* is provided, the prefix (e.g. ``"my_ship_"``) is
+    stripped and the remainder is title-cased (e.g. ``"my_ship_vtol_deploy"``
+    → ``"Vtol Deploy"``).
+    """
     for key in ("localized_name", "display_name", "label", "title", "ui_name"):
         value = clip.get(key)
         if isinstance(value, str):
@@ -1000,7 +2387,13 @@ def _animation_display_name(clip: dict[str, Any]) -> str:
     raw_name = str(clip.get("name", "")).strip()
     shortened = _strip_animation_prefix(raw_name)
     filename = Path(shortened).name if shortened else ""
-    return filename or shortened or raw_name
+    base = filename or shortened or raw_name
+    if entity_prefix:
+        prefix_with_sep = entity_prefix.rstrip("_") + "_"
+        if base.lower().startswith(prefix_with_sep):
+            base = base[len(prefix_with_sep):]
+        return _humanize_fragment_part(base)
+    return base
 
 
 def _hydrate_animation_clip(package: PackageBundle, clip: dict[str, Any]) -> dict[str, Any]:
@@ -1159,6 +2552,13 @@ def _position_distance(a: list[Any], b: list[Any]) -> float:
     return (dx * dx + dy * dy + dz * dz) ** 0.5
 
 
+def _vec_distance_sq(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
+    dx = float(a[0]) - float(b[0])
+    dy = float(a[1]) - float(b[1])
+    dz = float(a[2]) - float(b[2])
+    return dx * dx + dy * dy + dz * dz
+
+
 def _quat_mul(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
     aw, ax, ay, az = a
     bw, bx, by, bz = b
@@ -1179,6 +2579,51 @@ def _quat_align(reference: tuple[float, float, float, float], q: tuple[float, fl
     if reference[0] * q[0] + reference[1] * q[1] + reference[2] * q[2] + reference[3] * q[3] < 0.0:
         return (-q[0], -q[1], -q[2], -q[3])
     return q
+
+
+_ANIMATION_SAMPLE_DECODERS = ("identity", "source")
+_BIND_POSITION_EPSILON_METERS = 0.01
+_BIND_ROTATION_EPSILON_RADIANS = 0.025
+
+
+def _quat_distance_sq(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> float:
+    aligned = _quat_align(b, a)
+    return (
+        (aligned[0] - b[0]) ** 2
+        + (aligned[1] - b[1]) ** 2
+        + (aligned[2] - b[2]) ** 2
+        + (aligned[3] - b[3]) ** 2
+    )
+
+
+def _bind_equivalent_position(
+    sample: tuple[float, float, float],
+    bind: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    if _vec_distance_sq(sample, bind) <= (
+        _BIND_POSITION_EPSILON_METERS * _BIND_POSITION_EPSILON_METERS
+    ):
+        return bind
+    return sample
+
+
+def _bind_equivalent_rotation(
+    sample: tuple[float, float, float, float],
+    bind: tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
+    dot = abs(
+        sample[0] * bind[0]
+        + sample[1] * bind[1]
+        + sample[2] * bind[2]
+        + sample[3] * bind[3]
+    )
+    dot = max(0.0, min(1.0, dot))
+    if 2.0 * math.acos(dot) <= _BIND_ROTATION_EPSILON_RADIANS:
+        return bind
+    return sample
 
 
 def _positive_speed_fragment(fragment: dict[str, Any]) -> bool:
@@ -1244,6 +2689,46 @@ def _series_cyclic_target_time(
     return False, target_time
 
 
+def _clip_start_rotation(clip: dict[str, Any]) -> tuple[float, float, float, float] | None:
+    """Return the clip's DBA-metadata `start_rotation` as a Blender wxyz
+    quaternion tuple, or None when the field is absent (CAF-only clips)
+    or malformed.
+
+    The exporter (`crates/starbreaker-3d/src/animation.rs::clip_to_json`)
+    already converts the on-disk CryEngine xyzw quat into Blender wxyz
+    convention (see `cry_xyzw_to_blender_wxyz`), so consumers here just
+    need to validate the shape and coerce to floats.
+    """
+
+    raw = clip.get("start_rotation")
+    if not isinstance(raw, (list, tuple)) or len(raw) < 4:
+        return None
+    try:
+        return (float(raw[0]), float(raw[1]), float(raw[2]), float(raw[3]))
+    except (TypeError, ValueError):
+        return None
+
+
+def _clip_start_position(clip: dict[str, Any]) -> tuple[float, float, float] | None:
+    """Return the clip's DBA-metadata `start_position` as a Blender Z-up
+    XYZ tuple, or None when the field is absent (CAF-only clips) or
+    malformed.
+
+    The exporter applies the same CryEngine→Blender axis swap used for
+    sample positions (`(cx, cy, cz) → (cx, -cz, cy)`), so the value is
+    already in Blender frame and can be used directly as the anchor in
+    `bind + (sample - anchor)`.
+    """
+
+    raw = clip.get("start_position")
+    if not isinstance(raw, (list, tuple)) or len(raw) < 3:
+        return None
+    try:
+        return (float(raw[0]), float(raw[1]), float(raw[2]))
+    except (TypeError, ValueError):
+        return None
+
+
 def _clip_cyclic_transition_target_frame(clip: dict[str, Any]) -> float | None:
     if not _clip_has_transition_fragment(clip):
         return None
@@ -1251,7 +2736,10 @@ def _clip_cyclic_transition_target_frame(clip: dict[str, Any]) -> float | None:
     position_targets: list[float] = []
     rotation_moving = 0
     rotation_targets: list[float] = []
-    for channel in _normalized_bone_channels(clip).values():
+    for channel_variants in _normalized_bone_channels(clip).values():
+        if not channel_variants:
+            continue
+        channel = channel_variants[0]
         positions = channel.get("position")
         if isinstance(positions, list):
             position_times = _channel_times(channel, "position_time", len(positions))
@@ -1286,12 +2774,56 @@ def _clip_cyclic_transition_target_frame(clip: dict[str, Any]) -> float | None:
     return cyclic_targets[len(cyclic_targets) // 2]
 
 
+def _object_source_name_candidates(obj: bpy.types.Object) -> list[str]:
+    names: list[str] = []
+    seen_names: set[str] = set()
+
+    def _add_name(value: Any) -> None:
+        if not isinstance(value, str):
+            return
+        name = value.strip()
+        if not name or name in seen_names:
+            return
+        seen_names.add(name)
+        names.append(name)
+
+    _add_name(obj.get(PROP_SOURCE_NODE_NAME))
+    _add_name(obj.name)
+
+    # Native .blend linked hierarchies can prefix source animation node names
+    # with parent path + instance indices, e.g. geo_nose_167_anim_wing_top_left.
+    # Hash suffixes after numeric path tokens so those objects still match the
+    # source CAF/DBA bone hashes without asset-specific name branches.
+    for raw_name in list(names):
+        parts = raw_name.split("_")
+        for index, part in enumerate(parts[:-1]):
+            if not part.isdigit():
+                continue
+            _add_name("_".join(parts[index + 1:]))
+        while len(parts) > 1 and parts[-1].isdigit():
+            parts = parts[:-1]
+            _add_name("_".join(parts))
+
+    return names
+
+
 def _object_bone_hash(obj: bpy.types.Object) -> str:
+    return _object_bone_hash_keys(obj)[0]
+
+
+def _object_bone_hash_keys(obj: bpy.types.Object) -> list[str]:
     import zlib
 
-    source_name = str(obj.get(PROP_SOURCE_NODE_NAME, obj.name) or "")
-    digest = zlib.crc32(source_name.encode("utf-8")) & 0xFFFFFFFF
-    return f"0x{digest:08X}"
+    keys: list[str] = []
+    seen_keys: set[str] = set()
+    for name in _object_source_name_candidates(obj):
+        digest = zlib.crc32(name.encode("utf-8")) & 0xFFFFFFFF
+        key = f"0x{digest:08X}"
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        keys.append(key)
+    return keys
 
 
 def _canonical_bone_hash_key(value: Any) -> str | None:
@@ -1309,19 +2841,334 @@ def _canonical_bone_hash_key(value: Any) -> str | None:
     return None
 
 
-def _normalized_bone_channels(clip: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def _normalized_bone_channels(clip: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     bones = clip.get("bones")
     if not isinstance(bones, dict):
         return {}
-    normalized: dict[str, dict[str, Any]] = {}
-    for raw_key, channel in bones.items():
-        if not isinstance(channel, dict):
+    normalized: dict[str, list[dict[str, Any]]] = {}
+    for raw_key, raw_channel in bones.items():
+        channels: list[dict[str, Any]] = []
+        if isinstance(raw_channel, dict):
+            channels.append(raw_channel)
+        elif isinstance(raw_channel, list):
+            channels.extend(c for c in raw_channel if isinstance(c, dict))
+        if not channels:
             continue
         key = _canonical_bone_hash_key(raw_key)
         if key is None:
             continue
-        normalized[key] = channel
+        normalized[key] = channels
     return normalized
+
+
+def _provenance_tokens(value: Any) -> set[str]:
+    if not isinstance(value, str) or not value:
+        return set()
+    text = value.replace("\\", "/").lower()
+    stem = Path(text).stem
+    return {token for token in re.split(r"[^a-z0-9]+", stem) if len(token) > 1}
+
+
+def _asset_stem(value: Any) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    stem = Path(value.replace("\\", "/").lower()).stem
+    while True:
+        stripped = re.sub(r"_(?:lod|tex|mip)\d+$", "", stem)
+        if stripped == stem:
+            return stem
+        stem = stripped
+
+
+def _asset_stem_score(asset_path: Any, channel_skeleton: str) -> int:
+    asset_stem = _asset_stem(asset_path)
+    skeleton_stem = _asset_stem(channel_skeleton)
+    if not asset_stem or not skeleton_stem:
+        return 0
+    if asset_stem == skeleton_stem:
+        return 14
+    if asset_stem.startswith(f"{skeleton_stem}_"):
+        return 10
+    return 0
+
+
+_DIRECTION_TOKENS = {"front", "rear", "left", "right", "upper", "lower", "top", "bottom"}
+
+
+def _object_provenance_tokens(obj: bpy.types.Object, *, include_self: bool = True) -> set[str]:
+    tokens: set[str] = set()
+    current = obj if include_self else obj.parent
+    visited = 0
+    while current is not None and visited < 16:
+        visited += 1
+        for value in (
+            current.get(PROP_SOURCE_NODE_NAME),
+            current.get(PROP_TEMPLATE_PATH),
+            current.name,
+        ):
+            tokens.update(_provenance_tokens(value))
+        current = current.parent
+    return tokens
+
+
+def _channel_variant_score(obj: bpy.types.Object, channel: dict[str, Any]) -> int:
+    obj_source = str(obj.get(PROP_SOURCE_NODE_NAME, "") or "").strip().lower()
+    obj_template = str(obj.get(PROP_TEMPLATE_PATH, "") or "").strip().lower()
+    obj_mesh_asset = str(obj.get(PROP_MESH_ASSET, "") or "").strip().lower()
+    channel_source = str(channel.get("source_node_name", "") or "").strip().lower()
+    channel_skeleton = str(channel.get("source_skeleton_path", "") or "").strip().lower()
+
+    score = 0
+    obj_sources = [name.lower() for name in _object_source_name_candidates(obj)]
+    if channel_source:
+        for source in obj_sources:
+            if source == channel_source:
+                score += 6
+                break
+            if source.endswith(channel_source) or channel_source.endswith(source):
+                score += 4
+                break
+
+    if obj_template and channel_skeleton:
+        template_tokens = _provenance_tokens(obj_template)
+        skeleton_tokens = _provenance_tokens(channel_skeleton)
+        overlap = template_tokens.intersection(skeleton_tokens)
+        score += min(len(overlap), 4)
+
+        template_dirs = template_tokens.intersection(_DIRECTION_TOKENS)
+        skeleton_dirs = skeleton_tokens.intersection(_DIRECTION_TOKENS)
+        if template_dirs and skeleton_dirs:
+            direction_overlap = template_dirs.intersection(skeleton_dirs)
+            if direction_overlap:
+                score += 6 + len(direction_overlap)
+            else:
+                score -= 6
+
+    if channel_skeleton:
+        score += _asset_stem_score(obj_mesh_asset, channel_skeleton)
+        score += _asset_stem_score(obj_template, channel_skeleton)
+
+        object_tokens = _object_provenance_tokens(obj)
+        skeleton_tokens = _provenance_tokens(channel_skeleton)
+        overlap = object_tokens.intersection(skeleton_tokens)
+        score += min(len(overlap), 4)
+
+        direction_tokens = _object_provenance_tokens(obj, include_self=False) or object_tokens
+        object_dirs = direction_tokens.intersection(_DIRECTION_TOKENS)
+        skeleton_dirs = skeleton_tokens.intersection(_DIRECTION_TOKENS)
+        if object_dirs and skeleton_dirs:
+            direction_overlap = object_dirs.intersection(skeleton_dirs)
+            if direction_overlap:
+                score += 6 + len(direction_overlap)
+            else:
+                score -= 6
+
+    if obj_source and channel_skeleton and obj_source in channel_skeleton:
+        score += 2
+    return score
+
+
+def _select_channel_variant_for_object(
+    obj: bpy.types.Object,
+    channels: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if not channels:
+        return None
+    if len(channels) == 1:
+        return channels[0]
+    scored = [(index, _channel_variant_score(obj, channel)) for index, channel in enumerate(channels)]
+    best_index, _best_score = max(scored, key=lambda item: (item[1], -item[0]))
+    return channels[best_index]
+
+
+def _position_track_matches_bind(
+    bind_loc: tuple[float, float, float],
+    positions: list[Any],
+    *,
+    decoder: str = "identity",
+    tol: float = 0.15,
+) -> bool:
+    tol_sq = tol * tol
+    for sample in positions:
+        if not isinstance(sample, list) or len(sample) < 3:
+            continue
+        decoded = _decode_animation_position(sample, decoder)
+        dist_sq = (
+            (decoded[0] - bind_loc[0]) ** 2
+            + (decoded[1] - bind_loc[1]) ** 2
+            + (decoded[2] - bind_loc[2]) ** 2
+        )
+        if dist_sq <= tol_sq:
+            return True
+    return False
+
+
+def _shared_hash_position_policy(
+    groups: dict[str, list[tuple[bpy.types.Object, dict[str, Any], dict[str, Any]]]],
+    _legacy_bones: Any | None = None,
+    *,
+    decoder: str = "identity",
+) -> dict[int, bool]:
+    """Return per-object position eligibility for duplicate-hash channels.
+
+    Absolute parent-local position tracks work for a shared hash only when the
+    receiving object's bind pose is compatible with at least one sampled
+    position. If a hash is shared across multiple instances and only a subset of
+    those binds match the track, suppress position on the incompatible objects
+    while still allowing rotation.
+    """
+
+    policy: dict[int, bool] = {}
+    for key, entries in groups.items():
+        if len(entries) <= 1:
+            continue
+        matches: list[bool] = []
+        for entry in entries:
+            if len(entry) == 3:
+                _obj, bind_data, channel = entry
+            elif len(entry) == 2:
+                _obj, bind_data = entry
+                if isinstance(_legacy_bones, dict):
+                    channel = _legacy_bones.get(key)
+                else:
+                    channel = None
+            else:
+                matches.append(False)
+                continue
+            if not isinstance(channel, dict):
+                matches.append(False)
+                continue
+            positions = channel.get("position")
+            if not isinstance(positions, list) or not positions:
+                matches.append(True)
+                continue
+            bind_location = bind_data.get("location")
+            if not isinstance(bind_location, list) or len(bind_location) < 3:
+                matches.append(False)
+                continue
+            bind_loc = (float(bind_location[0]), float(bind_location[1]), float(bind_location[2]))
+            matches.append(_position_track_matches_bind(bind_loc, positions, decoder=decoder))
+
+        if not any(matches) or all(matches):
+            continue
+
+        for entry, matched in zip(entries, matches):
+            if len(entry) >= 1:
+                obj = entry[0]
+            else:
+                continue
+            policy[id(obj)] = matched
+    return policy
+
+
+def _animation_sample_decoder_score(
+    candidates: list[tuple[bpy.types.Object, str, dict[str, Any], dict[str, Any]]],
+    decoder: str,
+) -> tuple[float, int]:
+    score = 0.0
+    evidence = 0
+    for _obj, _key, bind_data, channel in candidates:
+        bind_location = bind_data.get("location")
+        positions = channel.get("position")
+        if (
+            isinstance(bind_location, list)
+            and len(bind_location) >= 3
+            and isinstance(positions, list)
+        ):
+            bind_loc = (float(bind_location[0]), float(bind_location[1]), float(bind_location[2]))
+            samples = [
+                sample
+                for sample in (positions[:1] + positions[-1:])
+                if isinstance(sample, list) and len(sample) >= 3
+            ]
+            if samples:
+                best = min(
+                    _vec_distance_sq(_decode_animation_position(sample, decoder), bind_loc)
+                    for sample in samples
+                )
+                score += min(best, 1.0)
+                evidence += 1
+
+        bind_rotation = bind_data.get("rotation_quaternion")
+        rotations = channel.get("rotation")
+        if (
+            isinstance(bind_rotation, list)
+            and len(bind_rotation) >= 4
+            and isinstance(rotations, list)
+        ):
+            bind_rot = (
+                float(bind_rotation[0]),
+                float(bind_rotation[1]),
+                float(bind_rotation[2]),
+                float(bind_rotation[3]),
+            )
+            samples = [
+                sample
+                for sample in (rotations[:1] + rotations[-1:])
+                if isinstance(sample, list) and len(sample) >= 4
+            ]
+            if samples:
+                best = min(
+                    _quat_distance_sq(_decode_animation_rotation(sample, decoder), bind_rot)
+                    for sample in samples
+                )
+                score += min(best * 4.0, 1.0)
+                evidence += 1
+
+    return score, evidence
+
+
+def _select_animation_sample_decoder(
+    candidates: list[tuple[bpy.types.Object, str, dict[str, Any], dict[str, Any]]],
+) -> str:
+    scored = [
+        (_animation_sample_decoder_score(candidates, decoder), decoder)
+        for decoder in _ANIMATION_SAMPLE_DECODERS
+    ]
+    scored = [item for item in scored if item[0][1] > 0]
+    if not scored:
+        return "identity"
+    scored.sort(key=lambda item: (item[0][0] / item[0][1], item[0][0], item[1] != "identity"))
+    best_score, best_decoder = scored[0]
+    identity = next((score for score, decoder in scored if decoder == "identity"), None)
+    if identity is not None:
+        best_average = best_score[0] / best_score[1]
+        identity_average = identity[0] / identity[1]
+        if abs(identity_average - best_average) <= 1.0e-8:
+            return "identity"
+    return best_decoder
+
+
+def _animation_bone_candidates(
+    package_root: bpy.types.Object,
+    bones: dict[str, list[dict[str, Any]]],
+) -> tuple[list[tuple[bpy.types.Object, str, dict[str, Any], dict[str, Any]]], dict[int, bool], str]:
+    candidates: list[tuple[bpy.types.Object, str, dict[str, Any], dict[str, Any]]] = []
+    groups: dict[str, list[tuple[bpy.types.Object, dict[str, Any], dict[str, Any]]]] = {}
+
+    for obj in _iter_candidate_bone_objects(package_root):
+        key = None
+        variants = None
+        for candidate_key in _object_bone_hash_keys(obj):
+            key = _canonical_bone_hash_key(candidate_key) or candidate_key
+            variants = bones.get(key)
+            if isinstance(variants, list) and variants:
+                break
+        if key is None or not isinstance(variants, list) or not variants:
+            continue
+        channel = _select_channel_variant_for_object(obj, variants)
+        if not isinstance(channel, dict):
+            continue
+        _store_bind_pose_once(obj)
+        bind_data = _bind_pose_payload(obj)
+        if bind_data is None:
+            continue
+
+        candidates.append((obj, key, bind_data, channel))
+        groups.setdefault(key, []).append((obj, bind_data, channel))
+
+    decoder = _select_animation_sample_decoder(candidates)
+    return candidates, _shared_hash_position_policy(groups, decoder=decoder), decoder
 
 
 def _iter_candidate_bone_objects(package_root: bpy.types.Object) -> list[bpy.types.Object]:
@@ -1441,6 +3288,9 @@ def _apply_best_channel_transform(
     endpoint_policy: str,
     target_frame: float | None = None,
     anchor_frame: float | None = None,
+    allow_rotation: bool = True,
+    allow_position: bool = True,
+    sample_decoder: str = "identity",
 ) -> None:
     _restore_object_bind_pose(obj, bind_data)
 
@@ -1458,63 +3308,24 @@ def _apply_best_channel_transform(
         float(bind_quaternion[3]),
     )
 
-    def _rotation_score(sample: list[Any]) -> float:
-        w = float(sample[0])
-        x = float(sample[1])
-        y = float(sample[2])
-        z = float(sample[3])
-        dot = abs(bind_rot[0] * w + bind_rot[1] * x + bind_rot[2] * y + bind_rot[3] * z)
-        dot = max(0.0, min(1.0, dot))
-        return 2.0 * math.acos(dot)
-
-    def _position_score(sample: list[Any]) -> float:
-        decoded = _decode_animation_position(sample, "identity")
-        dx = decoded[0] - bind_loc[0]
-        dy = decoded[1] - bind_loc[1]
-        dz = decoded[2] - bind_loc[2]
-        return (dx * dx + dy * dy + dz * dz) ** 0.5
-
-    def _channel_other_endpoint(
-        valid: list[list[Any]],
-        item_len: int,
-        distance: Callable[[list[Any], list[Any]], float],
-        threshold: float,
-    ) -> list[Any]:
-        """Return the channel's "opposite state" sample.
-
-        For a non-cyclic series the last sample is the opposite of the first.
-        For a cyclic series (first ≈ last) the opposite state lives mid-clip:
-        find the sample most distant from the first/last endpoint.
-        """
-
-        if len(valid) < 2:
-            return valid[-1] if valid else []
-        first = valid[0]
-        last = valid[-1]
-        if distance(first, last) > threshold:
-            return last
-        # Cyclic: pick the sample most distant from the shared endpoint.
-        return max(valid, key=lambda value: distance(first, value))
-
-    def _select_sample(values: list[Any], item_len: int, scorer: Callable[[list[Any]], float]) -> list[Any] | None:
+    def _select_sample(values: list[Any], item_len: int) -> list[Any] | None:
         valid: list[list[Any]] = [v for v in values if isinstance(v, list) and len(v) >= item_len]
         if not valid:
             return None
-        if endpoint_policy == "literal":
-            return valid[0] if frame_index == 0 else valid[-1]
+        # Phase 53: data-backed sample selection. The exporter classifies
+        # each bone as Additive vs Override (see classify_bone_blend_modes
+        # in starbreaker-3d), and the addon composes
+        # `result = bind · (start⁻¹ · sample)` for Additive bones using
+        # the clip's DBA-metadata `start_rotation` / `start_position`
+        # (whitepaper §14.6) as the anchor. The selector here only
+        # decides WHICH sample to read; cyclic-target frames are handled
+        # upstream by `_clip_cyclic_transition_target_frame`.
         if endpoint_policy == "transition_start":
             return valid[0]
         if endpoint_policy == "transition_end":
-            distance = _position_distance if item_len == 3 else _rotation_distance
-            threshold = 0.05 if item_len == 3 else 0.03
-            return _channel_other_endpoint(valid, item_len, distance, threshold)
-        if endpoint_policy == "least_bind_error":
-            endpoint_candidates = [valid[0], valid[-1]] if len(valid) > 1 else valid
-            scored = [(scorer(v), v) for v in endpoint_candidates]
-            return min(scored, key=lambda item: item[0])[1]
-        if endpoint_policy == "most_bind_error":
-            scored = [(scorer(v), v) for v in valid]
-            return max(scored, key=lambda item: item[0])[1]
+            return valid[-1]
+        # Default ("literal" + any unrecognised string): first at
+        # frame_index=0, last otherwise. Matches engine playback.
         return valid[0] if frame_index == 0 else valid[-1]
 
     rotation_sample: list[Any] | None = None
@@ -1524,7 +3335,7 @@ def _apply_best_channel_transform(
                 rotations, _channel_times(channel, "rotation_time", len(rotations)), 4, target_frame
             )
         else:
-            rotation_sample = _select_sample(rotations, 4, _rotation_score)
+            rotation_sample = _select_sample(rotations, 4)
 
     position_sample: list[Any] | None = None
     if isinstance(positions, list) and positions:
@@ -1533,16 +3344,14 @@ def _apply_best_channel_transform(
                 positions, _channel_times(channel, "position_time", len(positions)), 3, target_frame
             )
         else:
-            position_sample = _select_sample(positions, 3, _position_score)
+            position_sample = _select_sample(positions, 3)
 
-    if rotation_sample is not None:
+    if allow_rotation and rotation_sample is not None:
         obj.rotation_mode = "QUATERNION"
         rot_sample_q = (
-            float(rotation_sample[0]),
-            float(rotation_sample[1]),
-            float(rotation_sample[2]),
-            float(rotation_sample[3]),
+            *_decode_animation_rotation(rotation_sample, sample_decoder),
         )
+        rot_sample_q = _bind_equivalent_rotation(rot_sample_q, bind_rot)
         blend_mode = str(channel.get("blend_mode") or "").lower()
         if blend_mode == "override":
             # Override mode (Phase 38): the exporter classified this bone's
@@ -1551,32 +3360,19 @@ def _apply_best_channel_transform(
             # pose rather than ride on top of it. Use the sampled rotation
             # verbatim — no anchor-relative composition.
             obj.rotation_quaternion = rot_sample_q
-        elif endpoint_policy in {"transition_start", "transition_end"} and isinstance(rotations, list) and rotations:
-            # Anchor-relative composition (matches the position pathway).
-            # Clip channels are stored in a coordinate frame that has a fixed
-            # offset from the imported rest pose; the offset cancels out by
-            # composing `bind ⋅ (anchor⁻¹ ⋅ sample)`. The clip's two channel
-            # "states" are valid[0] and the per-channel opposite endpoint
-            # (last sample, or rotation-extreme mid-clip sample for cyclic
-            # channels). The state nearer to bind acts as the anchor.
-            valid_rots: list[list[Any]] = [v for v in rotations if isinstance(v, list) and len(v) >= 4]
-            if valid_rots:
-                other_rot = _channel_other_endpoint(valid_rots, 4, _rotation_distance, 0.03)
-                anchor_candidates = [valid_rots[0], other_rot]
-                anchor_rot_list = min(anchor_candidates, key=_rotation_score)
-                anchor_q = (
-                    float(anchor_rot_list[0]),
-                    float(anchor_rot_list[1]),
-                    float(anchor_rot_list[2]),
-                    float(anchor_rot_list[3]),
-                )
-                rot_sample_q = _quat_align(anchor_q, rot_sample_q)
-                delta = _quat_mul(_quat_conj(anchor_q), rot_sample_q)
-                rot_sample_q = _quat_mul(bind_rot, delta)
+        # For transition_start/transition_end: CAF clips store absolute
+        # bone rotations in parent-local space, not deltas. Using verbatim
+        # sample is correct for all current cases (cyclic clips have
+        # first=last=bind so verbatim is trivially bind; non-cyclic clips
+        # author the deployed/stowed state directly as the sample value).
+        # Bind-compose (`bind @ first⁻¹ @ sample`) was incorrect: for
+        # non-cyclic deploy clips where last≈bind it doubles the rotation,
+        # and the hemisphere-alignment step introduces additional sign errors
+        # when first_rot.w < 0 (e.g. DRAK Clipper Foot_joint_anim).
         obj.rotation_quaternion = rot_sample_q
 
-    if position_sample is not None and isinstance(positions, list) and positions:
-        sample_decoded = _decode_animation_position(position_sample, "identity")
+    if allow_position and position_sample is not None and isinstance(positions, list) and positions:
+        sample_decoded = _bind_equivalent_position(_decode_animation_position(position_sample, sample_decoder), bind_loc)
         blend_mode = str(channel.get("blend_mode") or "").lower()
         if blend_mode == "override":
             # Override mode (Phase 38): use the sampled position verbatim.
@@ -1585,41 +3381,54 @@ def _apply_best_channel_transform(
             # (canonical example: Scorpius BONE_Front_Landing_Gear_Foot).
             obj.location = sample_decoded
             return
-        # Anchor-relative composition (mirrors rotation pathway). Clip
-        # positions are in a fixed-offset coordinate frame relative to
-        # bind; composing `bind + (sample - anchor)` cancels the offset.
-        # Anchor candidates: valid[0] and the per-channel opposite endpoint
-        # (last sample, or mid-clip extreme for cyclic position channels).
-        # The candidate nearest to bind is the anchor.
+        # Per-bone position anchor. The DBA `start_position` field
+        # is plumbed through scene.json (whitepaper §14.6) but is
+        # *not* used here: it is a clip-root-frame value, not in the
+        # same coordinate space as per-bone parent-local samples.
+        # Anchor selection picks whichever of {first sample,
+        # anchor_frame sample} sits nearer to bind — that is the
+        # endpoint the engine treats as the bone's resting state in
+        # clip-frame, with the other endpoint being the "moved"
+        # pose. The same shape was used pre-Phase-53; only the
+        # rotation pathway needed the heuristic-removal that Phase
+        # 52 / Phase 53 landed.
         valid_positions: list[list[Any]] = [v for v in positions if isinstance(v, list) and len(v) >= 3]
         if valid_positions:
+            first_decoded = _bind_equivalent_position(_decode_animation_position(valid_positions[0], sample_decoder), bind_loc)
             if anchor_frame is not None:
                 anchor_target = _sample_nearest_time(
                     positions, _channel_times(channel, "position_time", len(positions)), 3, anchor_frame
                 )
-                anchor_samples = [valid_positions[0], anchor_target or position_sample]
-            elif endpoint_policy in {"transition_start", "transition_end"}:
-                other = _channel_other_endpoint(
-                    valid_positions, 3, _position_distance, 0.05
+                if anchor_target is not None:
+                    anchor_target_decoded = _bind_equivalent_position(
+                        _decode_animation_position(anchor_target, sample_decoder),
+                        bind_loc,
+                    )
+                    d_first = (
+                        (first_decoded[0] - bind_loc[0]) ** 2
+                        + (first_decoded[1] - bind_loc[1]) ** 2
+                        + (first_decoded[2] - bind_loc[2]) ** 2
+                    )
+                    d_target = (
+                        (anchor_target_decoded[0] - bind_loc[0]) ** 2
+                        + (anchor_target_decoded[1] - bind_loc[1]) ** 2
+                        + (anchor_target_decoded[2] - bind_loc[2]) ** 2
+                    )
+                    anchor_decoded = first_decoded if d_first <= d_target else anchor_target_decoded
+                else:
+                    anchor_decoded = first_decoded
+                obj.location = (
+                    bind_loc[0] + (sample_decoded[0] - anchor_decoded[0]),
+                    bind_loc[1] + (sample_decoded[1] - anchor_decoded[1]),
+                    bind_loc[2] + (sample_decoded[2] - anchor_decoded[2]),
                 )
-                anchor_samples = [valid_positions[0], other]
             else:
-                anchor_samples = [valid_positions[0], valid_positions[-1]]
-
-            def _dist_sq(sample: list[Any]) -> float:
-                decoded = _decode_animation_position(sample, "identity")
-                return (
-                    (decoded[0] - bind_loc[0]) ** 2
-                    + (decoded[1] - bind_loc[1]) ** 2
-                    + (decoded[2] - bind_loc[2]) ** 2
-                )
-
-            anchor_decoded = _decode_animation_position(min(anchor_samples, key=_dist_sq), "identity")
-            obj.location = (
-                bind_loc[0] + (sample_decoded[0] - anchor_decoded[0]),
-                bind_loc[1] + (sample_decoded[1] - anchor_decoded[1]),
-                bind_loc[2] + (sample_decoded[2] - anchor_decoded[2]),
-            )
+                # Non-cyclic clips (no cyclic-anchor frame) store absolute
+                # parent-local bone positions. Apply verbatim — no bind-compose.
+                # The bind-compose was wrong for bones shared across multiple
+                # instances that have different bind positions (e.g. DRAK Clipper
+                # side swingarms whose bind ≠ channel endpoints).
+                obj.location = sample_decoded
         else:
             obj.location = sample_decoded
 
@@ -1646,19 +3455,24 @@ def _apply_animation_pose(
     bones = _normalized_bone_channels(clip)
     if not bones:
         return 0
+    candidates, position_policy, sample_decoder = _animation_bone_candidates(package_root, bones)
     updated = 0
-    for obj in _iter_candidate_bone_objects(package_root):
-        key = _canonical_bone_hash_key(_object_bone_hash(obj)) or _object_bone_hash(obj)
-        channel = bones.get(key)
-        if not isinstance(channel, dict):
-            continue
-        _store_bind_pose_once(obj)
-        bind_data = _bind_pose_payload(obj)
-        if bind_data is None:
-            continue
+    for obj, key, bind_data, channel in candidates:
+        allow_position = position_policy.get(id(obj), True)
 
         _apply_best_channel_transform(
-            obj, bind_data, channel, frame_index, endpoint_policy, target_frame, anchor_frame
+            obj,
+            bind_data,
+            channel,
+            frame_index,
+            endpoint_policy,
+            target_frame,
+            anchor_frame,
+            # Duplicate-hash disambiguation only suppresses incompatible
+            # position tracks; rotation remains valid and must still apply.
+            allow_rotation=True,
+            allow_position=allow_position,
+            sample_decoder=sample_decoder,
         )
         updated += 1
     return updated
@@ -1744,34 +3558,57 @@ def _insert_animation_action(
     context: bpy.types.Context,
     package_root: bpy.types.Object,
     clip: dict[str, Any],
+    animation_name: str | None = None,
     reverse_playback: bool = False,
+    fps_policy: str = FPS_POLICY_ADAPT_SCENE,
 ) -> int:
     bones = _normalized_bone_channels(clip)
     if not bones:
         return 0
-    name = str(clip.get("name", "animation")) or "animation"
+    name = animation_name or str(clip.get("name", "animation")) or "animation"
+    visible_name = _animation_insert_label(animation_name, clip)
     trim_frame = _clip_cyclic_transition_target_frame(clip)
+    fps_reconciliation = reconcile_animation_fps(context.scene, clip.get("fps"), fps_policy)
+    if fps_reconciliation.mismatch:
+        print(describe_reconciliation(name, fps_reconciliation))
 
-    # Phase 46.2: anchor inserted keyframes at frame 1 by default. Earlier
-    # versions used the current scene playhead so multiple action-mode
-    # clips could chain naturally on the timeline, but in practice the
-    # per-clip NLA strip (added in Phase 46) is the proper UI gesture for
-    # time-shifting blocks: the user grabs the strip and drags it. Using
-    # the playhead as an implicit anchor surprised users who scrubbed the
-    # timeline and then re-applied a clip and saw it land at frame 76 (or
-    # wherever they had stopped).
-    frame_offset = 1
+    frame_offset = float(getattr(context.scene, "frame_current", 1.0))
+    duration_frames = _clip_duration_frames(clip, fps_reconciliation.frame_scale)
+    existing_instances = _load_animation_instances(package_root)
+    overlap_warnings = _animation_overlap_warnings(
+        name,
+        frame_offset,
+        duration_frames,
+        _clip_bone_hashes(clip),
+        existing_instances,
+    )
+    for warning in overlap_warnings:
+        print(f"[StarBreaker] WARNING: {warning}")
+    instance_id = uuid.uuid4().hex
+    instance = {
+        "id": instance_id,
+        "animation_name": name,
+        "start_frame": frame_offset,
+        "duration_frames": duration_frames,
+        "driven_hashes": sorted(_clip_bone_hashes(clip)),
+    }
 
+    candidates, position_policy, sample_decoder = _animation_bone_candidates(package_root, bones)
     updated = 0
-    for obj in _iter_candidate_bone_objects(package_root):
-        key = _canonical_bone_hash_key(_object_bone_hash(obj)) or _object_bone_hash(obj)
-        channel = bones.get(key)
-        if not isinstance(channel, dict):
-            continue
-        _store_bind_pose_once(obj)
-        bind_data = _bind_pose_payload(obj)
-        if bind_data is None:
-            continue
+    # Multi-clip mode: when prior instances exist, clear live action from all
+    # objects so NLA is the sole driver.  This covers the case where the first
+    # insert left anim.action set (single-clip Dopesheet mode) and a second
+    # insert is now being added.
+    if existing_instances:
+        for obj in _iter_package_objects(package_root):
+            animation_data = getattr(obj, "animation_data", None)
+            if animation_data is not None and getattr(animation_data, "action", None) is not None:
+                try:
+                    animation_data.action = None
+                except Exception:
+                    pass
+    for obj, key, bind_data, channel in candidates:
+        _restore_object_bind_pose(obj, bind_data)
         obj.rotation_mode = "QUATERNION"
         obj.animation_data_create()
 
@@ -1780,11 +3617,16 @@ def _insert_animation_action(
         # Dope Sheet Action editor shows clean per-bone groups. The Action
         # is pushed onto a per-clip NLA track so multiple clips coexist on
         # the timeline without overwriting each other.
-        action_name = f"SB_{package_root.name}_{name}_{obj.name}"
-        existing = bpy.data.actions.get(action_name)
-        if existing is not None:
-            bpy.data.actions.remove(existing, do_unlink=True)
+        action_name = f"SB_{package_root.name}_{visible_name}_{instance_id}_{obj.name}"
         action = bpy.data.actions.new(name=action_name)
+        try:
+            action[_ANIMATION_INSTANCE_ID_PROP] = instance_id
+            action[_ANIMATION_INSTANCE_NAME_PROP] = name
+        except Exception:
+            pass
+        # Temporarily set anim.action to the new action so keyframe_insert()
+        # writes into the correct target.  After all keyframes are done the
+        # live action pointer is cleared (NLA strips drive playback).
         obj.animation_data.action = action
         group_name = obj.name
         # Phase 39: defer group creation until after keyframes are
@@ -1802,50 +3644,48 @@ def _insert_animation_action(
         position_times = _channel_times(channel, "position_time", len(positions))
         channel_times = [*rotation_times, *position_times]
         duration_frame = trim_frame if trim_frame is not None else max(channel_times, default=0.0)
+        allow_position = position_policy.get(id(obj), True)
 
         def _action_frame(sample_time: float) -> float:
             local_time = duration_frame - sample_time if reverse_playback else sample_time
-            return frame_offset + local_time
+            return frame_offset + (local_time * fps_reconciliation.frame_scale)
 
-        if positions:
+        if allow_position and positions:
             bind_location = bind_data.get("location", obj.location)
             bind = (float(bind_location[0]), float(bind_location[1]), float(bind_location[2]))
 
+            # Per-bone first-sample anchor. The DBA `start_position`
+            # field is plumbed through scene.json (whitepaper §14.6)
+            # but is *not* used here: it is a clip-root-frame value,
+            # not directly compatible with per-bone parent-local
+            # samples. The bind-distance first/last heuristic that
+            # lived here previously is retired — it masked the same
+            # cyclic-channel ambiguity the snap-pose path suffered
+            # from (Phase 52 evidence).
             first = positions[0] if isinstance(positions[0], list) and len(positions[0]) >= 3 else None
-            last = (
-                _sample_nearest_time(positions, position_times, 3, trim_frame)
-                if trim_frame is not None
-                else positions[-1] if isinstance(positions[-1], list) and len(positions[-1]) >= 3 else None
-            )
             anchor: tuple[float, float, float] | None = None
-            if first is not None and last is not None:
-                first_decoded = _decode_animation_position(first, "identity")
-                last_decoded = _decode_animation_position(last, "identity")
-                first_dist_sq = (
-                    (first_decoded[0] - bind[0]) ** 2
-                    + (first_decoded[1] - bind[1]) ** 2
-                    + (first_decoded[2] - bind[2]) ** 2
-                )
-                last_dist_sq = (
-                    (last_decoded[0] - bind[0]) ** 2
-                    + (last_decoded[1] - bind[1]) ** 2
-                    + (last_decoded[2] - bind[2]) ** 2
-                )
-                anchor = first_decoded if first_dist_sq <= last_dist_sq else last_decoded
+            if first is not None:
+                anchor = _bind_equivalent_position(_decode_animation_position(first, sample_decoder), bind)
 
-            if anchor is not None:
-                for index, sample in enumerate(positions):
-                    sample_time = position_times[index] if index < len(position_times) else float(index)
-                    if trim_frame is not None and sample_time > trim_frame:
-                        continue
-                    if isinstance(sample, list) and len(sample) >= 3:
-                        sample_decoded = _decode_animation_position(sample, "identity")
+            for index, sample in enumerate(positions):
+                sample_time = position_times[index] if index < len(position_times) else float(index)
+                if trim_frame is not None and sample_time > trim_frame:
+                    continue
+                if isinstance(sample, list) and len(sample) >= 3:
+                    sample_decoded = _bind_equivalent_position(_decode_animation_position(sample, sample_decoder), bind)
+                    if trim_frame is not None and anchor is not None:
+                        # Cyclic clip: use bind-delta to anchor the animation
+                        # at the bind pose (e.g. Scorpius landing_gear_deploy).
                         obj.location = (
                             bind[0] + (sample_decoded[0] - anchor[0]),
                             bind[1] + (sample_decoded[1] - anchor[1]),
                             bind[2] + (sample_decoded[2] - anchor[2]),
                         )
-                        obj.keyframe_insert(data_path="location", frame=_action_frame(sample_time))
+                    else:
+                        # Non-cyclic clip: CAF stores absolute parent-local
+                        # positions — apply verbatim.
+                        obj.location = sample_decoded
+                    obj.keyframe_insert(data_path="location", frame=_action_frame(sample_time))
 
         # Phase 47.3: align each rotation sample to the previous *keyed*
         # sample's hemisphere so per-component LINEAR interpolation stays
@@ -1855,22 +3695,25 @@ def _insert_animation_action(
         # frame between the two keys (observed on Scorpius
         # `landing_gear_extend` BONE_Front_Landing_Gear_Foot frames 37→39).
         prev_keyed_quat: tuple[float, float, float, float] | None = None
-        for index, sample in enumerate(rotations):
-            sample_time = rotation_times[index] if index < len(rotation_times) else float(index)
-            if trim_frame is not None and sample_time > trim_frame:
-                continue
-            if isinstance(sample, list) and len(sample) >= 4:
-                sample_q = (
-                    float(sample[0]),
-                    float(sample[1]),
-                    float(sample[2]),
-                    float(sample[3]),
-                )
-                if prev_keyed_quat is not None:
-                    sample_q = _quat_align(prev_keyed_quat, sample_q)
-                obj.rotation_quaternion = sample_q
-                obj.keyframe_insert(data_path="rotation_quaternion", frame=_action_frame(sample_time))
-                prev_keyed_quat = sample_q
+        bind_rotation = bind_data.get("rotation_quaternion", obj.rotation_quaternion)
+        bind_rot = (
+            float(bind_rotation[0]),
+            float(bind_rotation[1]),
+            float(bind_rotation[2]),
+            float(bind_rotation[3]),
+        )
+        if rotations:
+            for index, sample in enumerate(rotations):
+                sample_time = rotation_times[index] if index < len(rotation_times) else float(index)
+                if trim_frame is not None and sample_time > trim_frame:
+                    continue
+                if isinstance(sample, list) and len(sample) >= 4:
+                    sample_q = _bind_equivalent_rotation(_decode_animation_rotation(sample, sample_decoder), bind_rot)
+                    if prev_keyed_quat is not None:
+                        sample_q = _quat_align(prev_keyed_quat, sample_q)
+                    obj.rotation_quaternion = sample_q
+                    obj.keyframe_insert(data_path="rotation_quaternion", frame=_action_frame(sample_time))
+                    prev_keyed_quat = sample_q
 
         # Phase 24C / Phase 39: assign all fcurves on this action to the
         # bone's group so the Action editor renders a single collapsible
@@ -1936,40 +3779,46 @@ def _insert_animation_action(
         except Exception:
             has_range = False
         if anim is not None and has_range:
-            track = anim.nla_tracks.get(name)
+            track_name = f"{name}@{int(round(frame_offset))}"
+            track = anim.nla_tracks.get(track_name)
             if track is None:
                 track = anim.nla_tracks.new()
-                track.name = name
+                track.name = track_name
             try:
-                strip_start = int(action.frame_range[0])
+                strip_start = int(round(float(action.frame_range[0])))
             except Exception:
-                strip_start = int(frame_offset)
+                strip_start = int(round(float(frame_offset)))
             strip = None
             try:
-                strip = track.strips.new(name=name, start=strip_start, action=action)
-                strip.name = name
+                strip = track.strips.new(name=visible_name, start=strip_start, action=action)
+                strip.name = visible_name
+                strip.extrapolation = 'HOLD_FORWARD'
+                try:
+                    strip[_ANIMATION_INSTANCE_ID_PROP] = instance_id
+                    strip[_ANIMATION_INSTANCE_NAME_PROP] = name
+                except Exception:
+                    pass
             except Exception:
                 # Strip may already exist at that frame; reuse the
                 # most-recently-added strip on this track.
                 if track.strips:
                     strip = track.strips[-1]
-            # Phase 46: mute the NLA strip so the live action drives
-            # playback (no double-evaluation). Apply mute regardless of
-            # whether the strip was freshly created or pre-existing from
-            # a prior import — Phase 46's first-pass version only set
-            # mute on freshly-created strips and left re-imports playing
-            # the strip at full strength alongside the live action.
-            if strip is not None:
-                try:
-                    strip.mute = True
-                except Exception:
-                    pass
-            # Phase 46: keep anim.action set so the keyframes are visible
-            # in the Dope Sheet / Action Editor for the selected object.
-            # The NLA strip above is muted, so there's no double-eval.
-            anim.action = action
+            # Phase 62: NLA strips drive playback for multi-insert scenarios.
+            # Leave strips unmuted so Blender's NLA evaluates them at their
+            # scheduled frame ranges.  When multiple clips are inserted on
+            # separate non-overlapping tracks, the NLA plays each clip at
+            # the right time without blending artifacts.
+            # For single-clip mode (no prior instances), keep anim.action set
+            # so keyframes are visible in the Action Editor / Dopesheet.
+            # For multi-clip mode, clear anim.action so NLA drives playback.
+            if anim is not None and existing_instances:
+                anim.action = None
 
         updated += 1
+
+    if updated > 0:
+        existing_instances.append(instance)
+        _store_animation_instances(package_root, existing_instances)
 
     return updated
 
@@ -1983,6 +3832,10 @@ def _decode_animation_position(sample: list[Any], decoder: str) -> tuple[float, 
     x = float(sample[0])
     y = float(sample[1])
     z = float(sample[2])
+    if decoder == "source":
+        # Native .blend hierarchy nodes can retain source/CryEngine local axes
+        # while sidecars remain authored in the exported Blender-frame contract.
+        return (x, z, -y)
     if decoder == "legacy":
         # Legacy export decode: [x, z, -y] -> (x, y, z_blender)
         return (x, -z, y)
@@ -1991,6 +3844,16 @@ def _decode_animation_position(sample: list[Any], decoder: str) -> tuple[float, 
         return (z, y, x)
     # "identity": already-authored Blender XYZ.
     return (x, y, z)
+
+
+def _decode_animation_rotation(sample: list[Any], decoder: str) -> tuple[float, float, float, float]:
+    w = float(sample[0])
+    x = float(sample[1])
+    y = float(sample[2])
+    z = float(sample[3])
+    if decoder == "source":
+        return (w, x, z, -y)
+    return (w, x, y, z)
 
 
 def _select_position_decoder(
@@ -2006,7 +3869,7 @@ def _select_position_decoder(
         return None
 
     bind = (float(bind_location[0]), float(bind_location[1]), float(bind_location[2]))
-    candidates = ("legacy", "swizzled", "identity")
+    candidates = ("legacy", "swizzled", "identity", "source")
 
     if frame_index is None:
         anchor_samples = [valid_samples[0], valid_samples[-1]]

@@ -188,7 +188,13 @@ def _palette_group_name(package_name: str, palette_scope: str) -> str:
 
 def _canonical_source_name(name: str) -> str:
     if len(name) > 4 and name[-4] == "." and name[-3:].isdigit():
-        return name[:-4]
+        name = name[:-4]
+    if "_mtl_" in name:
+        material_name = name.rsplit("_mtl_", 1)[1]
+        stem, separator, suffix = material_name.rpartition("_")
+        if separator and suffix.isdigit():
+            return stem
+        return material_name
     return name
 
 
@@ -237,6 +243,11 @@ def _scene_matrix_to_blender(matrix_rows: Any) -> Matrix:
     return SCENE_AXIS_CONVERSION @ matrix @ SCENE_AXIS_CONVERSION_INV
 
 
+def _gltf_matrix_to_blender_basis(matrix_rows: Any) -> Matrix:
+    """Interpret a glTF Y-up matrix payload directly as Blender basis."""
+    return Matrix(matrix_rows).transposed()
+
+
 def _scene_quaternion_to_blender(rotation: tuple[float, float, float, float]) -> Quaternion:
     if all(abs(component) <= 1e-8 for component in rotation):
         return Quaternion((1.0, 0.0, 0.0, 0.0))
@@ -246,6 +257,29 @@ def _scene_quaternion_to_blender(rotation: tuple[float, float, float, float]) ->
 
 def _scene_light_quaternion_to_blender(rotation: tuple[float, float, float, float]) -> Quaternion:
     return (_scene_quaternion_to_blender(rotation) @ GLTF_LIGHT_BASIS_CORRECTION).normalized()
+
+
+def _scene_light_direction_to_blender(direction_sc: tuple[float, float, float] | None) -> Quaternion | None:
+    if direction_sc is None:
+        return None
+    dx, dy, dz = _scene_position_to_blender(direction_sc)
+    length = math.sqrt(dx * dx + dy * dy + dz * dz)
+    if length <= 1e-8:
+        return None
+    target = (dx / length, dy / length, dz / length)
+    source = (0.0, 0.0, -1.0)  # Blender spot/sun lights emit along local -Z.
+    dot = source[0] * target[0] + source[1] * target[1] + source[2] * target[2]
+    if dot > 0.999999:
+        return Quaternion((1.0, 0.0, 0.0, 0.0))
+    if dot < -0.999999:
+        return Quaternion((0.0, 0.0, 1.0, 0.0))
+    cross = (
+        source[1] * target[2] - source[2] * target[1],
+        source[2] * target[0] - source[0] * target[2],
+        source[0] * target[1] - source[1] * target[0],
+    )
+    quat = Quaternion((1.0 + dot, cross[0], cross[1], cross[2]))
+    return quat.normalized()
 
 
 def _blender_light_type(light: Any) -> str:
@@ -293,6 +327,7 @@ def _light_energy_to_blender(
     blender_light_type: str,
     *,
     intensity_raw: float | None = None,
+    semantic_light_kind: str | None = None,
 ) -> float:
     """Convert a Star Citizen light intensity to Blender light energy.
 
@@ -300,17 +335,20 @@ def _light_energy_to_blender(
     W/m^2 (irradiance). SC intensities are treated as KHR_lights_punctual-style
     candela values: luminous flux = ``intensity * 4π``, radiant flux =
     flux / 683 lm/W. An empirical ``LIGHT_VISUAL_GAIN`` multiplier compensates
-    for the engine's much brighter in-game response so Aurora interiors
-    actually illuminate. Sun retains the legacy lux→W/m^2 ratio.
+    for the engine's much brighter in-game response so dim interior fixtures
+    still illuminate correctly. Sun retains the legacy lux→W/m^2 ratio.
 
     See ``docs/StarBreaker/lights-research.md``.
     """
     intensity_candela_proxy = max(float(intensity_candela_proxy), 0.0)
+    semantic = str(semantic_light_kind or "").strip().lower()
     if blender_light_type == "SUN":
         return intensity_candela_proxy / GLTF_PBR_WATTS_TO_LUMENS
     if blender_light_type == "AREA":
         lumens = float(intensity_raw) if intensity_raw is not None else intensity_candela_proxy / SC_LIGHT_CANDELA_SCALE
         return max(lumens, 0.0) / LUMENS_PER_WATT_WHITE
+    if semantic == "ambient_proxy":
+        return intensity_candela_proxy * LIGHT_CANDELA_TO_WATT
     return intensity_candela_proxy * LIGHT_CANDELA_TO_WATT * LIGHT_VISUAL_GAIN
 
 
@@ -400,11 +438,22 @@ def _unique_submaterials_by_name(sidecar: MaterialSidecar) -> dict[str, Submater
     }
 
 
+def _submaterials_by_name(sidecar: MaterialSidecar) -> dict[str, list[SubmaterialRecord]]:
+    grouped: dict[str, list[SubmaterialRecord]] = {}
+    for submaterial in sidecar.submaterials:
+        name = submaterial.submaterial_name.strip()
+        if not name:
+            continue
+        grouped.setdefault(name, []).append(submaterial)
+    return grouped
+
+
 def _remapped_submaterial_for_slot(
     source_submaterial: SubmaterialRecord | None,
     fallback_index: int,
     target_submaterials_by_index: dict[int, SubmaterialRecord],
     target_submaterials_by_name: dict[str, SubmaterialRecord],
+    target_submaterials_by_name_all: dict[str, list[SubmaterialRecord]] | None = None,
 ) -> SubmaterialRecord | None:
     if source_submaterial is not None:
         source_name = source_submaterial.submaterial_name.strip()
@@ -412,6 +461,10 @@ def _remapped_submaterial_for_slot(
             remapped = target_submaterials_by_name.get(source_name)
             if remapped is not None:
                 return remapped
+            if target_submaterials_by_name_all is not None:
+                candidates = target_submaterials_by_name_all.get(source_name)
+                if candidates:
+                    return min(candidates, key=lambda item: abs(item.index - fallback_index))
     return target_submaterials_by_index.get(fallback_index)
 
 

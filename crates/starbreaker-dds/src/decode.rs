@@ -27,9 +27,7 @@ pub fn decode_block_compressed(
         BlockFormat::BC3 => decode_4bpp(data, width, height, bcdec_rs::bc3),
         BlockFormat::BC4 => decode_bc4(data, width, height, is_snorm),
         BlockFormat::BC5 => Ok(decode_bc5(data, width, height, is_snorm)),
-        BlockFormat::BC6H => Err(DdsError::UnsupportedFormat(
-            "BC6H decoding is not yet supported (HDR format)".to_string(),
-        )),
+        BlockFormat::BC6H => decode_bc6h_to_rgba8(data, width, height),
         BlockFormat::BC7 => decode_4bpp(data, width, height, bcdec_rs::bc7),
     }
 }
@@ -175,4 +173,131 @@ fn decode_bc5(data: &[u8], width: u32, height: u32, is_snorm: bool) -> Vec<u8> {
         }
     }
     out
+}
+
+/// Decode BC6H (HDR float format) to RGBA8 with tone mapping.
+fn decode_bc6h_to_rgba8(
+    data: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, DdsError> {
+    let w = width as usize;
+    let h = height as usize;
+    let bw = (w + 3) / 4;
+    let bh = (h + 3) / 4;
+    let block_size = 16; // BC6H uses 16 bytes per block
+    // bcdec_rs::bc6h_float writes 32-bit RGB floats with pitch in floats/row.
+    let pitch = 4 * 3; // 4 pixels × 3 float channels (RGB)
+    let mut out = vec![0u8; w * h * 4];
+    let mut block_buf_float = vec![0.0f32; 4 * 4 * 3]; // 4×4 × RGB (float)
+    
+    // Calculate mean luminance while decoding for gobo compensation
+    let mut luminance_sum = 0.0f32;
+    let mut pixel_count = 0usize;
+    
+    for by in 0..bh {
+        for bx in 0..bw {
+            let offset = (by * bw + bx) * block_size;
+            if offset + block_size > data.len() {
+                break;
+            }
+            
+            // Decode using bc6h_float (returns 3-channel float output)
+            // BC6H gobos are typically unsigned (is_signed = false)
+            bcdec_rs::bc6h_float(&data[offset..], &mut block_buf_float, pitch, false);
+            
+            // Collect luminance and convert float to RGBA8 with simple tone mapping
+            for py in 0..4 {
+                for px in 0..4 {
+                    let x = bx * 4 + px;
+                    let y = by * 4 + py;
+                    if x >= w || y >= h {
+                        continue;
+                    }
+                    
+                    let src_idx = (py * 4 + px) * 3;
+                    let r = block_buf_float[src_idx];
+                    let g = block_buf_float[src_idx + 1];
+                    let b = block_buf_float[src_idx + 2];
+                    
+                    // Calculate perceived luminance (standard weighted average)
+                    let lum = r * 0.299 + g * 0.587 + b * 0.114;
+                    luminance_sum += lum;
+                    pixel_count += 1;
+                    
+                    // Tone map with clamping + Reinhard for very bright values
+                    let r_mapped = if r > 1.0 { r / (1.0 + r) } else { r };
+                    let g_mapped = if g > 1.0 { g / (1.0 + g) } else { g };
+                    let b_mapped = if b > 1.0 { b / (1.0 + b) } else { b };
+
+                    // Convert to u8
+                    let dst = (y * w + x) * 4;
+                    out[dst] = (r_mapped.max(0.0).min(1.0) * 255.0) as u8;
+                    out[dst + 1] = (g_mapped.max(0.0).min(1.0) * 255.0) as u8;
+                    out[dst + 2] = (b_mapped.max(0.0).min(1.0) * 255.0) as u8;
+                    out[dst + 3] = 255;
+                }
+            }
+        }
+    }
+    
+    // Store mean luminance for later use in compensation
+    if pixel_count > 0 {
+        let _mean_luminance = luminance_sum / pixel_count as f32;
+        // Note: This is informational; the actual compensation happens in the decomposed exporter
+        // Luminance is printed in debug logs in the decomposed path
+    }
+    
+    Ok(out)
+}
+
+/// Decode BC6H (HDR float format) to raw float RGB preserving HDR values.
+///
+/// This is used specifically for gobo (projector texture) export to EXR format.
+/// Unlike `decode_bc6h_to_rgba8`, this does NOT tone-map or clamp values,
+/// so all floating-point values including those >1.0 are preserved.
+pub fn decode_bc6h_to_float_rgb(
+    data: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<Vec<f32>, DdsError> {
+    let w = width as usize;
+    let h = height as usize;
+    let bw = (w + 3) / 4;
+    let bh = (h + 3) / 4;
+    let block_size = 16; // BC6H uses 16 bytes per block
+    let pitch = 4 * 3; // 4 pixels × 3 float channels (RGB)
+    let mut out = vec![0.0f32; w * h * 3]; // Only RGB, no alpha
+    let mut block_buf_float = vec![0.0f32; 4 * 4 * 3]; // 4×4 × RGB (float)
+    
+    for by in 0..bh {
+        for bx in 0..bw {
+            let offset = (by * bw + bx) * block_size;
+            if offset + block_size > data.len() {
+                break;
+            }
+            
+            // Decode using bc6h_float; preserves all float values including >1.0
+            bcdec_rs::bc6h_float(&data[offset..], &mut block_buf_float, pitch, false);
+            
+            // Copy float RGB directly without tone mapping
+            for py in 0..4 {
+                for px in 0..4 {
+                    let x = bx * 4 + px;
+                    let y = by * 4 + py;
+                    if x >= w || y >= h {
+                        continue;
+                    }
+                    
+                    let src_idx = (py * 4 + px) * 3;
+                    let dst_idx = (y * w + x) * 3;
+                    out[dst_idx] = block_buf_float[src_idx];
+                    out[dst_idx + 1] = block_buf_float[src_idx + 1];
+                    out[dst_idx + 2] = block_buf_float[src_idx + 2];
+                }
+            }
+        }
+    }
+    
+    Ok(out)
 }

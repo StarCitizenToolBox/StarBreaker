@@ -120,6 +120,8 @@ class LayersMixin:
         if layer is None:
             return LayerSurfaceSockets()
 
+        uv_tile = layer.uv_tiling if layer.uv_tiling is not None else 1.0
+
         base_texture = _layer_texture_reference(
             layer, slots=("TexSlot1",), roles=("base_color", "diffuse")
         )
@@ -130,12 +132,14 @@ class LayersMixin:
             y=y,
             is_color=True,
         )
+        self._apply_uv_tiling(nodes, links, base_node, uv_tile, x=x - 320, y=y)
         detail_ref = _layer_texture_reference(layer, slots=detail_slots)
         detail_channels = self._detail_texture_channels(
             nodes,
             detail_ref.export_path if detail_ref is not None else None,
             x=x,
             y=y - 420,
+            uv_tiling=uv_tile,
         )
         normal_ref = _layer_texture_reference(
             layer, roles=("normal_gloss",), alpha_semantic="smoothness"
@@ -147,6 +151,7 @@ class LayersMixin:
             y=y - 560,
             is_color=False,
         )
+        self._apply_uv_tiling(nodes, links, normal_node, uv_tile, x=x - 320, y=y - 560)
         roughness, roughness_is_smoothness = self._roughness_socket_for_texture_reference(
             nodes, normal_ref, x=x + 180, y=y - 560
         )
@@ -222,6 +227,8 @@ class LayersMixin:
         palette_specular_value: float,
         metallic_value: float,
         specular_color: tuple[float, float, float] | None,
+        specular_socket: Any = None,
+        metallic_socket: Any = None,
         x: int,
         y: int,
         label: str,
@@ -305,6 +312,8 @@ class LayersMixin:
         self._link_group_input(links, base_alpha_socket, group_node, "Base Alpha")
         self._link_group_input(links, normal_color_socket, group_node, "Normal Color")
         self._link_group_input(links, roughness_socket, group_node, "Roughness Source")
+        self._link_group_input(links, specular_socket, group_node, "Specular Value")
+        self._link_group_input(links, metallic_socket, group_node, "Metallic")
         self._link_group_input(links, palette_color_socket, group_node, "Palette Color")
         self._link_group_input(links, palette_gloss_socket, group_node, "Palette Glossiness")
         self._link_group_input(links, palette_specular_socket, group_node, "Palette Specular")
@@ -375,10 +384,13 @@ class LayersMixin:
         *,
         x: int,
         y: int,
+        uv_tiling: float = 1.0,
     ) -> dict[str, Any] | None:
         image_node = self._image_node(nodes, image_path, x=x, y=y, is_color=False)
         if image_node is None:
             return None
+        links = image_node.id_data.links
+        self._apply_uv_tiling(nodes, links, image_node, uv_tiling, x=x - 320, y=y)
         group_node = nodes.new("ShaderNodeGroup")
         group_node.location = (x + 180, y)
         group_node.node_tree = self._ensure_runtime_channel_split_group()

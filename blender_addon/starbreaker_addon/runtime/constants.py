@@ -48,8 +48,12 @@ PROP_HAS_POM = "starbreaker_has_pom"
 # same datablock so we can restore values when the user toggles states.
 PROP_LIGHT_STATES_JSON = "starbreaker_light_states"
 PROP_LIGHT_ACTIVE_STATE = "starbreaker_light_active_state"
+PROP_LIGHT_SEMANTIC_KIND = "starbreaker_light_semantic_kind"
+PROP_ENGINE_GLOW_CONTROL_JSON = "starbreaker_engine_glow_control"
+PROP_ENGINE_GLOW_STRENGTH = "starbreaker_engine_glow_strength"
 SCENE_POM_DETAIL_PROP = "starbreaker_pom_detail"
 SCENE_WEAR_STRENGTH_PROP = "starbreaker_wear_strength"
+SCENE_ENGINE_GLOW_PROP = "starbreaker_engine_glow_strength"
 SURFACE_SHADER_MODE_PRINCIPLED = "principled_first"
 SURFACE_SHADER_MODE_GLASS = "glass_bsdf"
 
@@ -91,10 +95,12 @@ LUMENS_PER_WATT_WHITE = 120.0
 # radiant-flux Watts. SC intensities are treated as KHR_lights_punctual-style
 # candela values (matching Blender's own glTF importer behaviour): total
 # luminous flux = intensity * 4π, which divided by 683 lm/W gives Watts.
+# Updated to 1500.0 for brighter interior lighting
+# (Phase 36+: aligned with Max script's PowerModifier and user-verified brightness).
 # See ``docs/StarBreaker/lights-research.md``.
 import math as _math
 
-SC_LIGHT_CANDELA_SCALE = 200.0
+SC_LIGHT_CANDELA_SCALE = 1500.0
 LIGHT_CANDELA_TO_WATT = (4.0 * _math.pi) / GLTF_PBR_WATTS_TO_LUMENS
 HEADLIGHT_GOBO_THROW_GAIN = 10.0
 # Empirical visual-brightness multiplier. Star Citizen's in-engine light
@@ -113,4 +119,4 @@ SCENE_AXIS_CONVERSION = Matrix(
 SCENE_AXIS_CONVERSION_INV = SCENE_AXIS_CONVERSION.inverted()
 GLTF_LIGHT_BASIS_CORRECTION = Quaternion((math.sqrt(0.5), 0.0, -math.sqrt(0.5), 0.0))
 NON_COLOR_INPUT_KEYWORDS = ("normal", "roughness", "gloss", "mask", "height", "specular", "opacity", "id_map")
-MATERIAL_IDENTITY_SCHEMA = "runtime_material_v10"
+MATERIAL_IDENTITY_SCHEMA = "runtime_material_v11"

@@ -12,6 +12,7 @@ pub(crate) mod socpak;
 pub mod types;
 pub mod animation;
 pub mod chrparams;
+pub mod validation;
 
 pub use error::Error;
 pub use pipeline::{
@@ -22,6 +23,7 @@ pub use pipeline::{
     resolve_loadout_meshes, socpaks_to_glb,
 };
 pub use types::Mesh;
+pub use validation::{ValidationReport, validate_decomposed_export};
 
 use starbreaker_chunks::ChunkFile;
 

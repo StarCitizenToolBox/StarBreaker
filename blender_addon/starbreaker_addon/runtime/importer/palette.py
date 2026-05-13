@@ -280,8 +280,21 @@ class PaletteMixin:
             }
             expected_inputs = {"Image", "Decal Red Tint", "Decal Green Tint", "Decal Blue Tint"}
             expected_outputs = {"Color", "Alpha"}
-            if expected_inputs.issubset(existing_inputs) and expected_outputs.issubset(
-                existing_outputs
+            has_map_range = any(node.bl_idname == "ShaderNodeMapRange" for node in group.nodes)
+            channel_mix_nodes = [
+                node
+                for node in group.nodes
+                if node.bl_idname == "ShaderNodeMix"
+                and getattr(node, "label", "") in {"Red Mix", "Green Mix", "Blue Mix"}
+            ]
+            mixes_are_add = len(channel_mix_nodes) == 3 and all(
+                getattr(node, "blend_type", "") == "ADD" for node in channel_mix_nodes
+            )
+            if (
+                expected_inputs.issubset(existing_inputs)
+                and expected_outputs.issubset(existing_outputs)
+                and has_map_range
+                and mixes_are_add
             ):
                 return group
         if group is None:
@@ -308,19 +321,27 @@ class PaletteMixin:
         separate_rgb.location = (-140, 300)
         if hasattr(separate_rgb, "mode"):
             separate_rgb.mode = "RGB"
-        group.links.new(group_input.outputs["Image"], separate_rgb.inputs[0])
+
+        map_range = group.nodes.new("ShaderNodeMapRange")
+        map_range.location = (-360, 380)
+        if hasattr(map_range, "data_type"):
+            map_range.data_type = "FLOAT"
+        if hasattr(map_range, "clamp"):
+            map_range.clamp = True
+        group.links.new(group_input.outputs["Image"], map_range.inputs["Value"])
+        group.links.new(map_range.outputs["Result"], separate_rgb.inputs[0])
 
         separate_hsv = group.nodes.new("ShaderNodeSeparateColor")
         separate_hsv.location = (460, 60)
         if hasattr(separate_hsv, "mode"):
             separate_hsv.mode = "HSV"
-        group.links.new(group_input.outputs["Image"], separate_hsv.inputs[0])
+        group.links.new(map_range.outputs["Result"], separate_hsv.inputs[0])
 
         red_mix = group.nodes.new("ShaderNodeMix")
         red_mix.label = "Red Mix"
         red_mix.location = (60, 340)
         red_mix.data_type = "RGBA"
-        red_mix.blend_type = "MIX"
+        red_mix.blend_type = "ADD"
         red_mix.clamp_factor = True
         red_mix.inputs[6].default_value = (0.0, 0.0, 0.0, 1.0)
         group.links.new(_output_socket(separate_rgb, "Red", "R"), red_mix.inputs[0])
@@ -330,7 +351,7 @@ class PaletteMixin:
         green_mix.label = "Green Mix"
         green_mix.location = (260, 320)
         green_mix.data_type = "RGBA"
-        green_mix.blend_type = "MIX"
+        green_mix.blend_type = "ADD"
         green_mix.clamp_factor = True
         group.links.new(_output_socket(separate_rgb, "Green", "G"), green_mix.inputs[0])
         group.links.new(red_mix.outputs[2], green_mix.inputs[6])
@@ -340,7 +361,7 @@ class PaletteMixin:
         blue_mix.label = "Blue Mix"
         blue_mix.location = (460, 300)
         blue_mix.data_type = "RGBA"
-        blue_mix.blend_type = "MIX"
+        blue_mix.blend_type = "ADD"
         blue_mix.clamp_factor = True
         group.links.new(_output_socket(separate_rgb, "Blue", "B"), blue_mix.inputs[0])
         group.links.new(green_mix.outputs[2], blue_mix.inputs[6])
@@ -373,7 +394,7 @@ class PaletteMixin:
             and getattr(item, "in_out", None) == "INPUT"
         }
 
-        expected_inputs: set[str] = set()
+        expected_inputs: set[str] = {"Decal UV"}
         expected_outputs = {
             "Decal Color",
             "Decal Alpha",
@@ -439,6 +460,10 @@ class PaletteMixin:
                 group.interface.new_socket(
                     name=socket_name, in_out="OUTPUT", socket_type=socket_type
                 )
+        if "Decal UV" not in existing_inputs:
+            group.interface.new_socket(
+                name="Decal UV", in_out="INPUT", socket_type="NodeSocketVector"
+            )
 
         for item in list(group.interface.items_tree):
             if (
@@ -463,6 +488,10 @@ class PaletteMixin:
             group.nodes, palette_decal_texture(palette), x=-900, y=-520, is_color=True
         )
         if palette_decal_node is not None:
+            decal_uv_socket = group_input.outputs.get("Decal UV")
+            decal_vector_socket = palette_decal_node.inputs.get("Vector")
+            if decal_uv_socket is not None and decal_vector_socket is not None:
+                group.links.new(decal_uv_socket, decal_vector_socket)
             adaptor_tree = self._ensure_tint_decal_adaptor_group()
             decal_converter = group.nodes.new("ShaderNodeGroup")
             decal_converter.name = "DecalConverter"
@@ -541,6 +570,26 @@ class PaletteMixin:
         group_node = existing or nodes.new("ShaderNodeGroup")
         group_node.node_tree = self._ensure_palette_group(palette)
         _refresh_group_node_sockets(group_node)
+        decal_uv_input = group_node.inputs.get("Decal UV")
+        if decal_uv_input is not None and not decal_uv_input.is_linked:
+            uv_node = next(
+                (
+                    node
+                    for node in nodes
+                    if node.bl_idname == "ShaderNodeUVMap"
+                    and getattr(node, "name", "") == "STARBREAKER_PALETTE_DECAL_UV"
+                ),
+                None,
+            )
+            if uv_node is None:
+                uv_node = nodes.new("ShaderNodeUVMap")
+                uv_node.name = "STARBREAKER_PALETTE_DECAL_UV"
+                uv_node.label = "StarBreaker Palette Decal UV"
+                uv_node.uv_map = "UVMap"
+                uv_node.location = (x - 220, y - 180)
+            uv_socket = _output_socket(uv_node, "UV")
+            if uv_socket is not None:
+                links.new(uv_socket, decal_uv_input)
         group_node.location = (x, y)
         group_node.label = "StarBreaker Palette"
         group_node.name = expected_name

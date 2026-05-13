@@ -1360,6 +1360,14 @@
           "source_slot": "TexSlot1"
         },
         {
+          "default_value": false,
+          "name": "Use Vert Col",
+          "required": false,
+          "semantic": "use_vertex_colors",
+          "socket_type": "NodeSocketBool",
+          "source_slot": null
+        },
+        {
           "default_value": null,
           "name": "TexSlot2_Specular",
           "required": false,
@@ -1510,6 +1518,14 @@
           "name": "Param_DamagePerObjectWear",
           "required": false,
           "semantic": "public_param_damageperobjectwear",
+          "socket_type": "NodeSocketFloat",
+          "source_slot": null
+        },
+        {
+          "default_value": 0.0,
+          "name": "Emission Strength",
+          "required": false,
+          "semantic": "emission_strength",
           "socket_type": "NodeSocketFloat",
           "source_slot": null
         },

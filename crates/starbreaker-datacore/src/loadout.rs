@@ -352,7 +352,14 @@ fn build_port_info_map(db: &Database, record: &Record) -> HashMap<String, PortIn
                     ])
                     .unwrap_or([0.0; 3]);
 
-                map.insert(port_name.to_string(), PortInfo {
+                // Key by lowercase port name. The DataCore SItemPortDef.Name is
+                // sometimes camelCase (e.g. ``hardpoint_Jump_Drive`` on QDRV
+                // components) while the loadout entry's ``itemPortName`` is
+                // always lowercase (e.g. ``hardpoint_jump_drive``). The CryEngine
+                // runtime matches case-insensitively; matching that here ensures
+                // ``apply_port_info`` populates ``helper_bone_name`` and offsets
+                // for nested item ports.
+                map.insert(port_name.to_ascii_lowercase(), PortInfo {
                     bone_name,
                     no_rotation,
                     offset_position,
@@ -372,7 +379,8 @@ fn build_port_info_map(db: &Database, record: &Record) -> HashMap<String, PortIn
 fn apply_port_info(db: &Database, parent_record: &Record, children: &mut [LoadoutNode]) {
     let port_map = build_port_info_map(db, parent_record);
     for child in children {
-        if let Some(info) = port_map.get(&child.item_port_name) {
+        // Lookup is case-insensitive: see ``build_port_info_map`` for context.
+        if let Some(info) = port_map.get(&child.item_port_name.to_ascii_lowercase()) {
             child.helper_bone_name = info.bone_name.clone();
             child.no_rotation = info.no_rotation;
             child.offset_position = info.offset_position;
@@ -649,7 +657,9 @@ pub fn resolve_loadout_indexed(idx: &EntityIndex, record: &Record) -> LoadoutTre
     }
 }
 
-const MAX_LOADOUT_DEPTH: usize = 4;
+/// Nested item-port loadouts can stack through parent ship -> docking module ->
+/// vehicle attach -> child vehicle -> turret -> gimbal -> weapon.
+const MAX_LOADOUT_DEPTH: usize = 8;
 
 /// Extract a geometry file path from an inline EntityClassDefinition Value.
 /// Walks: Components[] → SGeometryResourceParams → Geometry.Geometry.Geometry.path

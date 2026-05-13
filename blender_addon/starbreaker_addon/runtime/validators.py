@@ -70,21 +70,22 @@ def _assert_material_top_level_clean(
 #: Name prefixes of runtime-owned node groups. Used by
 #: :func:`_purge_orphaned_runtime_groups` to skip non-starbreaker groups.
 _RUNTIME_GROUP_PREFIXES: tuple[str, ...] = (
-    "StarBreaker Runtime LayerSurface.",
-    "StarBreaker Runtime HardSurface.",
-    "StarBreaker Runtime Glass.",
-    "StarBreaker Runtime NoDraw.",
-    "StarBreaker Runtime Screen.",
-    "StarBreaker Runtime Effect.",
-    "StarBreaker Runtime LayeredInputs.",
-    "StarBreaker Runtime Principled.",
-    "StarBreaker Runtime HardSurface Stencil.",
-    "StarBreaker Runtime Channel Split.",
-    "StarBreaker Runtime Smoothness To Roughness.",
-    "StarBreaker Runtime Color To Luma.",
-    "StarBreaker Runtime Shadowless Wrapper.",
-    "StarBreaker Wear Input.",
-    "StarBreaker Iridescence Input.",
+    "StarBreaker Runtime LayerSurface",
+    "StarBreaker Runtime HardSurface",
+    "StarBreaker Runtime Glass",
+    "StarBreaker Runtime NoDraw",
+    "StarBreaker Runtime Screen",
+    "StarBreaker Runtime Effect",
+    "StarBreaker Runtime LayeredInputs",
+    "StarBreaker Runtime Principled",
+    "StarBreaker Runtime HardSurface Stencil",
+    "StarBreaker Runtime Channel Split",
+    "StarBreaker Runtime Smoothness To Roughness",
+    "StarBreaker Runtime Color To Luma",
+    "StarBreaker Runtime POM Detail",
+    "StarBreaker Runtime Shadowless Wrapper",
+    "StarBreaker Wear Input",
+    "StarBreaker Iridescence Input",
     # Phase 12 POM: appended copies of the production POM pipeline
     # from resources/pom_library.blend. Each POM-flagged material
     # triggers a unique copy (keyed by height-image name) via
@@ -104,6 +105,30 @@ def _purge_orphaned_runtime_groups() -> int:
         if any(name.startswith(prefix) for prefix in _RUNTIME_GROUP_PREFIXES):
             bpy.data.node_groups.remove(group)
             removed += 1
+    return removed
+
+
+def _purge_orphaned_managed_materials() -> int:
+    removed = 0
+    for material in list(bpy.data.materials):
+        if material.users > 0:
+            continue
+        if not material.get("starbreaker_material_identity"):
+            continue
+        bpy.data.materials.remove(material)
+        removed += 1
+    return removed
+
+
+def _purge_orphaned_runtime_actions() -> int:
+    removed = 0
+    for action in list(bpy.data.actions):
+        if action.users > 0:
+            continue
+        if not action.name.startswith("HeightMapAction"):
+            continue
+        bpy.data.actions.remove(action)
+        removed += 1
     return removed
 
 

@@ -1,12 +1,15 @@
 bl_info = {
     "name": "StarBreaker Decomposed Import",
     "author": "GitHub Copilot",
-    "version": (0, 1, 0),
+    "version": (0, 2, 2),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > StarBreaker",
     "description": "Import StarBreaker decomposed export packages and rebuild template-driven materials",
     "category": "Import-Export",
 }
+
+# Installer-facing semantic version string.
+VERSION = "0.2.2+addon.6"
 
 try:
     from .ui import register, unregister
@@ -21,4 +24,4 @@ except ModuleNotFoundError as exc:
         return None
 
 
-__all__ = ["bl_info", "register", "unregister"]
+__all__ = ["bl_info", "VERSION", "register", "unregister"]

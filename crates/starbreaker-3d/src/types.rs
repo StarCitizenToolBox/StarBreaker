@@ -25,6 +25,7 @@ pub struct Mesh {
 pub struct SubMesh {
     pub material_name: Option<String>,
     pub material_id: u32,
+    pub source_material_id: Option<u32>,
     pub first_index: u32,
     pub num_indices: u32,
     pub first_vertex: u32,
@@ -290,6 +291,9 @@ pub fn build_mesh_with_bbox(skin: &SkinMesh, materials: &[MaterialName], use_mod
         .map(|s| SubMesh {
             material_name: materials.get(s.mat_id as usize).map(|m| m.name.clone()),
             material_id: s.mat_id as u32,
+            // Preserve the authored submesh material index so downstream
+            // remapping can resolve against sparse source MTL indices.
+            source_material_id: Some(s.mat_id as u32),
             first_index: s.first_index,
             num_indices: s.num_indices,
             first_vertex: s.first_vertex,
@@ -496,6 +500,8 @@ pub struct EntityPayload {
     /// (`.chrparams`/`$TracksDatabase`) when exporting sidecar animations.
     pub skeleton_source_path: Option<String>,
     pub entity_name: String,
+    /// DataCore EntityClassDefinition.Category for this payload, if present.
+    pub entity_category: Option<String>,
     /// NMC node name in the parent to attach under.
     pub parent_node_name: String,
     /// Fallback: parent entity name to attach to if parent_node_name isn't found.
@@ -587,6 +593,10 @@ pub struct LightStateInfo {
     /// Authored linear RGB triple (0..1) from the `<color>` child. When
     /// `use_temperature` is true this is usually `[1,1,1]`.
     pub color: [f32; 3],
+    /// CryEngine authored light style id (e.g. strobe patterns).
+    pub light_style: i32,
+    /// Optional authored preset tag (e.g. ``fast`` / ``slow``).
+    pub preset_tag: String,
 }
 
 /// A geometry placement from a .soc interior container.
@@ -607,6 +617,12 @@ pub struct InteriorMesh {
 #[derive(Debug)]
 pub struct InteriorPayload {
     pub name: String,
+    /// Optional scene instance that owns this container when it comes from a
+    /// child entity rather than the root export record.
+    pub parent_entity_name: Option<String>,
+    /// Optional source node/bone inside the parent scene instance that the
+    /// container is authored relative to.
+    pub parent_node_name: Option<String>,
     /// Static geometry placements from IncludedObjects + CryXMLB entities.
     pub meshes: Vec<InteriorMesh>,
     /// Lights from CryXMLB entities.

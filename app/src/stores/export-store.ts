@@ -29,26 +29,26 @@ interface ExportState {
   mip: number;
   exportKind: string;
   materialMode: string;
-  format: string;
   includeAttachments: boolean;
   includeInterior: boolean;
   includeLights: boolean;
   overwriteExistingAssets: boolean;
   includeNodraw: boolean;
   includeAnimations: boolean;
+  includeObjectTypeDirectory: boolean;
   threads: number;
   outputDir: string | null;
   setLod: (v: number) => void;
   setMip: (v: number) => void;
   setExportKind: (v: string) => void;
   setMaterialMode: (v: string) => void;
-  setFormat: (v: string) => void;
   setIncludeAttachments: (v: boolean) => void;
   setIncludeInterior: (v: boolean) => void;
   setIncludeLights: (v: boolean) => void;
   setOverwriteExistingAssets: (v: boolean) => void;
   setIncludeNodraw: (v: boolean) => void;
   setIncludeAnimations: (v: boolean) => void;
+  setIncludeObjectTypeDirectory: (v: boolean) => void;
   setThreads: (v: number) => void;
   setOutputDir: (dir: string | null) => void;
 
@@ -80,6 +80,7 @@ type PersistedExportState = Pick<
   | "overwriteExistingAssets"
   | "includeNodraw"
   | "includeAnimations"
+  | "includeObjectTypeDirectory"
   | "threads"
   | "outputDir"
   | "hideNpcVariants"
@@ -125,26 +126,26 @@ export const useExportStore = create<ExportState>()(
   mip: 2,
   exportKind: "bundled",
   materialMode: "textures",
-  format: "glb",
   includeAttachments: true,
   includeInterior: true,
   includeLights: true,
   overwriteExistingAssets: true,
   includeNodraw: false,
   includeAnimations: true,
+  includeObjectTypeDirectory: false,
   threads: 0,
   outputDir: null,
   setLod: (v) => set({ lod: v }),
   setMip: (v) => set({ mip: v }),
   setExportKind: (v) => set({ exportKind: v }),
   setMaterialMode: (v) => set({ materialMode: v }),
-  setFormat: (v) => set({ format: v }),
   setIncludeAttachments: (v) => set({ includeAttachments: v }),
   setIncludeInterior: (v) => set({ includeInterior: v }),
   setIncludeLights: (v) => set({ includeLights: v }),
   setOverwriteExistingAssets: (v) => set({ overwriteExistingAssets: v }),
   setIncludeNodraw: (v) => set({ includeNodraw: v }),
   setIncludeAnimations: (v) => set({ includeAnimations: v }),
+  setIncludeObjectTypeDirectory: (v) => set({ includeObjectTypeDirectory: v }),
   setThreads: (v) => set({ threads: v }),
   setOutputDir: (dir) => set({ outputDir: dir }),
 
@@ -172,16 +173,34 @@ export const useExportStore = create<ExportState>()(
         : {}),
     }),
   setProgress: (fraction, current, total, label, stage) =>
-    set({
-      progressFraction: fraction,
-      progress: current,
-      progressTotal: total,
-      progressLabel: label,
-      progressStage: stage,
+    set((s) => {
+      const progressFraction = Math.max(s.progressFraction, fraction);
+      const progressTotal = Math.max(s.progressTotal, total);
+      return {
+        progressFraction,
+        progress: Math.max(s.progress, current),
+        progressTotal,
+        progressLabel: label,
+        progressStage: stage,
+      };
     }),
   addExportError: (msg) =>
     set((s) => ({ exportErrors: [...s.exportErrors, msg] })),
-  setResult: (result) => set({ result, exporting: false }),
+  setResult: (result) =>
+    set((s) => {
+      if (result === null) {
+        return { result, exporting: false };
+      }
+      const total = s.progressTotal || result.success + result.errors;
+      return {
+        result,
+        exporting: false,
+        progressFraction: 1,
+        progress: total,
+        progressTotal: total,
+        progressStage: "Done",
+      };
+    }),
   deselectIds: (ids) =>
     set((s) => {
       const next = new Set(s.selected);
@@ -203,6 +222,7 @@ export const useExportStore = create<ExportState>()(
         overwriteExistingAssets: s.overwriteExistingAssets,
         includeNodraw: s.includeNodraw,
         includeAnimations: s.includeAnimations,
+        includeObjectTypeDirectory: s.includeObjectTypeDirectory,
         threads: s.threads,
         outputDir: s.outputDir,
         hideNpcVariants: s.hideNpcVariants,

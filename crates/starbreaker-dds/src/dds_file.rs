@@ -301,10 +301,48 @@ impl DdsFile {
         Ok(rgba.iter().step_by(4).copied().collect())
     }
 
+    /// Decode a BC6H gobo (projector texture) to float RGB preserving HDR values.
+    ///
+    /// This is specifically for exporting gobos to EXR format for Blender.
+    /// Unlike `decode_rgba`, this does NOT tone-map or clamp values,
+    /// so floating-point values >1.0 (common in HDR gobos) are preserved.
+    ///
+    /// Returns `None` if the DDS is not a BC6H format.
+    /// Returns `Some((width, height, rgb_floats))` where rgb_floats is in row-major order
+    /// with 3 floats per pixel (R, G, B).
+    pub fn decode_bc6h_to_float_rgb(&self, mip_level: usize) -> Result<Option<(u32, u32, Vec<f32>)>, DdsError> {
+        if mip_level >= self.mip_data.len() {
+            return Err(DdsError::MipOutOfRange {
+                level: mip_level,
+                max: self.mip_data.len().saturating_sub(1),
+            });
+        }
+
+        let pf = &self.header.pixel_format;
+        let (w, h) = self.dimensions(mip_level);
+        let data = &self.mip_data[mip_level];
+
+        // Check if this is a BC6H format (requires DX10 header)
+        let format = match resolve_format(pf, self.dxt10_header.as_ref()) {
+            Ok(fmt) => fmt,
+            Err(_) => return Ok(None), // Not a recognized format, return None
+        };
+
+        // Only handle BC6H; all other formats return None
+        if !matches!(format, DxgiFormat::BC6hUf16) {
+            return Ok(None);
+        }
+
+        // Decode BC6H to float RGB
+        let float_rgb = crate::decode::decode_bc6h_to_float_rgb(data, w, h)?;
+        Ok(Some((w, h, float_rgb)))
+    }
+
     /// Check if this DDS has alpha/smoothness mip data.
     pub fn has_alpha_mips(&self) -> bool {
         !self.alpha_mip_data.is_empty()
     }
+
 
     /// Save a specific mip level as a PNG file.
     pub fn save_png(&self, path: &Path, mip_level: usize) -> Result<(), DdsError> {

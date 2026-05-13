@@ -8,11 +8,18 @@ import {
   onExportProgress,
   onExportDone,
   browseOutputDir,
+  getBlenderAddonStatus,
+  installBlenderAddon,
+  reloadBlenderAddon,
   type ExportRequest,
+  type BlenderAddonStatus,
 } from "../lib/commands";
 
 export function ExportView() {
   const [optionsWidth, setOptionsWidth] = useState(260);
+  const [addonStatus, setAddonStatus] = useState<BlenderAddonStatus | null>(null);
+  const [addonBusy, setAddonBusy] = useState(false);
+  const [addonError, setAddonError] = useState<string | null>(null);
   const categories = useExportStore((s) => s.categories);
   const categoriesLoading = useExportStore((s) => s.categoriesLoading);
   const activeCategory = useExportStore((s) => s.activeCategory);
@@ -34,13 +41,13 @@ export function ExportView() {
   const mip = useExportStore((s) => s.mip);
   const exportKind = useExportStore((s) => s.exportKind);
   const materialMode = useExportStore((s) => s.materialMode);
-  const format = useExportStore((s) => s.format);
   const includeAttachments = useExportStore((s) => s.includeAttachments);
   const includeInterior = useExportStore((s) => s.includeInterior);
   const includeLights = useExportStore((s) => s.includeLights);
   const overwriteExistingAssets = useExportStore((s) => s.overwriteExistingAssets);
   const includeNodraw = useExportStore((s) => s.includeNodraw);
   const includeAnimations = useExportStore((s) => s.includeAnimations);
+  const includeObjectTypeDirectory = useExportStore((s) => s.includeObjectTypeDirectory);
   const threads = useExportStore((s) => s.threads);
   const outputDir = useExportStore((s) => s.outputDir);
   const setLod = useExportStore((s) => s.setLod);
@@ -53,6 +60,7 @@ export function ExportView() {
   const setOverwriteExistingAssets = useExportStore((s) => s.setOverwriteExistingAssets);
   const setIncludeNodraw = useExportStore((s) => s.setIncludeNodraw);
   const setIncludeAnimations = useExportStore((s) => s.setIncludeAnimations);
+  const setIncludeObjectTypeDirectory = useExportStore((s) => s.setIncludeObjectTypeDirectory);
   const setThreads = useExportStore((s) => s.setThreads);
   const setOutputDir = useExportStore((s) => s.setOutputDir);
 
@@ -80,6 +88,25 @@ export function ExportView() {
         setCategoriesLoading(false);
       });
   }, [setCategoriesLoading, setCategories]);
+
+  useEffect(() => {
+    let mounted = true;
+    getBlenderAddonStatus()
+      .then((status) => {
+        if (mounted) {
+          setAddonStatus(status);
+          setAddonError(null);
+        }
+      })
+      .catch((err) => {
+        if (mounted) {
+          setAddonError(String(err));
+        }
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   // Subscribe to export events on mount
   useEffect(() => {
@@ -135,7 +162,14 @@ export function ExportView() {
 
   const canExport = totalSelected > 0 && outputDir !== null && !exporting;
 
-  const progressPercent = Math.round(progressFraction * 100);
+  const allDone = progressTotal > 0 && progress >= progressTotal;
+  // Never display 100% until all export slots are marked complete, to avoid the
+  // aggregate fraction rounding up prematurely when most (but not all) entities
+  // are done and the last one is near the end (e.g. 2/3 done + 0.99 → 0.9966 rounds to 100).
+  const progressPercent = allDone
+    ? 100
+    : Math.min(Math.round(progressFraction * 100), 99);
+  const progressBarFraction = allDone ? progressFraction : Math.min(progressFraction, 0.99);
 
   const handleExport = () => {
     const allEntities = categories.flatMap((c) => c.entities);
@@ -148,7 +182,6 @@ export function ExportView() {
       mip,
       export_kind: exportKind,
       material_mode: materialMode,
-      format: format,
       include_attachments: includeAttachments,
       include_interior: includeInterior,
       include_lights: includeLights,
@@ -156,6 +189,7 @@ export function ExportView() {
       overwrite_existing_assets: overwriteExistingAssets,
       include_nodraw: includeNodraw,
       include_animations: includeAnimations,
+      include_object_type_directory: includeObjectTypeDirectory,
     };
     setExporting(true);
     setProgress(
@@ -184,6 +218,59 @@ export function ExportView() {
     });
   };
 
+  const refreshAddonStatus = () => {
+    getBlenderAddonStatus()
+      .then((status) => {
+        setAddonStatus(status);
+        setAddonError(null);
+      })
+      .catch((err) => setAddonError(String(err)));
+  };
+
+  const handleInstallAddon = () => {
+    setAddonBusy(true);
+    setAddonError(null);
+    installBlenderAddon()
+      .then((status) => {
+        setAddonStatus(status);
+      })
+      .catch((err) => {
+        setAddonError(String(err));
+      })
+      .finally(() => {
+        setAddonBusy(false);
+        refreshAddonStatus();
+      });
+  };
+
+  const handleReloadAddon = () => {
+    setAddonBusy(true);
+    setAddonError(null);
+    reloadBlenderAddon()
+      .then((msg) => {
+        setAddonError(null);
+        refreshAddonStatus();
+        // Surface the reload result as a transient message via addonError (it may be informational)
+        if (msg) {
+          setAddonError(msg);
+        }
+      })
+      .catch((err) => {
+        setAddonError(String(err));
+      })
+      .finally(() => {
+        setAddonBusy(false);
+      });
+  };
+
+  const addonActionLabel = addonStatus?.state === "installed"
+    ? "Installed"
+    : addonStatus?.state === "upgrade"
+      ? "Upgrade"
+      : addonStatus?.state === "unavailable"
+        ? "Unavailable"
+        : "Install";
+
   return (
     <div className="flex-1 flex overflow-hidden relative">
       {/* ── Export overlay ── */}
@@ -198,7 +285,7 @@ export function ExportView() {
               <div className="w-full bg-surface rounded-full h-2 overflow-hidden">
                 <div
                   className="bg-accent h-full rounded-full transition-all duration-300"
-                  style={{ width: `${progressFraction * 100}%` }}
+                  style={{ width: `${progressBarFraction * 100}%` }}
                 />
               </div>
               <div className="flex items-start justify-between gap-3">
@@ -351,6 +438,67 @@ export function ExportView() {
             Export Options
           </h2>
 
+          <div className="rounded-md border border-border bg-surface/40 p-3 flex flex-col gap-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs text-text-sub">Blender Addon</span>
+              <div className="flex items-center gap-1.5">
+                {addonStatus?.blender_running && addonStatus.state === "installed" && (
+                  <button
+                    onClick={handleReloadAddon}
+                    disabled={addonBusy}
+                    className="px-2 py-1 rounded-md text-[11px] font-medium bg-surface text-text-sub hover:bg-surface/80 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+                    title="Reload addon in running Blender"
+                  >
+                    Reload
+                  </button>
+                )}
+                <button
+                  onClick={handleInstallAddon}
+                  disabled={addonBusy || addonStatus?.state === "unavailable" || addonStatus?.state === "installed"}
+                  className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors ${
+                    addonBusy || addonStatus?.state === "unavailable" || addonStatus?.state === "installed"
+                      ? "bg-surface text-text-faint cursor-not-allowed"
+                      : addonStatus?.state === "upgrade"
+                        ? "bg-warning/20 text-warning hover:bg-warning/30"
+                        : "bg-accent text-on-accent hover:brightness-110"
+                  }`}
+                >
+                  {addonBusy ? "Working..." : addonActionLabel}
+                </button>
+              </div>
+            </div>
+            {addonStatus && (
+              <>
+                <p className="text-[10px] text-text-faint leading-relaxed">
+                  Current addon: {addonStatus.current_version}
+                  {addonStatus.installed_version
+                    ? ` | Installed: ${addonStatus.installed_version}`
+                    : " | Not installed"}
+                </p>
+                {addonStatus.addons_path && (
+                  <p className="text-[10px] text-text-faint leading-relaxed break-all">
+                    Target: {addonStatus.addons_path}
+                  </p>
+                )}
+                {addonStatus.incompatible_blender_found && addonStatus.state === "unavailable" && (
+                  <p className="text-[10px] text-warning leading-relaxed">
+                    Blender found but requires 5.0 or newer. Please upgrade Blender.
+                  </p>
+                )}
+                {addonStatus.message && (
+                  <p className="text-[10px] text-warning leading-relaxed">
+                    {addonStatus.message}
+                  </p>
+                )}
+              </>
+            )}
+            {addonError && (
+              <p className="text-[10px] text-danger leading-relaxed break-words">
+                {addonError}
+              </p>
+            )}
+          </div>
+
           {/* LOD */}
           <div className="flex flex-col gap-1.5">
             <div className="flex items-center justify-between">
@@ -423,7 +571,7 @@ export function ExportView() {
             <div className="flex flex-col gap-1">
               {([
                 { value: "bundled", label: "Bundled - single .glb", tip: "Single-file export for direct viewing in stock tools." },
-                { value: "decomposed", label: "Structured package", tip: "Reusable mesh assets, canonical textures, and JSON sidecars for Blender reconstruction." },
+                { value: "decomposed", label: "Structured package - .blend files", tip: "Reusable native Blender mesh assets, canonical textures, and JSON sidecars for Blender reconstruction." },
               ] as const).map((opt) => (
                 <label
                   key={opt.value}
@@ -460,7 +608,7 @@ export function ExportView() {
                 </span>
               </label>
               <p className="text-[10px] text-text-faint leading-relaxed pl-6">
-                When disabled, existing Data/... .glb and .png assets are left in place.
+                When disabled, existing Data/... .blend and .png assets are left in place.
               </p>
 
               <label className="flex items-center gap-2.5 cursor-pointer group">
@@ -582,6 +730,17 @@ export function ExportView() {
                 {outputDir ?? "Choose folder..."}
               </span>
             </button>
+            <label className="flex items-center gap-2.5 cursor-pointer group mt-1">
+              <input
+                type="checkbox"
+                checked={includeObjectTypeDirectory}
+                onChange={(e) => setIncludeObjectTypeDirectory(e.target.checked)}
+                className="accent-accent w-3.5 h-3.5 rounded"
+              />
+              <span className="text-xs text-text-sub group-hover:text-text transition-colors">
+                Include object type directory (ship, vehicle, weapon, other)
+              </span>
+            </label>
           </div>
         </div>
 

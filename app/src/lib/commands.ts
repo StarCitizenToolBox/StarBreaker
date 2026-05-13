@@ -127,7 +127,6 @@ export interface ExportRequest {
   mip: number;
   export_kind: string;
   material_mode: string;
-  format: string;
   include_attachments: boolean;
   include_interior: boolean;
   include_lights: boolean;
@@ -135,6 +134,7 @@ export interface ExportRequest {
   overwrite_existing_assets: boolean;
   include_nodraw: boolean;
   include_animations: boolean;
+  include_object_type_directory: boolean;
 }
 
 export interface ExportProgress {
@@ -197,6 +197,34 @@ export async function browseOutputDir(): Promise<string | null> {
     multiple: false,
   });
   return result ?? null;
+}
+
+export interface BlenderAddonStatus {
+  state: "install" | "installed" | "upgrade" | "unavailable";
+  current_version: string;
+  installed_version: string | null;
+  addons_path: string | null;
+  blender_version: string | null;
+  blender_running: boolean;
+  message: string | null;
+  /** True when Blender was found but all installs are older than 5.0. */
+  incompatible_blender_found: boolean;
+}
+
+export async function getBlenderAddonStatus(): Promise<BlenderAddonStatus> {
+  return invoke<BlenderAddonStatus>("get_blender_addon_status");
+}
+
+export async function installBlenderAddon(
+  targetPath: string | null = null,
+): Promise<BlenderAddonStatus> {
+  return invoke<BlenderAddonStatus>("install_blender_addon", {
+    target_path: targetPath,
+  });
+}
+
+export async function reloadBlenderAddon(): Promise<string> {
+  return invoke<string>("reload_blender_addon");
 }
 
 // ── DataCore types ──
@@ -370,6 +398,7 @@ export async function audioDecodeWem(
   return invoke<number[]>("audio_decode_wem", { mediaId, sourceType, bankName });
 }
 
+/** Get recommended export extension for a media file (ogg for Vorbis, else wem). */
 export async function audioExportInfo(
   mediaId: number,
   sourceType: string,
@@ -378,6 +407,7 @@ export async function audioExportInfo(
   return invoke<AudioExportInfo>("audio_export_info", { mediaId, sourceType, bankName });
 }
 
+/** Export a media file to disk, decoding Vorbis to OGG when applicable. */
 export async function audioExportMedia(
   mediaId: number,
   sourceType: string,

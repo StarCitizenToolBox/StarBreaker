@@ -1,3 +1,4 @@
+mod blend;
 mod chf;
 mod common;
 mod cryxml;

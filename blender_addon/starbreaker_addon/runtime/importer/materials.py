@@ -55,8 +55,11 @@ from ..constants import (
 from ..node_utils import _input_socket, _output_socket, _refresh_group_node_sockets
 from ..record_utils import (
     _float_authored_attribute,
+    _uses_vertex_color_tint,
     _layer_texture_reference,
     _matching_texture_reference,
+    _mean_triplet,
+    _is_virtual_tint_palette_stencil_decal,
     _routes_virtual_tint_palette_decal_alpha_to_decal_source,
     _routes_virtual_tint_palette_decal_to_decal_source,
     _submaterial_texture_reference,
@@ -73,6 +76,16 @@ from .utils import (
 )
 
 
+def _material_datablock_is_valid(material: bpy.types.Material | None) -> bool:
+    if material is None:
+        return False
+    try:
+        material.name
+    except ReferenceError:
+        return False
+    return True
+
+
 class MaterialsMixin:
     """Material lifecycle + node/socket utilities for ``PackageImporter``."""
 
@@ -84,16 +97,36 @@ class MaterialsMixin:
         palette: PaletteRecord | None,
     ) -> bpy.types.Material:
         palette_scope = self._palette_scope(palette)
-        cache_key = _material_identity(sidecar_path, sidecar, submaterial, palette, palette_scope)
+        identity_cache = getattr(self, "material_identity_cache", None)
+        identity_key = (sidecar_path, int(submaterial.index), palette_scope)
+        cache_key = identity_cache.get(identity_key) if identity_cache is not None else None
+        if cache_key is None:
+            cache_key = _material_identity(sidecar_path, sidecar, submaterial, palette, palette_scope)
+            if identity_cache is not None:
+                identity_cache[identity_key] = cache_key
         expected_template_key = template_plan_for_submaterial(submaterial).template_key
         cached = self.material_cache.get(cache_key)
         if cached is not None:
-            return cached
+            if _material_datablock_is_valid(cached):
+                return cached
+            self.material_cache.pop(cache_key, None)
+            self.material_identity_index.pop(cache_key, None)
 
         reusable = self._reusable_material(sidecar_path, sidecar, submaterial, palette, palette_scope, cache_key)
         if reusable is not None:
+            reusable = self._local_editable_material(reusable, cache_key)
             existing_identity = reusable.get(PROP_MATERIAL_IDENTITY)
             existing_template_key = reusable.get(PROP_TEMPLATE_KEY)
+            if (
+                isinstance(existing_identity, str)
+                and existing_identity == cache_key
+                and existing_template_key == expected_template_key
+                and self._material_needs_mesh_decal_emission_refresh(reusable, submaterial)
+            ):
+                self._build_managed_material(reusable, sidecar_path, sidecar, submaterial, palette, cache_key)
+                self.material_cache[cache_key] = reusable
+                self.material_identity_index[cache_key] = reusable
+                return reusable
             if (
                 isinstance(existing_identity, str)
                 and existing_identity == cache_key
@@ -113,6 +146,78 @@ class MaterialsMixin:
         self.material_cache[cache_key] = material
         self.material_identity_index[cache_key] = material
         return material
+
+
+
+    def _local_editable_material(self, material: bpy.types.Material, material_identity: str) -> bpy.types.Material:
+        if getattr(material, "library", None) is None:
+            return material
+
+        self._ensure_material_identity_index()
+        indexed_material = self.material_identity_index.get(material_identity)
+        if indexed_material is not None and not _material_datablock_is_valid(indexed_material):
+            self.material_identity_index.pop(material_identity, None)
+            indexed_material = None
+        if indexed_material is not None and getattr(indexed_material, "library", None) is None:
+            return indexed_material
+
+        for candidate in bpy.data.materials:
+            if candidate is material:
+                continue
+            if getattr(candidate, "library", None) is not None:
+                continue
+            if candidate.get(PROP_MATERIAL_IDENTITY) == material_identity:
+                self.material_identity_index[material_identity] = candidate
+                return candidate
+
+        local_material = material.copy()
+        try:
+            local_material.name = material.name
+        except Exception:
+            pass
+        local_material[PROP_MATERIAL_IDENTITY] = material_identity
+        self.material_identity_index[material_identity] = local_material
+        return local_material
+
+
+
+    def _material_needs_mesh_decal_emission_refresh(
+        self,
+        material: bpy.types.Material,
+        submaterial: SubmaterialRecord,
+    ) -> bool:
+        group_contract = self._group_contract_for_submaterial(submaterial)
+        if group_contract is None or group_contract.name != "SB_MeshDecal_v1":
+            return False
+
+        node_tree = getattr(material, "node_tree", None)
+        if node_tree is None:
+            return True
+
+        expected_use_vertex_colors = _uses_vertex_color_tint(submaterial)
+        if expected_use_vertex_colors and not any(node.bl_idname == "ShaderNodeVertexColor" for node in node_tree.nodes):
+            return True
+
+        if any(node.bl_idname in {"ShaderNodeAddShader", "ShaderNodeEmission"} for node in node_tree.nodes):
+            return True
+
+        for node in node_tree.nodes:
+            if node.bl_idname != "ShaderNodeGroup":
+                continue
+            group_tree = getattr(node, "node_tree", None)
+            if group_tree is None or group_tree.name != "SB_MeshDecal_v1":
+                continue
+            if group_tree.get("starbreaker_mesh_decal_emission_patch_version") != 3:
+                return True
+            if _input_socket(node, "Emission Strength") is None:
+                return True
+            use_vert_col_socket = _input_socket(node, "Use Vert Col")
+            if use_vert_col_socket is None:
+                return True
+            if bool(getattr(use_vert_col_socket, "default_value", False)) != expected_use_vertex_colors:
+                return True
+            return False
+        return True
 
 
 
@@ -140,6 +245,9 @@ class MaterialsMixin:
 
         self._ensure_material_identity_index()
         indexed_material = self.material_identity_index.get(material_identity)
+        if indexed_material is not None and not _material_datablock_is_valid(indexed_material):
+            self.material_identity_index.pop(material_identity, None)
+            indexed_material = None
         if indexed_material is not None and _material_is_compatible(
             indexed_material,
             self.package,
@@ -584,8 +692,10 @@ class MaterialsMixin:
                 image_node = self._image_node(nodes, image_path, x=x, y=y, is_color=True)
                 if image_node is None:
                     return None
-                return image_node.outputs[0]
-            return self._color_source_socket(nodes, submaterial, palette, image_path, x=x, y=y)
+                color_socket = image_node.outputs[0]
+            else:
+                color_socket = self._color_source_socket(nodes, submaterial, palette, image_path, x=x, y=y)
+            return color_socket
         image_node = self._image_node(nodes, image_path, x=x, y=y, is_color=False)
         if image_node is None:
             return None
@@ -632,6 +742,28 @@ class MaterialsMixin:
 
     def _smoothness_texture_reference(self, submaterial: SubmaterialRecord) -> TextureReference | None:
         return smoothness_texture_reference(submaterial)
+
+
+
+    def _authored_emissive_triplet(self, submaterial: SubmaterialRecord) -> tuple[float, float, float] | None:
+        for attribute in submaterial.raw.get("authored_attributes", []):
+            if attribute.get("name") != "Emissive":
+                continue
+            value = attribute.get("value")
+            if isinstance(value, (list, tuple)) and len(value) >= 3:
+                try:
+                    return (float(value[0]), float(value[1]), float(value[2]))
+                except (TypeError, ValueError):
+                    return None
+            if isinstance(value, str):
+                parts = [part.strip() for part in value.split(",")]
+                if len(parts) >= 3:
+                    try:
+                        return (float(parts[0]), float(parts[1]), float(parts[2]))
+                    except (TypeError, ValueError):
+                        return None
+            return None
+        return None
 
 
 
@@ -768,6 +900,11 @@ class MaterialsMixin:
 
 
     def _illum_emission_strength(self, submaterial: SubmaterialRecord) -> float:
+        emissive = self._authored_emissive_triplet(submaterial)
+        emissive_mean = _mean_triplet(emissive) if emissive is not None else None
+        if emissive_mean is not None and emissive_mean > 0.0:
+            return emissive_mean
+
         glow_value = _float_authored_attribute(submaterial, "Glow")
         if glow_value > 0.0:
             return glow_value
@@ -782,6 +919,32 @@ class MaterialsMixin:
         )
         if "glow" in material_name or "emissive" in material_name:
             return 0.35
+        return 0.0
+
+
+
+    def _mesh_decal_emission_strength(self, submaterial: SubmaterialRecord) -> float:
+        glow_value = _float_authored_attribute(submaterial, "Glow")
+        if glow_value > 0.0:
+            return glow_value
+
+        # MeshDecal frequently carries Emissive=1,1,1 as a neutral authoring
+        # baseline even when the decal is not a light-emitting surface (for
+        # example host-primary POM decals). Gate emission on explicit channels.
+        if self._texture_export_path(submaterial, "emissive"):
+            return 1.0
+
+        emissive = self._authored_emissive_triplet(submaterial)
+        emissive_mean = _mean_triplet(emissive) if emissive is not None else 0.0
+        if emissive_mean <= 0.0:
+            return 0.0
+
+        if submaterial.decoded_feature_flags.has_parallax_occlusion_mapping:
+            return 0.0
+
+        base_color = (self._texture_export_path(submaterial, "base_color") or "").replace("\\", "/").lower()
+        if "/glows/" in base_color or "_glow" in base_color:
+            return 1.0
         return 0.0
 
 
@@ -817,8 +980,6 @@ class MaterialsMixin:
         self._link_color_output(image_node.outputs[0], mix.inputs[1])
         self._link_color_output(palette_socket, mix.inputs[2])
         return mix.outputs[0]
-
-
 
     def _image_node(
         self,
@@ -977,13 +1138,23 @@ class MaterialsMixin:
 
 
     def _purge_unused_materials(self, materials: list[bpy.types.Material]) -> None:
+        # Phase B perf fix: defer the actual ``bpy.data.materials.remove``
+        # to a single ``bpy.data.batch_remove`` at the end of the import.
+        # The per-template path used to call ``remove`` once per orphan
+        # which dominated 8s of wall on the Clipper. The orphan set is
+        # re-checked for ``users == 0`` at flush time so any intervening
+        # rebind still keeps the material alive.
+        pending = getattr(self, "_pending_orphan_materials", None)
+        if pending is None:
+            for material in materials:
+                if material is not None and material.users == 0:
+                    bpy.data.materials.remove(material)
+            return
         for material in materials:
-            if material.users == 0:
-                bpy.data.materials.remove(material)
+            if material is not None and material.users == 0:
+                pending.add(material)
 
 
 
     def _link_color_output(self, output: Any, input_socket: Any) -> None:
         output.node.id_data.links.new(output, input_socket)
-
-

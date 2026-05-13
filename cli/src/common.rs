@@ -40,15 +40,15 @@ pub struct ExportOpts {
     /// Material detail: none, colors, textures, all
     #[arg(long, default_value = "textures")]
     pub materials: String,
-    /// Output format: glb or stl
-    #[arg(long, default_value = "glb")]
-    pub format: String,
     /// Texture mip level (0=full, 2=1/4 res, 4=1/16 res)
     #[arg(long, default_value = "2")]
     pub mip: u32,
     /// LOD level (0=highest detail, 1+=lower)
     #[arg(long, default_value = "1")]
     pub lod: u32,
+    /// Worker threads for parallel export phases (0=auto/all cores, 1=sequential)
+    #[arg(long, default_value = "0")]
+    pub threads: usize,
     /// Skip attached items (weapons, thrusters, landing gear)
     #[arg(long)]
     pub no_attachments: bool,
@@ -85,9 +85,9 @@ impl From<&ExportOpts> for starbreaker_3d::ExportOptions {
                 starbreaker_3d::MaterialMode::Textures
             }
         };
-        let format = match opts.format.to_lowercase().as_str() {
-            "stl" => starbreaker_3d::ExportFormat::Stl,
-            _ => starbreaker_3d::ExportFormat::Glb,
+        let format = match kind {
+            starbreaker_3d::ExportKind::Decomposed => starbreaker_3d::ExportFormat::Blend,
+            starbreaker_3d::ExportKind::Bundled => starbreaker_3d::ExportFormat::Glb,
         };
         starbreaker_3d::ExportOptions {
             kind,
@@ -100,9 +100,11 @@ impl From<&ExportOpts> for starbreaker_3d::ExportOptions {
             include_shields: opts.include_shields,
             texture_mip: opts.mip,
             lod_level: opts.lod,
+            threads: opts.threads,
             include_animations: matches!(kind, starbreaker_3d::ExportKind::Decomposed),
             apply_default_animation_pose: !matches!(kind, starbreaker_3d::ExportKind::Decomposed),
             default_animation_tags: vec!["landing_gear_extend".to_string()],
+            decomposed_package_subdir: None,
         }
     }
 }
@@ -254,4 +256,3 @@ mod tests {
         assert!(matches_filter(CGF_DEEP, None, None));
     }
 }
-

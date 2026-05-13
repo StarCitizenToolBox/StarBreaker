@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 import sys
 import unittest
 
@@ -11,17 +12,50 @@ REPO_ROOT = STARBREAKER_ROOT.parent
 
 sys.path.insert(0, str(ADDON_ROOT))
 
-from starbreaker_addon.manifest import LightRecord, LightState, MaterialSidecar, PackageBundle, SceneInstanceRecord, TextureReference, infer_export_root
+from starbreaker_addon.manifest import InteriorContainerRecord, LightRecord, LightState, MaterialSidecar, PackageBundle, SceneInstanceRecord, SceneManifest, TextureReference, infer_export_root
 
 
-ARGO_SCENE = REPO_ROOT / "ships/Packages/ARGO MOLE/scene.json"
-VULTURE_SCENE = REPO_ROOT / "ships/Packages/Drake Vulture/scene.json"
-ARGO_INTERIOR = REPO_ROOT / "ships/Data/Objects/Spaceships/Ships/ARGO/MOLE/argo_mole_interior.materials.json"
-COMPONENT_MASTER = REPO_ROOT / "ships/Data/Materials/vehicles/components/component_master_01.materials.json"
+_STARBREAKER_BIN = STARBREAKER_ROOT / "target/debug/starbreaker"
+
+
+def _existing_path(*candidates: str) -> "Path":
+    for c in candidates:
+        p = REPO_ROOT / c
+        if p.is_file():
+            return p
+    return REPO_ROOT / candidates[-1]
+
+
+def _ensure_argo_mole_exported() -> None:
+    key = REPO_ROOT / "ships/Data/Objects/Spaceships/Ships/ARGO/MOLE/argo_mole_interior_TEX0.materials.json"
+    if key.is_file():
+        return
+    if not _STARBREAKER_BIN.is_file():
+        return
+    subprocess.run(
+        [str(_STARBREAKER_BIN), "entity", "export", "ARGO MOLE", str(REPO_ROOT / "ships"), "--kind", "decomposed", "--lod", "0"],
+        check=False,
+        capture_output=True,
+    )
+
+
+_ensure_argo_mole_exported()
+
+ARGO_SCENE = _existing_path(
+    "ships/Packages/ARGO MOLE_LOD0_TEX0/scene.json",
+    "ships/Packages/ARGO MOLE/scene.json",
+)
+VULTURE_SCENE = _existing_path(
+    "ships/Packages/DRAK Vulture_LOD0_TEX0/scene.json",
+    "ships/Packages/Drake Vulture/scene.json",
+)
+ARGO_INTERIOR = REPO_ROOT / "ships/Data/Objects/Spaceships/Ships/ARGO/MOLE/argo_mole_interior_TEX0.materials.json"
+ARGO_CORAMOR = REPO_ROOT / "ships/Data/Objects/Spaceships/Ships/ARGO/MOLE/argo_mole_coramor_TEX0.materials.json"
+COMPONENT_MASTER = REPO_ROOT / "ships/Data/Materials/vehicles/components/component_master_01_TEX0.materials.json"
 
 
 _requires_argo_fixture = unittest.skipUnless(
-    ARGO_SCENE.is_file() and ARGO_INTERIOR.is_file() and COMPONENT_MASTER.is_file(),
+    ARGO_SCENE.is_file() and ARGO_CORAMOR.is_file() and COMPONENT_MASTER.is_file(),
     "ARGO MOLE fixtures not present; skipping manifest test",
 )
 
@@ -38,7 +72,7 @@ class ManifestTests(unittest.TestCase):
     @_requires_argo_fixture
     def test_package_bundle_loads_real_fixture_manifests(self) -> None:
         package = PackageBundle.load(ARGO_SCENE)
-        self.assertEqual(package.package_name, "ARGO MOLE")
+        self.assertIn("ARGO MOLE", package.package_name)  # folder: ARGO MOLE_LOD0_TEX0
         self.assertEqual(package.scene.root_entity.entity_name, "EntityClassDefinition.ARGO_MOLE")
         self.assertGreater(len(package.scene.children), 10)
         self.assertIn("palette/argo_mole", package.palettes)
@@ -47,22 +81,22 @@ class ManifestTests(unittest.TestCase):
     @_requires_argo_fixture
     def test_package_bundle_resolves_and_caches_material_sidecars(self) -> None:
         package = PackageBundle.load(ARGO_SCENE)
-        sidecar = package.load_material_sidecar("Data/objects/spaceships/ships/argo/mole/argo_mole_interior.materials.json")
+        sidecar = package.load_material_sidecar("Data/Objects/Spaceships/Ships/ARGO/MOLE/argo_mole_interior_TEX0.materials.json")
         self.assertIsNotNone(sidecar)
-        second = package.load_material_sidecar("Data/objects/spaceships/ships/argo/mole/argo_mole_interior.materials.json")
+        second = package.load_material_sidecar("Data/Objects/Spaceships/Ships/ARGO/MOLE/argo_mole_interior_TEX0.materials.json")
         self.assertIs(sidecar, second)
 
-        cargo_pod = package.resolve_path("Data/Objects/Spaceships/Ships/MISC/Prospector/MISC_Prospector_Cargo_Pod_Collapsed.glb")
+        cargo_pod = package.resolve_path("Data/Objects/Spaceships/Ships/misc/Prospector/MISC_Prospector_Cargo_Pod_Collapsed_LOD0.glb")
         self.assertIsNotNone(cargo_pod)
         self.assertTrue(cargo_pod.is_file())
 
     @_requires_argo_fixture
     def test_material_sidecar_preserves_layer_and_virtual_input_contract(self) -> None:
-        interior = MaterialSidecar.from_file(ARGO_INTERIOR)
+        interior = MaterialSidecar.from_file(ARGO_CORAMOR)
         self.assertIsNotNone(interior.source_material_path)
         self.assertTrue(interior.submaterials)
         ui_plane = next(submaterial for submaterial in interior.submaterials if submaterial.shader_family == "UIPlane")
-        self.assertEqual(ui_plane.submaterial_name, "rtt_hud")
+        self.assertEqual(ui_plane.submaterial_name, "int_rtt_hud")
         self.assertIn("$RenderToTexture", ui_plane.virtual_inputs)
 
         component = MaterialSidecar.from_file(COMPONENT_MASTER)
@@ -166,6 +200,68 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(instance.local_transform_sc[3], (1.0, 2.0, 3.0, 1.0))
         self.assertTrue(instance.resolved_no_rotation)
 
+    def test_interior_container_parses_child_parent_fields(self) -> None:
+        interior = InteriorContainerRecord.from_value(
+            {
+                "name": "command_module_interior",
+                "parent_entity_name": "DRAK_Command_Module",
+                "parent_node_name": "drak_command_module",
+                "container_transform": [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ],
+                "placements": [],
+                "lights": [],
+            }
+        )
+
+        self.assertEqual(interior.parent_entity_name, "DRAK_Command_Module")
+        self.assertEqual(interior.parent_node_name, "drak_command_module")
+
+    def test_scene_manifest_parses_engine_glow_controls(self) -> None:
+        manifest = SceneManifest.from_value(
+            {
+                "version": 1,
+                "root_entity": {"entity_name": "Root"},
+                "package_rule": {"package_dir": "Packages/Test", "shared_asset_root": "Data"},
+                "children": [],
+                "interiors": [],
+                "controls": {
+                    "engine_glow": {
+                        "label": "Engine Glow",
+                        "units": "emission_strength",
+                        "min_strength": 0,
+                        "max_strength": 200,
+                        "default_strength": 3,
+                        "targets": [
+                            {
+                                "entity_name": "Test_Thruster",
+                                "geometry_path": "Data/Objects/Ships/Test/thruster.cga",
+                                "mesh_asset": "Data/Objects/Ships/Test/thruster_LOD0.blend",
+                                "material_sidecar": "Data/Objects/Ships/Test/root.materials.json",
+                                "source_material_index": 4,
+                                "submaterial_name": "Glow_Thrusters",
+                            }
+                        ],
+                    }
+                },
+            }
+        )
+        self.assertIsNotNone(manifest.engine_glow_control)
+        assert manifest.engine_glow_control is not None
+        self.assertEqual(manifest.engine_glow_control.default_strength, 3.0)
+        self.assertEqual(
+            manifest.engine_glow_control.targets[0].geometry_path,
+            "Data/Objects/Ships/Test/thruster.cga",
+        )
+        self.assertEqual(
+            manifest.engine_glow_control.targets[0].mesh_asset,
+            "Data/Objects/Ships/Test/thruster_LOD0.blend",
+        )
+        self.assertEqual(manifest.engine_glow_control.targets[0].source_material_index, 4)
+
     def test_light_state_parses_explicit_intensity_semantics(self) -> None:
         state = LightState.from_value(
             {
@@ -212,7 +308,7 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(smoothness_texture.texture_identity, "ddna_normal")
 
     def test_layer_manifest_preserves_resolved_layer_details(self) -> None:
-        exterior_path = REPO_ROOT / "ships/Data/Objects/Spaceships/Ships/ARGO/MOLE/argo_mole_exterior.materials.json"
+        exterior_path = REPO_ROOT / "ships/Data/Objects/Spaceships/Ships/ARGO/MOLE/argo_mole_exterior_TEX0.materials.json"
         if not exterior_path.is_file():
             self.skipTest(f"ARGO MOLE exterior fixture not present at {exterior_path}")
         exterior = MaterialSidecar.from_file(exterior_path)

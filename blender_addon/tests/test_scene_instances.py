@@ -126,6 +126,7 @@ def _load_orchestration() -> types.ModuleType:
     utils_stub = types.ModuleType("sb_scene_test_runtime.importer.utils")
     utils_stub._canonical_material_sidecar_path = lambda *args, **kwargs: None
     utils_stub._canonical_source_name = lambda *args, **kwargs: None
+    utils_stub._gltf_matrix_to_blender_basis = lambda matrix: ("gltf", matrix)
     utils_stub._remapped_submaterial_for_slot = lambda *args, **kwargs: None
     utils_stub._scene_attachment_offset_to_blender = lambda *args, **kwargs: None
     utils_stub._scene_light_quaternion_to_blender = lambda *args, **kwargs: None
@@ -172,6 +173,9 @@ class InstantiateSceneInstanceTests(unittest.TestCase):
             def _apply_instance_metadata(self, objects, record, effective_palette_id):
                 self.metadata = (objects, record, effective_palette_id)
 
+            def _flush_pending_view_layer_update(self):
+                pass
+
         importer = _Importer()
         parent = SimpleNamespace(name="root")
         parent_node = SimpleNamespace(name="hardpoint")
@@ -195,6 +199,54 @@ class InstantiateSceneInstanceTests(unittest.TestCase):
 
         self.assertIs(anchor.parent, parent_node)
         self.assertEqual(anchor.matrix_basis, ("converted", record.local_transform_sc))
+        self.assertEqual(clones, [anchor])
+        self.assertEqual(linked, [anchor])
+
+    def test_gltf_transform_basis_uses_direct_matrix_payload(self) -> None:
+        linked: list[object] = []
+
+        class _Importer:
+            def __init__(self) -> None:
+                self.collection = SimpleNamespace(objects=SimpleNamespace(link=linked.append))
+
+            def _effective_palette_id(self, palette_id):
+                return palette_id
+
+            def _palette_id_for_instance(self, record):
+                return None
+
+            def ensure_template(self, mesh_asset):
+                raise RuntimeError("missing template")
+
+            def _apply_instance_metadata(self, objects, record, effective_palette_id):
+                self.metadata = (objects, record, effective_palette_id)
+
+            def _flush_pending_view_layer_update(self):
+                pass
+
+        importer = _Importer()
+        parent = SimpleNamespace(name="root")
+        parent_node = SimpleNamespace(name="hardpoint")
+        record = SimpleNamespace(
+            entity_name="child",
+            resolved_no_rotation=False,
+            local_transform_sc=((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
+            source_transform_basis="gltf_y_up",
+            offset_position=(0.0, 0.0, 0.0),
+            offset_rotation=(0.0, 0.0, 0.0),
+            no_rotation=False,
+            mesh_asset="missing.glb",
+        )
+
+        anchor, clones = self.orchestration.OrchestrationMixin.instantiate_scene_instance(
+            importer,
+            record,
+            parent,
+            parent_node,
+        )
+
+        self.assertIs(anchor.parent, parent_node)
+        self.assertEqual(anchor.matrix_basis, ("gltf", record.local_transform_sc))
         self.assertEqual(clones, [anchor])
         self.assertEqual(linked, [anchor])
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 import unittest
+import subprocess
 
 
 ADDON_ROOT = Path(__file__).resolve().parents[1]
@@ -22,9 +23,26 @@ from starbreaker_addon.templates import (
 )
 
 
-ARGO_EXTERIOR = REPO_ROOT / "ships/Data/Objects/Spaceships/Ships/ARGO/MOLE/argo_mole_exterior.materials.json"
-ARGO_INTERIOR = REPO_ROOT / "ships/Data/Objects/Spaceships/Ships/ARGO/MOLE/argo_mole_interior.materials.json"
-COMPONENT_MASTER = REPO_ROOT / "ships/Data/Materials/vehicles/components/component_master_01.materials.json"
+ARGO_EXTERIOR = REPO_ROOT / "ships/Data/Objects/Spaceships/Ships/ARGO/MOLE/argo_mole_exterior_TEX0.materials.json"
+ARGO_INTERIOR = REPO_ROOT / "ships/Data/Objects/Spaceships/Ships/ARGO/MOLE/argo_mole_coramor_TEX0.materials.json"
+COMPONENT_MASTER = REPO_ROOT / "ships/Data/Materials/vehicles/components/component_master_01_TEX0.materials.json"
+_STARBREAKER_BIN = STARBREAKER_ROOT / "target/debug/starbreaker"
+
+
+def _ensure_argo_mole_exported() -> None:
+    """Run the decomposed export for ARGO MOLE if TEX0 fixture files are absent."""
+    if ARGO_EXTERIOR.is_file() and ARGO_INTERIOR.is_file() and COMPONENT_MASTER.is_file():
+        return
+    if not _STARBREAKER_BIN.is_file():
+        return  # binary not present; tests will skip naturally
+    subprocess.run(
+        [str(_STARBREAKER_BIN), "entity", "export", "ARGO MOLE", str(REPO_ROOT / "ships"), "--kind", "decomposed", "--lod", "0"],
+        check=False,
+        capture_output=True,
+    )
+
+
+_ensure_argo_mole_exported()
 VULTURE_BASE = REPO_ROOT / "ships/Data/Objects/Spaceships/Ships/DRAK/Vulture/DRAK_Vulture_TEX0.materials.json"
 VULTURE_ALT_A = REPO_ROOT / "ships/Data/Objects/Spaceships/Ships/DRAK/Vulture/drak_vulture_alt_a_TEX0.materials.json"
 VULTURE_PIRATE_SKULL = REPO_ROOT / "ships/Data/Objects/Spaceships/Ships/DRAK/Vulture/DRAK_Vulture_Pirate_Skull_TEX0.materials.json"

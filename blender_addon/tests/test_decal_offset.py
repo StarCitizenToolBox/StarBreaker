@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 from pathlib import Path
 import sys
@@ -76,6 +78,8 @@ from starbreaker_addon.manifest import MaterialSidecar, SubmaterialRecord
 from starbreaker_addon.runtime.importer.builders import BuildersMixin
 from starbreaker_addon.runtime.importer.decals import DecalsMixin
 from starbreaker_addon.runtime.importer.materials import MaterialsMixin
+from starbreaker_addon.runtime.importer.materials import _material_datablock_is_valid
+from starbreaker_addon.runtime.importer.orchestration import OrchestrationMixin
 from starbreaker_addon.runtime.importer.utils import (
     _canonical_material_sidecar_path,
     _material_identity,
@@ -92,13 +96,21 @@ class FakeNodeTree:
 
 class FakeMaterial(dict):
     def __init__(self, name: str, **props):
+        library = props.pop("library", None)
         super().__init__(props)
         self.name = name
         self.node_tree = FakeNodeTree()
         self.use_nodes = True
+        self.library = library
+
+    def copy(self):
+        return FakeMaterial(self.name, library=None, **dict(self))
 
 
 class FakeMaterialsCollection(dict):
+    def __iter__(self):
+        return iter(self.values())
+
     def get(self, name: str, default=None):
         return super().get(name, default)
 
@@ -132,79 +144,20 @@ class FakePolygon:
         self.vertices = vertices
 
 
-class FakeVertex:
-    def __init__(self, index: int):
-        self.index = index
-
-
 class FakeMesh:
     def __init__(self, polygons: list[FakePolygon], vertex_count: int):
         self.polygons = polygons
-        self.vertices = [FakeVertex(index) for index in range(vertex_count)]
 
-
-class FakeVertexGroup:
-    def __init__(self, name: str):
-        self.name = name
-        self.members: set[int] = set()
-
-    def add(self, indices: list[int], weight: float, mode: str) -> None:
-        self.members.update(int(index) for index in indices)
-
-    def remove(self, indices: list[int]) -> None:
-        for index in indices:
-            self.members.discard(int(index))
-
-
-class FakeVertexGroups:
-    def __init__(self):
-        self._groups: dict[str, FakeVertexGroup] = {}
-
-    def get(self, name: str):
-        return self._groups.get(name)
-
-    def new(self, name: str):
-        group = FakeVertexGroup(name)
-        self._groups[name] = group
-        return group
-
-
-class FakeModifier:
-    def __init__(self, name: str, modifier_type: str):
-        self.name = name
-        self.type = modifier_type
-        self.strength = None
-        self.mid_level = None
-        self.direction = None
-        self.space = None
-        self.vertex_group = ""
-
-
-class FakeModifiers:
-    def __init__(self):
-        self._modifiers: list[FakeModifier] = []
-
-    def get(self, name: str):
-        for modifier in self._modifiers:
-            if modifier.name == name:
-                return modifier
-        return None
-
-    def new(self, name: str, type: str):
-        modifier = FakeModifier(name, type)
-        self._modifiers.append(modifier)
-        return modifier
-
-    def remove(self, modifier: FakeModifier) -> None:
-        self._modifiers.remove(modifier)
+    def as_pointer(self) -> int:
+        return id(self)
 
 
 class FakeObject:
     def __init__(self, material_slots: list[FakeSlot], mesh: FakeMesh, **props):
+        self.name = props.pop("name", "FakeObject")
+        self.type = "MESH"
         self.material_slots = material_slots
         self.data = mesh
-        self.vertex_groups = FakeVertexGroups()
-        self.modifiers = FakeModifiers()
         self._props = dict(props)
 
     def get(self, name: str, default=None):
@@ -316,72 +269,113 @@ class ManagedMaterialBuildImporterUnderTest(BuildersMixin):
         return "test-scope"
 
 
+class FakeSidecar:
+    def __init__(self, submaterials):
+        self.submaterials = submaterials
+
+
+class FakeSubmaterial:
+    def __init__(self, index: int, name: str):
+        self.index = index
+        self.submaterial_name = name
+
+
+class FakePackageWithSidecars:
+    def __init__(self, sidecar):
+        self.sidecar = sidecar
+        self.palettes = {}
+        self.scene = types.SimpleNamespace(root_entity=types.SimpleNamespace(palette_id=None))
+
+    def load_material_sidecar(self, sidecar_path):
+        return self.sidecar
+
+
+class OrchestrationImporterUnderTest(OrchestrationMixin):
+    def __init__(self, sidecar):
+        self.package = FakePackageWithSidecars(sidecar)
+        self.package_root = None
+        self.import_palette_override = None
+        self.import_paint_variant_sidecar = None
+        self.exterior_material_sidecars = None
+        self.slot_mapping_cache = {}
+        self.sidecar_submaterials_by_index = {}
+        self.sidecar_submaterials_by_name = {}
+        self.sidecar_submaterials_by_name_all = {}
+
+    def _ensure_runtime_shared_groups(self) -> None:
+        return None
+
+    def _effective_palette_id(self, palette_id: str | None) -> str | None:
+        return palette_id
+
+    def material_for_submaterial(self, sidecar_path, sidecar, submaterial, palette):
+        return FakeMaterial(f"material_{submaterial.index}")
+
+    def _remove_replaced_slot_material(self, material) -> None:
+        return None
+
+    def _rebind_mesh_decal_for_host(self, obj, palette) -> int:
+        return 0
+
+
+class OrphanRemovalImporterUnderTest(OrchestrationMixin):
+    def __init__(self):
+        self._pending_orphan_materials = set()
+
+
+class FakeHashableMaterial:
+    library = None
+
+    def __init__(self):
+        self.users = 0
+
+    def get(self, _key, default=None):
+        return default
+
+
+class FakeInvalidMaterial:
+    @property
+    def name(self):
+        raise ReferenceError("StructRNA of type Material has been removed")
+
+
 class DecalOffsetTests(unittest.TestCase):
-    def test_illum_pom_loadout_decal_uses_smaller_offset_strength(self) -> None:
-        decal = FakeMaterial(
-            "KLWE_las_rep_s1-3:pom_decals__host_rgb_070707",
-            starbreaker_shader_family="Illum",
-            **{
-                PROP_HAS_POM: True,
-                PROP_TEMPLATE_KEY: "decal_stencil",
-            },
-        )
-        host = FakeMaterial("KLWE_las_rep_s1-3:H_painted_metal_dark_gray_01", starbreaker_shader_family="LayerBlend_V2")
+    def test_invalid_material_datablock_is_detected(self) -> None:
+        self.assertFalse(_material_datablock_is_valid(FakeInvalidMaterial()))
+
+    def test_replaced_slot_material_cleanup_is_deferred(self) -> None:
+        importer = OrphanRemovalImporterUnderTest()
+        material = FakeHashableMaterial()
+
+        importer._remove_replaced_slot_material(material)
+
+        self.assertIn(material, importer._pending_orphan_materials)
+
+    def test_rebuild_object_materials_skips_empty_unmapped_slots_without_warning(self) -> None:
+        sidecar = FakeSidecar([
+            FakeSubmaterial(0, "decal pom"),
+            FakeSubmaterial(1, "tint_secondary"),
+        ])
+        importer = OrchestrationImporterUnderTest(sidecar)
+        mesh = FakeMesh(polygons=[], vertex_count=0)
+        importer.slot_mapping_cache[mesh.as_pointer()] = [0, 1, None, None]
         obj = FakeObject(
-            material_slots=[FakeSlot(decal), FakeSlot(host)],
-            mesh=FakeMesh(
-                polygons=[
-                    FakePolygon(0, [0, 1, 2]),
-                    FakePolygon(1, [3, 4, 5]),
-                ],
-                vertex_count=6,
-            ),
-            starbreaker_material_sidecar="Data/Objects/Spaceships/Weapons/KLWE/KLWE_las_rep_s1-3_TEX0.materials.json",
+            material_slots=[FakeSlot(None), FakeSlot(None), FakeSlot(None), FakeSlot(None)],
+            mesh=mesh,
+            name="flair_poster_hook_mesh_005",
+            starbreaker_material_sidecar="Data/Objects/props/flair/poster/flair_poster_1_a_TEX0.materials.json",
         )
 
-        importer = ImporterUnderTest()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            applied = importer.rebuild_object_materials(obj, None)
 
-        self.assertTrue(importer._apply_decal_offset_modifier(obj))
-        group = obj.vertex_groups.get(importer._DECAL_OFFSET_GROUP_NAME)
-        self.assertIsNotNone(group)
-        self.assertEqual(group.members, {0, 1, 2})
-
-        modifier = obj.modifiers.get(importer._DECAL_OFFSET_MODIFIER_NAME)
-        self.assertIsNotNone(modifier)
-        self.assertEqual(modifier.type, "DISPLACE")
-        self.assertEqual(modifier.vertex_group, importer._DECAL_OFFSET_GROUP_NAME)
-        self.assertAlmostEqual(modifier.strength, importer._LOADOUT_DECAL_OFFSET_STRENGTH)
-        self.assertEqual(modifier.direction, "NORMAL")
-        self.assertEqual(modifier.space, "LOCAL")
-
-    def test_ship_decal_keeps_default_offset_strength(self) -> None:
-        decal = FakeMaterial(
-            "rsi_aurora_mk2:pom_decals",
-            starbreaker_shader_family="Illum",
-            **{
-                PROP_HAS_POM: True,
-                PROP_TEMPLATE_KEY: "decal_stencil",
-            },
-        )
-        host = FakeMaterial("rsi_aurora_mk2:hull", starbreaker_shader_family="LayerBlend_V2")
-        obj = FakeObject(
-            material_slots=[FakeSlot(decal), FakeSlot(host)],
-            mesh=FakeMesh(
-                polygons=[
-                    FakePolygon(0, [0, 1, 2]),
-                    FakePolygon(1, [3, 4, 5]),
-                ],
-                vertex_count=6,
-            ),
-            starbreaker_material_sidecar="Data/Objects/Spaceships/Ships/RSI/aurora_mk2/rsi_aurora_mk2_TEX0.materials.json",
-        )
-
-        importer = ImporterUnderTest()
-
-        self.assertTrue(importer._apply_decal_offset_modifier(obj))
-        modifier = obj.modifiers.get(importer._DECAL_OFFSET_MODIFIER_NAME)
-        self.assertIsNotNone(modifier)
-        self.assertAlmostEqual(modifier.strength, importer._DECAL_OFFSET_STRENGTH)
+        self.assertEqual(applied, 2)
+        self.assertEqual(output.getvalue(), "")
+        self.assertIsNotNone(obj.material_slots[0].material)
+        self.assertIsNotNone(obj.material_slots[1].material)
+        self.assertIsNone(obj.material_slots[2].material)
+        self.assertIsNone(obj.material_slots[3].material)
 
     def test_illum_pom_rebind_uses_palette_channel_rgb_when_no_authored_fallback_exists(self) -> None:
         decal = FakeMaterial(
@@ -439,6 +433,62 @@ class DecalOffsetTests(unittest.TestCase):
         self.assertEqual(rebound, 1)
         self.assertEqual(importer.illum_rgb_calls, [palette.primary])
         self.assertEqual(obj.material_slots[0].material.name, "drak_vulture:pom_decals__host_rgb")
+
+    def test_mesh_decal_host_variant_names_do_not_chain_existing_host_suffixes(self) -> None:
+        bpy = sys.modules["bpy"]
+        original_materials = getattr(bpy.data, "materials", None)
+        materials = FakeMaterialsCollection()
+        bpy.data.materials = materials
+        try:
+            decal = FakeMaterial(
+                "drak_clipper_ext:Decal_POM_A#03e817cc__host_secondary",
+                starbreaker_shader_family="MeshDecal",
+                **{PROP_HAS_POM: True},
+            )
+            importer = ImporterUnderTest(channel="tertiary")
+            palette = types.SimpleNamespace(
+                primary=(0.2, 0.3, 0.4),
+                secondary=(0.5, 0.6, 0.7),
+                tertiary=(0.8, 0.1, 0.2),
+                glass=(0.9, 0.9, 0.95),
+            )
+
+            variant = importer._ensure_mesh_decal_host_variant(decal, "tertiary", palette)
+
+            self.assertEqual(
+                variant.name,
+                "drak_clipper_ext:Decal_POM_A#03e817cc__host_tertiary",
+            )
+        finally:
+            bpy.data.materials = original_materials
+
+    def test_host_channel_scan_returns_single_channel_without_polygon_counts(self) -> None:
+        obj = FakeObject(
+            material_slots=[FakeSlot(FakeMaterial("drak_clipper_ext_Paint_Secondary"))],
+            mesh=FakeMesh(polygons=[], vertex_count=0),
+        )
+        importer = ImporterUnderTest()
+
+        self.assertEqual(importer._scan_slots_for_host_channel(obj), "secondary")
+
+    def test_host_channel_scan_uses_polygon_weight_when_channels_compete(self) -> None:
+        obj = FakeObject(
+            material_slots=[
+                FakeSlot(FakeMaterial("drak_clipper_ext_Paint_Primary")),
+                FakeSlot(FakeMaterial("drak_clipper_ext_Paint_Tertiary")),
+            ],
+            mesh=FakeMesh(
+                polygons=[
+                    FakePolygon(0, [0, 1, 2]),
+                    FakePolygon(1, [3, 4, 5]),
+                    FakePolygon(1, [6, 7, 8]),
+                ],
+                vertex_count=9,
+            ),
+        )
+        importer = ImporterUnderTest()
+
+        self.assertEqual(importer._scan_slots_for_host_channel(obj), "tertiary")
 
     def test_parallax_bias_value_prefers_authored_height_bias(self) -> None:
         importer = ImporterUnderTest()
@@ -538,6 +588,51 @@ class MaterialReuseTests(unittest.TestCase):
             self.assertIs(material, stale)
             self.assertEqual(importer.rebuild_calls, [stale.name])
             self.assertEqual(material[PROP_TEMPLATE_KEY], "nodraw")
+        finally:
+            bpy.data.materials = original_materials
+
+    @unittest.skipUnless(
+        VULTURE_ALT_A.is_file(),
+        "Vulture fixtures not present; skipping material localization regression test",
+    )
+    def test_linked_reusable_material_is_copied_before_rebuild(self) -> None:
+        sidecar = MaterialSidecar.from_file(VULTURE_ALT_A)
+        submaterial = next(
+            candidate
+            for candidate in sidecar.submaterials
+            if candidate.submaterial_name == "livery_decal"
+        )
+
+        bpy = sys.modules["bpy"]
+        original_materials = getattr(bpy.data, "materials", None)
+        materials = FakeMaterialsCollection()
+        bpy.data.materials = materials
+        try:
+            sidecar_path = _canonical_material_sidecar_path("", sidecar)
+            palette_scope = "test-scope"
+            material_identity = _material_identity(sidecar_path, sidecar, submaterial, None, palette_scope)
+            linked = FakeMaterial(
+                submaterial.blender_material_name or "DRAK_Vulture:livery_decal",
+                library=object(),
+                **{
+                    PROP_TEMPLATE_KEY: "wrong-template",
+                    PROP_MATERIAL_IDENTITY: material_identity,
+                    PROP_MATERIAL_SIDECAR: sidecar_path,
+                    PROP_SUBMATERIAL_JSON: json.dumps(submaterial.raw, sort_keys=True),
+                    PROP_PALETTE_SCOPE: palette_scope,
+                },
+            )
+            materials[linked.name] = linked
+
+            importer = MaterialReuseImporterUnderTest()
+            material = importer.material_for_submaterial(sidecar_path, sidecar, submaterial, None)
+            second = importer.material_for_submaterial(sidecar_path, sidecar, submaterial, None)
+
+            self.assertIsNot(material, linked)
+            self.assertIs(second, material)
+            self.assertIsNone(material.library)
+            self.assertEqual(material[PROP_MATERIAL_IDENTITY], material_identity)
+            self.assertEqual(importer.rebuild_calls, [material.name])
         finally:
             bpy.data.materials = original_materials
 

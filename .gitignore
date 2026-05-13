@@ -16,6 +16,9 @@ docs-local/
 
 .claude/
 
+# Asset exports (decomposed mesh packages, textures, materials) — DO NOT COMMIT
+ships/
+
 .vscode/
 
 __pycache__/
@@ -25,3 +28,7 @@ __pycache__/
 Thumbs.db
 
 blender_addon/starbreaker_addon/resources/material_templates.blend1
+
+# Asset exports (decomposed mesh packages, textures, materials) — DO NOT COMMIT
+ships/
+Cargo.lock
