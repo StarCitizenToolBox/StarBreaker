@@ -35,3 +35,4 @@ futures-lite = "2"
 filetime = "0.2"
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 which = "6"
+include_dir = "0.7"

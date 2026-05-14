@@ -9,6 +9,14 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::process::Command;
 use std::time::{Duration, UNIX_EPOCH};
 
+use include_dir::{Dir, include_dir};
+
+/// Blender addon source tree, embedded into the binary at compile time so the
+/// installer is self-contained — no on-disk lookup, no Tauri resources, works
+/// identically in `cargo run` and in an NSIS/AppImage bundle on any machine.
+static ADDON_FILES: Dir<'_> =
+    include_dir!("$CARGO_MANIFEST_DIR/../../blender_addon/starbreaker_addon");
+
 /// Build a `Command` that won't pop a CMD window on Windows.
 ///
 /// The Tauri binary is compiled with `windows_subsystem = "windows"`, so it
@@ -648,20 +656,6 @@ fn discover_blender_addon_targets() -> BlenderDiscovery {
     }
 }
 
-fn addon_source_dir() -> Option<PathBuf> {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let candidates = [
-        manifest_dir.join("../blender_addon/starbreaker_addon"),
-        manifest_dir.join("../../blender_addon/starbreaker_addon"),
-    ];
-    for candidate in candidates {
-        if candidate.join("__init__.py").is_file() {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
 /// Build version string used by both the app (`get_app_version`) and the
 /// bundled Blender addon (installer stamp / "Update available" detection).
 /// Format: `"<cargo_pkg_version>+<commit_sha>"` — e.g. `"0.3.0+abc1234"`.
@@ -687,24 +681,6 @@ fn blender_running() -> bool {
     sys.processes()
         .values()
         .any(|p| p.name().to_string_lossy().eq_ignore_ascii_case(target))
-}
-
-fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), AppError> {
-    fs::create_dir_all(destination)?;
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
-        let src = entry.path();
-        let dst = destination.join(entry.file_name());
-        if src.is_dir() {
-            copy_dir_recursive(&src, &dst)?;
-        } else {
-            if let Some(parent) = dst.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::copy(&src, &dst)?;
-        }
-    }
-    Ok(())
 }
 
 /// One install target as surfaced to the frontend target picker.
@@ -779,10 +755,6 @@ pub fn uninstall_blender_addon(target_path: String) -> Result<BlenderAddonTarget
 
 #[tauri::command]
 pub fn install_blender_addon(target_path: String) -> Result<BlenderAddonTargetsDto, AppError> {
-    let source_dir = addon_source_dir().ok_or_else(|| {
-        AppError::Internal("Unable to locate bundled starbreaker_addon source directory".into())
-    })?;
-
     let addons_path = PathBuf::from(target_path);
     fs::create_dir_all(&addons_path)?;
     let destination = addons_path.join("starbreaker_addon");
@@ -790,7 +762,10 @@ pub fn install_blender_addon(target_path: String) -> Result<BlenderAddonTargetsD
         let _ = fs::remove_dir_all(destination.join("__pycache__"));
         fs::remove_dir_all(&destination)?;
     }
-    copy_dir_recursive(&source_dir, &destination)?;
+    fs::create_dir_all(&destination)?;
+    ADDON_FILES.extract(&destination).map_err(|e| {
+        AppError::Internal(format!("failed to extract embedded addon: {e}"))
+    })?;
 
     // Stamp the installed __init__.py with the build-time version so that
     // subsequent target-state checks correctly report "up to date" after a

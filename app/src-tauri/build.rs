@@ -40,5 +40,10 @@ fn main() {
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../.git/refs");
 
+    // Re-embed the Blender addon (via `include_dir!` in commands.rs) whenever
+    // any file under `blender_addon/starbreaker_addon/` changes — otherwise
+    // edits to the Python source won't refresh the bytes baked into the .exe.
+    println!("cargo:rerun-if-changed=../../blender_addon/starbreaker_addon");
+
     tauri_build::build();
 }
