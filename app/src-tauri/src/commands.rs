@@ -9,6 +9,27 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::process::Command;
 use std::time::{Duration, UNIX_EPOCH};
 
+/// Build a `Command` that won't pop a CMD window on Windows.
+///
+/// The Tauri binary is compiled with `windows_subsystem = "windows"`, so it
+/// has no inherited console. Without `CREATE_NO_WINDOW`, every shell-out
+/// (`tasklist`, `blender.exe --version`, …) briefly flashes a CMD window —
+/// the export view triggers several of these on mount, which is the
+/// "horrible experience" the addon-installer UX was trying to avoid.
+fn quiet_command<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
+    let cmd = Command::new(program);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut cmd = cmd;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        return cmd;
+    }
+    #[cfg(not(target_os = "windows"))]
+    cmd
+}
+
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
@@ -402,14 +423,6 @@ fn find_blender_binary_candidates(addons_path: &Path) -> Vec<PathBuf> {
         candidates.push(PathBuf::from("/usr/bin/blender"));
         candidates.push(PathBuf::from("/usr/local/bin/blender"));
         candidates.push(PathBuf::from("/opt/blender/blender"));
-        if let Ok(out) = Command::new("which").arg("blender").output() {
-            if out.status.success() {
-                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !s.is_empty() {
-                    candidates.push(PathBuf::from(s));
-                }
-            }
-        }
     }
 
     #[cfg(target_os = "macos")]
@@ -420,14 +433,11 @@ fn find_blender_binary_candidates(addons_path: &Path) -> Vec<PathBuf> {
         candidates.push(PathBuf::from(
             "/Applications/Blender.app/Contents/MacOS/blender",
         ));
-        if let Ok(out) = Command::new("which").arg("blender").output() {
-            if out.status.success() {
-                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !s.is_empty() {
-                    candidates.push(PathBuf::from(s));
-                }
-            }
-        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    if let Ok(path) = which::which("blender") {
+        candidates.push(path);
     }
 
     #[cfg(target_os = "windows")]
@@ -450,7 +460,7 @@ fn find_blender_binary_candidates(addons_path: &Path) -> Vec<PathBuf> {
 /// Run `blender --version` and parse the version string from stdout.
 /// Blender prints: "Blender 5.1.0 (hash abcdef built 2026-04-01 ...)"
 fn probe_blender_version(binary: &Path) -> Option<String> {
-    let out = Command::new(binary).arg("--version").output().ok()?;
+    let out = quiet_command(binary).arg("--version").output().ok()?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     for line in stdout.lines() {
         let line = line.trim();
@@ -652,11 +662,12 @@ fn addon_source_dir() -> Option<PathBuf> {
     None
 }
 
-fn current_addon_version() -> Result<String, AppError> {
-    // Use the build-time version string (derived from git commit count) so
-    // that every new build automatically shows "Update available" to users
-    // who have an older installed copy.  No manual VERSION bump required.
-    Ok(env!("ADDON_BUILD_VERSION").to_string())
+/// Build version string used by both the app (`get_app_version`) and the
+/// bundled Blender addon (installer stamp / "Update available" detection).
+/// Format: `"<cargo_pkg_version>+<commit_sha>"` — e.g. `"0.3.0+abc1234"`.
+/// A dirty working tree adds a `-dirty` suffix to the SHA (see `build.rs`).
+fn build_version() -> String {
+    format!("{}+{}", env!("CARGO_PKG_VERSION"), env!("COMMIT_SHA"))
 }
 
 fn installed_addon_version(addons_path: &Path) -> Option<String> {
@@ -666,35 +677,16 @@ fn installed_addon_version(addons_path: &Path) -> Option<String> {
 }
 
 fn blender_running() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        return Command::new("pgrep")
-            .args(["-f", "[bB]lender"])
-            .output()
-            .map(|out| out.status.success())
-            .unwrap_or(false);
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        return Command::new("pgrep")
-            .args(["-f", "[bB]lender"])
-            .output()
-            .map(|out| out.status.success())
-            .unwrap_or(false);
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        return Command::new("tasklist")
-            .args(["/FI", "IMAGENAME eq blender.exe"])
-            .output()
-            .map(|out| String::from_utf8_lossy(&out.stdout).to_ascii_lowercase().contains("blender.exe"))
-            .unwrap_or(false);
-    }
-
-    #[allow(unreachable_code)]
-    false
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    let target = if cfg!(target_os = "windows") {
+        "blender.exe"
+    } else {
+        "blender"
+    };
+    sys.processes()
+        .values()
+        .any(|p| p.name().to_string_lossy().eq_ignore_ascii_case(target))
 }
 
 fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), AppError> {
@@ -768,8 +760,7 @@ fn build_targets_dto(discovery: BlenderDiscovery, current_version: String) -> Bl
 #[tauri::command]
 pub fn list_blender_addon_targets() -> Result<BlenderAddonTargetsDto, AppError> {
     let discovery = discover_blender_addon_targets();
-    let current_version = current_addon_version()?;
-    Ok(build_targets_dto(discovery, current_version))
+    Ok(build_targets_dto(discovery, build_version()))
 }
 
 /// Remove the StarBreaker addon directory from the given Blender addons path.
@@ -783,8 +774,7 @@ pub fn uninstall_blender_addon(target_path: String) -> Result<BlenderAddonTarget
         fs::remove_dir_all(&destination)?;
     }
     let discovery = discover_blender_addon_targets();
-    let current_version = current_addon_version()?;
-    Ok(build_targets_dto(discovery, current_version))
+    Ok(build_targets_dto(discovery, build_version()))
 }
 
 #[tauri::command]
@@ -807,13 +797,13 @@ pub fn install_blender_addon(target_path: String) -> Result<BlenderAddonTargetsD
     // fresh install rather than always showing "update available".
     let init_path = destination.join("__init__.py");
     if let Ok(content) = fs::read_to_string(&init_path) {
-        let build_version = env!("ADDON_BUILD_VERSION");
+        let stamp = build_version();
         let patched = content
             .lines()
             .map(|line| {
                 let trimmed = line.trim();
                 if trimmed.starts_with("VERSION") && trimmed.contains('=') {
-                    format!("VERSION = \"{}\"", build_version)
+                    format!("VERSION = \"{stamp}\"")
                 } else {
                     line.to_string()
                 }
@@ -829,8 +819,7 @@ pub fn install_blender_addon(target_path: String) -> Result<BlenderAddonTargetsD
     }
 
     let discovery = discover_blender_addon_targets();
-    let current_version = current_addon_version()?;
-    Ok(build_targets_dto(discovery, current_version))
+    Ok(build_targets_dto(discovery, build_version()))
 }
 
 /// Attempt to reload the StarBreaker addon in the running Blender instance via its
@@ -2444,10 +2433,7 @@ pub struct AppVersion {
 /// Get app version information including commit SHA as semver build metadata.
 #[tauri::command]
 pub fn get_app_version() -> AppVersion {
-    let base_version = env!("CARGO_PKG_VERSION");
-    let commit_sha = env!("COMMIT_SHA");
-
     AppVersion {
-        version: format!("{}+{}", base_version, commit_sha),
+        version: build_version(),
     }
 }

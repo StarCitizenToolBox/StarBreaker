@@ -33,3 +33,5 @@ tauri-plugin-store = "2.4"
 system-theme = "0.3"
 futures-lite = "2"
 filetime = "0.2"
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+which = "6"
