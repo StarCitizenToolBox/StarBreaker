@@ -981,6 +981,99 @@ fn test_create_scene_blend_links_object_ids_instead_of_empty_mesh_stubs() {
 }
 
 #[test]
+fn test_create_scene_blend_disambiguates_duplicate_library_basenames() {
+    let first = LinkedMeshInstance {
+        scene_instance_id: 0,
+        entity_name: "idris_screen".to_string(),
+        parent_entity_name: None,
+        parent_empty_name: None,
+        parent_empty_parent_entity_name: None,
+        parent_empty_parent_node_name: None,
+        parent_empty_loc: [0.0, 0.0, 0.0],
+        parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+        parent_empty_scale: [1.0, 1.0, 1.0],
+        is_interior: false,
+        source_object_name: "idris_screen".to_string(),
+        name: "idris_screen".to_string(),
+        mesh_name: "idris_screen_mesh".to_string(),
+        material_names: Vec::new(),
+        material_sidecar: None,
+        palette_id: None,
+        source_nodes: Vec::new(),
+        source_ancestors: Vec::new(),
+        source_loc: [0.0, 0.0, 0.0],
+        source_quat: [1.0, 0.0, 0.0, 0.0],
+        source_scale: [1.0, 1.0, 1.0],
+        source_parent_name: None,
+        parent_node_name: None,
+        blend_path: "//../../Data/Objects/Spaceships/Ships/AEGS/Idris_Frigate/interior/ui/ui_screen_4x3_a_LOD0.blend".to_string(),
+        mesh_asset: "Data/Objects/Spaceships/Ships/AEGS/Idris_Frigate/interior/ui/ui_screen_4x3_a_LOD0.blend".to_string(),
+        position: [0.0, 0.0, 0.0],
+        rotation: [1.0, 0.0, 0.0, 0.0],
+        scale: [1.0, 1.0, 1.0],
+        hidden: false,
+    };
+    let second = LinkedMeshInstance {
+        scene_instance_id: 1,
+        entity_name: "s42_screen".to_string(),
+        parent_entity_name: None,
+        parent_empty_name: None,
+        parent_empty_parent_entity_name: None,
+        parent_empty_parent_node_name: None,
+        parent_empty_loc: [0.0, 0.0, 0.0],
+        parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+        parent_empty_scale: [1.0, 1.0, 1.0],
+        is_interior: false,
+        source_object_name: "s42_screen".to_string(),
+        name: "s42_screen".to_string(),
+        mesh_name: "s42_screen_mesh".to_string(),
+        material_names: Vec::new(),
+        material_sidecar: None,
+        palette_id: None,
+        source_nodes: Vec::new(),
+        source_ancestors: Vec::new(),
+        source_loc: [0.0, 0.0, 0.0],
+        source_quat: [1.0, 0.0, 0.0, 0.0],
+        source_scale: [1.0, 1.0, 1.0],
+        source_parent_name: None,
+        parent_node_name: None,
+        blend_path: "//../../Data/Objects/Squadron42/universal/ui/ui_screen_4x3_a_LOD0.blend".to_string(),
+        mesh_asset: "Data/Objects/Squadron42/universal/ui/ui_screen_4x3_a_LOD0.blend".to_string(),
+        position: [0.0, 0.0, 0.0],
+        rotation: [1.0, 0.0, 0.0, 0.0],
+        scale: [1.0, 1.0, 1.0],
+        hidden: false,
+    };
+
+    let blend_bytes =
+        create_scene_blend_with_instances("LibraryNameTest", &[first, second], &[]).unwrap();
+    let blocks = parse_blend_blocks(&blend_bytes);
+    let library_names = id_block_names(&blocks, b"LI\0\0");
+
+    assert_eq!(library_names.len(), 2);
+    assert_eq!(
+        library_names
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        2,
+        "duplicate library basenames must be disambiguated in scene.blend"
+    );
+    assert!(
+        library_names
+            .iter()
+            .all(|name| name.ends_with("ui_screen_4x3_a_LOD0.blend")),
+        "disambiguated library names should stay path-derived and readable: {library_names:?}"
+    );
+    assert!(
+        library_names
+            .iter()
+            .all(|name| name != "ui_screen_4x3_a_LOD0.blend"),
+        "colliding basenames must not be emitted unchanged: {library_names:?}"
+    );
+}
+
+#[test]
 fn test_create_scene_blend_writes_addon_style_scene_anchors() {
     let instance = LinkedMeshInstance {
         scene_instance_id: 0,

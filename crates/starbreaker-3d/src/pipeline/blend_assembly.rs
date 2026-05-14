@@ -12,7 +12,8 @@
 //! Phase 5D (decal material assignment) — vertex group material assignment
 #![allow(dead_code)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
@@ -284,6 +285,88 @@ fn unique_scene_object_name(base: &str, used: &mut HashMap<String, usize>) -> St
     };
     *count += 1;
     name
+}
+
+fn blend_library_basename(blend_path: &str) -> &str {
+    blend_path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(blend_path)
+}
+
+fn blend_library_path_components(blend_path: &str) -> Vec<&str> {
+    blend_path
+        .split(['/', '\\'])
+        .filter(|component| !component.is_empty())
+        .collect()
+}
+
+fn hashed_library_name(blend_path: &str, basename: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    blend_path.hash(&mut hasher);
+    format!("{basename}__{:016x}", hasher.finish())
+}
+
+fn unique_library_names(blend_paths: &[String]) -> HashMap<String, String> {
+    let mut paths_by_basename: HashMap<&str, Vec<&String>> = HashMap::new();
+    for blend_path in blend_paths {
+        paths_by_basename
+            .entry(blend_library_basename(blend_path))
+            .or_default()
+            .push(blend_path);
+    }
+
+    let mut names = HashMap::new();
+    for (basename, paths) in paths_by_basename {
+        if paths.len() == 1 {
+            names.insert(paths[0].clone(), basename.to_string());
+            continue;
+        }
+
+        let component_lists: Vec<Vec<&str>> = paths
+            .iter()
+            .map(|path| blend_library_path_components(path))
+            .collect();
+        let max_depth = component_lists
+            .iter()
+            .map(Vec::len)
+            .max()
+            .unwrap_or(1);
+
+        let mut resolved = None;
+        for depth in 2..=max_depth {
+            let candidates: Vec<String> = component_lists
+                .iter()
+                .map(|components| {
+                    let start = components.len().saturating_sub(depth);
+                    components[start..].join("__")
+                })
+                .collect();
+
+            let unique: HashSet<&String> = candidates.iter().collect();
+            if unique.len() == candidates.len() {
+                resolved = Some(candidates);
+                break;
+            }
+        }
+
+        let resolved = resolved.unwrap_or_else(|| {
+            paths.iter()
+                .map(|path| hashed_library_name(path, basename))
+                .collect()
+        });
+
+        for (path, candidate) in paths.iter().zip(resolved) {
+            let final_name = if candidate.len() <= 255 {
+                candidate
+            } else {
+                hashed_library_name(path, basename)
+            };
+            names.insert((*path).clone(), final_name);
+        }
+    }
+
+    names
 }
 
 fn lookup_named_ptr(map: &HashMap<String, u64>, name: &str) -> Option<u64> {
@@ -4101,12 +4184,18 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
     // Build linked object ID stubs and their library blocks.
     let mut linked_mesh_id_data = Vec::new();
     let mut mesh_library_data = Vec::new();
+    let library_names = unique_library_names(
+        &library_ptrs
+            .iter()
+            .map(|(blend_path, _)| blend_path.clone())
+            .collect::<Vec<_>>(),
+    );
     
     for (blend_path, library_ptr) in &library_ptrs {
-        let lib_name = blend_path
-            .rsplit('/')
-            .next()
-            .unwrap_or(blend_path.as_str());
+        let lib_name = library_names
+            .get(blend_path)
+            .map(String::as_str)
+            .unwrap_or_else(|| blend_library_basename(blend_path));
         let lib_data = build_library_block(lib_name, blend_path);
         mesh_library_data.push((*library_ptr, lib_data));
     }
