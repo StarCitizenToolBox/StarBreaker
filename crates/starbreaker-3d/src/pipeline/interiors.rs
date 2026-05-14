@@ -270,7 +270,7 @@ fn helper_transform_duplicates_offset(helper_transform: glam::Mat4, offset_trans
     let (offset_scale, offset_rotation, offset_translation) =
         offset_transform.to_scale_rotation_translation();
     helper_scale.abs_diff_eq(offset_scale, 1e-3)
-        && helper_translation.abs_diff_eq(offset_translation, 1e-2)
+        && helper_translation.distance(offset_translation) <= 1.5e-2
         && helper_rotation.angle_between(offset_rotation).abs() < 1e-2
 }
 
@@ -1133,6 +1133,32 @@ mod tests {
         let transform = mat4_from_array(&transform);
         let actual = transform.to_cols_array();
         let expected = offset.to_cols_array();
+        for (actual, expected) in actual.iter().zip(expected.iter()) {
+            assert!((actual - expected).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn compose_root_container_transform_skips_near_duplicate_helper_transform() {
+        let helper = glam::Mat4::from_translation(glam::Vec3::new(
+            -0.012000000104308128,
+            -8.607000350952148,
+            -3.332000732421875,
+        ));
+
+        let transform = compose_root_container_transform(
+            [-0.0015102500328794122, -8.607000350952148, -3.3320000171661377],
+            [0.0, 0.0, 0.0],
+            Some(helper),
+        );
+        let transform = mat4_from_array(&transform);
+        let expected = mat4_from_array(&crate::socpak::build_container_transform(
+            [-0.0015102500328794122, -8.607000350952148, -3.3320000171661377],
+            [0.0, 0.0, 0.0],
+        ));
+
+        let actual = transform.to_cols_array();
+        let expected = expected.to_cols_array();
         for (actual, expected) in actual.iter().zip(expected.iter()) {
             assert!((actual - expected).abs() < 1e-5);
         }

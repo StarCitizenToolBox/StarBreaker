@@ -408,11 +408,8 @@ fn resolve_sub_geometry(idx: &EntityIndex, children: &mut [LoadoutNode]) {
     // First pass: direct tag matching for each child.
     let mut unmatched: Vec<usize> = Vec::new();
     for (i, child) in children.iter_mut().enumerate() {
-        if child.geometry_path.is_none() {
-            continue;
-        }
         let variants = idx.query_sub_geometry(&child.record);
-        if variants.is_empty() {
+        if !should_attempt_sub_geometry_resolution(child.geometry_path.as_deref(), &variants) {
             continue;
         }
         if let Some(m) = match_sub_geometry_variant(&variants, &child.port_tags, child.helper_bone_name.as_deref(), &child.item_port_name) {
@@ -461,6 +458,13 @@ fn resolve_sub_geometry(idx: &EntityIndex, children: &mut [LoadoutNode]) {
     for child in children.iter_mut() {
         resolve_sub_geometry(idx, &mut child.children);
     }
+}
+
+fn should_attempt_sub_geometry_resolution(
+    geometry_path: Option<&str>,
+    variants: &[SubGeometryVariant],
+) -> bool {
+    geometry_path.is_some() || !variants.is_empty()
 }
 
 fn has_multiple_geometry_variants(variants: &[SubGeometryVariant]) -> bool {
@@ -847,6 +851,19 @@ mod tests {
         ];
 
         assert!(!has_multiple_geometry_variants(&variants));
+    }
+
+    #[test]
+    fn should_attempt_sub_geometry_resolution_allows_variant_only_entities() {
+        let variants = vec![SubGeometryVariant {
+            tag: "left".to_string(),
+            geometry_path: "objects/spaceships/ships/drak/cutlass/drak_cutlass_door_side_left.cga"
+                .to_string(),
+            material_path: String::new(),
+        }];
+
+        assert!(should_attempt_sub_geometry_resolution(None, &variants));
+        assert!(!should_attempt_sub_geometry_resolution(None, &[]));
     }
 }
 

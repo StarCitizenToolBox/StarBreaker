@@ -82,7 +82,11 @@ impl<'a> P4kArchive<'a> {
     /// Parse a P4k archive from a byte slice.
     pub fn from_bytes(data: &'a [u8]) -> Result<Self, P4kError> {
         let (entries, path_index, sorted_index, lowercase_names, sorted_lower_index) =
-            parse_central_directory(data, None)?;
+            match parse_central_directory(data, None) {
+                Ok(parsed) => parsed,
+                Err(P4kError::EocdNotFound) => parse_local_file_entries(data)?,
+                Err(err) => return Err(err),
+            };
         Ok(P4kArchive {
             data,
             entries,
@@ -465,6 +469,10 @@ fn parse_entries(
         }
     }
 
+    build_archive_indexes(entries)
+}
+
+fn build_archive_indexes(entries: Vec<P4kEntry>) -> Result<CentralDirectory, P4kError> {
     // Build path index — HashTable<u32> keyed by entry index, hashing through entries[i].name.
     // Avoids the full-path String key duplication of FxHashMap<String, usize>.
     let mut path_index: HashTable<u32> = HashTable::with_capacity(entries.len());
@@ -487,6 +495,76 @@ fn parse_entries(
     });
 
     Ok((entries, path_index, sorted_index, lowercase_names, sorted_lower_index))
+}
+
+fn parse_local_file_entries(data: &[u8]) -> Result<CentralDirectory, P4kError> {
+    let mut offset = 0usize;
+    let mut entries = Vec::new();
+
+    while offset + size_of::<LocalFileHeader>() <= data.len() {
+        let mut reader = SpanReader::new_at(data, offset);
+        let header = reader.read_type::<LocalFileHeader>()?;
+        if header.signature != LOCAL_FILE_SIGNATURE && header.signature != LOCAL_FILE_CIG_SIGNATURE {
+            break;
+        }
+
+        if header.flags & 0x0008 != 0 {
+            return Err(P4kError::Parse(starbreaker_common::ParseError::InvalidLayout(
+                "local-header fallback does not support data descriptors".to_string(),
+            )));
+        }
+
+        let name_bytes = reader.read_bytes(header.file_name_length as usize)?;
+        let mut bytes = name_bytes.to_vec();
+        for b in &mut bytes {
+            if *b == b'/' {
+                *b = b'\\';
+            }
+        }
+        let name = String::from_utf8(bytes).map_err(|_| {
+            P4kError::Parse(starbreaker_common::ParseError::InvalidLayout(
+                "non-utf8 entry name".to_string(),
+            ))
+        })?;
+
+        reader.advance(header.extra_field_length as usize)?;
+        let data_offset = offset
+            + size_of::<LocalFileHeader>()
+            + header.file_name_length as usize
+            + header.extra_field_length as usize;
+        let compressed_size = header.compressed_size as usize;
+        let end_offset = data_offset.checked_add(compressed_size).ok_or_else(|| {
+            P4kError::Parse(starbreaker_common::ParseError::InvalidLayout(
+                "local-header fallback offset overflow".to_string(),
+            ))
+        })?;
+        if end_offset > data.len() {
+            return Err(P4kError::Parse(starbreaker_common::ParseError::Truncated {
+                offset: data_offset,
+                need: compressed_size,
+                have: data.len().saturating_sub(data_offset),
+            }));
+        }
+
+        entries.push(P4kEntry {
+            name,
+            compressed_size: header.compressed_size as u64,
+            uncompressed_size: header.uncompressed_size as u64,
+            compression_method: header.compression_method,
+            is_encrypted: header.flags & 0x0001 != 0,
+            offset: offset as u64,
+            crc32: header.crc32,
+            last_modified: ((header.last_mod_date as u32) << 16) | header.last_mod_time as u32,
+        });
+
+        offset = end_offset;
+    }
+
+    if entries.is_empty() {
+        return Err(P4kError::EocdNotFound);
+    }
+
+    build_archive_indexes(entries)
 }
 
 /// Parse the central directory from raw archive data (in-memory byte slice).
@@ -1071,5 +1149,31 @@ mod tests {
             "expected Parse error for non-UTF-8 name, got: {:?}",
             result
         );
+    }
+
+    #[test]
+    fn from_bytes_falls_back_to_local_headers_when_eocd_is_missing() {
+        let name = b"foo.txt";
+        let payload = b"abc";
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&LOCAL_FILE_SIGNATURE.to_le_bytes());
+        buf.extend_from_slice(&20u16.to_le_bytes()); // version_needed
+        buf.extend_from_slice(&0u16.to_le_bytes()); // flags
+        buf.extend_from_slice(&0u16.to_le_bytes()); // compression_method = stored
+        buf.extend_from_slice(&0u16.to_le_bytes()); // last_mod_time
+        buf.extend_from_slice(&0u16.to_le_bytes()); // last_mod_date
+        buf.extend_from_slice(&0u32.to_le_bytes()); // crc32
+        buf.extend_from_slice(&(payload.len() as u32).to_le_bytes()); // compressed_size
+        buf.extend_from_slice(&(payload.len() as u32).to_le_bytes()); // uncompressed_size
+        buf.extend_from_slice(&(name.len() as u16).to_le_bytes()); // file_name_length
+        buf.extend_from_slice(&0u16.to_le_bytes()); // extra_field_length
+        buf.extend_from_slice(name);
+        buf.extend_from_slice(payload);
+
+        let archive = P4kArchive::from_bytes(&buf).expect("local-header fallback should parse");
+        let entry = archive.entry("foo.txt").expect("entry should exist");
+        assert_eq!(entry.compression_method, 0);
+        assert_eq!(archive.read(entry).expect("read stored payload"), payload);
     }
 }
