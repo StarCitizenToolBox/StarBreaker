@@ -61,6 +61,9 @@ for _pkg in ("starbreaker_addon", "starbreaker_addon.runtime", "starbreaker_addo
         sys.modules[_pkg] = _mod
 
 from starbreaker_addon.manifest import MaterialSidecar, SubmaterialRecord
+from starbreaker_addon.material_contract import ContractInput, ShaderGroupContract
+from starbreaker_addon.runtime.importer.materials import MaterialsMixin
+from starbreaker_addon.runtime.record_utils import _mesh_decal_authored_emission_strength
 from starbreaker_addon.runtime.importer.utils import (
     _canonical_source_name,
     _material_identity,
@@ -90,6 +93,34 @@ def _make_sidecar(*entries: tuple[int, str]) -> MaterialSidecar:
         submaterials=submaterials,
         raw={},
     )
+
+
+class _FakeImageNode:
+    def __init__(self, path: str | None):
+        self.path = path
+        self.outputs = _FakeOutputs(path)
+
+
+class _FakeOutputs(dict):
+    def __init__(self, path: str | None):
+        super().__init__(
+            {
+                "Color": f"{path}:Color",
+                "Alpha": f"{path}:Alpha",
+                0: f"{path}:Color",
+            }
+        )
+
+
+class _MaterialSocketProbe(MaterialsMixin):
+    def __init__(self) -> None:
+        self.image_paths: list[tuple[str | None, bool]] = []
+
+    def _image_node(self, nodes, image_path, *, x, y, is_color, **_kwargs):
+        self.image_paths.append((image_path, is_color))
+        if image_path is None:
+            return None
+        return _FakeImageNode(image_path)
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +276,185 @@ class TestRemappedSubmaterialForSlot(unittest.TestCase):
         source = _make_submaterial(0, "ghost")
         result = self._slot(source, 99, {}, {})
         self.assertIsNone(result)
+
+
+# ---------------------------------------------------------------------------
+# Tests for MeshDecal emission gating
+# ---------------------------------------------------------------------------
+
+class TestMeshDecalEmissionStrength(unittest.TestCase):
+    def test_linked_mesh_decal_requires_explicit_glow_signal(self) -> None:
+        linked = SubmaterialRecord.from_value(
+            {
+                "shader_family": "MeshDecal",
+                "authored_attributes": [
+                    {"name": "Emissive", "value": "1,1,1"},
+                ],
+                "texture_slots": [
+                    {
+                        "slot": "TexSlot1",
+                        "role": "base_color",
+                        "source_path": "Data/Textures/vehicles/manufacturer/CRUS/Glows/crus_glows_diff.tif",
+                        "export_path": "Data/Textures/vehicles/manufacturer/CRUS/Glows/crus_glows_diff_TEX0.png",
+                    }
+                ],
+            }
+        )
+        self.assertEqual(_mesh_decal_authored_emission_strength(linked), 0.0)
+
+    def test_unlinked_mesh_decal_keeps_authored_glow(self) -> None:
+        unlinked = SubmaterialRecord.from_value(
+            {
+                "shader_family": "MeshDecal",
+                "authored_attributes": [
+                    {"name": "Emissive", "value": "1,1,1"},
+                    {"name": "Glow", "value": "0.25"},
+                ],
+                "texture_slots": [
+                    {
+                        "slot": "TexSlot1",
+                        "role": "base_color",
+                        "source_path": "Data/Textures/vehicles/manufacturer/CRUS/Glows/crus_glows_diff.tif",
+                        "export_path": "Data/Textures/vehicles/manufacturer/CRUS/Glows/crus_glows_diff_TEX0.png",
+                    }
+                ],
+            }
+        )
+        self.assertAlmostEqual(_mesh_decal_authored_emission_strength(unlinked), 0.25)
+
+    def test_mesh_decal_emissive_texture_still_emits(self) -> None:
+        decal = SubmaterialRecord.from_value({"shader_family": "MeshDecal"})
+        self.assertEqual(
+            _mesh_decal_authored_emission_strength(
+                decal,
+                emissive_texture_path="Data/Textures/test_emissive.png",
+            ),
+            1.0,
+        )
+
+
+class TestMaterialAlphaSources(unittest.TestCase):
+    def test_stencil_decal_alpha_prefers_texslot7_stencil_texture(self) -> None:
+        submaterial = SubmaterialRecord.from_value(
+            {
+                "shader_family": "MeshDecal",
+                "decoded_feature_flags": {"has_stencil_map": True, "tokens": ["STENCIL_MAP"]},
+                "texture_slots": [
+                    {
+                        "slot": "TexSlot1",
+                        "role": "opacity",
+                        "export_path": "Data/Textures/test/transparent_opacity.png",
+                    },
+                    {
+                        "slot": "TexSlot7",
+                        "role": "stencil",
+                        "export_path": "Data/Textures/test/stencil.png",
+                    },
+                ],
+            }
+        )
+        probe = _MaterialSocketProbe()
+
+        alpha = probe._alpha_source_socket(
+            object(),
+            submaterial,
+            {"opacity": "Data/Textures/test/transparent_opacity.png", "base_color": None},
+            x=0,
+            y=0,
+        )
+
+        self.assertEqual(alpha, "Data/Textures/test/stencil.png:Alpha")
+        self.assertEqual(probe.image_paths, [("Data/Textures/test/stencil.png", True)])
+
+    def test_non_stencil_decal_alpha_uses_generic_opacity(self) -> None:
+        submaterial = SubmaterialRecord.from_value(
+            {
+                "shader_family": "MeshDecal",
+                "decoded_feature_flags": {"has_decal": True, "tokens": ["DECAL"]},
+                "texture_slots": [
+                    {
+                        "slot": "TexSlot7",
+                        "role": "stencil",
+                        "export_path": "Data/Textures/test/stencil.png",
+                    },
+                ],
+            }
+        )
+        probe = _MaterialSocketProbe()
+
+        alpha = probe._alpha_source_socket(
+            object(),
+            submaterial,
+            {"opacity": "Data/Textures/test/opacity.png", "base_color": None},
+            x=0,
+            y=0,
+        )
+
+        self.assertEqual(alpha, "Data/Textures/test/opacity.png:Color")
+        self.assertEqual(probe.image_paths, [("Data/Textures/test/opacity.png", False)])
+
+    def test_stencil_decal_contract_does_not_fallback_without_adaptor(self) -> None:
+        submaterial = SubmaterialRecord.from_value(
+            {
+                "shader_family": "MeshDecal",
+                "decoded_feature_flags": {"has_stencil_map": True, "tokens": ["STENCIL_MAP"]},
+                "texture_slots": [
+                    {
+                        "slot": "TexSlot7",
+                        "role": "stencil",
+                        "export_path": "Data/Textures/test/stencil.png",
+                    },
+                ],
+            }
+        )
+        probe = _MaterialSocketProbe()
+        group_contract = ShaderGroupContract(
+            name="SB_MeshDecal_v1",
+            shader_families=["MeshDecal"],
+            version=1,
+            shader_output="Shader",
+            inputs=[],
+            metadata={},
+            raw={},
+        )
+
+        color = probe._contract_input_source_socket(
+            object(),
+            submaterial,
+            None,
+            group_contract,
+            ContractInput(
+                name="TexSlot1_DecalSource",
+                socket_type="NodeSocketColor",
+                semantic="decal_source",
+                source_slot="TexSlot1",
+                required=False,
+                default_value=None,
+                raw={},
+            ),
+            x=0,
+            y=0,
+        )
+        alpha = probe._contract_input_source_socket(
+            object(),
+            submaterial,
+            None,
+            group_contract,
+            ContractInput(
+                name="TexSlot1_DecalSource_alpha",
+                socket_type="NodeSocketFloat",
+                semantic="decal_source_alpha",
+                source_slot="TexSlot1",
+                required=False,
+                default_value=0.0,
+                raw={},
+            ),
+            x=0,
+            y=0,
+        )
+
+        self.assertIsNone(color)
+        self.assertIsNone(alpha)
 
 
 # ---------------------------------------------------------------------------

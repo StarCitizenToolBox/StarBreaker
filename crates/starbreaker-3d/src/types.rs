@@ -435,6 +435,13 @@ pub struct ResolvedNode {
     pub geometry_path: Option<String>,
     /// Material path (for fallback loading).
     pub material_path: Option<String>,
+    /// Whether this node's DataCore record should be queried for child
+    /// object containers during interior discovery.
+    ///
+    /// Vehicle XML synthetic wheel/tread nodes reuse the root record to supply
+    /// geometry, but they are not standalone entity records and must not trigger
+    /// child object-container discovery.
+    pub allows_child_object_containers: bool,
     /// Children in the loadout.
     pub children: Vec<ResolvedNode>,
 }
@@ -457,6 +464,7 @@ impl ResolvedNode {
             record: self.record,
             geometry_path: self.geometry_path.clone(),
             material_path: self.material_path.clone(),
+            allows_child_object_containers: self.allows_child_object_containers,
             children: Vec::new(), // Children handled separately
         }
     }
@@ -477,6 +485,7 @@ impl ResolvedNode {
             record: self.record,
             geometry_path: self.geometry_path.clone(),
             material_path: self.material_path.clone(),
+            allows_child_object_containers: self.allows_child_object_containers,
             children: Vec::new(),
         }
     }
@@ -502,6 +511,8 @@ pub struct EntityPayload {
     pub entity_name: String,
     /// DataCore EntityClassDefinition.Category for this payload, if present.
     pub entity_category: Option<String>,
+    /// DataCore SAttachableComponentParams.AttachDef.Type for this payload, if present.
+    pub attach_def_type: Option<String>,
     /// NMC node name in the parent to attach under.
     pub parent_node_name: String,
     /// Fallback: parent entity name to attach to if parent_node_name isn't found.
@@ -611,6 +622,9 @@ pub struct InteriorMesh {
     /// EntityClassGUID from CryXMLB — used to resolve geometry via DataCore
     /// when no inline PropertiesDataCore geometry path is available.
     pub entity_class_guid: Option<String>,
+    /// Entity class short name from socpak root item-port XML when no GUID is
+    /// authored but the room setup still names a visual entity to spawn.
+    pub entity_class_name: Option<String>,
 }
 
 /// All geometry and lights from a single socpak interior container.

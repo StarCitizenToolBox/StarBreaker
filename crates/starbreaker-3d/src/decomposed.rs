@@ -320,6 +320,7 @@ fn resolve_child_instance_transforms(input: &DecomposedInput) -> Vec<ResolvedChi
                 skeleton_source_path: child.skeleton_source_path.clone(),
                 entity_name: child.entity_name.clone(),
                 entity_category: child.entity_category.clone(),
+                attach_def_type: child.attach_def_type.clone(),
                 parent_node_name: child.parent_node_name.clone(),
                 parent_entity_name: child.parent_entity_name.clone(),
                 no_rotation: child.no_rotation,
@@ -517,6 +518,17 @@ fn is_engine_glow_material(material: &SubMaterial) -> bool {
         lowered.contains("glow") || lowered.contains("emissive")
     });
     has_emissive_energy || has_emissive_texture
+}
+
+fn should_export_engine_glow_targets(child: &crate::types::EntityPayload) -> bool {
+    child
+        .entity_category
+        .as_deref()
+        .is_some_and(|category| category.eq_ignore_ascii_case("Thruster"))
+        && child
+            .attach_def_type
+            .as_deref()
+            .is_some_and(|attach_def_type| attach_def_type.eq_ignore_ascii_case("MainThruster"))
 }
 
 fn normalize_package_subdir(subdir: &str) -> Option<String> {
@@ -1095,11 +1107,7 @@ pub(crate) fn write_decomposed_export(
                 &mut mtl_cache,
             )
         });
-        if child
-            .entity_category
-            .as_deref()
-            .is_some_and(|category| category.eq_ignore_ascii_case("Thruster"))
-        {
+        if should_export_engine_glow_targets(child) {
             engine_glow_targets.extend(build_thruster_engine_glow_targets(
                 &child.mesh,
                 child_material_view.sidecar_materials.as_ref(),
@@ -1726,7 +1734,7 @@ fn build_scene_manifest_value(
                 "units": "emission_strength",
                 "min_strength": 0.0,
                 "max_strength": 200.0,
-                "default_strength": 3.0,
+                "default_strength": 0.0,
                 "targets": engine_glow_targets
                     .iter()
                     .map(|target| serde_json::json!({
@@ -3283,9 +3291,14 @@ mod tests {
     }
 
     fn sample_mesh(submeshes: Vec<crate::types::SubMesh>) -> Mesh {
+        let index_count = submeshes
+            .iter()
+            .map(|submesh| submesh.first_index + submesh.num_indices)
+            .max()
+            .unwrap_or(0) as usize;
         Mesh {
             positions: Vec::new(),
-            indices: Vec::new(),
+            indices: (0..index_count as u32).collect(),
             uvs: None,
             secondary_uvs: None,
             normals: None,
@@ -4328,7 +4341,7 @@ mod tests {
 
         assert_eq!(
             value["controls"]["engine_glow"]["default_strength"],
-            serde_json::json!(3.0)
+            serde_json::json!(0.0)
         );
         assert_eq!(
             value["controls"]["engine_glow"]["targets"][0]["geometry_path"],
@@ -4385,6 +4398,38 @@ mod tests {
         );
         assert_eq!(targets[0].source_material_index, 5);
         assert_eq!(targets[0].submaterial_name, "Glow_Thrusters");
+    }
+
+    #[test]
+    fn engine_glow_targets_require_main_thruster_attach_def_type() {
+        let child = EntityPayload {
+            mesh: sample_mesh(vec![]),
+            materials: None,
+            textures: None,
+            nmc: None,
+            palette: None,
+            geometry_path: String::new(),
+            material_path: String::new(),
+            bones: Vec::new(),
+            skeleton_source_path: None,
+            entity_name: "thruster".into(),
+            entity_category: Some("Thruster".into()),
+            attach_def_type: Some("MainThruster".into()),
+            parent_node_name: "bone".into(),
+            parent_entity_name: "parent".into(),
+            no_rotation: false,
+            offset_position: [0.0; 3],
+            offset_rotation: [0.0; 3],
+            detach_direction: [0.0; 3],
+            port_flags: String::new(),
+        };
+        assert!(should_export_engine_glow_targets(&child));
+
+        let maneuver_child = EntityPayload {
+            attach_def_type: Some("ManneuverThruster".into()),
+            ..child
+        };
+        assert!(!should_export_engine_glow_targets(&maneuver_child));
     }
 
     #[test]
@@ -4499,6 +4544,7 @@ mod tests {
             skeleton_source_path: None,
             entity_name: "DRAK_Test_Command_Module".to_string(),
             entity_category: None,
+            attach_def_type: None,
             parent_node_name: "hardpoint_docking_module".to_string(),
             parent_entity_name: "root".to_string(),
             no_rotation: true,

@@ -935,6 +935,7 @@ mod tests {
             skeleton_source_path: None,
             entity_name: entity_name.into(),
             entity_category: None,
+            attach_def_type: None,
             parent_node_name: String::new(),
             parent_entity_name: String::new(),
             no_rotation: false,

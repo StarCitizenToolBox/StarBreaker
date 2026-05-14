@@ -5,6 +5,8 @@
 use std::collections::HashMap;
 
 use crate::included_objects::IncludedObjects;
+use quick_xml::Reader;
+use quick_xml::events::Event;
 use starbreaker_chunks::ChunkFile;
 use starbreaker_chunks::known_types::crch;
 use starbreaker_cryxml::CryXml;
@@ -135,6 +137,8 @@ pub fn load_interior_from_socpak(
     p4k: &MappedP4k,
     socpak_path: &str,
     container_transform: [[f32; 4]; 4],
+    non_item_port_transform_delta: [[f32; 4]; 4],
+    root_item_port_reference_candidates: &[[[f32; 4]; 4]],
 ) -> Result<InteriorPayload, Error> {
     let p4k_path = normalize_socpak_path(socpak_path);
 
@@ -190,8 +194,18 @@ pub fn load_interior_from_socpak(
                     payload.meshes.len(),
                     payload.lights.len()
                 );
-                meshes.extend(payload.meshes);
-                lights.extend(payload.lights);
+                meshes.extend(
+                    payload
+                        .meshes
+                        .into_iter()
+                        .map(|mesh| transform_non_item_port_mesh(mesh, non_item_port_transform_delta)),
+                );
+                lights.extend(
+                    payload
+                        .lights
+                        .into_iter()
+                        .map(|light| transform_non_item_port_light(light, non_item_port_transform_delta)),
+                );
                 if tint_palette_names.is_empty() {
                     tint_palette_names = palette_names;
                 }
@@ -201,6 +215,13 @@ pub fn load_interior_from_socpak(
             }
         }
     }
+
+    meshes.extend(extract_root_item_port_meshes(
+        &inner,
+        &name,
+        container_transform,
+        root_item_port_reference_candidates,
+    ));
 
     Ok(InteriorPayload {
         name,
@@ -277,6 +298,403 @@ fn parse_soc(
     }, palette_names))
 }
 
+fn transform_non_item_port_mesh(
+    mut mesh: InteriorMesh,
+    non_item_port_transform_delta: [[f32; 4]; 4],
+) -> InteriorMesh {
+    let delta = glam::Mat4::from_cols_array_2d(&non_item_port_transform_delta);
+    mesh.transform = (delta * glam::Mat4::from_cols_array_2d(&mesh.transform)).to_cols_array_2d();
+    mesh
+}
+
+fn transform_non_item_port_light(
+    mut light: LightInfo,
+    non_item_port_transform_delta: [[f32; 4]; 4],
+) -> LightInfo {
+    let delta = glam::Mat4::from_cols_array_2d(&non_item_port_transform_delta);
+    let (_, delta_rotation, _) = delta.to_scale_rotation_translation();
+    let transformed_position = delta.transform_point3(glam::Vec3::new(
+        light.position[0] as f32,
+        light.position[1] as f32,
+        light.position[2] as f32,
+    ));
+    light.position = [
+        transformed_position.x as f64,
+        transformed_position.y as f64,
+        transformed_position.z as f64,
+    ];
+    let local_rotation = glam::Quat::from_xyzw(
+        light.rotation[1] as f32,
+        light.rotation[2] as f32,
+        light.rotation[3] as f32,
+        light.rotation[0] as f32,
+    );
+    let transformed_rotation = (delta_rotation * local_rotation).normalize();
+    light.rotation = [
+        transformed_rotation.w as f64,
+        transformed_rotation.x as f64,
+        transformed_rotation.y as f64,
+        transformed_rotation.z as f64,
+    ];
+    let transformed_direction = (delta_rotation
+        * glam::Vec3::new(
+            light.direction_sc[0] as f32,
+            light.direction_sc[1] as f32,
+            light.direction_sc[2] as f32,
+        ))
+    .normalize_or_zero();
+    light.direction_sc = [
+        transformed_direction.x as f64,
+        transformed_direction.y as f64,
+        transformed_direction.z as f64,
+    ];
+    light
+}
+
+fn extract_root_item_port_meshes(
+    inner: &P4kArchive,
+    root_name: &str,
+    container_transform: [[f32; 4]; 4],
+    root_item_port_reference_candidates: &[[[f32; 4]; 4]],
+) -> Vec<InteriorMesh> {
+    let root_xml_name = format!("{}.xml", root_name.to_ascii_lowercase());
+    let Some(entry) = inner.entries().iter().find(|entry| {
+        entry.name.replace('/', "\\").to_ascii_lowercase() == root_xml_name
+    }) else {
+        return Vec::new();
+    };
+
+    let data = match inner.read(entry) {
+        Ok(data) => data,
+        Err(e) => {
+            log::warn!("failed to read {}: {e}", entry.name);
+            return Vec::new();
+        }
+    };
+
+    let root_item_port_reference_transform = infer_root_item_port_reference_transform(
+        inner,
+        root_name,
+        &data,
+        root_item_port_reference_candidates,
+    );
+    let meshes = extract_item_port_meshes_from_container_xml(
+        &data,
+        container_transform,
+        root_item_port_reference_transform,
+    );
+    if !meshes.is_empty() {
+        log::debug!(
+            "  root container xml '{}' → {} item-port entities",
+            entry.name,
+            meshes.len()
+        );
+    }
+    meshes
+}
+
+fn extract_item_port_meshes_from_container_xml(
+    data: &[u8],
+    container_transform: [[f32; 4]; 4],
+    root_item_port_reference_transform: Option<[[f32; 4]; 4]>,
+) -> Vec<InteriorMesh> {
+    if let Ok(xml) = starbreaker_cryxml::from_bytes(data) {
+        return extract_item_port_meshes_from_cryxml(
+            &xml,
+            container_transform,
+            root_item_port_reference_transform,
+        );
+    }
+
+    let Ok(text) = std::str::from_utf8(data) else {
+        return Vec::new();
+    };
+    extract_item_port_meshes_from_text_xml(
+        text,
+        container_transform,
+        root_item_port_reference_transform,
+    )
+}
+
+fn extract_item_port_meshes_from_cryxml(
+    xml: &CryXml,
+    container_transform: [[f32; 4]; 4],
+    root_item_port_reference_transform: Option<[[f32; 4]; 4]>,
+) -> Vec<InteriorMesh> {
+    fn walk(
+        xml: &CryXml,
+        node: &starbreaker_cryxml::CryXmlNode,
+        container_transform: [[f32; 4]; 4],
+        root_item_port_reference_transform: Option<[[f32; 4]; 4]>,
+        meshes: &mut Vec<InteriorMesh>,
+    ) {
+        if xml.node_tag(node) == "ItemPort" {
+            let attrs: HashMap<&str, &str> = xml.node_attributes(node).collect();
+            push_item_port_mesh(
+                &attrs,
+                container_transform,
+                root_item_port_reference_transform,
+                meshes,
+            );
+        }
+        for child in xml.node_children(node) {
+            walk(
+                xml,
+                child,
+                container_transform,
+                root_item_port_reference_transform,
+                meshes,
+            );
+        }
+    }
+
+    let mut meshes = Vec::new();
+    walk(
+        xml,
+        xml.root(),
+        container_transform,
+        root_item_port_reference_transform,
+        &mut meshes,
+    );
+    meshes
+}
+
+fn extract_item_port_meshes_from_text_xml(
+    text: &str,
+    container_transform: [[f32; 4]; 4],
+    root_item_port_reference_transform: Option<[[f32; 4]; 4]>,
+) -> Vec<InteriorMesh> {
+    let mut reader = Reader::from_str(text);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let mut meshes = Vec::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == b"ItemPort" => {
+                let mut attrs: HashMap<String, String> = HashMap::new();
+                for attr in e.attributes().flatten() {
+                    let key = String::from_utf8_lossy(attr.key.as_ref()).into_owned();
+                    if let Ok(value) = attr.decode_and_unescape_value(reader.decoder()) {
+                        attrs.insert(key, value.into_owned());
+                    }
+                }
+                let borrowed: HashMap<&str, &str> = attrs
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str()))
+                    .collect();
+                push_item_port_mesh(
+                    &borrowed,
+                    container_transform,
+                    root_item_port_reference_transform,
+                    &mut meshes,
+                );
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(e) => {
+                log::warn!("failed to parse container item-port xml: {e}");
+                break;
+            }
+        }
+        buf.clear();
+    }
+
+    meshes
+}
+
+fn push_item_port_mesh(
+    attrs: &HashMap<&str, &str>,
+    container_transform: [[f32; 4]; 4],
+    root_item_port_reference_transform: Option<[[f32; 4]; 4]>,
+    meshes: &mut Vec<InteriorMesh>,
+) {
+    let Some(entity_class_name) = attrs
+        .get("name")
+        .and_then(|value| normalize_item_port_entity_name(value))
+    else {
+        return;
+    };
+
+    let pos = parse_csv_f64(
+        attrs
+            .get("interactionOffset")
+            .copied()
+            .unwrap_or("0,0,0"),
+    );
+    let rot = parse_csv_f64(attrs.get("rotation").copied().unwrap_or("1,0,0,0"));
+    let scale = [1.0, 1.0, 1.0];
+    let world_transform = glam::Mat4::from_cols_array_2d(&pos_rot_scale_to_4x4(&pos, &rot, &scale));
+    let reference_transform = if attrs.get("resourceLinkToParent").copied() == Some("1") {
+        root_item_port_reference_transform.unwrap_or(container_transform)
+    } else {
+        container_transform
+    };
+    let reference_transform = glam::Mat4::from_cols_array_2d(&reference_transform);
+    let transform = (reference_transform.inverse() * world_transform).to_cols_array_2d();
+    meshes.push(InteriorMesh {
+        cgf_path: String::new(),
+        material_path: None,
+        transform,
+        entity_class_guid: None,
+        entity_class_name: Some(entity_class_name),
+    });
+}
+
+fn normalize_item_port_entity_name(port_name: &str) -> Option<String> {
+    let candidate = if let Some(rest) = port_name.strip_prefix("Port") {
+        let digit_count = rest.chars().take_while(|ch| ch.is_ascii_digit()).count();
+        if digit_count > 0 && rest.get(digit_count..digit_count + 1) == Some("_") {
+            &rest[digit_count + 1..]
+        } else {
+            port_name
+        }
+    } else {
+        port_name
+    };
+
+    let candidate = candidate.split('[').next()?.trim();
+    if candidate.is_empty() {
+        return None;
+    }
+
+    let candidate = if let Some((base, suffix)) = candidate.rsplit_once('-') {
+        if !base.is_empty() && !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit()) {
+            base
+        } else {
+            candidate
+        }
+    } else {
+        candidate
+    };
+
+    Some(candidate.to_string())
+}
+
+fn infer_root_item_port_reference_transform(
+    inner: &P4kArchive,
+    root_name: &str,
+    root_xml_data: &[u8],
+    root_item_port_reference_candidates: &[[[f32; 4]; 4]],
+) -> Option<[[f32; 4]; 4]> {
+    if root_item_port_reference_candidates.is_empty() {
+        return None;
+    }
+    if root_item_port_reference_candidates.len() == 1 {
+        return root_item_port_reference_candidates.first().copied();
+    }
+    let bounds = read_root_editor_bounds(inner, root_name)?;
+    let item_ports = extract_item_port_meshes_from_container_xml(
+        root_xml_data,
+        glam::Mat4::IDENTITY.to_cols_array_2d(),
+        None,
+    );
+    if item_ports.is_empty() {
+        return root_item_port_reference_candidates.first().copied();
+    }
+    root_item_port_reference_candidates
+        .iter()
+        .copied()
+        .max_by(|left, right| {
+            let left_score = score_reference_transform_bounds(*left, &item_ports, bounds);
+            let right_score = score_reference_transform_bounds(*right, &item_ports, bounds);
+            left_score
+                .0
+                .cmp(&right_score.0)
+                .then_with(|| right_score.1.total_cmp(&left_score.1))
+        })
+}
+
+fn read_root_editor_bounds(
+    inner: &P4kArchive,
+    root_name: &str,
+) -> Option<([f32; 3], [f32; 3])> {
+    let editor_xml_name = format!("{}_editor.xml", root_name.to_ascii_lowercase());
+    let entry = inner.entries().iter().find(|entry| {
+        entry.name.replace('/', "\\").to_ascii_lowercase() == editor_xml_name
+    })?;
+    let data = inner.read(entry).ok()?;
+    parse_editor_bounds(&data)
+}
+
+fn parse_editor_bounds(data: &[u8]) -> Option<([f32; 3], [f32; 3])> {
+    if let Ok(xml) = starbreaker_cryxml::from_bytes(data) {
+        let attrs: HashMap<&str, &str> = xml.node_attributes(xml.root()).collect();
+        return Some((
+            parse_vec3_csv(attrs.get("minBounds").copied()?)?,
+            parse_vec3_csv(attrs.get("maxBounds").copied()?)?,
+        ));
+    }
+    let text = std::str::from_utf8(data).ok()?;
+    let mut reader = Reader::from_str(text);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == b"ObjectContainer" => {
+                let mut min_bounds = None;
+                let mut max_bounds = None;
+                for attr in e.attributes().flatten() {
+                    let key = attr.key.as_ref();
+                    let Ok(value) = attr.decode_and_unescape_value(reader.decoder()) else {
+                        continue;
+                    };
+                    if key == b"minBounds" {
+                        min_bounds = Some(parse_vec3_csv(value.as_ref()));
+                    } else if key == b"maxBounds" {
+                        max_bounds = Some(parse_vec3_csv(value.as_ref()));
+                    }
+                }
+                return Some((min_bounds.flatten()?, max_bounds.flatten()?));
+            }
+            Ok(Event::Eof) => return None,
+            Ok(_) => {}
+            Err(_) => return None,
+        }
+        buf.clear();
+    }
+}
+
+fn parse_vec3_csv(text: &str) -> Option<[f32; 3]> {
+    let values = parse_csv_f64(text);
+    Some([
+        *values.first()? as f32,
+        *values.get(1)? as f32,
+        *values.get(2)? as f32,
+    ])
+}
+
+fn score_reference_transform_bounds(
+    reference_transform: [[f32; 4]; 4],
+    item_ports: &[InteriorMesh],
+    bounds: ([f32; 3], [f32; 3]),
+) -> (usize, f32) {
+    let reference_transform = glam::Mat4::from_cols_array_2d(&reference_transform);
+    let (min_bounds, max_bounds) = bounds;
+    let mut inside = 0usize;
+    let mut overflow = 0.0f32;
+    for port in item_ports {
+        let world = glam::Mat4::from_cols_array_2d(&port.transform);
+        let local = reference_transform.inverse() * world;
+        let translation = local.transform_point3(glam::Vec3::ZERO);
+        let coords = [translation.x, translation.y, translation.z];
+        let mut within_bounds = true;
+        for axis in 0..3 {
+            if coords[axis] < min_bounds[axis] {
+                within_bounds = false;
+                overflow += min_bounds[axis] - coords[axis];
+            } else if coords[axis] > max_bounds[axis] {
+                within_bounds = false;
+                overflow += coords[axis] - max_bounds[axis];
+            }
+        }
+        if within_bounds {
+            inside += 1;
+        }
+    }
+    (inside, overflow)
+}
+
 // ── IncludedObjects → InteriorMesh ──────────────────────────────────────────
 
 fn included_objects_to_meshes(io: &IncludedObjects) -> Vec<InteriorMesh> {
@@ -324,6 +742,7 @@ fn included_objects_to_meshes(io: &IncludedObjects) -> Vec<InteriorMesh> {
                 material_path: None,
                 transform,
                 entity_class_guid: None,
+                entity_class_name: None,
             })
         })
         .collect()
@@ -465,6 +884,7 @@ fn process_entity_children(
                 material_path,
                 transform,
                 entity_class_guid: None,
+                entity_class_name: None,
             });
         } else if let Some(guid) = attrs.get("EntityClassGUID") {
             // No inline geometry — resolve via DataCore using EntityClassGUID
@@ -473,6 +893,7 @@ fn process_entity_children(
                 material_path,
                 transform,
                 entity_class_guid: Some(guid.to_string()),
+                entity_class_name: None,
             });
         }
     }
@@ -1101,7 +1522,10 @@ pub fn build_container_transform(pos: [f32; 3], rot_deg: [f32; 3]) -> [[f32; 4];
 mod tests {
     use crate::included_objects::{IncludedObject, IncludedObjects};
 
-    use super::{quat_mul, quat_rotate_vec, semantic_light_kind_for_light};
+    use super::{
+        build_container_transform, extract_item_port_meshes_from_text_xml,
+        normalize_item_port_entity_name, quat_mul, quat_rotate_vec, semantic_light_kind_for_light,
+    };
 
     fn approx_eq3(left: [f64; 3], right: [f64; 3]) {
         for index in 0..3 {
@@ -1181,4 +1605,106 @@ mod tests {
             super::authored_light_intensity_to_candela_semantic(10.0, "ambient_proxy", 0.2);
         assert_eq!(candela, 750.0);
     }
+
+    #[test]
+    fn normalize_item_port_entity_name_strips_port_prefix_and_instance_suffix() {
+        assert_eq!(
+            normalize_item_port_entity_name(
+                "Port3_Door_RN_RoomConnector_Breachable_OpenReverse_Crew_Quarters[int_crew_quarter_a_SETUP]"
+            ),
+            Some("Door_RN_RoomConnector_Breachable_OpenReverse_Crew_Quarters".to_string())
+        );
+        assert_eq!(
+            normalize_item_port_entity_name(
+                "Port1_ControlPanel_Screen_DoorControl_Physical_Cutter_OpenNoneNone-005[int_crew_quarter_a_SETUP]"
+            ),
+            Some("ControlPanel_Screen_DoorControl_Physical_Cutter_OpenNoneNone".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_item_port_meshes_from_text_xml_emits_named_entity_meshes() {
+        let xml = r#"
+            <ObjectContainer>
+              <TileXmlEntry>
+                <TileItemPortEntries>
+                  <ItemPort
+                    name="Port4_ControlPanel_Screen_DoorControl_Physical_Cutter_OpenLockLight-001[int_crew_quarter_a_SETUP]"
+                    interactionOffset="6.5421228,-25.057394,3.61601"
+                    rotation="1,0,0,0" />
+                </TileItemPortEntries>
+              </TileXmlEntry>
+            </ObjectContainer>
+        "#;
+
+        let meshes = extract_item_port_meshes_from_text_xml(
+            xml,
+            glam::Mat4::IDENTITY.to_cols_array_2d(),
+            None,
+        );
+        assert_eq!(meshes.len(), 1);
+        assert_eq!(
+            meshes[0].entity_class_name.as_deref(),
+            Some("ControlPanel_Screen_DoorControl_Physical_Cutter_OpenLockLight")
+        );
+        assert_eq!(meshes[0].entity_class_guid, None);
+        assert_eq!(meshes[0].cgf_path, "");
+        assert!((meshes[0].transform[3][0] - 6.5421228).abs() < 1e-6);
+        assert!((meshes[0].transform[3][1] + 25.057394).abs() < 1e-6);
+        assert!((meshes[0].transform[3][2] - 3.61601).abs() < 1e-6);
+    }
+
+    #[test]
+    fn extract_item_port_meshes_from_text_xml_localizes_against_current_container_transform() {
+        let xml = r#"
+            <ObjectContainer>
+              <TileXmlEntry>
+                <TileItemPortEntries>
+                  <ItemPort
+                    name="Port4_ControlPanel_Screen_DoorControl_Physical_Cutter_OpenLockLight-001[int_crew_quarter_a_SETUP]"
+                    interactionOffset="6.5421228,-25.057394,3.61601"
+                    rotation="1,0,0,0" />
+                </TileItemPortEntries>
+              </TileXmlEntry>
+            </ObjectContainer>
+        "#;
+
+        let meshes = extract_item_port_meshes_from_text_xml(
+            xml,
+            build_container_transform([-3.875, -26.562, 3.625], [0.0, 0.0, 0.0]),
+            None,
+        );
+        assert_eq!(meshes.len(), 1);
+        assert!((meshes[0].transform[3][0] - 10.417123).abs() < 1e-6);
+        assert!((meshes[0].transform[3][1] - 1.504606).abs() < 1e-6);
+        assert!((meshes[0].transform[3][2] + 0.00899).abs() < 1e-6);
+    }
+
+    #[test]
+    fn extract_item_port_meshes_from_text_xml_uses_reference_transform_for_linked_ports() {
+        let xml = r#"
+            <ObjectContainer>
+              <TileXmlEntry>
+                <TileItemPortEntries>
+                  <ItemPort
+                    name="Port0_ChipSet_LightControl_Crew_A[int_crew_quarter_a_SETUP]"
+                    interactionOffset="7.625,-25.656252,3.6906581"
+                    rotation="1,0,0,0"
+                    resourceLinkToParent="1" />
+                </TileItemPortEntries>
+              </TileXmlEntry>
+            </ObjectContainer>
+        "#;
+
+        let meshes = extract_item_port_meshes_from_text_xml(
+            xml,
+            build_container_transform([-3.875, -26.562, 3.625], [0.0, 0.0, 0.0]),
+            Some(glam::Mat4::IDENTITY.to_cols_array_2d()),
+        );
+        assert_eq!(meshes.len(), 1);
+        assert!((meshes[0].transform[3][0] - 7.625).abs() < 1e-6);
+        assert!((meshes[0].transform[3][1] + 25.656252).abs() < 1e-6);
+        assert!((meshes[0].transform[3][2] - 3.6906581).abs() < 1e-6);
+    }
+
 }

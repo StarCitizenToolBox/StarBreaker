@@ -517,7 +517,7 @@ class BuildersMixin:
     @staticmethod
     def _patch_mesh_decal_template_emission(group: bpy.types.ShaderNodeTree) -> None:
         """Route MeshDecal emissive data into Principled emission."""
-        if group.get("starbreaker_mesh_decal_emission_patch_version") == 3:
+        if group.get("starbreaker_mesh_decal_emission_patch_version") == 4:
             return
 
         nodes = group.nodes
@@ -609,7 +609,77 @@ class BuildersMixin:
                 links.remove(link)
             links.new(multiplier.outputs[0], emission_strength_input)
 
-        group["starbreaker_mesh_decal_emission_patch_version"] = 3
+        # Stencil breakup alpha routing (inside SB_MeshDecal_v1):
+        # alpha = base_alpha * mix(1.0, grime_red, clamp(WearBlendFalloff * 2.0))
+        grime_breakup_socket = _output_socket(group_input, "TexSlot8_GrimeBreakup")
+        wear_falloff_socket = _output_socket(group_input, "Param_WearBlendFalloff")
+        base_alpha_node = nodes.get("Maths.008")
+        principled_alpha = _input_socket(principled, "Alpha")
+        base_alpha_socket = _output_socket(base_alpha_node, "Value") if base_alpha_node is not None else None
+        if (
+            grime_breakup_socket is not None
+            and wear_falloff_socket is not None
+            and base_alpha_socket is not None
+            and principled_alpha is not None
+        ):
+            separate = nodes.get("SB Stencil Breakup Separate")
+            if separate is None or separate.bl_idname != "ShaderNodeSeparateColor":
+                separate = nodes.new("ShaderNodeSeparateColor")
+                separate.name = "SB Stencil Breakup Separate"
+            separate.label = "Stencil Breakup Channel"
+            separate.location = (base_alpha_node.location.x - 420, base_alpha_node.location.y - 280)
+
+            strength_scale = nodes.get("SB Stencil Breakup Strength x2")
+            if strength_scale is None or strength_scale.bl_idname != "ShaderNodeMath":
+                strength_scale = nodes.new("ShaderNodeMath")
+                strength_scale.name = "SB Stencil Breakup Strength x2"
+            strength_scale.label = "Breakup Strength x2 (Clamp)"
+            strength_scale.location = (base_alpha_node.location.x - 420, base_alpha_node.location.y - 120)
+            strength_scale.operation = "MULTIPLY"
+            strength_scale.use_clamp = True
+            strength_scale.inputs[1].default_value = 2.0
+
+            breakup_mix = nodes.get("SB Stencil Breakup Mix")
+            if breakup_mix is None or breakup_mix.bl_idname != "ShaderNodeMix":
+                breakup_mix = nodes.new("ShaderNodeMix")
+                breakup_mix.name = "SB Stencil Breakup Mix"
+            breakup_mix.label = "Stencil Breakup Strength"
+            breakup_mix.location = (base_alpha_node.location.x - 180, base_alpha_node.location.y - 280)
+            if hasattr(breakup_mix, "data_type"):
+                breakup_mix.data_type = "FLOAT"
+            breakup_mix.inputs[2].default_value = 1.0
+
+            alpha_mul = nodes.get("SB Stencil Alpha Wear Multiply")
+            if alpha_mul is None or alpha_mul.bl_idname != "ShaderNodeMath":
+                alpha_mul = nodes.new("ShaderNodeMath")
+                alpha_mul.name = "SB Stencil Alpha Wear Multiply"
+            alpha_mul.label = "Alpha x Breakup"
+            alpha_mul.location = (base_alpha_node.location.x + 220, base_alpha_node.location.y - 120)
+            alpha_mul.operation = "MULTIPLY"
+
+            for link in list(separate.inputs[0].links):
+                links.remove(link)
+            links.new(grime_breakup_socket, separate.inputs[0])
+            for link in list(strength_scale.inputs[0].links):
+                links.remove(link)
+            links.new(wear_falloff_socket, strength_scale.inputs[0])
+            for link in list(breakup_mix.inputs[0].links):
+                links.remove(link)
+            links.new(strength_scale.outputs[0], breakup_mix.inputs[0])
+            for link in list(breakup_mix.inputs[3].links):
+                links.remove(link)
+            links.new(separate.outputs["Red"], breakup_mix.inputs[3])
+            for link in list(alpha_mul.inputs[0].links):
+                links.remove(link)
+            links.new(base_alpha_socket, alpha_mul.inputs[0])
+            for link in list(alpha_mul.inputs[1].links):
+                links.remove(link)
+            links.new(breakup_mix.outputs[0], alpha_mul.inputs[1])
+            for link in list(principled_alpha.links):
+                links.remove(link)
+            links.new(alpha_mul.outputs[0], principled_alpha)
+
+        group["starbreaker_mesh_decal_emission_patch_version"] = 4
 
     def _build_contract_group_material(
         self,
@@ -667,6 +737,14 @@ class BuildersMixin:
                 param_key = semantic.removeprefix("public_param_")
                 if hasattr(target_socket, "default_value"):
                     resolved = _resolve_public_param_default(submaterial, param_key)
+                    if (
+                        resolved is None
+                        and group_contract.name == "SB_MeshDecal_v1"
+                        and template_plan_for_submaterial(submaterial).template_key == "decal_stencil"
+                        and submaterial.decoded_feature_flags.has_stencil_map
+                        and param_key == "decaldiffuseopacity"
+                    ):
+                        resolved = _resolve_public_param_default(submaterial, "stencilopacity")
                     if resolved is not None:
                         try:
                             target_socket.default_value = resolved
@@ -737,6 +815,14 @@ class BuildersMixin:
                     target_socket.default_value = 1.0
                 elif ("alpha" in semantic or "opacity" in semantic) and hasattr(target_socket, "default_value"):
                     target_socket.default_value = 0.0
+                elif (
+                    group_contract.name == "SB_MeshDecal_v1"
+                    and contract_input.name == "TexSlot1_DecalSource"
+                    and template_plan_for_submaterial(submaterial).template_key == "decal_stencil"
+                    and submaterial.decoded_feature_flags.has_stencil_map
+                    and hasattr(target_socket, "default_value")
+                ):
+                    target_socket.default_value = (1.0, 1.0, 1.0, 1.0)
                 source_socket = self._contract_input_source_socket(
                     nodes,
                     submaterial,
@@ -951,7 +1037,7 @@ class BuildersMixin:
             y=-720,
             is_color=False,
         )
-        emissive_ref = _submaterial_texture_reference(submaterial, slots=("TexSlot14",), roles=("emissive",))
+        emissive_ref = _submaterial_texture_reference(submaterial, slots=("TexSlot14",))
         emissive_node = self._image_node(
             nodes,
             emissive_ref.export_path if emissive_ref is not None else None,
@@ -1197,14 +1283,39 @@ class BuildersMixin:
             shader_group,
             "Displacement Height",
         )
+        authored_emissive = _authored_emissive_triplet(submaterial)
+        emission_color_source = emissive_node.outputs[0] if emissive_node is not None else None
+        if emission_color_source is not None and authored_emissive is not None:
+            tint = nodes.new("ShaderNodeRGB")
+            tint.label = "Authored Emissive Tint"
+            tint.location = (-460, -1220)
+            tint.outputs[0].default_value = (*authored_emissive, 1.0)
+            multiply = nodes.new("ShaderNodeMixRGB")
+            multiply.label = "Emissive Texture x Authored Tint"
+            multiply.location = (-220, -1100)
+            multiply.blend_type = "MULTIPLY"
+            multiply.inputs[0].default_value = 1.0
+            links.new(emission_color_source, multiply.inputs[1])
+            links.new(tint.outputs[0], multiply.inputs[2])
+            emission_color_source = multiply.outputs[0]
         self._link_group_input(
             links,
-            emissive_node.outputs[0] if emissive_node is not None else None,
+            emission_color_source,
             shader_group,
             "Emission Color",
         )
         if emissive_node is not None:
-            self._set_socket_default(_input_socket(shader_group, "Emission Strength"), 1.0)
+            self._set_socket_default(_input_socket(shader_group, "Emission Strength"), 0.0)
+        else:
+            if authored_emissive is not None and any(abs(component) > 1e-6 for component in authored_emissive):
+                self._set_socket_default(
+                    _input_socket(shader_group, "Emission Color"),
+                    (*authored_emissive, 1.0),
+                )
+                self._set_socket_default(
+                    _input_socket(shader_group, "Emission Strength"),
+                    max(_float_authored_attribute(submaterial, "Glow"), 1.0),
+                )
 
         surface_shader = _output_socket(shader_group, "Shader")
         self._wire_surface_shader_to_output(nodes, links, surface_shader, output, plan, submaterial)

@@ -295,11 +295,20 @@ fn lookup_named_ptr(map: &HashMap<String, u64>, name: &str) -> Option<u64> {
         })
 }
 
-fn interior_parent_empty_name(container_name: &str, parent_entity_name: Option<&str>) -> String {
-    if let Some(parent) = parent_entity_name.filter(|name| !name.is_empty()) {
+fn interior_parent_empty_name(
+    container_name: &str,
+    parent_entity_name: Option<&str>,
+    container_index: Option<usize>,
+) -> String {
+    let base = if let Some(parent) = parent_entity_name.filter(|name| !name.is_empty()) {
         format!("interior_{parent}_{container_name}")
     } else {
         format!("interior_{container_name}")
+    };
+    if let Some(index) = container_index {
+        format!("{base}_{index:03}")
+    } else {
+        base
     }
 }
 
@@ -537,7 +546,7 @@ fn scene_manifest_instances(manifest_files: &[ExportedFile]) -> Vec<SceneManifes
         }
     }
     if let Some(interiors) = root.get("interiors").and_then(|v| v.as_array()) {
-        for interior in interiors {
+        for (interior_index, interior) in interiors.iter().enumerate() {
             let container_transform = manifest_matrix(interior, "container_transform")
                 .unwrap_or(glam::Mat4::IDENTITY);
             let (container_loc, container_quat, container_scale) =
@@ -562,6 +571,7 @@ fn scene_manifest_instances(manifest_files: &[ExportedFile]) -> Vec<SceneManifes
             let container_name = interior_parent_empty_name(
                 &interior_name,
                 parent_empty_parent_entity_name.as_deref(),
+                Some(interior_index),
             );
             let parent_empty_parent_node_name = interior
                 .get("parent_node_name")
@@ -4659,7 +4669,7 @@ pub fn extract_lights_from_interiors(
 ) -> Result<Vec<ExtractedLight>, Error> {
     let mut lights = Vec::new();
     
-    for container in &interiors.containers {
+    for (container_index, container) in interiors.containers.iter().enumerate() {
         let parent_empty_parent_entity_name = container.parent_entity_name.clone();
         let parent_empty_parent_node_name = container.parent_node_name.clone();
         for light_info in &container.lights {
@@ -4738,6 +4748,7 @@ pub fn extract_lights_from_interiors(
                 parent_empty_name: Some(interior_parent_empty_name(
                     &container.name,
                     parent_empty_parent_entity_name.as_deref(),
+                    Some(container_index),
                 )),
                 parent_empty_parent_entity_name: parent_empty_parent_entity_name.clone(),
                 parent_empty_parent_node_name: parent_empty_parent_node_name.clone(),

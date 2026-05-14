@@ -374,6 +374,49 @@ fn scene_manifest_instances_use_material_sidecar_default_palette() {
 }
 
 #[test]
+fn scene_manifest_instances_unique_parent_empty_for_repeated_interior_names() {
+    let scene = br#"{
+        "interiors": [
+            {
+                "name": "crew_quarters",
+                "container_transform": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[-3.875,-26.562,3.625,1]],
+                "placements": [
+                    {
+                        "mesh_asset": "Data/Objects/quarter_a.blend",
+                        "cgf_path": "Data/Objects/quarter_a.cgf",
+                        "transform": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
+                    }
+                ]
+            },
+            {
+                "name": "crew_quarters",
+                "container_transform": [[-1,0,0,0],[0,-1,0,0],[0,0,1,0],[8.0625,-25.4375,3.625,1]],
+                "placements": [
+                    {
+                        "mesh_asset": "Data/Objects/quarter_b.blend",
+                        "cgf_path": "Data/Objects/quarter_b.cgf",
+                        "transform": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
+                    }
+                ]
+            }
+        ]
+    }"#;
+    let files = vec![ExportedFile {
+        relative_path: "Packages/Test/scene.json".to_string(),
+        bytes: scene.to_vec(),
+        kind: ExportedFileKind::PackageManifest,
+    }];
+
+    let instances = scene_manifest_instances(&files);
+
+    assert_eq!(instances.len(), 2);
+    assert_eq!(instances[0].parent_empty_name.as_deref(), Some("interior_crew_quarters_000"));
+    assert_eq!(instances[1].parent_empty_name.as_deref(), Some("interior_crew_quarters_001"));
+    assert_ne!(instances[0].parent_empty_name, instances[1].parent_empty_name);
+    assert_ne!(instances[0].parent_empty_loc, instances[1].parent_empty_loc);
+}
+
+#[test]
 fn interior_placement_mesh_geometry_converts_to_scene_axes() {
     let mut mesh = Mesh {
         positions: vec![[1.0, 2.0, 3.0]],
@@ -1855,6 +1898,7 @@ fn create_test_input(
             skeleton_source_path: None,
             entity_name: format!("child_{}", i),
             entity_category: None,
+            attach_def_type: None,
             parent_node_name: "Root".to_string(),
             parent_entity_name: entity_name.to_string(),
             no_rotation: false,

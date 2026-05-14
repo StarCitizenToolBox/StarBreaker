@@ -1499,11 +1499,23 @@ class STARBREAKER_AP_preferences(bpy.types.AddonPreferences):
         default=True,
     )
 
+    auto_refresh_unloaded_materials_on_load: BoolProperty(  # type: ignore[assignment]
+        name="Refresh unloaded materials after file load",
+        description=(
+            "Automatically rebuild package materials after opening a generated "
+            ".blend file when placeholder or unloaded material slots still need refresh."
+        ),
+        default=True,
+    )
+
     def draw(self, context: bpy.types.Context) -> None:
         layout = self.layout
         layout.label(text="Post-import behaviour:")
         layout.prop(self, "landing_gear_retract_after_import")
         layout.prop(self, "viewport_change_after_import")
+        layout.separator()
+        layout.label(text="Post-open behaviour:")
+        layout.prop(self, "auto_refresh_unloaded_materials_on_load")
 
 
 def _get_prefs() -> STARBREAKER_AP_preferences | None:
@@ -1528,6 +1540,13 @@ def _should_change_viewport(prefs: object | None) -> bool:
     return bool(getattr(prefs, "viewport_change_after_import", True))
 
 
+def _should_auto_refresh_unloaded_materials_on_load(prefs: object | None) -> bool:
+    """Pure gate — return True when load-post should auto-refresh unloaded materials."""
+    if prefs is None:
+        return True
+    return bool(getattr(prefs, "auto_refresh_unloaded_materials_on_load", True))
+
+
 def _should_auto_refresh_package_root(obj: object, needs_material_refresh: object) -> bool:
     """Return True when load-post should rebuild materials for a package root."""
     get_prop = getattr(obj, "get", None)
@@ -1543,6 +1562,7 @@ def _material_refresh_prompt_timer(token: int | None = None) -> float | None:
     if token is not None and token != _AUTO_MATERIAL_REFRESH_TOKEN:
         return None
     context = bpy.context
+    prefs = _get_prefs()
     if _AUTO_MATERIAL_REFRESH_SESSION is not None:
         session = _AUTO_MATERIAL_REFRESH_SESSION
         done = session.step(budget_seconds=0.04, min_objects=2)
@@ -1562,6 +1582,9 @@ def _material_refresh_prompt_timer(token: int | None = None) -> float | None:
             _AUTO_MATERIAL_REFRESH_SESSION = None
             return None
         return 0.01
+
+    if not _should_auto_refresh_unloaded_materials_on_load(prefs):
+        return None
 
     for obj in bpy.data.objects:
         if not _should_auto_refresh_package_root(obj, package_root_needs_material_refresh):

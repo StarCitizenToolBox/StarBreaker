@@ -322,6 +322,7 @@ pub(crate) fn load_child_payloads(
         .filter_map(|(spec_index, spec)| {
             let child = &spec.child;
             let entity_category = entity_record_category(db, &child.record);
+            let attach_def_type = entity_record_attach_def_type(db, &child.record);
             if child.has_geometry {
                 let asset_index = spec_asset_indices[spec_index]?;
                 let loaded = loaded_assets.get(asset_index)?.as_ref()?;
@@ -337,6 +338,7 @@ pub(crate) fn load_child_payloads(
                     skeleton_source_path: loaded.skeleton_source_path.clone(),
                     entity_name: child.entity_name.clone(),
                     entity_category,
+                    attach_def_type,
                     parent_node_name: spec.parent_node_name.clone(),
                     parent_entity_name: spec.parent_entity_name.clone(),
                     no_rotation: spec.no_rotation,
@@ -358,6 +360,7 @@ pub(crate) fn load_child_payloads(
                     skeleton_source_path: None,
                     entity_name: child.entity_name.clone(),
                     entity_category,
+                    attach_def_type,
                     parent_node_name: spec.parent_node_name.clone(),
                     parent_entity_name: spec.parent_entity_name.clone(),
                     no_rotation: spec.no_rotation,
@@ -378,4 +381,14 @@ fn entity_record_category(db: &Database, record: &starbreaker_datacore::types::R
         .ok()
         .and_then(|compiled| db.query_single::<String>(&compiled, record).ok().flatten())
         .filter(|category| !category.is_empty())
+}
+
+fn entity_record_attach_def_type(
+    db: &Database,
+    record: &starbreaker_datacore::types::Record,
+) -> Option<String> {
+    db.compile_path::<String>(record.struct_id(), "Components[SAttachableComponentParams].AttachDef.Type")
+        .ok()
+        .and_then(|compiled| db.query_single::<String>(&compiled, record).ok().flatten())
+        .filter(|attach_def_type| !attach_def_type.is_empty())
 }

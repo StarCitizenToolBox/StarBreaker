@@ -57,15 +57,17 @@ from ..record_utils import (
     _float_authored_attribute,
     _uses_vertex_color_tint,
     _layer_texture_reference,
+    _mesh_decal_authored_emission_strength,
     _matching_texture_reference,
     _mean_triplet,
+    _public_param_triplet,
     _is_virtual_tint_palette_stencil_decal,
     _routes_virtual_tint_palette_decal_alpha_to_decal_source,
     _routes_virtual_tint_palette_decal_to_decal_source,
     _submaterial_texture_reference,
     _suppresses_virtual_tint_palette_stencil_input,
 )
-from .types import MATERIAL_NODE_LAYOUT
+from .types import MATERIAL_NODE_LAYOUT, LayerSurfaceSockets
 from .utils import (
     _contract_input_uses_color,
     _derived_material_name,
@@ -209,10 +211,14 @@ class MaterialsMixin:
                 continue
             if group_tree.get("starbreaker_mesh_decal_emission_patch_version") != 3:
                 return True
-            if _input_socket(node, "Emission Strength") is None:
+            emission_strength_socket = _input_socket(node, "Emission Strength")
+            if emission_strength_socket is None:
                 return True
             use_vert_col_socket = _input_socket(node, "Use Vert Col")
             if use_vert_col_socket is None:
+                return True
+            expected_emission_strength = self._mesh_decal_emission_strength(submaterial)
+            if abs(float(getattr(emission_strength_socket, "default_value", 0.0)) - expected_emission_strength) > 1e-6:
                 return True
             if bool(getattr(use_vert_col_socket, "default_value", False)) != expected_use_vertex_colors:
                 return True
@@ -657,6 +663,22 @@ class MaterialsMixin:
             return self._palette_color_socket(nodes, palette, channel_name, x=x, y=y)
 
         semantic = (contract_input.semantic or contract_input.name).lower()
+        if group_contract.name == "SB_MeshDecal_v1":
+            if (
+                template_plan_for_submaterial(submaterial).template_key == "decal_stencil"
+                and submaterial.decoded_feature_flags.has_stencil_map
+                and contract_input.name == "TexSlot7_StencilSource_alpha"
+            ):
+                return None
+            stencil_source = self._mesh_decal_stencil_contract_source(
+                nodes,
+                submaterial,
+                contract_input,
+                x=x,
+                y=y,
+            )
+            if stencil_source is not None:
+                return stencil_source
         if _routes_virtual_tint_palette_decal_to_decal_source(submaterial, contract_input):
             return self._virtual_tint_palette_decal_sockets(nodes, submaterial, palette, x=x, y=y).color
         if _suppresses_virtual_tint_palette_stencil_input(submaterial, contract_input):
@@ -882,6 +904,10 @@ class MaterialsMixin:
         x: int,
         y: int,
     ) -> Any:
+        stencil_alpha = self._stencil_alpha_source_socket(nodes, submaterial, x=x, y=y)
+        if stencil_alpha is not None:
+            return stencil_alpha
+
         opacity_path = textures.get("opacity")
         if opacity_path:
             opacity_node = self._image_node(nodes, opacity_path, x=x, y=y, is_color=False)
@@ -896,6 +922,118 @@ class MaterialsMixin:
         if alpha_node is None:
             return None
         return _output_socket(alpha_node, "Alpha")
+
+    def _stencil_alpha_source_socket(
+        self,
+        nodes: bpy.types.Nodes,
+        submaterial: SubmaterialRecord,
+        *,
+        x: int,
+        y: int,
+    ) -> Any:
+        if template_plan_for_submaterial(submaterial).template_key != "decal_stencil":
+            return None
+        if not submaterial.decoded_feature_flags.has_stencil_map:
+            return None
+        stencil_ref = _submaterial_texture_reference(
+            submaterial,
+            slots=("TexSlot7",),
+            roles=("stencil",),
+        )
+        if stencil_ref is None:
+            return None
+        return self._texture_alpha_socket(nodes, stencil_ref.export_path, x=x, y=y, is_color=True)
+
+    def _mesh_decal_stencil_contract_source(
+        self,
+        nodes: bpy.types.Nodes,
+        submaterial: SubmaterialRecord,
+        contract_input: ContractInput,
+        *,
+        x: int,
+        y: int,
+    ) -> Any:
+        if template_plan_for_submaterial(submaterial).template_key != "decal_stencil":
+            return None
+        if not submaterial.decoded_feature_flags.has_stencil_map:
+            return None
+        if contract_input.name not in {"TexSlot1_DecalSource", "TexSlot1_DecalSource_alpha"}:
+            return None
+        stencil_sockets = self._mesh_decal_stencil_adaptor_sockets(
+            nodes,
+            submaterial,
+            x=x,
+            y=y,
+        )
+        if stencil_sockets is None:
+            return None
+        if contract_input.name == "TexSlot1_DecalSource":
+            return stencil_sockets.color
+        return stencil_sockets.alpha
+
+    def _mesh_decal_stencil_adaptor_sockets(
+        self,
+        nodes: bpy.types.Nodes,
+        submaterial: SubmaterialRecord,
+        *,
+        x: int,
+        y: int,
+    ) -> LayerSurfaceSockets | None:
+        stencil_ref = _submaterial_texture_reference(
+            submaterial,
+            slots=("TexSlot7",),
+            roles=("stencil",),
+        )
+        if stencil_ref is None:
+            return None
+        ensure_adaptor = getattr(self, "_ensure_tint_decal_adaptor_group", None)
+        if not callable(ensure_adaptor):
+            return None
+
+        existing = next(
+            (
+                node
+                for node in nodes
+                if node.bl_idname == "ShaderNodeGroup"
+                and getattr(node, "name", "") == "STARBREAKER_STENCIL_TINT_DECAL_ADAPTOR"
+            ),
+            None,
+        )
+        if existing is not None:
+            color_socket = _output_socket(existing, "Color")
+            alpha_socket = _output_socket(existing, "Alpha")
+            if color_socket is not None and alpha_socket is not None:
+                return LayerSurfaceSockets(color=color_socket, alpha=alpha_socket)
+
+        image_node = self._image_node(nodes, stencil_ref.export_path, x=x, y=y, is_color=True)
+        if image_node is None:
+            return None
+        adaptor = nodes.new("ShaderNodeGroup")
+        adaptor.name = "STARBREAKER_STENCIL_TINT_DECAL_ADAPTOR"
+        adaptor.label = "StarBreaker Stencil Tint Decal"
+        adaptor.location = (x + 240, y)
+        adaptor.node_tree = ensure_adaptor()
+
+        red = _public_param_triplet(
+            submaterial,
+            "StencilDiffuseColor1",
+            "StencilDiffuse1",
+            "StencilTintColor",
+            "TintColor",
+            "StencilDiffuseColor",
+        ) or (1.0, 1.0, 1.0)
+        green = _public_param_triplet(submaterial, "StencilDiffuseColor2", "StencilDiffuse2") or (1.0, 1.0, 1.0)
+        blue = _public_param_triplet(submaterial, "StencilDiffuseColor3", "StencilDiffuse3") or (1.0, 1.0, 1.0)
+        adaptor.inputs["Decal Red Tint"].default_value = (*red, 1.0)
+        adaptor.inputs["Decal Green Tint"].default_value = (*green, 1.0)
+        adaptor.inputs["Decal Blue Tint"].default_value = (*blue, 1.0)
+        nodes.id_data.links.new(image_node.outputs[0], adaptor.inputs["Image"])
+
+        color_socket = _output_socket(adaptor, "Color")
+        alpha_socket = _output_socket(adaptor, "Alpha")
+        if color_socket is None or alpha_socket is None:
+            return None
+        return LayerSurfaceSockets(color=color_socket, alpha=alpha_socket)
 
 
 
@@ -924,28 +1062,10 @@ class MaterialsMixin:
 
 
     def _mesh_decal_emission_strength(self, submaterial: SubmaterialRecord) -> float:
-        glow_value = _float_authored_attribute(submaterial, "Glow")
-        if glow_value > 0.0:
-            return glow_value
-
-        # MeshDecal frequently carries Emissive=1,1,1 as a neutral authoring
-        # baseline even when the decal is not a light-emitting surface (for
-        # example host-primary POM decals). Gate emission on explicit channels.
-        if self._texture_export_path(submaterial, "emissive"):
-            return 1.0
-
-        emissive = self._authored_emissive_triplet(submaterial)
-        emissive_mean = _mean_triplet(emissive) if emissive is not None else 0.0
-        if emissive_mean <= 0.0:
-            return 0.0
-
-        if submaterial.decoded_feature_flags.has_parallax_occlusion_mapping:
-            return 0.0
-
-        base_color = (self._texture_export_path(submaterial, "base_color") or "").replace("\\", "/").lower()
-        if "/glows/" in base_color or "_glow" in base_color:
-            return 1.0
-        return 0.0
+        return _mesh_decal_authored_emission_strength(
+            submaterial,
+            emissive_texture_path=self._texture_export_path(submaterial, "emissive"),
+        )
 
 
 

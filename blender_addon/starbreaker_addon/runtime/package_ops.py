@@ -825,12 +825,28 @@ def _string_prop(obj: bpy.types.ID, name: str) -> str | None:
     return None
 
 
+def _triplet_from_any(value: Any) -> tuple[float, float, float] | None:
+    if isinstance(value, (list, tuple)) and len(value) >= 3:
+        try:
+            return (float(value[0]), float(value[1]), float(value[2]))
+        except (TypeError, ValueError):
+            return None
+    if isinstance(value, str):
+        parts = [part.strip() for part in value.split(",")]
+        if len(parts) >= 3:
+            try:
+                return (float(parts[0]), float(parts[1]), float(parts[2]))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 _ENGINE_GLOW_OVERRIDE_PROP = "starbreaker_engine_glow_override_material"
 _ENGINE_GLOW_OVERRIDE_SIDECAR_PROP = "starbreaker_engine_glow_override_sidecar"
 _ENGINE_GLOW_OVERRIDE_INDEX_PROP = "starbreaker_engine_glow_override_source_index"
 
 
-def _material_source_index(material: bpy.types.Material) -> int | None:
+def _material_submaterial_payload(material: bpy.types.Material) -> dict[str, Any] | None:
     payload = material.get(PROP_SUBMATERIAL_JSON)
     if not isinstance(payload, str):
         return None
@@ -840,11 +856,34 @@ def _material_source_index(material: bpy.types.Material) -> int | None:
         return None
     if not isinstance(data, dict):
         return None
+    return data
+
+
+def _material_source_index(material: bpy.types.Material) -> int | None:
+    data = _material_submaterial_payload(material)
+    if data is None:
+        return None
     raw_index = data.get("source_material_index", data.get("index"))
     try:
         return int(raw_index)
     except (TypeError, ValueError):
         return None
+
+
+def _material_authored_emissive_color(material: bpy.types.Material) -> tuple[float, float, float, float] | None:
+    data = _material_submaterial_payload(material)
+    if data is None:
+        return None
+    for attribute in data.get("authored_attributes", []) or []:
+        if not isinstance(attribute, dict) or attribute.get("name") != "Emissive":
+            continue
+        triplet = _triplet_from_any(attribute.get("value"))
+        if triplet is None:
+            continue
+        if all(abs(component) <= 1e-6 for component in triplet):
+            return None
+        return (*triplet, 1.0)
+    return None
 
 
 def _normalize_engine_glow_path(value: str | None) -> str | None:
@@ -1011,7 +1050,6 @@ def apply_engine_glow_to_package_root(package_root: bpy.types.Object, strength: 
     if not targets_by_instance_and_sidecar:
         return 0
     strength = float(strength)
-    emission_color = (0.0, 0.0, 0.0, 1.0) if strength == 0.0 else (1.0, 1.0, 1.0, 1.0)
     updated = 0
     seen_materials: set[int] = set()
     override_cache: dict[tuple[str, int], bpy.types.Material] = {}
@@ -1059,26 +1097,21 @@ def apply_engine_glow_to_package_root(package_root: bpy.types.Object, strength: 
             node_tree = getattr(material, "node_tree", None)
             if node_tree is None:
                 continue
+            authored_emissive_color = _material_authored_emissive_color(material)
             material_changed = False
             for node in getattr(node_tree, "nodes", []):
                 if getattr(node, "bl_idname", "") != "ShaderNodeGroup":
                     continue
-                palette_input = getattr(node, "inputs", {}).get("Palette Color")
-                if (
-                    palette_input is not None
-                    and (getattr(node, "label", "") == "Primary Layer" or getattr(node, "name", "") == "Primary Layer")
-                ):
-                    palette_input.default_value = emission_color
-                    material_changed = True
                 strength_input = getattr(node, "inputs", {}).get("Emission Strength")
                 if strength_input is None:
                     continue
                 strength_input.default_value = strength
-                for color_socket_name in ("Emission Color", "Emission"):
-                    color_input = getattr(node, "inputs", {}).get(color_socket_name)
-                    if color_input is not None:
-                        color_input.default_value = emission_color
-                        break
+                if authored_emissive_color is not None:
+                    for color_socket_name in ("Emission Color", "Emission"):
+                        color_input = getattr(node, "inputs", {}).get(color_socket_name)
+                        if color_input is not None:
+                            color_input.default_value = authored_emissive_color
+                            break
                 material_changed = True
             if material_changed:
                 updated += 1
