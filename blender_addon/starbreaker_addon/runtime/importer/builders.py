@@ -145,6 +145,25 @@ def _layered_wear_metallic_values(
     return _clamp_unit_float(base_metallic), _clamp_unit_float(wear_metallic)
 
 
+def _mesh_decal_neutral_breakup_default(
+    group_contract: ShaderGroupContract,
+    submaterial: SubmaterialRecord,
+    contract_input: ContractInput,
+    source_socket: Any,
+) -> tuple[float, float, float, float] | None:
+    if source_socket is not None:
+        return None
+    if group_contract.name != "SB_MeshDecal_v1":
+        return None
+    if contract_input.name != "TexSlot8_GrimeBreakup":
+        return None
+    if template_plan_for_submaterial(submaterial).template_key != "decal_stencil":
+        return None
+    if not submaterial.decoded_feature_flags.has_stencil_map:
+        return None
+    return (1.0, 1.0, 1.0, 1.0)
+
+
 class BuildersMixin:
     def _apply_uv_tiling(
         self,
@@ -838,8 +857,17 @@ class BuildersMixin:
                 )
             if source_socket is not None:
                 links.new(source_socket, target_socket)
-            elif "normal" in semantic and hasattr(target_socket, "default_value"):
-                target_socket.default_value = (0.5, 0.5, 1.0, 1.0)
+            else:
+                neutral_breakup = _mesh_decal_neutral_breakup_default(
+                    group_contract,
+                    submaterial,
+                    contract_input,
+                    source_socket,
+                )
+                if neutral_breakup is not None and hasattr(target_socket, "default_value"):
+                    target_socket.default_value = neutral_breakup
+                elif "normal" in semantic and hasattr(target_socket, "default_value"):
+                    target_socket.default_value = (0.5, 0.5, 1.0, 1.0)
             y -= 180
 
         group_handles_alpha = any(

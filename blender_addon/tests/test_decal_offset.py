@@ -75,11 +75,15 @@ from starbreaker_addon.runtime.constants import (
     PROP_TEMPLATE_KEY,
 )
 from starbreaker_addon.manifest import MaterialSidecar, SubmaterialRecord
-from starbreaker_addon.runtime.importer.builders import BuildersMixin
+from starbreaker_addon.runtime.importer.builders import (
+    BuildersMixin,
+    _mesh_decal_neutral_breakup_default,
+)
 from starbreaker_addon.runtime.importer.decals import DecalsMixin
 from starbreaker_addon.runtime.importer.materials import MaterialsMixin
 from starbreaker_addon.runtime.importer.materials import _material_datablock_is_valid
 from starbreaker_addon.runtime.importer.orchestration import OrchestrationMixin
+from starbreaker_addon.material_contract import ContractInput, ShaderGroupContract
 from starbreaker_addon.runtime.importer.utils import (
     _canonical_material_sidecar_path,
     _material_identity,
@@ -278,6 +282,79 @@ class FakeSubmaterial:
     def __init__(self, index: int, name: str):
         self.index = index
         self.submaterial_name = name
+
+
+class TestMeshDecalNeutralBreakupDefault(unittest.TestCase):
+    def test_returns_white_for_stencil_mesh_decal_without_breakup_texture(self) -> None:
+        submaterial = SubmaterialRecord.from_value(
+            {
+                "shader_family": "MeshDecal",
+                "decoded_feature_flags": {"has_stencil_map": True, "tokens": ["STENCIL_MAP"]},
+            }
+        )
+        group_contract = ShaderGroupContract(
+            name="SB_MeshDecal_v1",
+            shader_families=["MeshDecal"],
+            version=1,
+            shader_output="Shader",
+            inputs=[],
+            metadata={},
+            raw={},
+        )
+        contract_input = ContractInput(
+            name="TexSlot8_GrimeBreakup",
+            socket_type="NodeSocketColor",
+            semantic="grime_breakup",
+            source_slot="TexSlot8",
+            required=False,
+            default_value=None,
+            raw={},
+        )
+
+        self.assertEqual(
+            _mesh_decal_neutral_breakup_default(
+                group_contract,
+                submaterial,
+                contract_input,
+                source_socket=None,
+            ),
+            (1.0, 1.0, 1.0, 1.0),
+        )
+
+    def test_returns_none_when_breakup_texture_is_present(self) -> None:
+        submaterial = SubmaterialRecord.from_value(
+            {
+                "shader_family": "MeshDecal",
+                "decoded_feature_flags": {"has_stencil_map": True, "tokens": ["STENCIL_MAP"]},
+            }
+        )
+        group_contract = ShaderGroupContract(
+            name="SB_MeshDecal_v1",
+            shader_families=["MeshDecal"],
+            version=1,
+            shader_output="Shader",
+            inputs=[],
+            metadata={},
+            raw={},
+        )
+        contract_input = ContractInput(
+            name="TexSlot8_GrimeBreakup",
+            socket_type="NodeSocketColor",
+            semantic="grime_breakup",
+            source_slot="TexSlot8",
+            required=False,
+            default_value=None,
+            raw={},
+        )
+
+        self.assertIsNone(
+            _mesh_decal_neutral_breakup_default(
+                group_contract,
+                submaterial,
+                contract_input,
+                source_socket=object(),
+            )
+        )
 
 
 class FakePackageWithSidecars:
