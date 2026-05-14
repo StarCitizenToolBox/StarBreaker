@@ -6,6 +6,8 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 
 cd "$REPO_ROOT/app"
 
+npm ci
+
 if command -v pgrep >/dev/null 2>&1; then
   while IFS= read -r pid; do
     [[ -n "$pid" ]] || continue
