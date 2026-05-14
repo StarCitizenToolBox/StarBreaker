@@ -36,7 +36,7 @@ from ...manifest import PaletteRecord, SubmaterialRecord
 from ...palette import (
     palette_color,
     palette_decal_texture,
-    palette_finish_glossiness,
+    palette_finish_glossiness_factor,
     palette_finish_specular,
 )
 from ..constants import PROP_PALETTE_ID, PROP_SUBMATERIAL_JSON
@@ -166,7 +166,7 @@ class PaletteMixin:
 
         self._set_socket_default(
             _input_socket(group_node, "Palette Glossiness"),
-            palette_finish_glossiness(palette, channel_name) or 0.0,
+            palette_finish_glossiness_factor(palette, channel_name) or 0.0,
         )
         self._set_socket_default(
             _input_socket(group_node, "Palette Specular"),
@@ -517,7 +517,7 @@ class PaletteMixin:
                 value.location = (120, y)
                 value.label = socket_name
                 value.outputs[0].default_value = (
-                    palette_finish_glossiness(palette, channel_name) or 0.0
+                    palette_finish_glossiness_factor(palette, channel_name) or 0.0
                 )
                 group.links.new(value.outputs[0], output.inputs[socket_name])
             else:

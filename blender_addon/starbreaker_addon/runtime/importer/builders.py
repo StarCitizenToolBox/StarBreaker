@@ -70,7 +70,11 @@ from ...material_contract import (
     bundled_template_library_path,
     load_bundled_template_contract,
 )
-from ...palette import palette_color, palette_finish_glossiness, palette_finish_specular
+from ...palette import (
+    palette_color,
+    palette_finish_glossiness_factor,
+    palette_finish_specular,
+)
 from ...templates import has_virtual_input, material_palette_channels, representative_textures, template_plan_for_submaterial
 from ..palette_utils import _hard_surface_palette_iridescence_channel
 from .types import LayerSurfaceSockets
@@ -1381,7 +1385,7 @@ class BuildersMixin:
             is_color=False,
         )
         primary_detail = self._detail_texture_channels(nodes, self._texture_path_for_slot(submaterial, "TexSlot6"), x=-720, y=-420)
-        primary_roughness, primary_roughness_is_smoothness = self._roughness_socket_for_texture_reference(nodes, primary_normal_ref, x=-460, y=-140)
+        primary_roughness, _primary_roughness_is_smoothness = self._roughness_socket_for_texture_reference(nodes, primary_normal_ref, x=-460, y=-140)
         primary_specular = self._specular_socket_for_texture_path(nodes, self._texture_path_for_slot(submaterial, "TexSlot4"), x=-720, y=760)
         primary = self._connect_layer_surface_group(
             nodes,
@@ -1394,7 +1398,6 @@ class BuildersMixin:
             ),
             normal_color_socket=primary_normal_node.outputs[0] if primary_normal_node is not None else None,
             roughness_socket=primary_roughness,
-            roughness_source_is_smoothness=primary_roughness_is_smoothness,
             detail_channels=primary_detail,
             detail_diffuse_strength=0.35,
             detail_gloss_strength=0.35,
@@ -1403,7 +1406,7 @@ class BuildersMixin:
             palette=palette,
             palette_channel_name=material_channel,
             palette_finish_channel_name=material_channel,
-            palette_glossiness=palette_finish_glossiness(palette, material_channel),
+            palette_glossiness=palette_finish_glossiness_factor(palette, material_channel),
             specular_value=0.0,
             palette_specular_value=_mean_triplet(palette_finish_specular(palette, material_channel)) or 0.0,
             metallic_value=0.0,
@@ -1441,7 +1444,7 @@ class BuildersMixin:
                 is_color=False,
             )
             secondary_detail = self._detail_texture_channels(nodes, self._texture_path_for_slot(submaterial, "TexSlot13"), x=-720, y=-980)
-            secondary_roughness, secondary_roughness_is_smoothness = self._roughness_socket_for_texture_reference(nodes, secondary_normal_ref, x=-460, y=-700)
+            secondary_roughness, _secondary_roughness_is_smoothness = self._roughness_socket_for_texture_reference(nodes, secondary_normal_ref, x=-460, y=-700)
             secondary_specular = self._specular_socket_for_texture_path(nodes, self._texture_path_for_slot(submaterial, "TexSlot10"), x=-720, y=980)
             secondary = self._connect_layer_surface_group(
                 nodes,
@@ -1454,7 +1457,6 @@ class BuildersMixin:
                 ),
                 normal_color_socket=secondary_normal_node.outputs[0] if secondary_normal_node is not None else None,
                 roughness_socket=secondary_roughness,
-                roughness_source_is_smoothness=secondary_roughness_is_smoothness,
                 detail_channels=secondary_detail,
                 detail_diffuse_strength=0.35,
                 detail_gloss_strength=0.35,
@@ -1463,7 +1465,7 @@ class BuildersMixin:
                 palette=palette,
                 palette_channel_name=material_channel,
                 palette_finish_channel_name=material_channel,
-                palette_glossiness=palette_finish_glossiness(palette, material_channel),
+                palette_glossiness=palette_finish_glossiness_factor(palette, material_channel),
                 specular_value=0.0,
                 palette_specular_value=_mean_triplet(palette_finish_specular(palette, material_channel)) or 0.0,
                 metallic_value=0.0,

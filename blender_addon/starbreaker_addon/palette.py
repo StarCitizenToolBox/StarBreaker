@@ -241,6 +241,18 @@ def palette_finish_glossiness(palette: PaletteRecord | None, channel_name: str |
         return None
 
 
+def palette_finish_glossiness_factor(
+    palette: PaletteRecord | None,
+    channel_name: str | None,
+) -> float | None:
+    glossiness = palette_finish_glossiness(palette, channel_name)
+    if glossiness is None:
+        return None
+    if glossiness > 1.0:
+        glossiness /= 255.0
+    return max(0.0, min(1.0, glossiness))
+
+
 def palette_decal_color(palette: PaletteRecord | None, channel_name: str | None) -> tuple[float, float, float] | None:
     if palette is None:
         return None

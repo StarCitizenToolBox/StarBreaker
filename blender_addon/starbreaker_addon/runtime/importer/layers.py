@@ -28,7 +28,7 @@ from typing import Any
 import bpy
 
 from ...manifest import LayerManifestEntry, PaletteRecord, SubmaterialRecord
-from ...palette import palette_finish_glossiness, palette_finish_specular
+from ...palette import palette_finish_glossiness_factor, palette_finish_specular
 from ...templates import representative_textures
 from ..constants import SCENE_WEAR_STRENGTH_PROP
 from ..node_utils import _input_socket, _output_socket, _refresh_group_node_sockets
@@ -152,7 +152,7 @@ class LayersMixin:
             is_color=False,
         )
         self._apply_uv_tiling(nodes, links, normal_node, uv_tile, x=x - 320, y=y - 560)
-        roughness, roughness_is_smoothness = self._roughness_socket_for_texture_reference(
+        roughness, _roughness_is_smoothness = self._roughness_socket_for_texture_reference(
             nodes, normal_ref, x=x + 180, y=y - 560
         )
         layer_channel_name = (
@@ -178,7 +178,6 @@ class LayersMixin:
             ),
             normal_color_socket=normal_node.outputs[0] if normal_node is not None else None,
             roughness_socket=roughness,
-            roughness_source_is_smoothness=roughness_is_smoothness,
             detail_channels=detail_channels,
             detail_diffuse_strength=max(
                 0.0, min(1.0, _float_layer_public_param(layer, "DetailDiffuse"))
@@ -191,7 +190,7 @@ class LayersMixin:
             palette=palette,
             palette_channel_name=layer_channel_name,
             palette_finish_channel_name=layer_channel_name,
-            palette_glossiness=palette_finish_glossiness(palette, layer_channel_name),
+            palette_glossiness=palette_finish_glossiness_factor(palette, layer_channel_name),
             specular_value=specular_value,
             palette_specular_value=_mean_triplet(
                 palette_finish_specular(palette, layer_channel_name)
@@ -213,7 +212,6 @@ class LayersMixin:
         base_alpha_socket: Any,
         normal_color_socket: Any,
         roughness_socket: Any,
-        roughness_source_is_smoothness: bool,
         detail_channels: dict[str, Any] | None,
         detail_diffuse_strength: float,
         detail_gloss_strength: float,
@@ -265,12 +263,8 @@ class LayersMixin:
         self._set_socket_default(_input_socket(group_node, "Normal Color"), (0.5, 0.5, 1.0, 1.0))
         self._set_socket_default(_input_socket(group_node, "Roughness Source"), 0.45)
         self._set_socket_default(
-            _input_socket(group_node, "Roughness Source Is Smoothness"),
-            roughness_source_is_smoothness,
-        )
-        self._set_socket_default(
             _input_socket(group_node, "Palette Glossiness"),
-            max(0.0, min(1.0, palette_glossiness)) if palette_glossiness is not None else 0.0,
+            palette_glossiness if palette_glossiness is not None else 0.0,
         )
         self._set_socket_default(_input_socket(group_node, "Specular Value"), specular_value)
         self._set_socket_default(

@@ -54,7 +54,7 @@ if "bpy" not in sys.modules:
     bpy.data = types.SimpleNamespace(node_groups=[], images=[])
     sys.modules["bpy"] = bpy
 
-from starbreaker_addon.manifest import PackageBundle
+from starbreaker_addon.manifest import PackageBundle, PaletteRecord
 from starbreaker_addon.palette import (
     available_livery_ids,
     available_palette_ids,
@@ -63,6 +63,7 @@ from starbreaker_addon.palette import (
     paint_list_canonical_id,
     palette_color,
     palette_finish_glossiness,
+    palette_finish_glossiness_factor,
     palette_finish_specular,
     palette_for_id,
     palette_id_for_livery_instance,
@@ -152,6 +153,24 @@ class PaletteTests(unittest.TestCase):
             (0.04373502731323242, 0.04373502731323242, 0.04373502731323242),
         )
         self.assertIsNone(palette_finish_glossiness(palette, "primary"))
+
+    def test_palette_finish_glossiness_factor_normalizes_raw_datacore_scale(self) -> None:
+        palette = PaletteRecord.from_value(
+            {
+                "id": "palette/test",
+                "primary": [1.0, 1.0, 1.0],
+                "secondary": [1.0, 1.0, 1.0],
+                "tertiary": [1.0, 1.0, 1.0],
+                "glass": [1.0, 1.0, 1.0],
+                "finish": {
+                    "primary": {"glossiness": 136.0, "specular": [0.0, 0.0, 0.0]},
+                },
+            }
+        )
+        self.assertAlmostEqual(
+            palette_finish_glossiness_factor(palette, "primary"),
+            136.0 / 255.0,
+        )
 
     def test_null_child_palette_inherits_package_root_palette(self) -> None:
         package = PackageBundle.load(ARGO_SCENE)
