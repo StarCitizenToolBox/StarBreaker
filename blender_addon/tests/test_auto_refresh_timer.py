@@ -19,9 +19,12 @@ def _load_ui_function(name: str):
     namespace: dict = {
         "_AUTO_MATERIAL_REFRESH_SESSION": None,
         "_AUTO_MATERIAL_REFRESH_TOKEN": 1,
+        "_CONTROL_PROP_SYNCING": False,
         "PROP_PACKAGE_NAME": "starbreaker_package_name",
         "PROP_PACKAGE_ROOT": "starbreaker_package_root",
         "PROP_PALETTE_ID": "starbreaker_palette_id",
+        "SCENE_ENGINE_GLOW_PROP": "starbreaker_engine_glow_strength",
+        "SCENE_SHARED_GLOW_PROP": "starbreaker_shared_glow_strength",
         "bpy": types.SimpleNamespace(
             context=object(),
             data=types.SimpleNamespace(objects=[]),
@@ -50,6 +53,10 @@ def _load_loaded_package_roots():
 
 def _load_open_view3d_sidebar():
     return _load_ui_function("_open_view3d_sidebar")
+
+
+def _load_sync_scene_package_controls():
+    return _load_ui_function("_sync_scene_package_controls")
 
 
 class _MockObject(dict):
@@ -210,6 +217,25 @@ class TestAutoRefreshPromptTimer(unittest.TestCase):
         self.assertTrue(view3d.spaces.active.show_region_ui)
         self.assertEqual(view3d.regions[0].active_panel_category, "StarBreaker")
         self.assertEqual(view3d.redraws, 1)
+
+    def test_sync_scene_package_controls_uses_root_values(self) -> None:
+        sync_controls, namespace = _load_sync_scene_package_controls()
+        scene = types.SimpleNamespace(
+            starbreaker_engine_glow_strength=3.0,
+            starbreaker_shared_glow_strength=1.0,
+        )
+        context = types.SimpleNamespace(scene=scene)
+        package_root = _MockObject("Root", starbreaker_package_root=True)
+        namespace["engine_glow_control_enabled"] = lambda _root: True
+        namespace["engine_glow_strength"] = lambda _root: 0.0
+        namespace["shared_glow_control_enabled"] = lambda _root: True
+        namespace["shared_glow_strength"] = lambda _root: 2.5
+
+        sync_controls(context, package_root)
+
+        self.assertEqual(scene.starbreaker_engine_glow_strength, 0.0)
+        self.assertEqual(scene.starbreaker_shared_glow_strength, 2.5)
+        self.assertFalse(namespace["_CONTROL_PROP_SYNCING"])
 
 
 if __name__ == "__main__":

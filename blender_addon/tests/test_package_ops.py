@@ -1021,6 +1021,220 @@ class PackageOpsTests(unittest.TestCase):
             (0.25, 0.5, 0.75, 1.0),
         )
 
+    def test_shared_glow_control_enabled_discovers_mesh_decal_glow_targets(self) -> None:
+        package_root = FakeObject("Root", starbreaker_package_root=True)
+        mesh = FakeObject(
+            "mesh",
+            starbreaker_material_sidecar="Data/Objects/Ships/Test/root.materials.json",
+        )
+        mesh.type = "MESH"
+        mesh.parent = package_root
+        package_root.children.append(mesh)
+        sidecar = types.SimpleNamespace(
+            submaterials=[
+                types.SimpleNamespace(
+                    index=31,
+                    submaterial_name="Decal_Glow_Linked",
+                    blender_material_name="test:Decal_Glow_Linked",
+                    shader_family="MeshDecal",
+                    decoded_feature_flags=types.SimpleNamespace(
+                        has_parallax_occlusion_mapping=False,
+                        has_stencil_map=False,
+                    ),
+                    texture_slots=[
+                        types.SimpleNamespace(
+                            slot="TexSlot1",
+                            export_path="Data/Textures/Ships/Test/Glows/glow_diff.png",
+                        )
+                    ],
+                ),
+                types.SimpleNamespace(
+                    index=53,
+                    submaterial_name="Glow_Thrusters",
+                    blender_material_name="test:Glow_Thrusters",
+                    shader_family="HardSurface",
+                    decoded_feature_flags=types.SimpleNamespace(
+                        has_parallax_occlusion_mapping=True,
+                        has_stencil_map=False,
+                    ),
+                    texture_slots=[],
+                ),
+            ]
+        )
+        package = types.SimpleNamespace(load_material_sidecar=lambda _path: sidecar)
+
+        original_load = self.package_ops._load_package_from_root
+        try:
+            self.package_ops._load_package_from_root = lambda _root: package
+            enabled = self.package_ops.shared_glow_control_enabled(package_root)
+        finally:
+            self.package_ops._load_package_from_root = original_load
+
+        self.assertTrue(enabled)
+        payload = json.loads(package_root["starbreaker_shared_glow_control"])
+        self.assertEqual(payload["default_strength"], 0.0)
+        self.assertEqual(payload["targets"], [
+            {
+                "blender_material_name": "test:Decal_Glow_Linked",
+                "material_sidecar": "Data/Objects/Ships/Test/root.materials.json",
+                "source_material_index": 31,
+                "submaterial_name": "Decal_Glow_Linked",
+            }
+        ])
+
+    def test_apply_shared_glow_to_package_root_updates_only_shared_glow_decals(self) -> None:
+        package_root = FakeObject("Root", starbreaker_package_root=True)
+        target_material = FakeMaterial("drak_pitbull_ext:Decal_Glow_Unlinked#cf6835ab")
+        target_material.node_tree = FakeNodeTree(0.16)
+        thruster_material = FakeMaterial("drak_pitbull_ext:Glow_Thrusters__engine_glow")
+        thruster_material.node_tree = FakeNodeTree(0.0)
+
+        mesh = FakeObject(
+            "mesh",
+            starbreaker_material_sidecar="Data/Objects/Ships/Test/root.materials.json",
+        )
+        mesh.type = "MESH"
+        mesh.parent = package_root
+        mesh.material_slots = [FakeSlot(target_material)]
+        package_root.children.append(mesh)
+
+        mesh_2 = FakeObject(
+            "mesh_2",
+            starbreaker_material_sidecar="Data/Objects/Ships/Test/root.materials.json",
+        )
+        mesh_2.type = "MESH"
+        mesh_2.parent = package_root
+        mesh_2.material_slots = [FakeSlot(target_material)]
+        package_root.children.append(mesh_2)
+
+        thruster_mesh = FakeObject(
+            "thruster_mesh",
+            starbreaker_material_sidecar="Data/Objects/Ships/Test/root.materials.json",
+        )
+        thruster_mesh.type = "MESH"
+        thruster_mesh.parent = package_root
+        thruster_mesh.material_slots = [FakeSlot(thruster_material)]
+        package_root.children.append(thruster_mesh)
+
+        sidecar = types.SimpleNamespace(
+            submaterials=[
+                types.SimpleNamespace(
+                    index=32,
+                    submaterial_name="Decal_Glow_Unlinked",
+                    blender_material_name="test:Decal_Glow_Unlinked",
+                    shader_family="MeshDecal",
+                    decoded_feature_flags=types.SimpleNamespace(
+                        has_parallax_occlusion_mapping=False,
+                        has_stencil_map=False,
+                    ),
+                    texture_slots=[
+                        types.SimpleNamespace(
+                            slot="TexSlot1",
+                            export_path="Data/Textures/Ships/Test/Glows/glow_diff.png",
+                        )
+                    ],
+                    raw={"authored_attributes": [{"name": "Glow", "value": "0.16"}]},
+                ),
+                types.SimpleNamespace(
+                    index=53,
+                    submaterial_name="Glow_Thrusters",
+                    blender_material_name="test:Glow_Thrusters",
+                    shader_family="HardSurface",
+                    decoded_feature_flags=types.SimpleNamespace(
+                        has_parallax_occlusion_mapping=True,
+                        has_stencil_map=False,
+                    ),
+                    texture_slots=[],
+                    raw={"authored_attributes": []},
+                ),
+            ]
+        )
+        package = types.SimpleNamespace(load_material_sidecar=lambda _path: sidecar)
+
+        original_load = self.package_ops._load_package_from_root
+        try:
+            self.package_ops._load_package_from_root = lambda _root: package
+            updated = self.package_ops.apply_shared_glow_to_package_root(package_root, 2.0)
+        finally:
+            self.package_ops._load_package_from_root = original_load
+
+        self.assertEqual(updated, 1)
+        self.assertIsNot(mesh.material_slots[0].material, target_material)
+        self.assertIs(mesh.material_slots[0].material, mesh_2.material_slots[0].material)
+        self.assertIs(thruster_mesh.material_slots[0].material, thruster_material)
+        self.assertAlmostEqual(
+            mesh.material_slots[0].material.node_tree.nodes[0].inputs["Emission Strength"].default_value,
+            2.16,
+        )
+        self.assertAlmostEqual(
+            thruster_mesh.material_slots[0].material.node_tree.nodes[0].inputs["Emission Strength"].default_value,
+            0.0,
+        )
+        self.assertAlmostEqual(float(package_root.get("starbreaker_shared_glow_strength")), 2.0)
+
+    def test_refresh_materials_for_package_root_reapplies_shared_glow(self) -> None:
+        @contextmanager
+        def _no_suspend(_context):
+            yield
+
+        @contextmanager
+        def _no_mode(_context):
+            yield
+
+        package_root = FakeObject(
+            "Root",
+            starbreaker_package_root=True,
+            starbreaker_material_sidecar="Data/Objects/Ships/Test/root.materials.json",
+        )
+        mesh = FakeObject(
+            "mesh",
+            starbreaker_material_sidecar="Data/Objects/Ships/Test/root.materials.json",
+        )
+        mesh.type = "MESH"
+        mesh.parent = package_root
+        mesh.material_slots = [FakeSlot(FakeMaterial("mat"))]
+        package_root.children.append(mesh)
+        package = types.SimpleNamespace(
+            scene_path=Path("/tmp/test_scene.json"),
+            package_name="Test Package",
+            load_material_sidecar=lambda path: types.SimpleNamespace(submaterials=[types.SimpleNamespace(index=0, submaterial_name=path)]),
+        )
+        importer_stub = sys.modules["sb_pkg_test_runtime.importer"]
+        importer_stub.events = []
+        shared_glow_calls: list[tuple[object, float]] = []
+
+        original_load = self.package_ops._load_package_from_root
+        original_suspend = self.package_ops._suspend_heavy_viewports
+        original_mode = self.package_ops._temporary_object_mode
+        original_engine_enabled = self.package_ops.engine_glow_control_enabled
+        original_shared_enabled = self.package_ops.shared_glow_control_enabled
+        original_shared_strength = self.package_ops.shared_glow_strength
+        original_apply_shared = self.package_ops.apply_shared_glow_to_package_root
+        try:
+            self.package_ops._load_package_from_root = lambda _root: package
+            self.package_ops._suspend_heavy_viewports = _no_suspend
+            self.package_ops._temporary_object_mode = _no_mode
+            self.package_ops.engine_glow_control_enabled = lambda _root: False
+            self.package_ops.shared_glow_control_enabled = lambda _root: True
+            self.package_ops.shared_glow_strength = lambda _root: 2.5
+            self.package_ops.apply_shared_glow_to_package_root = (
+                lambda root, value: shared_glow_calls.append((root, value)) or 1
+            )
+            self.package_ops.refresh_materials_for_package_root(
+                types.SimpleNamespace(view_layer=FakeViewLayer()),
+                package_root,
+            )
+        finally:
+            self.package_ops._load_package_from_root = original_load
+            self.package_ops._suspend_heavy_viewports = original_suspend
+            self.package_ops._temporary_object_mode = original_mode
+            self.package_ops.engine_glow_control_enabled = original_engine_enabled
+            self.package_ops.shared_glow_control_enabled = original_shared_enabled
+            self.package_ops.shared_glow_strength = original_shared_strength
+            self.package_ops.apply_shared_glow_to_package_root = original_apply_shared
+
+        self.assertEqual(shared_glow_calls, [(package_root, 2.5)])
+
     def test_resolve_package_relative_scene_path_from_opened_blend_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -35,6 +35,7 @@ from .runtime import (
     PROP_TEMPLATE_KEY,
     SCENE_POM_DETAIL_PROP,
     SCENE_ENGINE_GLOW_PROP,
+    SCENE_SHARED_GLOW_PROP,
     TEMPLATE_COLLECTION_NAME,
     apply_pom_detail_mode,
     SCENE_WEAR_STRENGTH_PROP,
@@ -42,6 +43,7 @@ from .runtime import (
     apply_animation_mode_to_package_root,
     apply_decal_offsets_to_package_root,
     apply_engine_glow_to_package_root,
+    apply_shared_glow_to_package_root,
     apply_light_state,
     apply_livery_to_selected_package,
     apply_paint_to_selected_package,
@@ -51,6 +53,8 @@ from .runtime import (
     available_light_state_names,
     engine_glow_control_enabled,
     engine_glow_strength,
+    shared_glow_control_enabled,
+    shared_glow_strength,
     decal_offset_control_enabled,
     dirty_package_material_objects,
     dump_selected_metadata,
@@ -102,6 +106,7 @@ _IMPORT_PROGRESS_TEXT_ONLY_PROP = "starbreaker_import_progress_text_only"
 _IMPORT_PROGRESS_LAST_UPDATE = 0.0
 _IMPORT_PROGRESS_DRAW_HANDLER = None
 _AUTO_MATERIAL_REFRESH_TOKEN = 0
+_CONTROL_PROP_SYNCING = False
 
 
 def _progress_fraction(value: float) -> float:
@@ -202,6 +207,7 @@ def _focus_loaded_package_root(context: bpy.types.Context, package_root: bpy.typ
     except Exception:
         pass
     _set_active_object(context, package_root)
+    _sync_scene_package_controls(context, package_root)
     _open_view3d_sidebar(context)
     _tag_view3d_redraws(context)
 
@@ -482,7 +488,32 @@ def _update_pom_detail(_: bpy.types.ID, context: bpy.types.Context) -> None:
     _tag_view3d_redraws(context)
 
 
+def _sync_scene_package_controls(context: bpy.types.Context, package_root: bpy.types.Object) -> None:
+    global _CONTROL_PROP_SYNCING
+    scene = getattr(context, "scene", None)
+    if scene is None:
+        return
+    updates: list[tuple[str, float]] = []
+    if engine_glow_control_enabled(package_root):
+        updates.append((SCENE_ENGINE_GLOW_PROP, engine_glow_strength(package_root)))
+    if shared_glow_control_enabled(package_root):
+        updates.append((SCENE_SHARED_GLOW_PROP, shared_glow_strength(package_root)))
+    if not updates:
+        return
+    _CONTROL_PROP_SYNCING = True
+    try:
+        for prop_name, value in updates:
+            try:
+                setattr(scene, prop_name, float(value))
+            except Exception:
+                continue
+    finally:
+        _CONTROL_PROP_SYNCING = False
+
+
 def _update_engine_glow(_: bpy.types.ID, context: bpy.types.Context) -> None:
+    if _CONTROL_PROP_SYNCING:
+        return
     scene = getattr(context, "scene", None)
     if scene is None:
         return
@@ -491,6 +522,22 @@ def _update_engine_glow(_: bpy.types.ID, context: bpy.types.Context) -> None:
         return
     try:
         apply_engine_glow_to_package_root(package_root, float(getattr(scene, SCENE_ENGINE_GLOW_PROP, 3.0)))
+    except Exception:
+        return
+    _tag_view3d_redraws(context)
+
+
+def _update_shared_glow(_: bpy.types.ID, context: bpy.types.Context) -> None:
+    if _CONTROL_PROP_SYNCING:
+        return
+    scene = getattr(context, "scene", None)
+    if scene is None:
+        return
+    package_root = _package_root_from_context(context)
+    if package_root is None or not shared_glow_control_enabled(package_root):
+        return
+    try:
+        apply_shared_glow_to_package_root(package_root, float(getattr(scene, SCENE_SHARED_GLOW_PROP, 0.0)))
     except Exception:
         return
     _tag_view3d_redraws(context)
@@ -1458,6 +1505,7 @@ class STARBREAKER_PT_tools(Panel):
             layout.label(text="StarBreaker exported .blend file")
             layout.label(text="for more options")
             return
+        _sync_scene_package_controls(context, package_root)
 
         package = _selected_package(context)
         info = layout.box()
@@ -1493,46 +1541,50 @@ class STARBREAKER_PT_tools(Panel):
         # Phase 28: light state switcher. Show a row of buttons when the
         # current .blend has any imported lights with authored states.
         state_names = available_light_state_names()
-        if state_names:
+        if state_names or engine_glow_control_enabled(package_root) or shared_glow_control_enabled(package_root):
             light_box = layout.box()
-            light_box.label(text="Light States")
-            _SHORT = {
-                "defaultState": "Default",
-                "auxiliaryState": "Auxiliary",
-                "emergencyState": "Emergency",
-                "cinematicState": "Cinematic",
-                "offState": "Off",
-            }
-            _ICONS = {
-                "defaultState": "CHECKMARK",
-                "auxiliaryState": "LIGHT",
-                "emergencyState": "ERROR",
-                "cinematicState": "RESTRICT_RENDER_OFF",
-                "offState": "HIDE_ON",
-                "emergencyState_strobe": "LIGHT_SUN",
-            }
-            button_specs: list[tuple[str, str, bool, str]] = []
-            for name in state_names:
-                if name == "emergencyState":
-                    button_specs.append(("Emergency", name, False, _ICONS["emergencyState"]))
-                    button_specs.append(("Emergency + Strobe", name, True, _ICONS["emergencyState_strobe"]))
-                else:
-                    button_specs.append((_SHORT.get(name, name), name, True, _ICONS.get(name, "NONE")))
+            if state_names:
+                light_box.label(text="Lighting Panel")
+                _SHORT = {
+                    "defaultState": "Default",
+                    "auxiliaryState": "Auxiliary",
+                    "emergencyState": "Emergency",
+                    "cinematicState": "Cinematic",
+                    "offState": "Off",
+                }
+                _ICONS = {
+                    "defaultState": "CHECKMARK",
+                    "auxiliaryState": "LIGHT",
+                    "emergencyState": "ERROR",
+                    "cinematicState": "RESTRICT_RENDER_OFF",
+                    "offState": "HIDE_ON",
+                    "emergencyState_strobe": "LIGHT_SUN",
+                }
+                button_specs: list[tuple[str, str, bool, str]] = []
+                for name in state_names:
+                    if name == "emergencyState":
+                        button_specs.append(("Emergency", name, False, _ICONS["emergencyState"]))
+                        button_specs.append(("Emergency + Strobe", name, True, _ICONS["emergencyState_strobe"]))
+                    else:
+                        button_specs.append((_SHORT.get(name, name), name, True, _ICONS.get(name, "NONE")))
 
-            split = (len(button_specs) + 1) // 2
-            top_row = light_box.row(align=True)
-            bottom_row = light_box.row(align=True)
-            for index, (label, state_name, include_strobe, icon_name) in enumerate(button_specs):
-                row = top_row if index < split else bottom_row
-                kwargs = {"text": label}
-                if icon_name != "NONE":
-                    kwargs["icon"] = icon_name
-                op = row.operator(STARBREAKER_OT_switch_light_state.bl_idname, **kwargs)
-                op.state_name = state_name
-                op.include_strobe = include_strobe
+                split = (len(button_specs) + 1) // 2
+                top_row = light_box.row(align=True)
+                bottom_row = light_box.row(align=True)
+                for index, (label, state_name, include_strobe, icon_name) in enumerate(button_specs):
+                    row = top_row if index < split else bottom_row
+                    kwargs = {"text": label}
+                    if icon_name != "NONE":
+                        kwargs["icon"] = icon_name
+                    op = row.operator(STARBREAKER_OT_switch_light_state.bl_idname, **kwargs)
+                    op.state_name = state_name
+                    op.include_strobe = include_strobe
+            elif engine_glow_control_enabled(package_root) or shared_glow_control_enabled(package_root):
+                light_box.label(text="Lighting Panel")
             if engine_glow_control_enabled(package_root):
-                light_box.label(text=f"Current Engine Glow Strength: {engine_glow_strength(package_root):.1f}")
                 light_box.prop(context.scene, SCENE_ENGINE_GLOW_PROP, text="Engine Glow Strength", slider=True)
+            if shared_glow_control_enabled(package_root):
+                light_box.prop(context.scene, SCENE_SHARED_GLOW_PROP, text="Shared Glow", slider=True)
 
         if package is not None:
             animation_items = available_package_animation_items(package)
@@ -1887,6 +1939,22 @@ def register() -> None:
         ),
     )
     setattr(
+        bpy.types.Scene,
+        SCENE_SHARED_GLOW_PROP,
+        FloatProperty(
+            name="Shared Glow",
+            description=(
+                "Additional emission strength added to imported glow-style MeshDecal materials."
+            ),
+            default=0.0,
+            min=0.0,
+            max=10.0,
+            soft_min=0.0,
+            soft_max=10.0,
+            update=_update_shared_glow,
+        ),
+    )
+    setattr(
         bpy.types.Object,
         PROP_DECAL_OFFSET_EXTERNAL,
         FloatProperty(
@@ -1957,6 +2025,8 @@ def unregister() -> None:
         delattr(bpy.types.Scene, SCENE_WEAR_STRENGTH_PROP)
     if hasattr(bpy.types.Scene, SCENE_ENGINE_GLOW_PROP):
         delattr(bpy.types.Scene, SCENE_ENGINE_GLOW_PROP)
+    if hasattr(bpy.types.Scene, SCENE_SHARED_GLOW_PROP):
+        delattr(bpy.types.Scene, SCENE_SHARED_GLOW_PROP)
     if hasattr(bpy.types.Object, PROP_DECAL_OFFSET_EXTERNAL):
         delattr(bpy.types.Object, PROP_DECAL_OFFSET_EXTERNAL)
     if hasattr(bpy.types.Object, PROP_DECAL_OFFSET_INTERNAL):

@@ -43,6 +43,8 @@ from .constants import (
     PROP_PAINT_VARIANT_SIDECAR,
     PROP_PALETTE_ID,
     PROP_SCENE_PATH,
+    PROP_SHARED_GLOW_CONTROL_JSON,
+    PROP_SHARED_GLOW_STRENGTH,
     PROP_SOURCE_NODE_NAME,
     PROP_SUBMATERIAL_JSON,
     PROP_TEMPLATE_PATH,
@@ -288,6 +290,8 @@ def refresh_materials_for_package_root(
             update()
     if engine_glow_control_enabled(package_root):
         apply_engine_glow_to_package_root(package_root, engine_glow_strength(package_root))
+    if shared_glow_control_enabled(package_root):
+        apply_shared_glow_to_package_root(package_root, shared_glow_strength(package_root))
     if progress_callback is not None:
         progress_callback(0.95, "Cleaning up...")
     _purge_orphaned_managed_materials()
@@ -437,6 +441,8 @@ class MaterialRefreshSession:
                 self.package_root[PROP_PALETTE_ID] = self.palette_id
             if engine_glow_control_enabled(self.package_root):
                 apply_engine_glow_to_package_root(self.package_root, engine_glow_strength(self.package_root))
+            if shared_glow_control_enabled(self.package_root):
+                apply_shared_glow_to_package_root(self.package_root, shared_glow_strength(self.package_root))
             if self.needs_view_layer_update:
                 view_layer = getattr(self.context, "view_layer", None)
                 update = getattr(view_layer, "update", None) if view_layer is not None else None
@@ -637,8 +643,15 @@ def _canonical_source_name(name: str) -> str:
         material_name = name.rsplit("_mtl_", 1)[1]
         stem, separator, suffix = material_name.rpartition("_")
         if separator and suffix.isdigit():
-            return stem
-        return material_name
+            name = stem
+        else:
+            name = material_name
+    if ":" in name:
+        name = name.rsplit(":", 1)[1]
+    if "__" in name:
+        name = name.split("__", 1)[0]
+    if "#" in name:
+        name = name.split("#", 1)[0]
     return name
 
 
@@ -1058,6 +1071,20 @@ def _triplet_from_any(value: Any) -> tuple[float, float, float] | None:
     return None
 
 
+def _submaterial_authored_glow(submaterial: Any) -> float:
+    raw = getattr(submaterial, "raw", None)
+    if not isinstance(raw, dict):
+        return 0.0
+    for attribute in raw.get("authored_attributes", []) or []:
+        if not isinstance(attribute, dict) or attribute.get("name") != "Glow":
+            continue
+        try:
+            return float(attribute.get("value"))
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
 _ENGINE_GLOW_OVERRIDE_PROP = "starbreaker_engine_glow_override_material"
 _ENGINE_GLOW_OVERRIDE_SIDECAR_PROP = "starbreaker_engine_glow_override_sidecar"
 _ENGINE_GLOW_OVERRIDE_INDEX_PROP = "starbreaker_engine_glow_override_source_index"
@@ -1112,6 +1139,115 @@ def _normalize_engine_glow_path(value: str | None) -> str | None:
     return f"Data/{normalized}".casefold()
 
 
+def _normalize_material_sidecar_path(value: str | None) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    return value.replace("\\", "/").casefold()
+
+
+def _submaterial_texture_export_path(submaterial: Any, slot_name: str) -> str | None:
+    for texture in getattr(submaterial, "texture_slots", []) or []:
+        if getattr(texture, "slot", None) != slot_name:
+            continue
+        export_path = getattr(texture, "export_path", None)
+        if isinstance(export_path, str) and export_path:
+            return export_path
+    return None
+
+
+def _shared_glow_target_submaterial(submaterial: Any) -> bool:
+    if getattr(submaterial, "shader_family", None) != "MeshDecal":
+        return False
+    decoded = getattr(submaterial, "decoded_feature_flags", None)
+    if bool(getattr(decoded, "has_parallax_occlusion_mapping", False)):
+        return False
+    if bool(getattr(decoded, "has_stencil_map", False)):
+        return False
+    texslot1 = _submaterial_texture_export_path(submaterial, "TexSlot1")
+    if not isinstance(texslot1, str):
+        return False
+    return "/glows/" in texslot1.replace("\\", "/").casefold()
+
+
+def _shared_glow_control_payload(package_root: bpy.types.Object) -> dict[str, Any] | None:
+    payload = _string_prop(package_root, PROP_SHARED_GLOW_CONTROL_JSON)
+    if payload is not None:
+        try:
+            data = json.loads(payload)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            data = None
+        if isinstance(data, dict):
+            return data
+    try:
+        package = _load_package_from_root(package_root)
+    except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError, ValueError):
+        return None
+
+    targets: list[dict[str, Any]] = []
+    seen_targets: set[tuple[str, int]] = set()
+    for obj in _iter_package_objects(package_root):
+        sidecar_path = _string_prop(obj, PROP_MATERIAL_SIDECAR)
+        if sidecar_path is None:
+            continue
+        normalized_sidecar = _normalize_material_sidecar_path(sidecar_path)
+        if normalized_sidecar is None:
+            continue
+        sidecar = package.load_material_sidecar(sidecar_path)
+        if sidecar is None:
+            continue
+        for submaterial in getattr(sidecar, "submaterials", []):
+            if not _shared_glow_target_submaterial(submaterial):
+                continue
+            key = (normalized_sidecar, int(getattr(submaterial, "index", 0)))
+            if key in seen_targets:
+                continue
+            seen_targets.add(key)
+            targets.append(
+                {
+                    "material_sidecar": sidecar_path,
+                    "source_material_index": key[1],
+                    "submaterial_name": getattr(submaterial, "submaterial_name", None),
+                    "blender_material_name": getattr(submaterial, "blender_material_name", None),
+                }
+            )
+    if not targets:
+        return None
+    data = {
+        "label": "Shared Glow",
+        "units": "emission_strength_delta",
+        "min_strength": 0.0,
+        "max_strength": 10.0,
+        "default_strength": 0.0,
+        "targets": targets,
+    }
+    package_root[PROP_SHARED_GLOW_CONTROL_JSON] = json.dumps(data, separators=(",", ":"), sort_keys=True)
+    if not isinstance(package_root.get(PROP_SHARED_GLOW_STRENGTH), (int, float)):
+        package_root[PROP_SHARED_GLOW_STRENGTH] = 0.0
+    return data
+
+
+def _shared_glow_targets(package_root: bpy.types.Object) -> dict[str, set[int]]:
+    data = _shared_glow_control_payload(package_root)
+    if data is None:
+        return {}
+    targets = data.get("targets")
+    if not isinstance(targets, list):
+        return {}
+    by_sidecar: dict[str, set[int]] = {}
+    for target in targets:
+        if not isinstance(target, dict):
+            continue
+        sidecar_key = _normalize_material_sidecar_path(target.get("material_sidecar"))
+        if sidecar_key is None:
+            continue
+        try:
+            source_index = int(target.get("source_material_index", 0))
+        except (TypeError, ValueError):
+            continue
+        by_sidecar.setdefault(sidecar_key, set()).add(source_index)
+    return by_sidecar
+
+
 def _engine_glow_targets(package_root: bpy.types.Object) -> dict[tuple[str, str], set[int]]:
     payload = _string_prop(package_root, PROP_ENGINE_GLOW_CONTROL_JSON)
     if payload is None:
@@ -1140,8 +1276,8 @@ def _engine_glow_targets(package_root: bpy.types.Object) -> dict[tuple[str, str]
     for target in targets:
         if not isinstance(target, dict):
             continue
-        sidecar = target.get("material_sidecar")
-        if not isinstance(sidecar, str) or not sidecar:
+        sidecar_key = _normalize_material_sidecar_path(target.get("material_sidecar"))
+        if sidecar_key is None:
             continue
         mesh_asset = _normalize_engine_glow_path(target.get("mesh_asset"))
         if mesh_asset is None:
@@ -1150,7 +1286,7 @@ def _engine_glow_targets(package_root: bpy.types.Object) -> dict[tuple[str, str]
             source_index = int(target.get("source_material_index", 0))
         except (TypeError, ValueError):
             continue
-        key = (mesh_asset, sidecar.replace("\\", "/").casefold())
+        key = (mesh_asset, sidecar_key)
         by_instance_and_sidecar.setdefault(key, set()).add(source_index)
     return by_instance_and_sidecar
 
@@ -1178,6 +1314,197 @@ def engine_glow_strength(package_root: bpy.types.Object) -> float:
         if isinstance(default_strength, (int, float)):
             return float(default_strength)
     return 3.0
+
+
+def shared_glow_control_enabled(package_root: bpy.types.Object) -> bool:
+    return bool(_shared_glow_targets(package_root))
+
+
+def shared_glow_strength(package_root: bpy.types.Object) -> float:
+    value = package_root.get(PROP_SHARED_GLOW_STRENGTH)
+    if isinstance(value, (int, float)):
+        return float(value)
+    data = _shared_glow_control_payload(package_root)
+    if isinstance(data, dict):
+        default_strength = data.get("default_strength")
+        if isinstance(default_strength, (int, float)):
+            return float(default_strength)
+    return 0.0
+
+
+_SHARED_GLOW_OVERRIDE_PROP = "starbreaker_shared_glow_override_material"
+_SHARED_GLOW_OVERRIDE_SIDECAR_PROP = "starbreaker_shared_glow_override_sidecar"
+_SHARED_GLOW_OVERRIDE_INDEX_PROP = "starbreaker_shared_glow_override_source_index"
+
+
+def _shared_glow_override_matches(material: bpy.types.Material, key: tuple[str, int], base_name: str) -> bool:
+    if not bool(material.get(_SHARED_GLOW_OVERRIDE_PROP)):
+        return False
+    stored_sidecar = material.get(_SHARED_GLOW_OVERRIDE_SIDECAR_PROP)
+    stored_index = material.get(_SHARED_GLOW_OVERRIDE_INDEX_PROP)
+    if isinstance(stored_sidecar, str) and stored_sidecar == key[0]:
+        try:
+            if int(stored_index) == key[1]:
+                return True
+        except (TypeError, ValueError):
+            pass
+    return material.name.startswith(f"{base_name}__shared_glow")
+
+
+def _shared_glow_override_sort_key(material: bpy.types.Material, base_name: str) -> tuple[int, str]:
+    exact_name = f"{base_name}__shared_glow"
+    return (0 if material.name == exact_name else 1, material.name)
+
+
+def _find_shared_glow_override_material(key: tuple[str, int], base_name: str) -> bpy.types.Material | None:
+    materials = getattr(getattr(bpy, "data", None), "materials", ())
+    candidates = [
+        material
+        for material in materials
+        if _shared_glow_override_matches(material, key, base_name)
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda material: _shared_glow_override_sort_key(material, base_name))
+    material = candidates[0]
+    material[_SHARED_GLOW_OVERRIDE_SIDECAR_PROP] = key[0]
+    material[_SHARED_GLOW_OVERRIDE_INDEX_PROP] = int(key[1])
+    return material
+
+
+def _material_for_shared_glow_slot(
+    material: bpy.types.Material,
+    sidecar_key: str,
+    source_index: int,
+    override_cache: dict[tuple[str, int], bpy.types.Material],
+) -> bpy.types.Material:
+    key = (sidecar_key, source_index)
+    existing = override_cache.get(key)
+    if existing is not None:
+        return existing
+    base_name = material.name.split("__shared_glow", 1)[0]
+    existing = _find_shared_glow_override_material(key, base_name)
+    if existing is not None:
+        override_cache[key] = existing
+        return existing
+    if bool(material.get(_SHARED_GLOW_OVERRIDE_PROP)):
+        material[_SHARED_GLOW_OVERRIDE_SIDECAR_PROP] = sidecar_key
+        material[_SHARED_GLOW_OVERRIDE_INDEX_PROP] = int(source_index)
+        override_cache[key] = material
+        return material
+    copy = material.copy()
+    copy.name = f"{material.name}__shared_glow"
+    copy[_SHARED_GLOW_OVERRIDE_PROP] = True
+    copy[_SHARED_GLOW_OVERRIDE_SIDECAR_PROP] = sidecar_key
+    copy[_SHARED_GLOW_OVERRIDE_INDEX_PROP] = int(source_index)
+    override_cache[key] = copy
+    return copy
+
+
+def _purge_duplicate_shared_glow_overrides(override_cache: dict[tuple[str, int], bpy.types.Material]) -> None:
+    materials = getattr(getattr(bpy, "data", None), "materials", None)
+    if materials is None:
+        return
+    for key, canonical in override_cache.items():
+        base_name = canonical.name.split("__shared_glow", 1)[0]
+        for material in list(materials):
+            if material is canonical:
+                continue
+            if not _shared_glow_override_matches(material, key, base_name):
+                continue
+            if getattr(material, "users", 0) != 0:
+                continue
+            remove = getattr(materials, "remove", None)
+            if callable(remove):
+                remove(material)
+
+
+def _source_submaterial_for_slot(obj: bpy.types.Object, slot_index: int, material: Any, sidecar: Any) -> Any | None:
+    slot_mapping = _slot_mapping_for_object(obj)
+    if slot_mapping is not None and slot_index < len(slot_mapping):
+        mapped_index = slot_mapping[slot_index]
+        if mapped_index is not None:
+            for submaterial in getattr(sidecar, "submaterials", ()):
+                if int(getattr(submaterial, "index", -1)) == mapped_index:
+                    return submaterial
+
+    material_name = getattr(material, "name", "")
+    if not isinstance(material_name, str) or not material_name:
+        return None
+    canonical_name = _canonical_source_name(material_name)
+    if not canonical_name:
+        return None
+    unique = _unique_submaterials_by_name(sidecar).get(canonical_name)
+    if unique is not None:
+        return unique
+    candidates = _submaterials_by_name(sidecar).get(canonical_name, [])
+    if not candidates:
+        return None
+    return min(candidates, key=lambda item: abs(int(getattr(item, "index", slot_index)) - slot_index))
+
+
+def apply_shared_glow_to_package_root(package_root: bpy.types.Object, strength: float) -> int:
+    targets_by_sidecar = _shared_glow_targets(package_root)
+    if not targets_by_sidecar:
+        return 0
+    try:
+        package = _load_package_from_root(package_root)
+    except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError, ValueError):
+        return 0
+
+    strength = float(strength)
+    updated = 0
+    seen_materials: set[int] = set()
+    override_cache: dict[tuple[str, int], bpy.types.Material] = {}
+    sidecar_cache: dict[str, Any] = {}
+    for obj in _iter_package_objects(package_root):
+        slots = list(getattr(obj, "material_slots", []))
+        if not slots:
+            continue
+        sidecar_path = _string_prop(obj, PROP_MATERIAL_SIDECAR)
+        sidecar_key = _normalize_material_sidecar_path(sidecar_path)
+        if sidecar_path is None or sidecar_key is None:
+            continue
+        target_indices = targets_by_sidecar.get(sidecar_key)
+        if not target_indices:
+            continue
+        sidecar = _material_refresh_sidecar(package, sidecar_cache, sidecar_path)
+        if sidecar is None:
+            continue
+        for slot_index, slot in enumerate(slots):
+            material = getattr(slot, "material", None)
+            if material is None:
+                continue
+            submaterial = _source_submaterial_for_slot(obj, slot_index, material, sidecar)
+            if submaterial is None:
+                continue
+            source_index = int(getattr(submaterial, "index", -1))
+            if source_index not in target_indices:
+                continue
+            material = _material_for_shared_glow_slot(material, sidecar_key, source_index, override_cache)
+            slot.material = material
+            material_id = id(material)
+            if material_id in seen_materials:
+                continue
+            seen_materials.add(material_id)
+            node_tree = getattr(material, "node_tree", None)
+            if node_tree is None:
+                continue
+            base_strength = _submaterial_authored_glow(submaterial)
+            material_changed = False
+            for node in getattr(node_tree, "nodes", []):
+                if getattr(node, "bl_idname", "") != "ShaderNodeGroup":
+                    continue
+                strength_input = getattr(node, "inputs", {}).get("Emission Strength")
+                if strength_input is None:
+                    continue
+                strength_input.default_value = base_strength + strength
+                material_changed = True
+            if material_changed:
+                updated += 1
+    package_root[PROP_SHARED_GLOW_STRENGTH] = float(strength)
+    _purge_duplicate_shared_glow_overrides(override_cache)
+    return updated
 
 
 def _material_for_engine_glow_slot(
