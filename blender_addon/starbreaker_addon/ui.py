@@ -18,8 +18,12 @@ from .manifest import PackageBundle
 from .palette import resolved_palette_id
 from .palette import paint_list_canonical_id
 from .runtime import (
+    DECAL_OFFSET_EXTERNAL_DEFAULT,
+    DECAL_OFFSET_INTERNAL_DEFAULT,
     POM_DETAIL_DEFAULT,
     POM_DETAIL_ITEMS,
+    PROP_DECAL_OFFSET_EXTERNAL,
+    PROP_DECAL_OFFSET_INTERNAL,
     PROP_ENTITY_NAME,
     PROP_MATERIAL_SIDECAR,
     PROP_PACKAGE_NAME,
@@ -37,6 +41,7 @@ from .runtime import (
     SCENE_WEAR_STRENGTH_PROP,
     animation_overlap_warnings,
     apply_animation_mode_to_package_root,
+    apply_decal_offsets_to_package_root,
     apply_engine_glow_to_package_root,
     apply_light_state,
     apply_livery_to_selected_package,
@@ -47,6 +52,7 @@ from .runtime import (
     available_light_state_names,
     engine_glow_control_enabled,
     engine_glow_strength,
+    decal_offset_control_enabled,
     dump_selected_metadata,
     exterior_palette_ids,
     find_package_root,
@@ -380,6 +386,20 @@ def _update_engine_glow(_: bpy.types.ID, context: bpy.types.Context) -> None:
         return
     try:
         apply_engine_glow_to_package_root(package_root, float(getattr(scene, SCENE_ENGINE_GLOW_PROP, 3.0)))
+    except Exception:
+        return
+    _tag_view3d_redraws(context)
+
+
+def _update_decal_offset(root: bpy.types.ID, context: bpy.types.Context) -> None:
+    if not bool(getattr(root, "get", lambda _key: False)(PROP_PACKAGE_ROOT)):
+        return
+    try:
+        apply_decal_offsets_to_package_root(
+            root,
+            float(getattr(root, PROP_DECAL_OFFSET_EXTERNAL, DECAL_OFFSET_EXTERNAL_DEFAULT)),
+            float(getattr(root, PROP_DECAL_OFFSET_INTERNAL, DECAL_OFFSET_INTERNAL_DEFAULT)),
+        )
     except Exception:
         return
     _tag_view3d_redraws(context)
@@ -1329,6 +1349,10 @@ class STARBREAKER_PT_tools(Panel):
         tuning.prop(context.scene, SCENE_POM_DETAIL_PROP, text="POM Detail")
         tuning.label(text="Layered Wear")
         tuning.prop(context.scene, SCENE_WEAR_STRENGTH_PROP, slider=True)
+        if decal_offset_control_enabled(package_root):
+            tuning.label(text="Decal Offset")
+            tuning.prop(package_root, PROP_DECAL_OFFSET_EXTERNAL, text="Exterior")
+            tuning.prop(package_root, PROP_DECAL_OFFSET_INTERNAL, text="Interior")
 
         if obj is not None and obj.active_material is not None:
             material = obj.active_material
@@ -1707,6 +1731,38 @@ def register() -> None:
         ),
     )
     setattr(
+        bpy.types.Object,
+        PROP_DECAL_OFFSET_EXTERNAL,
+        FloatProperty(
+            name="Exterior Decal Offset",
+            description=(
+                "Offset strength for imported StarBreaker decal displacement modifiers "
+                "on exterior ship-hull objects in the selected package root."
+            ),
+            default=DECAL_OFFSET_EXTERNAL_DEFAULT,
+            min=0.0,
+            soft_max=0.02,
+            precision=4,
+            update=_update_decal_offset,
+        ),
+    )
+    setattr(
+        bpy.types.Object,
+        PROP_DECAL_OFFSET_INTERNAL,
+        FloatProperty(
+            name="Interior Decal Offset",
+            description=(
+                "Offset strength for imported StarBreaker decal displacement modifiers "
+                "on interior and loadout objects in the selected package root."
+            ),
+            default=DECAL_OFFSET_INTERNAL_DEFAULT,
+            min=0.0,
+            soft_max=0.02,
+            precision=4,
+            update=_update_decal_offset,
+        ),
+    )
+    setattr(
         bpy.types.Scene,
         _SCENE_ANIMATION_FPS_POLICY_PROP,
         EnumProperty(
@@ -1745,6 +1801,10 @@ def unregister() -> None:
         delattr(bpy.types.Scene, SCENE_WEAR_STRENGTH_PROP)
     if hasattr(bpy.types.Scene, SCENE_ENGINE_GLOW_PROP):
         delattr(bpy.types.Scene, SCENE_ENGINE_GLOW_PROP)
+    if hasattr(bpy.types.Object, PROP_DECAL_OFFSET_EXTERNAL):
+        delattr(bpy.types.Object, PROP_DECAL_OFFSET_EXTERNAL)
+    if hasattr(bpy.types.Object, PROP_DECAL_OFFSET_INTERNAL):
+        delattr(bpy.types.Object, PROP_DECAL_OFFSET_INTERNAL)
     if hasattr(bpy.types.Scene, _SCENE_ANIMATION_FPS_POLICY_PROP):
         delattr(bpy.types.Scene, _SCENE_ANIMATION_FPS_POLICY_PROP)
     for prop_name in (

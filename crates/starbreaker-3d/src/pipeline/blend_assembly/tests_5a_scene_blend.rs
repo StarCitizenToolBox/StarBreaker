@@ -508,7 +508,7 @@ fn interior_placement_assets_flatten_source_hierarchy() {
 }
 
 #[test]
-fn existing_native_blend_asset_is_reused_for_scene_link_metadata() {
+fn existing_native_blend_asset_is_rebuilt_when_path_exists() {
     let mesh = Mesh {
         positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
         indices: vec![0, 1, 2],
@@ -538,14 +538,24 @@ fn existing_native_blend_asset_is_reused_for_scene_link_metadata() {
     let loader = |relative_path: &str| {
         (relative_path == "Data/Objects/existing_asset_LOD0.blend").then(|| existing_bytes.clone())
     };
+    let mut mesh_data_map = HashMap::new();
+    mesh_data_map.insert(
+        "data/objects/existing_asset_lod0.blend".to_string(),
+        MeshDataEntry {
+            mesh,
+            materials: None,
+            nmc: None,
+            interior_placement_space: false,
+        },
+    );
 
-    let built = build_native_blend_asset(&job, &HashMap::new(), &HashMap::new(), Some(&loader)).unwrap();
+    let built = build_native_blend_asset(&job, &mesh_data_map, &HashMap::new(), Some(&loader)).unwrap();
 
-    assert!(built.file.is_none(), "reused assets should not be queued for rewriting");
+    assert!(built.file.is_some(), "native mesh assets should be rebuilt even when a path already exists");
     assert_eq!(built.relative_path, "Data/Objects/existing_asset_LOD0.blend");
     assert_eq!(built.linked_mesh_refs.len(), 1);
-    assert_eq!(built.linked_mesh_refs[0].object_name, "existing_asset");
-    assert_eq!(built.linked_mesh_refs[0].mesh_name, "existing_asset");
+    assert_eq!(built.linked_mesh_refs[0].object_name, "existing_asset_LOD0");
+    assert_eq!(built.linked_mesh_refs[0].mesh_name, "existing_asset_LOD0");
 }
 
 #[test]

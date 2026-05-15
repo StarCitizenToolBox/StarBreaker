@@ -20,6 +20,7 @@ class FakeObject(dict):
         self.children: list[FakeObject] = []
         self.type = "EMPTY"
         self.material_slots = []
+        self.modifiers = []
 
     @property
     def children_recursive(self) -> list[FakeObject]:
@@ -59,6 +60,13 @@ class FakeMaterial(dict):
 class FakeSlot:
     def __init__(self, material=None):
         self.material = material
+
+
+class FakeModifier:
+    def __init__(self, name: str, type: str, strength: float = 0.0):  # noqa: A002 - matches bpy API
+        self.name = name
+        self.type = type
+        self.strength = strength
 
 
 class FakeSocket:
@@ -431,6 +439,68 @@ class PackageOpsTests(unittest.TestCase):
             importer_stub.events,
             [("rebuild", "wing", "palette/test"), ("rebuild", "hull", "palette/test")],
         )
+
+    def test_decal_offset_control_enabled_detects_modifier_in_root_tree(self) -> None:
+        package_root = FakeObject("StarBreaker RSI Aurora", starbreaker_package_root=True)
+        child = FakeObject(
+            "hull",
+            starbreaker_material_sidecar="Data/Objects/Spaceships/Ships/RSI/aurora/exterior/aurora_ext_TEX0.materials.json",
+        )
+        child.modifiers = [FakeModifier("StarBreaker Decal Offset", "DISPLACE", 0.005)]
+        child.parent = package_root
+        package_root.children.append(child)
+
+        self.assertTrue(self.package_ops.decal_offset_control_enabled(package_root))
+
+    def test_apply_decal_offsets_to_package_root_updates_only_selected_root(self) -> None:
+        package_root = FakeObject("StarBreaker RSI Aurora", starbreaker_package_root=True)
+        exterior = FakeObject(
+            "hull",
+            starbreaker_material_sidecar="Data/Objects/Spaceships/Ships/RSI/aurora/exterior/aurora_ext_TEX0.materials.json",
+        )
+        exterior.modifiers = [FakeModifier("StarBreaker Decal Offset", "DISPLACE", 0.005)]
+        interior = FakeObject(
+            "cooler",
+            starbreaker_material_sidecar="Data/Objects/Spaceships/Coolers/small_component/lplt/cool_lplt_s01_pl03_TEX0.materials.json",
+        )
+        interior.modifiers = [FakeModifier("StarBreaker Decal Offset", "DISPLACE", 0.001)]
+        other_root = FakeObject("StarBreaker MISC Razor", starbreaker_package_root=True)
+        other = FakeObject(
+            "other_hull",
+            starbreaker_material_sidecar="Data/Objects/Spaceships/Ships/MISC/razor/exterior/razor_ext_TEX0.materials.json",
+        )
+        other.modifiers = [FakeModifier("StarBreaker Decal Offset", "DISPLACE", 0.005)]
+        exterior.parent = package_root
+        interior.parent = package_root
+        other.parent = other_root
+        package_root.children.extend([exterior, interior])
+        other_root.children.append(other)
+
+        updated = self.package_ops.apply_decal_offsets_to_package_root(package_root, 0.0075, 0.0025)
+
+        self.assertEqual(updated, 2)
+        self.assertAlmostEqual(exterior.modifiers[0].strength, 0.0075)
+        self.assertAlmostEqual(interior.modifiers[0].strength, 0.0025)
+        self.assertAlmostEqual(other.modifiers[0].strength, 0.005)
+
+    def test_apply_decal_offsets_uses_instance_sidecar_when_object_prop_missing(self) -> None:
+        package_root = FakeObject("StarBreaker RSI Aurora", starbreaker_package_root=True)
+        child = FakeObject(
+            "weapon",
+            starbreaker_instance_json=json.dumps(
+                {
+                    "material_sidecar": "Data/Objects/Spaceships/Weapons/KLWE/KLWE_las_rep_s1-3_TEX0.materials.json",
+                }
+            ),
+        )
+        child.modifiers = [FakeModifier("StarBreaker Decal Offset", "DISPLACE", 0.001)]
+        child.parent = package_root
+        package_root.children.append(child)
+
+        updated = self.package_ops.apply_decal_offsets_to_package_root(package_root, 0.009, 0.003)
+
+        self.assertEqual(updated, 1)
+        self.assertAlmostEqual(child.modifiers[0].strength, 0.003)
 
     def test_material_refresh_session_splits_orphan_cleanup_across_steps(self) -> None:
         @contextmanager

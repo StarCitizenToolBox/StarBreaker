@@ -24,6 +24,11 @@ import bpy
 from ..manifest import PackageBundle, SceneInstanceRecord
 from ..palette import palette_id_for_livery_instance, resolved_palette_id
 from .constants import (
+    DECAL_OFFSET_EXTERNAL_DEFAULT,
+    DECAL_OFFSET_INTERNAL_DEFAULT,
+    DECAL_OFFSET_MODIFIER_NAME,
+    PROP_DECAL_OFFSET_EXTERNAL,
+    PROP_DECAL_OFFSET_INTERNAL,
     PROP_ENGINE_GLOW_CONTROL_JSON,
     PROP_ENGINE_GLOW_STRENGTH,
     PROP_INSTANCE_JSON,
@@ -823,6 +828,82 @@ def _string_prop(obj: bpy.types.ID, name: str) -> str | None:
     if isinstance(value, str) and value:
         return value
     return None
+
+
+def _float_prop_or_default(obj: object, name: str, default: float) -> float:
+    value = getattr(obj, name, None)
+    if isinstance(value, (int, float)):
+        return float(value)
+    get_prop = getattr(obj, "get", None)
+    if callable(get_prop):
+        value = get_prop(name)
+        if isinstance(value, (int, float)):
+            return float(value)
+    return float(default)
+
+
+def _decal_offset_modifier(obj: bpy.types.Object) -> Any:
+    for modifier in getattr(obj, "modifiers", ()):
+        if (
+            getattr(modifier, "name", "") == DECAL_OFFSET_MODIFIER_NAME
+            and getattr(modifier, "type", "") == "DISPLACE"
+        ):
+            return modifier
+    return None
+
+
+def _decal_offset_sidecar(obj: bpy.types.Object) -> str | None:
+    sidecar = _string_prop(obj, PROP_MATERIAL_SIDECAR)
+    if sidecar is not None:
+        return sidecar
+    instance = _scene_instance_from_object(obj)
+    value = getattr(instance, "material_sidecar", None) if instance is not None else None
+    return value if isinstance(value, str) and value else None
+
+
+def _is_exterior_decal_object(obj: bpy.types.Object) -> bool:
+    sidecar = _decal_offset_sidecar(obj)
+    if not isinstance(sidecar, str) or not sidecar:
+        return False
+    lower = sidecar.replace("\\", "/").lower()
+    return "/ships/" in lower and "_int_" not in lower and "_int_master" not in lower
+
+
+def decal_offset_control_enabled(package_root: bpy.types.Object) -> bool:
+    return any(_decal_offset_modifier(obj) is not None for obj in _iter_package_objects(package_root))
+
+
+def decal_offset_external_strength(package_root: bpy.types.Object) -> float:
+    return _float_prop_or_default(
+        package_root,
+        PROP_DECAL_OFFSET_EXTERNAL,
+        DECAL_OFFSET_EXTERNAL_DEFAULT,
+    )
+
+
+def decal_offset_internal_strength(package_root: bpy.types.Object) -> float:
+    return _float_prop_or_default(
+        package_root,
+        PROP_DECAL_OFFSET_INTERNAL,
+        DECAL_OFFSET_INTERNAL_DEFAULT,
+    )
+
+
+def apply_decal_offsets_to_package_root(
+    package_root: bpy.types.Object,
+    external_strength: float,
+    internal_strength: float,
+) -> int:
+    updated = 0
+    external_strength = float(external_strength)
+    internal_strength = float(internal_strength)
+    for obj in _iter_package_objects(package_root):
+        modifier = _decal_offset_modifier(obj)
+        if modifier is None:
+            continue
+        modifier.strength = external_strength if _is_exterior_decal_object(obj) else internal_strength
+        updated += 1
+    return updated
 
 
 def _triplet_from_any(value: Any) -> tuple[float, float, float] | None:

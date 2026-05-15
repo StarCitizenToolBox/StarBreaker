@@ -3,6 +3,95 @@
 use super::*;
 
 #[test]
+fn test_identify_meshes_with_decals_excludes_pom_only_damage_material() {
+    let mesh_materials = vec![(
+        "pitbull_body".to_string(),
+        vec![(
+            "Damage_Internal_Structure".to_string(),
+            "HardSurface".to_string(),
+            "%PARALLAX_OCCLUSION_MAPPING%USE_SPECULAR_MAPS".to_string(),
+            vec![
+                "WearBlendBase".to_string(),
+                "PomDisplacement".to_string(),
+                "POMHeightBias".to_string(),
+                "DamagePerObjectWear".to_string(),
+            ],
+        )],
+    )];
+
+    let result = identify_meshes_with_decals(&mesh_materials).unwrap();
+
+    assert!(result.is_empty());
+}
+
+#[test]
+fn test_identify_meshes_with_decals_keeps_non_meshdecal_stencil_material() {
+    let mesh_materials = vec![(
+        "marksman".to_string(),
+        vec![(
+            "graphic_decals_a".to_string(),
+            "Illum".to_string(),
+            "%VERTDATA%STENCIL_MAP%USE_DAMAGE_MAP".to_string(),
+            vec![
+                "StencilOpacity".to_string(),
+                "StencilDiffuseColor".to_string(),
+                "StencilBreakupTiling".to_string(),
+            ],
+        )],
+    )];
+
+    let result = identify_meshes_with_decals(&mesh_materials).unwrap();
+
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].mesh_path, "marksman");
+    assert_eq!(result[0].decal_materials.len(), 1);
+    assert!(result[0].decal_materials[0].is_decal);
+    assert!(!result[0].decal_materials[0].is_pom);
+}
+
+#[test]
+fn test_identify_meshes_with_decals_excludes_meshdecal_glow_without_vertdata_or_stencil() {
+    let mesh_materials = vec![(
+        "pitbull_glow".to_string(),
+        vec![(
+            "Decal_Glow_Linked".to_string(),
+            "MeshDecal".to_string(),
+            "%DIFFUSE_MAP%USE_DAMAGE_MAP".to_string(),
+            vec![
+                "DecalDiffuseOpacity".to_string(),
+                "DecalFalloff".to_string(),
+                "DecalAlphaMultiplier".to_string(),
+            ],
+        )],
+    )];
+
+    let result = identify_meshes_with_decals(&mesh_materials).unwrap();
+
+    assert!(result.is_empty());
+}
+
+#[test]
+fn test_identify_meshes_with_decals_excludes_glass_shader_with_decal_params() {
+    let mesh_materials = vec![(
+        "pitbull_glass".to_string(),
+        vec![(
+            "Glass_Int".to_string(),
+            "GlassPBR".to_string(),
+            "%DECAL%DIRT%REFRACTION%PER_VERTEX_TINT".to_string(),
+            vec![
+                "DecalTiling".to_string(),
+                "DecalSmoothness".to_string(),
+                "DecalReflectance".to_string(),
+            ],
+        )],
+    )];
+
+    let result = identify_meshes_with_decals(&mesh_materials).unwrap();
+
+    assert!(result.is_empty());
+}
+
+#[test]
 fn test_map_faces_to_vertices_single_triangle() {
     let corner_verts = vec![0, 1, 2, 3, 4, 5];  // Two triangles
     let face_indices = vec![0];  // First triangle
@@ -203,6 +292,59 @@ fn test_decal_face_indices_fall_back_to_submesh_material_name() {
     let faces = decal_face_indices_for_mesh(&mesh, &mesh_with_decals);
 
     assert_eq!(faces, vec![0]);
+}
+
+#[test]
+fn test_decal_face_indices_prefers_material_name_over_mismatched_source_material_id() {
+    let mesh = Mesh {
+        positions: vec![[0.0, 0.0, 0.0]; 6],
+        indices: vec![0, 1, 2, 3, 4, 5],
+        uvs: None,
+        secondary_uvs: None,
+        normals: None,
+        tangents: None,
+        colors: None,
+        submeshes: vec![
+            SubMesh {
+                material_name: Some("Damage_Internal_Structure".to_string()),
+                material_id: 0,
+                source_material_id: Some(2),
+                first_index: 0,
+                num_indices: 3,
+                first_vertex: 0,
+                num_vertices: 3,
+                node_parent_index: 0,
+            },
+            SubMesh {
+                material_name: Some("Decal_POM_A".to_string()),
+                material_id: 1,
+                source_material_id: Some(7),
+                first_index: 3,
+                num_indices: 3,
+                first_vertex: 3,
+                num_vertices: 3,
+                node_parent_index: 0,
+            },
+        ],
+        model_min: [0.0, 0.0, 0.0],
+        model_max: [0.0, 0.0, 0.0],
+        scaling_min: [0.0, 0.0, 0.0],
+        scaling_max: [0.0, 0.0, 0.0],
+    };
+    let mesh_with_decals = MeshWithDecals {
+        mesh_path: "prefer_name_mesh".to_string(),
+        decal_materials: vec![DecalMaterial {
+            material_name: "Decal_POM_A".to_string(),
+            is_decal: true,
+            is_pom: true,
+            material_index: 2,
+        }],
+        decal_face_indices: Vec::new(),
+    };
+
+    let faces = decal_face_indices_for_mesh(&mesh, &mesh_with_decals);
+
+    assert_eq!(faces, vec![1]);
 }
 
 #[test]
