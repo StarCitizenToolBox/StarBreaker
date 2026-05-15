@@ -2350,13 +2350,11 @@ fn build_native_blend_asset(
     mesh_vertex_groups: &HashMap<String, Vec<VertexGroup>>,
     existing_asset_loader: Option<&(dyn Fn(&str) -> Option<Vec<u8>> + Sync)>,
 ) -> Result<BuiltBlendAsset, Error> {
-    // Native mesh .blend assets carry generated vertex groups and modifiers.
-    // Reusing a same-path on-disk copy would keep stale decal-offset data when
-    // the exporter changes or the material-selection rule narrows.
+    if let Some(existing) = reusable_native_blend_asset(job, existing_asset_loader)? {
+        return Ok(existing);
+    }
+
     let Some(mesh_entry) = mesh_data_map.get(&job.blend_key) else {
-        if let Some(existing) = reusable_native_blend_asset(job, existing_asset_loader)? {
-            return Ok(existing);
-        }
         return Err(Error::Other(format!(
             "native Blend export has no mesh payload for generated asset '{}'",
             job.blend_path

@@ -36,18 +36,23 @@ pub fn query_object_containers(
     db: &Database,
     record: &starbreaker_datacore::types::Record,
 ) -> Vec<ObjectContainerRef> {
-    let Ok(path) = db.compile_path::<Value>(
+    let vehicle_containers = db
+        .compile_path::<Value>(
         record.struct_id(),
         "Components[VehicleComponentParams].objectContainers",
-    ) else {
-        return Vec::new();
-    };
+    )
+        .ok()
+        .and_then(|path| db.query::<Value>(&path, record).ok())
+        .unwrap_or_default();
+    let direct_object_container = db
+        .compile_path::<String>(
+            record.struct_id(),
+            "Components[SObjectContainerComponentParams].objectContainer",
+        )
+        .ok()
+        .and_then(|path| db.query_single::<String>(&path, record).ok().flatten());
 
-    let Ok(containers) = db.query::<Value>(&path, record) else {
-        return Vec::new();
-    };
-
-    containers.iter().filter_map(parse_container_ref).collect()
+    collect_object_container_refs(&vehicle_containers, direct_object_container.as_deref())
 }
 
 fn parse_container_ref(val: &Value) -> Option<ObjectContainerRef> {
@@ -62,7 +67,7 @@ fn parse_container_ref(val: &Value) -> Option<ObjectContainerRef> {
     let fields: HashMap<&str, &Value> = fields.iter().map(|(k, v)| (*k, v)).collect();
 
     let file_name = match fields.get("fileName") {
-        Some(Value::String(s)) => (*s).to_owned(),
+        Some(Value::String(s)) if !s.is_empty() => (*s).to_owned(),
         _ => return None,
     };
     let bone_name = match fields.get("boneName") {
@@ -77,6 +82,25 @@ fn parse_container_ref(val: &Value) -> Option<ObjectContainerRef> {
         offset_position,
         offset_rotation,
     })
+}
+
+fn collect_object_container_refs(
+    vehicle_containers: &[Value<'_>],
+    direct_object_container: Option<&str>,
+) -> Vec<ObjectContainerRef> {
+    let mut containers = vehicle_containers
+        .iter()
+        .filter_map(parse_container_ref)
+        .collect::<Vec<_>>();
+    if let Some(file_name) = direct_object_container.filter(|file_name| !file_name.is_empty()) {
+        containers.push(ObjectContainerRef {
+            bone_name: None,
+            file_name: file_name.to_owned(),
+            offset_position: [0.0, 0.0, 0.0],
+            offset_rotation: [0.0, 0.0, 0.0],
+        });
+    }
+    containers
 }
 
 fn authored_light_intensity_to_candela(intensity_raw: f32) -> f32 {
@@ -1521,10 +1545,12 @@ pub fn build_container_transform(pos: [f32; 3], rot_deg: [f32; 3]) -> [[f32; 4];
 #[cfg(test)]
 mod tests {
     use crate::included_objects::{IncludedObject, IncludedObjects};
+    use starbreaker_datacore::query::value::Value;
 
     use super::{
-        build_container_transform, extract_item_port_meshes_from_text_xml,
-        normalize_item_port_entity_name, quat_mul, quat_rotate_vec, semantic_light_kind_for_light,
+        build_container_transform, collect_object_container_refs,
+        extract_item_port_meshes_from_text_xml, normalize_item_port_entity_name, parse_container_ref,
+        quat_mul, quat_rotate_vec, semantic_light_kind_for_light,
     };
 
     fn approx_eq3(left: [f64; 3], right: [f64; 3]) {
@@ -1575,6 +1601,46 @@ mod tests {
     fn authored_light_intensity_matches_max_script_scale() {
         assert_eq!(super::authored_light_intensity_to_candela(1.0), 1500.0);
         assert_eq!(super::authored_light_intensity_to_candela(2.5), 3750.0);
+    }
+
+    #[test]
+    fn parse_container_ref_skips_blank_file_name() {
+        let value = Value::Object {
+            type_name: "SVehicleObjectContainerParams",
+            fields: vec![("fileName", Value::String(""))],
+            record_id: None,
+        };
+        assert!(parse_container_ref(&value).is_none());
+    }
+
+    #[test]
+    fn collect_object_container_refs_includes_direct_object_container_component() {
+        let vehicle_container = Value::Object {
+            type_name: "SVehicleObjectContainerParams",
+            fields: vec![
+                ("fileName", Value::String("objectcontainers\\ships\\misc\\hull_c\\base_int_front_main.socpak")),
+                ("boneName", Value::String("animated_front")),
+            ],
+            record_id: None,
+        };
+
+        let containers = collect_object_container_refs(
+            &[vehicle_container],
+            Some("ObjectContainers/Ships/MISC/Hull_C/base_int_back_main.socpak"),
+        );
+
+        assert_eq!(containers.len(), 2);
+        assert_eq!(
+            containers[0].file_name,
+            "objectcontainers\\ships\\misc\\hull_c\\base_int_front_main.socpak"
+        );
+        assert_eq!(
+            containers[1].file_name,
+            "ObjectContainers/Ships/MISC/Hull_C/base_int_back_main.socpak"
+        );
+        assert_eq!(containers[1].bone_name, None);
+        assert_eq!(containers[1].offset_position, [0.0, 0.0, 0.0]);
+        assert_eq!(containers[1].offset_rotation, [0.0, 0.0, 0.0]);
     }
 
     #[test]
