@@ -54,7 +54,6 @@ export function ExportView() {
   const includeInterior = useExportStore((s) => s.includeInterior);
   const includeLights = useExportStore((s) => s.includeLights);
   const overwriteExistingAssets = useExportStore((s) => s.overwriteExistingAssets);
-  const includeNodraw = useExportStore((s) => s.includeNodraw);
   const includeAnimations = useExportStore((s) => s.includeAnimations);
   const includeObjectTypeDirectory = useExportStore((s) => s.includeObjectTypeDirectory);
   const threads = useExportStore((s) => s.threads);
@@ -67,7 +66,6 @@ export function ExportView() {
   const setIncludeInterior = useExportStore((s) => s.setIncludeInterior);
   const setIncludeLights = useExportStore((s) => s.setIncludeLights);
   const setOverwriteExistingAssets = useExportStore((s) => s.setOverwriteExistingAssets);
-  const setIncludeNodraw = useExportStore((s) => s.setIncludeNodraw);
   const setIncludeAnimations = useExportStore((s) => s.setIncludeAnimations);
   const setIncludeObjectTypeDirectory = useExportStore((s) => s.setIncludeObjectTypeDirectory);
   const setThreads = useExportStore((s) => s.setThreads);
@@ -174,6 +172,7 @@ export function ExportView() {
   const totalSelected = selected.size;
 
   const canExport = totalSelected > 0 && outputDir !== null && !exporting;
+  const isBlendExport = exportKind === "decomposed";
 
   const allDone = progressTotal > 0 && progress >= progressTotal;
   // Never display 100% until all export slots are marked complete, to avoid the
@@ -194,14 +193,14 @@ export function ExportView() {
       lod,
       mip,
       export_kind: exportKind,
-      material_mode: materialMode,
-      include_attachments: includeAttachments,
+      material_mode: isBlendExport ? "all" : materialMode,
+      include_attachments: isBlendExport ? true : includeAttachments,
       include_interior: includeInterior,
-      include_lights: includeLights,
+      include_lights: isBlendExport ? true : includeLights,
       threads,
       overwrite_existing_assets: overwriteExistingAssets,
-      include_nodraw: includeNodraw,
-      include_animations: includeAnimations,
+      include_nodraw: false,
+      include_animations: isBlendExport ? true : includeAnimations,
       include_object_type_directory: includeObjectTypeDirectory,
     };
     setExporting(true);
@@ -687,7 +686,7 @@ export function ExportView() {
             </div>
           </div>
 
-          {exportKind === "decomposed" && (
+          {isBlendExport && (
             <div className="flex flex-col gap-3">
               <label className="flex items-center gap-2.5 cursor-pointer group">
                 <input
@@ -703,68 +702,44 @@ export function ExportView() {
               <p className="text-[10px] text-text-faint leading-relaxed pl-6">
                 When disabled, existing Data/... .blend and .png assets are left in place.
               </p>
-
-              <label className="flex items-center gap-2.5 cursor-pointer group">
-                <input
-                  type="checkbox"
-                  checked={includeNodraw}
-                  onChange={(e) => setIncludeNodraw(e.target.checked)}
-                  className="accent-accent w-3.5 h-3.5 rounded"
-                />
-                <span className="text-xs text-text-sub group-hover:text-text transition-colors">
-                  Include NoDraw faces and sidecars
-                </span>
-              </label>
-              <p className="text-[10px] text-text-faint leading-relaxed pl-6">
-                Disabled by default so hidden proxy geometry is excluded from decomposed mesh assets and material sidecars.
-              </p>
             </div>
           )}
 
           {/* Material Mode */}
-          <div className="flex flex-col gap-1.5">
-            <span className="text-xs text-text-sub">Materials</span>
-            <div className="flex flex-col gap-1">
-              {([
-                { value: "none", label: "None", tip: "Geometry only, no material data. Plain white surfaces." },
-                { value: "colors", label: "Colors", tip: "Palette and layer tint colors applied. No textures. Small file size." },
-                { value: "textures", label: "Textures", tip: "Colors + diffuse, normal, and roughness textures for materials that have them." },
-                { value: "all", label: "All (experimental)", tip: "Everything including heuristic approximations. Layer textures, alpha inference, decal classification. May not be correct." },
-              ] as const).map((opt) => (
-                <label
-                  key={opt.value}
-                  className="flex items-center gap-2 cursor-pointer group"
-                  title={opt.tip}
-                >
-                  <input
-                    type="radio"
-                    name="materialMode"
-                    value={opt.value}
-                    checked={materialMode === opt.value}
-                    onChange={() => setMaterialMode(opt.value)}
-                    className="accent-accent w-3 h-3"
-                  />
-                  <span className="text-xs text-text-sub group-hover:text-text transition-colors">
-                    {opt.label}
-                  </span>
-                </label>
-              ))}
+          {!isBlendExport && (
+            <div className="flex flex-col gap-1.5">
+              <span className="text-xs text-text-sub">Materials</span>
+              <div className="flex flex-col gap-1">
+                {([
+                  { value: "none", label: "None", tip: "Geometry only, no material data. Plain white surfaces." },
+                  { value: "colors", label: "Colors", tip: "Palette and layer tint colors applied. No textures. Small file size." },
+                  { value: "textures", label: "Textures", tip: "Colors + diffuse, normal, and roughness textures for materials that have them." },
+                  { value: "all", label: "All (experimental)", tip: "Everything including heuristic approximations. Layer textures, alpha inference, decal classification. May not be correct." },
+                ] as const).map((opt) => (
+                  <label
+                    key={opt.value}
+                    className="flex items-center gap-2 cursor-pointer group"
+                    title={opt.tip}
+                  >
+                    <input
+                      type="radio"
+                      name="materialMode"
+                      value={opt.value}
+                      checked={materialMode === opt.value}
+                      onChange={() => setMaterialMode(opt.value)}
+                      className="accent-accent w-3 h-3"
+                    />
+                    <span className="text-xs text-text-sub group-hover:text-text transition-colors">
+                      {opt.label}
+                    </span>
+                  </label>
+                ))}
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Toggles */}
           <div className="flex flex-col gap-2">
-            <label className="flex items-center gap-2.5 cursor-pointer group">
-              <input
-                type="checkbox"
-                checked={includeAttachments}
-                onChange={(e) => setIncludeAttachments(e.target.checked)}
-                className="accent-accent w-3.5 h-3.5 rounded"
-              />
-              <span className="text-xs text-text-sub group-hover:text-text transition-colors">
-                Include attachments
-              </span>
-            </label>
             <label className="flex items-center gap-2.5 cursor-pointer group">
               <input
                 type="checkbox"
@@ -776,28 +751,43 @@ export function ExportView() {
                 Include interiors
               </span>
             </label>
-            <label className="flex items-center gap-2.5 cursor-pointer group">
-              <input
-                type="checkbox"
-                checked={includeLights}
-                onChange={(e) => setIncludeLights(e.target.checked)}
-                className="accent-accent w-3.5 h-3.5 rounded"
-              />
-              <span className="text-xs text-text-sub group-hover:text-text transition-colors">
-                Include lights
-              </span>
-            </label>
-            <label className="flex items-center gap-2.5 cursor-pointer group">
-              <input
-                type="checkbox"
-                checked={includeAnimations}
-                onChange={(e) => setIncludeAnimations(e.target.checked)}
-                className="accent-accent w-3.5 h-3.5 rounded"
-              />
-              <span className="text-xs text-text-sub group-hover:text-text transition-colors">
-                Include animations
-              </span>
-            </label>
+            {!isBlendExport && (
+              <>
+                <label className="flex items-center gap-2.5 cursor-pointer group">
+                  <input
+                    type="checkbox"
+                    checked={includeAttachments}
+                    onChange={(e) => setIncludeAttachments(e.target.checked)}
+                    className="accent-accent w-3.5 h-3.5 rounded"
+                  />
+                  <span className="text-xs text-text-sub group-hover:text-text transition-colors">
+                    Include attachments
+                  </span>
+                </label>
+                <label className="flex items-center gap-2.5 cursor-pointer group">
+                  <input
+                    type="checkbox"
+                    checked={includeLights}
+                    onChange={(e) => setIncludeLights(e.target.checked)}
+                    className="accent-accent w-3.5 h-3.5 rounded"
+                  />
+                  <span className="text-xs text-text-sub group-hover:text-text transition-colors">
+                    Include lights
+                  </span>
+                </label>
+                <label className="flex items-center gap-2.5 cursor-pointer group">
+                  <input
+                    type="checkbox"
+                    checked={includeAnimations}
+                    onChange={(e) => setIncludeAnimations(e.target.checked)}
+                    className="accent-accent w-3.5 h-3.5 rounded"
+                  />
+                  <span className="text-xs text-text-sub group-hover:text-text transition-colors">
+                    Include animations
+                  </span>
+                </label>
+              </>
+            )}
           </div>
 
           {/* Output directory */}

@@ -559,6 +559,50 @@ fn existing_native_blend_asset_is_rebuilt_when_path_exists() {
 }
 
 #[test]
+fn missing_mesh_payload_reuses_existing_native_blend_asset() {
+    let mesh = Mesh {
+        positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        indices: vec![0, 1, 2],
+        uvs: None,
+        secondary_uvs: None,
+        normals: None,
+        tangents: None,
+        colors: None,
+        submeshes: vec![test_submesh(0, "mat", 0)],
+        model_min: [0.0, 0.0, 0.0],
+        model_max: [1.0, 1.0, 0.0],
+        scaling_min: [0.0, 0.0, 0.0],
+        scaling_max: [1.0, 1.0, 0.0],
+    };
+    let existing_bytes = starbreaker_blend::compress_blend_bytes(&mesh_to_blend(
+        "existing_asset",
+        &mesh,
+        &None,
+        None,
+        None,
+    ));
+    let job = BlendAssetJob {
+        blend_path: "Data/Objects/existing_asset_LOD0.blend".to_string(),
+        mesh_name: "existing_asset_LOD0".to_string(),
+        blend_key: "data/objects/existing_asset_lod0.blend".to_string(),
+    };
+    let loader = |relative_path: &str| {
+        (relative_path == "Data/Objects/existing_asset_LOD0.blend").then(|| existing_bytes.clone())
+    };
+
+    let built = build_native_blend_asset(&job, &HashMap::new(), &HashMap::new(), Some(&loader)).unwrap();
+
+    assert!(
+        built.file.is_none(),
+        "reused native mesh assets should not be rebuilt when no fresh mesh payload is available"
+    );
+    assert_eq!(built.relative_path, "Data/Objects/existing_asset_LOD0.blend");
+    assert_eq!(built.linked_mesh_refs.len(), 1);
+    assert_eq!(built.linked_mesh_refs[0].object_name, "existing_asset");
+    assert_eq!(built.linked_mesh_refs[0].mesh_name, "existing_asset");
+}
+
+#[test]
 fn test_blend_material_slots_use_glb_style_names_and_deduplicate_ids() {
     let mesh = test_mesh_with_submeshes(vec![
         test_submesh(3, "Decal_POM", 0),

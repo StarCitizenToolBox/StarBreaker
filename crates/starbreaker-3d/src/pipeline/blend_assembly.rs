@@ -2353,14 +2353,15 @@ fn build_native_blend_asset(
     // Native mesh .blend assets carry generated vertex groups and modifiers.
     // Reusing a same-path on-disk copy would keep stale decal-offset data when
     // the exporter changes or the material-selection rule narrows.
-    let _ = existing_asset_loader;
-
-    let mesh_entry = mesh_data_map.get(&job.blend_key).ok_or_else(|| {
-        Error::Other(format!(
+    let Some(mesh_entry) = mesh_data_map.get(&job.blend_key) else {
+        if let Some(existing) = reusable_native_blend_asset(job, existing_asset_loader)? {
+            return Ok(existing);
+        }
+        return Err(Error::Other(format!(
             "native Blend export has no mesh payload for generated asset '{}'",
             job.blend_path
-        ))
-    })?;
+        )));
+    };
     let mut placement_mesh;
     let placement_name;
     let (mesh_name, mesh, nmc) = if mesh_entry.interior_placement_space {
