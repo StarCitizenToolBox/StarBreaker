@@ -247,6 +247,7 @@ pub fn assemble_glb_with_loadout_with_progress(
         let child_interiors = load_child_interiors(
             db,
             p4k,
+            &resolved.entity_name,
             &resolved.children,
             &root_container_names,
             opts,

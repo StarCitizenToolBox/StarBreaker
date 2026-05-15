@@ -79,6 +79,7 @@ pub(crate) fn load_interiors(
     log::info!("Discovering {} interior containers...", containers.len());
 
     let mut payloads = Vec::new();
+    let root_entity_name = db.resolve_string2(record.name_offset).to_string();
     let root_geom_compiled = db
         .compile_path::<String>(
             record.struct_id(),
@@ -97,32 +98,39 @@ pub(crate) fn load_interiors(
         .map(|container| {
             let helper_transform =
                 resolve_nmc_helper_transform(root_nmc.as_ref(), container.bone_name.as_deref());
-            let container_transform = compose_root_container_transform_raw(
+            let container_transform = compose_helper_relative_container_transform(
                 container.offset_position,
                 container.offset_rotation,
                 helper_transform,
             );
-            let non_item_port_transform = compose_root_container_transform(
+            let reference_transform = compose_root_container_transform(
                 container.offset_position,
                 container.offset_rotation,
                 helper_transform,
             );
-            let non_item_port_transform_delta = mat4_to_array(
-                mat4_from_array(&container_transform).inverse()
-                    * mat4_from_array(&non_item_port_transform),
-            );
-            (container, container_transform, non_item_port_transform_delta)
+            let parent_entity_name = helper_transform
+                .and(container.bone_name.as_ref().filter(|name| !name.is_empty()))
+                .map(|_| root_entity_name.clone());
+            let parent_node_name = helper_transform
+                .and(container.bone_name.as_ref().filter(|name| !name.is_empty()).cloned());
+            (
+                container,
+                container_transform,
+                reference_transform,
+                parent_entity_name,
+                parent_node_name,
+            )
         })
         .collect();
     let mut root_item_port_reference_candidates: std::collections::HashMap<String, Vec<[[f32; 4]; 4]>> =
         std::collections::HashMap::new();
-    for (container, container_transform, _) in &container_instances {
+    for (container, _, reference_transform, _, _) in &container_instances {
         root_item_port_reference_candidates
             .entry(container.file_name.to_ascii_lowercase())
             .or_default()
-            .push(*container_transform);
+            .push(*reference_transform);
     }
-    for (container, container_transform, non_item_port_transform_delta) in &container_instances {
+    for (container, container_transform, _, parent_entity_name, parent_node_name) in &container_instances {
         let reference_candidates = root_item_port_reference_candidates
             .get(&container.file_name.to_ascii_lowercase())
             .map(Vec::as_slice)
@@ -131,10 +139,19 @@ pub(crate) fn load_interiors(
             p4k,
             &container.file_name,
             *container_transform,
-            *non_item_port_transform_delta,
+            glam::Mat4::IDENTITY.to_cols_array_2d(),
             reference_candidates,
         ) {
-            Ok(p) => payloads.push(p),
+            Ok(mut payload) => {
+                payload.container_transform = normalize_root_light_only_container_transform(
+                    payload.container_transform,
+                    parent_entity_name.is_some(),
+                    &payload,
+                );
+                payload.parent_entity_name = parent_entity_name.clone();
+                payload.parent_node_name = parent_node_name.clone();
+                payloads.push(payload);
+            }
             Err(e) => log::warn!("failed to load {}: {e}", container.file_name),
         }
     }
@@ -251,7 +268,7 @@ fn compose_root_container_transform(
     mat4_to_array(base)
 }
 
-fn compose_root_container_transform_raw(
+fn compose_helper_relative_container_transform(
     offset_position: [f32; 3],
     offset_rotation: [f32; 3],
     helper_transform: Option<glam::Mat4>,
@@ -260,8 +277,13 @@ fn compose_root_container_transform_raw(
         offset_position,
         offset_rotation,
     ));
-    let base = helper_transform.unwrap_or(glam::Mat4::IDENTITY) * offset;
-    mat4_to_array(base)
+    let local = match helper_transform {
+        Some(helper_transform) if helper_transform_duplicates_offset(helper_transform, offset) => {
+            glam::Mat4::IDENTITY
+        }
+        Some(_) | None => offset,
+    };
+    mat4_to_array(local)
 }
 
 fn helper_transform_duplicates_offset(helper_transform: glam::Mat4, offset_transform: glam::Mat4) -> bool {
@@ -297,10 +319,51 @@ fn resolve_nmc_helper_transform(
     Some(helper_world)
 }
 
+fn child_interior_parent_target(
+    child: &crate::types::ResolvedNode,
+    scene_parent_entity_name: &str,
+    override_attachment: Option<&str>,
+    container_bone_name: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let child_creates_nodes = child.has_geometry || child.nmc.is_some();
+    let inherited_attachment = override_attachment
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&child.attachment_name);
+    if child_creates_nodes {
+        (
+            Some(child.entity_name.clone()),
+            container_bone_name
+                .filter(|name| !name.is_empty())
+                .map(ToOwned::to_owned),
+        )
+    } else {
+        (
+            Some(scene_parent_entity_name.to_string()),
+            container_bone_name
+                .filter(|name| !name.is_empty())
+                .map(ToOwned::to_owned)
+                .or_else(|| (!inherited_attachment.is_empty()).then(|| inherited_attachment.to_string())),
+        )
+    }
+}
+
+fn normalize_root_light_only_container_transform(
+    container_transform: [[f32; 4]; 4],
+    has_parent_helper: bool,
+    payload: &crate::types::InteriorPayload,
+) -> [[f32; 4]; 4] {
+    if has_parent_helper && payload.meshes.is_empty() && !payload.lights.is_empty() {
+        glam::Mat4::IDENTITY.to_cols_array_2d()
+    } else {
+        container_transform
+    }
+}
+
 /// Discovery pass for object containers authored on child loadout entities.
 pub(crate) fn load_child_interiors(
     db: &Database,
     p4k: &MappedP4k,
+    root_entity_name: &str,
     children: &[crate::types::ResolvedNode],
     root_container_names: &std::collections::HashSet<String>,
     opts: &ExportOptions,
@@ -312,6 +375,8 @@ pub(crate) fn load_child_interiors(
         db: &Database,
         p4k: &MappedP4k,
         child: &crate::types::ResolvedNode,
+        scene_parent_entity_name: &str,
+        override_attachment: Option<&str>,
         root_container_names: &std::collections::HashSet<String>,
         payloads: &mut Vec<crate::types::InteriorPayload>,
     ) {
@@ -346,8 +411,14 @@ pub(crate) fn load_child_interiors(
                     std::slice::from_ref(&container_transform),
                 ) {
                     Ok(mut payload) => {
-                        payload.parent_entity_name = Some(child.entity_name.clone());
-                        payload.parent_node_name = container.bone_name.clone();
+                        let (parent_entity_name, parent_node_name) = child_interior_parent_target(
+                            child,
+                            scene_parent_entity_name,
+                            override_attachment,
+                            container.bone_name.as_deref(),
+                        );
+                        payload.parent_entity_name = parent_entity_name;
+                        payload.parent_node_name = parent_node_name;
                         payloads.push(payload);
                     }
                     Err(e) => log::warn!("failed to load {}: {e}", container.file_name),
@@ -355,12 +426,40 @@ pub(crate) fn load_child_interiors(
             }
         }
         for grandchild in &child.children {
-            collect(db, p4k, grandchild, root_container_names, payloads);
+            let child_creates_nodes = child.has_geometry || child.nmc.is_some();
+            let inherited_attachment = override_attachment
+                .filter(|name| !name.is_empty())
+                .unwrap_or(&child.attachment_name);
+            collect(
+                db,
+                p4k,
+                grandchild,
+                if child_creates_nodes {
+                    &child.entity_name
+                } else {
+                    scene_parent_entity_name
+                },
+                if child_creates_nodes {
+                    None
+                } else {
+                    Some(inherited_attachment)
+                },
+                root_container_names,
+                payloads,
+            );
         }
     }
 
     for child in children {
-        collect(db, p4k, child, root_container_names, &mut payloads);
+        collect(
+            db,
+            p4k,
+            child,
+            root_entity_name,
+            None,
+            root_container_names,
+            &mut payloads,
+        );
     }
 
     build_interiors_from_payloads(db, p4k, &payloads, opts.include_lights, opts.lod_level)
@@ -1074,6 +1173,8 @@ pub(crate) fn preload_interior_textures(
 #[cfg(test)]
 mod tests {
     use super::{
+        child_interior_parent_target, compose_helper_relative_container_transform,
+        normalize_root_light_only_container_transform,
         compose_root_container_transform, entity_class_name_matches_record_short_name,
         helper_node_name_matches, helper_transform_duplicates_offset,
         remove_root_geometry_duplicate_interior_placements, resolve_nmc_helper_transform,
@@ -1157,6 +1258,45 @@ mod tests {
             [0.0, 0.0, 0.0],
         ));
 
+        let actual = transform.to_cols_array();
+        let expected = expected.to_cols_array();
+        for (actual, expected) in actual.iter().zip(expected.iter()) {
+            assert!((actual - expected).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn compose_helper_relative_container_transform_returns_identity_for_duplicate_helper() {
+        let helper = glam::Mat4::from_translation(glam::Vec3::new(
+            -0.012000000104308128,
+            -8.607000350952148,
+            -3.332000732421875,
+        ));
+        let transform = compose_helper_relative_container_transform(
+            [-0.0015102500328794122, -8.607000350952148, -3.3320000171661377],
+            [0.0, 0.0, 0.0],
+            Some(helper),
+        );
+        let transform = mat4_from_array(&transform);
+        let (scale, rotation, translation) = transform.to_scale_rotation_translation();
+        assert!(scale.abs_diff_eq(glam::Vec3::ONE, 1e-5));
+        assert!(rotation.angle_between(glam::Quat::IDENTITY) < 1e-5);
+        assert!(translation.abs_diff_eq(glam::Vec3::ZERO, 1e-5));
+    }
+
+    #[test]
+    fn compose_helper_relative_container_transform_keeps_offset_for_distinct_helper() {
+        let helper = glam::Mat4::from_translation(glam::Vec3::new(0.0, 20.0, 0.0));
+        let transform = compose_helper_relative_container_transform(
+            [0.0, 35.0, 0.0],
+            [0.0, 0.0, 0.0],
+            Some(helper),
+        );
+        let transform = mat4_from_array(&transform);
+        let expected = mat4_from_array(&crate::socpak::build_container_transform(
+            [0.0, 35.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ));
         let actual = transform.to_cols_array();
         let expected = expected.to_cols_array();
         for (actual, expected) in actual.iter().zip(expected.iter()) {
@@ -1267,5 +1407,136 @@ mod tests {
         assert_eq!(removed, 1);
         assert_eq!(interiors.containers[0].placements.len(), 1);
         assert_eq!(interiors.containers[1].placements.len(), 1);
+    }
+
+    #[test]
+    fn geometryless_child_interiors_use_inherited_scene_anchor() {
+        let child = crate::types::ResolvedNode {
+            entity_name: "MISC_Hull_C_Int_Rear".to_string(),
+            attachment_name: "hardpoint_body_int_rear".to_string(),
+            no_rotation: false,
+            offset_position: [0.0; 3],
+            offset_rotation: [0.0; 3],
+            detach_direction: [0.0; 3],
+            port_flags: String::new(),
+            nmc: None,
+            bones: Vec::new(),
+            has_geometry: false,
+            record: starbreaker_datacore::types::Record {
+                name_offset: starbreaker_datacore::types::StringId2(-1),
+                file_name_offset: starbreaker_datacore::types::StringId(0),
+                tag_offset: starbreaker_datacore::types::StringId2(-1),
+                struct_index: 0,
+                id: starbreaker_common::CigGuid::EMPTY,
+                instance_index: 0,
+                struct_size: 0,
+            },
+            geometry_path: None,
+            material_path: None,
+            allows_child_object_containers: true,
+            children: Vec::new(),
+        };
+
+        let (parent_entity_name, parent_node_name) = child_interior_parent_target(
+            &child,
+            "EntityClassDefinition.MISC_Hull_C",
+            None,
+            None,
+        );
+
+        assert_eq!(
+            parent_entity_name,
+            Some("EntityClassDefinition.MISC_Hull_C".to_string())
+        );
+        assert_eq!(
+            parent_node_name,
+            Some("hardpoint_body_int_rear".to_string())
+        );
+    }
+
+    #[test]
+    fn geometry_child_interiors_keep_child_entity_anchor() {
+        let child = crate::types::ResolvedNode {
+            entity_name: "MISC_Hull_C_CentralWalkway".to_string(),
+            attachment_name: "hardpoint_CentralWalkway".to_string(),
+            no_rotation: false,
+            offset_position: [0.0; 3],
+            offset_rotation: [0.0; 3],
+            detach_direction: [0.0; 3],
+            port_flags: String::new(),
+            nmc: None,
+            bones: Vec::new(),
+            has_geometry: true,
+            record: starbreaker_datacore::types::Record {
+                name_offset: starbreaker_datacore::types::StringId2(-1),
+                file_name_offset: starbreaker_datacore::types::StringId(0),
+                tag_offset: starbreaker_datacore::types::StringId2(-1),
+                struct_index: 0,
+                id: starbreaker_common::CigGuid::EMPTY,
+                instance_index: 0,
+                struct_size: 0,
+            },
+            geometry_path: Some("Objects/Spaceships/Ships/MISC/Hull_C/Interior_Rooms/Walkway_Rigged/Hull_C_Int_CentralWalkway.cdf".to_string()),
+            material_path: None,
+            allows_child_object_containers: true,
+            children: Vec::new(),
+        };
+
+        let (parent_entity_name, parent_node_name) = child_interior_parent_target(
+            &child,
+            "EntityClassDefinition.MISC_Hull_C",
+            None,
+            None,
+        );
+
+        assert_eq!(
+            parent_entity_name,
+            Some("MISC_Hull_C_CentralWalkway".to_string())
+        );
+        assert_eq!(parent_node_name, None);
+    }
+
+    #[test]
+    fn helper_parented_light_only_root_container_zeros_local_transform() {
+        let payload = crate::types::InteriorPayload {
+            name: "ext_lights_rear".to_string(),
+            parent_entity_name: None,
+            parent_node_name: None,
+            meshes: Vec::new(),
+            lights: vec![crate::types::LightInfo {
+                name: "Light".to_string(),
+                position: [0.0, 0.0, 0.0],
+                transform_basis: "cryengine_z_up".to_string(),
+                rotation: [1.0, 0.0, 0.0, 0.0],
+                direction_sc: [1.0, 0.0, 0.0],
+                color: [1.0, 1.0, 1.0],
+                light_type: "Omni".to_string(),
+                semantic_light_kind: "point".to_string(),
+                intensity_raw: 1.0,
+                intensity_unit: "cryengine_authored_intensity".to_string(),
+                intensity_candela_proxy: 1.0,
+                intensity: 1.0,
+                radius: 1.0,
+                radius_m: 1.0,
+                inner_angle: None,
+                outer_angle: None,
+                projector_texture: None,
+                active_state: String::new(),
+                states: std::collections::BTreeMap::new(),
+            }],
+            container_transform: crate::socpak::build_container_transform([0.0, -35.0, 0.0], [0.0, 0.0, 0.0]),
+            tint_palette_names: Vec::new(),
+        };
+
+        let transform = normalize_root_light_only_container_transform(
+            payload.container_transform,
+            true,
+            &payload,
+        );
+        let transform = mat4_from_array(&transform);
+        let (scale, rotation, translation) = transform.to_scale_rotation_translation();
+        assert!(scale.abs_diff_eq(glam::Vec3::ONE, 1e-5));
+        assert!(rotation.angle_between(glam::Quat::IDENTITY) < 1e-5);
+        assert!(translation.abs_diff_eq(glam::Vec3::ZERO, 1e-5));
     }
 }
