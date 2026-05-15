@@ -321,6 +321,45 @@ class TestMeshDecalNeutralBreakupDefault(unittest.TestCase):
             (1.0, 1.0, 1.0, 1.0),
         )
 
+    def test_returns_white_for_pom_mesh_decal_without_breakup_texture(self) -> None:
+        submaterial = SubmaterialRecord.from_value(
+            {
+                "shader_family": "MeshDecal",
+                "decoded_feature_flags": {
+                    "has_parallax_occlusion_mapping": True,
+                    "tokens": ["PARALLAX_OCCLUSION_MAPPING"],
+                },
+            }
+        )
+        group_contract = ShaderGroupContract(
+            name="SB_MeshDecal_v1",
+            shader_families=["MeshDecal"],
+            version=1,
+            shader_output="Shader",
+            inputs=[],
+            metadata={},
+            raw={},
+        )
+        contract_input = ContractInput(
+            name="TexSlot8_GrimeBreakup",
+            socket_type="NodeSocketColor",
+            semantic="grime_breakup",
+            source_slot="TexSlot8",
+            required=False,
+            default_value=None,
+            raw={},
+        )
+
+        self.assertEqual(
+            _mesh_decal_neutral_breakup_default(
+                group_contract,
+                submaterial,
+                contract_input,
+                source_socket=None,
+            ),
+            (1.0, 1.0, 1.0, 1.0),
+        )
+
     def test_returns_none_when_breakup_texture_is_present(self) -> None:
         submaterial = SubmaterialRecord.from_value(
             {

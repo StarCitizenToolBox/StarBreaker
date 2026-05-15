@@ -159,8 +159,6 @@ def _mesh_decal_neutral_breakup_default(
         return None
     if template_plan_for_submaterial(submaterial).template_key != "decal_stencil":
         return None
-    if not submaterial.decoded_feature_flags.has_stencil_map:
-        return None
     return (1.0, 1.0, 1.0, 1.0)
 
 
