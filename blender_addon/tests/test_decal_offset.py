@@ -78,6 +78,7 @@ from starbreaker_addon.manifest import MaterialSidecar, SubmaterialRecord
 from starbreaker_addon.runtime.importer.builders import (
     BuildersMixin,
     _mesh_decal_neutral_breakup_default,
+    _parallax_height_sampler_extension,
 )
 from starbreaker_addon.runtime.importer.decals import DecalsMixin
 from starbreaker_addon.runtime.importer.materials import MaterialsMixin
@@ -618,6 +619,13 @@ class DecalOffsetTests(unittest.TestCase):
         )
 
         self.assertAlmostEqual(importer._parallax_bias_value(submaterial), 0.75)
+
+    def test_parallax_height_sampler_extension_clips_default_uv_range(self) -> None:
+        self.assertEqual(_parallax_height_sampler_extension(1.0), "CLIP")
+        self.assertEqual(_parallax_height_sampler_extension(0.75), "CLIP")
+
+    def test_parallax_height_sampler_extension_repeats_explicit_tiling(self) -> None:
+        self.assertEqual(_parallax_height_sampler_extension(3.0), "REPEAT")
 
     def test_missing_mesh_decal_texture_defaults_alpha_to_zero(self) -> None:
         submaterial = SubmaterialRecord.from_value({"shader_family": "MeshDecal"})

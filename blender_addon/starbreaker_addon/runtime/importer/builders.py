@@ -128,6 +128,19 @@ def _clamp_unit_float(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
 
+def _parallax_height_sampler_extension(uv_tile: float) -> str:
+    """Mirror authored repeat intent for runtime POM height samplers.
+
+    POM materials only need sampler wrap mode ``REPEAT`` when the authored
+    material explicitly tiles the underlying surface beyond the base 0-1 UV
+    range. The exported layer manifest preserves that as ``uv_tiling``; every
+    other case should stay on ``CLIP`` to avoid sampling neighboring atlas
+    islands at glancing angles.
+    """
+
+    return "REPEAT" if float(uv_tile) > 1.0 + 1e-4 else "CLIP"
+
+
 def _layered_wear_metallic_values(
     base_layer: LayerManifestEntry | None,
     wear_layer: LayerManifestEntry | None,
@@ -286,13 +299,15 @@ class BuildersMixin:
         but authored height-bias overrides are preserved when available.
 
         ``uv_tile`` is the layer's UVTiling factor (default 1.0 = no
-        tiling).  The POM group incorporates the scale internally via its
+        tiling). The POM group incorporates the scale internally via its
         ``UV Scale X`` / ``UV Scale Y`` inputs so that both the starting
-        UV and the ray-march delta are scaled consistently.  Callers must
-        NOT also call ``_apply_uv_tiling`` on the same target nodes; any
-        pre-existing Mapping chain on a target's Vector socket is removed
-        before POM wiring so the orphaned nodes can be swept later by
-        ``_sweep_unreachable_nodes``.
+        UV and the ray-march delta are scaled consistently. Height-sampler
+        wrap mode also mirrors this authored repeat intent: explicit tiling
+        uses ``REPEAT`` while default UVs stay on ``CLIP`` to avoid atlas
+        bleed. Callers must NOT also call ``_apply_uv_tiling`` on the same
+        target nodes; any pre-existing Mapping chain on a target's Vector
+        socket is removed before POM wiring so the orphaned nodes can be
+        swept later by ``_sweep_unreachable_nodes``.
         """
         node_tree = material.node_tree
         if node_tree is None or height_node is None:
@@ -300,7 +315,10 @@ class BuildersMixin:
         if height_node.bl_idname != "ShaderNodeTexImage" or height_node.image is None:
             return None
 
-        pom_tree = self._ensure_runtime_parallax_group(height_image=height_node.image)
+        pom_tree = self._ensure_runtime_parallax_group(
+            height_image=height_node.image,
+            sampler_extension=_parallax_height_sampler_extension(uv_tile),
+        )
         if pom_tree is None:
             return None
 

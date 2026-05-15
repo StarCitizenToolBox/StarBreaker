@@ -2403,6 +2403,7 @@ class GroupsMixin:
     def _ensure_runtime_parallax_group(
         self,
         height_image: bpy.types.Image | None = None,
+        sampler_extension: str = "CLIP",
     ) -> bpy.types.ShaderNodeTree | None:
         """Phase 12 (POM plan, Phase 1 — revised): return a per-height-image
         copy of the production-quality POM pipeline authored in
@@ -2421,10 +2422,11 @@ class GroupsMixin:
 
         This helper appends the bundled ``POM_Vector`` + dependencies
         from ``starbreaker_addon/resources/pom_library.blend`` once per
-        *height image*, renames the appended chain with a stable
-        ``StarBreaker POM …`` prefix that encodes the image name, and
-        patches the embedded ``HeightMap`` / ``POM_disp`` tex samplers
-        to point at that image. Subsequent calls with the same image
+        *(height image, wrap mode)* pair, renames the appended chain
+        with a stable ``StarBreaker POM …`` prefix that encodes the
+        image name plus sampler extension, and patches the embedded
+        ``HeightMap`` / ``POM_disp`` tex samplers to point at that
+        image. Subsequent calls with the same image and wrap mode
         return the cached copy.
 
         Returns ``None`` when no height image is supplied (single-sample
@@ -2434,19 +2436,20 @@ class GroupsMixin:
         if height_image is None:
             return None
         image_key = height_image.name
-        cached_name = f"StarBreaker POM [{image_key}]"
+        sampler_extension = "REPEAT" if str(sampler_extension).upper() == "REPEAT" else "CLIP"
+        cached_name = f"StarBreaker POM [{image_key}] [{sampler_extension}]"
         cached = bpy.data.node_groups.get(cached_name)
         current_mode = self._current_pom_detail_mode()
         _configure_runtime_pom_detail_group(current_mode)
 
         def _configure_pom_sampler_nodes(root_tree: bpy.types.ShaderNodeTree) -> None:
-            """Bind the cached height image and enforce repeat wrap mode.
+            """Bind the cached height image and mirror the authored wrap mode.
 
             The authored POM library ships with CLIP extension on its internal
-            height samplers. CLIP clamps UVs to [0,1], which makes parallax
-            appear only on islands that stay in-range while the material's
-            surface samplers are repeating. We mirror surface-sampler behavior by
-            forcing REPEAT on all POM-internal image samplers.
+            height samplers. Materials with explicit surface tiling need REPEAT
+            so their parallax walk samples the same repeated field as the color
+            samplers; atlas-backed materials must stay on CLIP so glancing rays
+            cannot wrap into neighbouring atlas islands.
             """
 
             seen: set[int] = set()
@@ -2460,7 +2463,7 @@ class GroupsMixin:
                 for node in tree.nodes:
                     if node.bl_idname == "ShaderNodeTexImage":
                         node.image = height_image
-                        node.extension = "REPEAT"
+                        node.extension = sampler_extension
                     elif node.bl_idname == "ShaderNodeGroup" and node.node_tree is not None:
                         stack.append(node.node_tree)
 
