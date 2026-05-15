@@ -80,6 +80,7 @@ from .package_ops import (
     engine_glow_strength,
     decal_offset_control_enabled,
     delete_animation_instance,
+    dirty_package_material_objects,
     dump_selected_metadata,
     exterior_palette_ids,
     find_package_root,

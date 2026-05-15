@@ -36,7 +36,6 @@ from .runtime import (
     SCENE_POM_DETAIL_PROP,
     SCENE_ENGINE_GLOW_PROP,
     TEMPLATE_COLLECTION_NAME,
-    MaterialRefreshSession,
     apply_pom_detail_mode,
     SCENE_WEAR_STRENGTH_PROP,
     animation_overlap_warnings,
@@ -53,6 +52,7 @@ from .runtime import (
     engine_glow_control_enabled,
     engine_glow_strength,
     decal_offset_control_enabled,
+    dirty_package_material_objects,
     dump_selected_metadata,
     exterior_palette_ids,
     find_package_root,
@@ -62,7 +62,6 @@ from .runtime import (
     solo_animation_instance,
     package_animation_instances,
     package_animation_mode_map,
-    package_root_needs_material_refresh,
     refresh_materials_for_package_root,
     resolve_package_scene_path,
     update_animation_instance_start_frame,
@@ -98,9 +97,10 @@ _SCENE_ANIMATION_FPS_POLICY_PROP = "starbreaker_animation_fps_policy"
 _IMPORT_PROGRESS_ACTIVE_PROP = "starbreaker_import_progress_active"
 _IMPORT_PROGRESS_VALUE_PROP = "starbreaker_import_progress_value"
 _IMPORT_PROGRESS_DESCRIPTION_PROP = "starbreaker_import_progress_description"
+_IMPORT_PROGRESS_INDETERMINATE_PROP = "starbreaker_import_progress_indeterminate"
+_IMPORT_PROGRESS_TEXT_ONLY_PROP = "starbreaker_import_progress_text_only"
 _IMPORT_PROGRESS_LAST_UPDATE = 0.0
 _IMPORT_PROGRESS_DRAW_HANDLER = None
-_AUTO_MATERIAL_REFRESH_SESSION: MaterialRefreshSession | None = None
 _AUTO_MATERIAL_REFRESH_TOKEN = 0
 
 
@@ -142,6 +142,111 @@ def _set_active_object(context: bpy.types.Context, obj: bpy.types.Object | None)
     view_layer = getattr(context, "view_layer", None)
     if view_layer is not None and obj is not None:
         view_layer.objects.active = obj
+
+
+def _object_parent_depth(obj: object) -> int:
+    depth = 0
+    parent = getattr(obj, "parent", None)
+    while parent is not None:
+        depth += 1
+        parent = getattr(parent, "parent", None)
+    return depth
+
+
+def _loaded_package_roots(
+    objects: object,
+    *,
+    max_depth: int = 2,
+) -> list[bpy.types.Object]:
+    roots: list[bpy.types.Object] = []
+    for obj in objects:
+        get_prop = getattr(obj, "get", None)
+        if not callable(get_prop) or not bool(get_prop(PROP_PACKAGE_ROOT)):
+            continue
+        if _object_parent_depth(obj) > max_depth:
+            continue
+        roots.append(obj)
+    roots.sort(key=lambda candidate: (_object_parent_depth(candidate), getattr(candidate, "name", "")))
+    return roots
+
+
+def _open_view3d_sidebar(context: bpy.types.Context) -> None:
+    window = getattr(context, "window", None)
+    screen = getattr(window, "screen", None)
+    if screen is None:
+        return
+    for area in screen.areas:
+        if area.type != "VIEW_3D":
+            continue
+        spaces = getattr(area, "spaces", None)
+        active_space = spaces.active if spaces is not None else None
+        if active_space is not None and hasattr(active_space, "show_region_ui"):
+            active_space.show_region_ui = True
+        ui_region = next((region for region in area.regions if region.type == "UI"), None)
+        if ui_region is not None and hasattr(ui_region, "active_panel_category"):
+            try:
+                ui_region.active_panel_category = "StarBreaker"
+            except Exception:
+                pass
+        area.tag_redraw()
+
+
+def _focus_loaded_package_root(context: bpy.types.Context, package_root: bpy.types.Object) -> None:
+    for obj in getattr(context, "selected_objects", []):
+        try:
+            obj.select_set(False)
+        except Exception:
+            pass
+    try:
+        package_root.select_set(True)
+    except Exception:
+        pass
+    _set_active_object(context, package_root)
+    _open_view3d_sidebar(context)
+    _tag_view3d_redraws(context)
+
+
+def _view3d_sidebar_categories(context: bpy.types.Context) -> list[str | None]:
+    categories: list[str | None] = []
+    window = getattr(context, "window", None)
+    screen = getattr(window, "screen", None)
+    if screen is None:
+        return categories
+    for area in screen.areas:
+        if area.type != "VIEW_3D":
+            continue
+        ui_region = next((region for region in area.regions if region.type == "UI"), None)
+        categories.append(getattr(ui_region, "active_panel_category", None) if ui_region is not None else None)
+    return categories
+
+
+def _deferred_focus_loaded_package_root(
+    package_root_name: str,
+    retries_remaining: int = 5,
+) -> None:
+    package_root = bpy.data.objects.get(package_root_name)
+    if package_root is None:
+        return None
+    get_prop = getattr(package_root, "get", None)
+    if not callable(get_prop) or not bool(get_prop(PROP_PACKAGE_ROOT)):
+        return None
+    context = bpy.context
+    _focus_loaded_package_root(context, package_root)
+    categories = _view3d_sidebar_categories(context)
+    if categories and any(category != "StarBreaker" for category in categories):
+        if retries_remaining > 0:
+            try:
+                bpy.app.timers.register(
+                    lambda root_name=package_root_name, retries=retries_remaining - 1: _deferred_focus_loaded_package_root(
+                        root_name,
+                        retries,
+                    ),
+                    first_interval=0.5,
+                    persistent=False,
+                )
+            except Exception:
+                pass
+    return None
 
 
 def _collapse_template_cache_outliner(context: bpy.types.Context) -> None:
@@ -416,9 +521,11 @@ def _draw_import_progress_overlay() -> None:
 
     fraction = _progress_fraction(getattr(window_manager, _IMPORT_PROGRESS_VALUE_PROP, 0.0))
     description = getattr(window_manager, _IMPORT_PROGRESS_DESCRIPTION_PROP, "Preparing import")
+    indeterminate = bool(getattr(window_manager, _IMPORT_PROGRESS_INDETERMINATE_PROP, False))
+    text_only = bool(getattr(window_manager, _IMPORT_PROGRESS_TEXT_ONLY_PROP, False))
 
     panel_width = min(480.0, max(region.width - 80.0, 320.0))
-    panel_height = 96.0
+    panel_height = 64.0 if text_only else 96.0
     panel_x = (region.width - panel_width) * 0.5
     panel_y = region.height * 0.12
     padding = 16.0
@@ -440,25 +547,28 @@ def _draw_import_progress_overlay() -> None:
     gpu.state.blend_set("ALPHA")
     draw_rect(panel_x, panel_y, panel_width, panel_height, (0.05, 0.07, 0.09, 0.88))
     draw_rect(panel_x + 1.0, panel_y + 1.0, panel_width - 2.0, panel_height - 2.0, (0.10, 0.12, 0.15, 0.92))
-    draw_rect(bar_x, bar_y, bar_width, bar_height, (0.18, 0.21, 0.25, 1.0))
-    if fraction > 0.0:
-        draw_rect(bar_x, bar_y, bar_width * fraction, bar_height, (0.23, 0.62, 0.86, 1.0))
+    if not text_only:
+        draw_rect(bar_x, bar_y, bar_width, bar_height, (0.18, 0.21, 0.25, 1.0))
+        if not indeterminate and fraction > 0.0:
+            draw_rect(bar_x, bar_y, bar_width * fraction, bar_height, (0.23, 0.62, 0.86, 1.0))
     gpu.state.blend_set("NONE")
 
     font_id = 0
-    try:
-        blf.size(font_id, 14.0)
-    except TypeError:
-        blf.size(font_id, 14, 72)
     blf.color(font_id, 0.96, 0.97, 0.98, 1.0)
-    blf.position(font_id, bar_x + bar_width + 16.0, bar_y + 4.0, 0)
-    blf.draw(font_id, f"{int(round(fraction * 100.0))}%")
+    if not text_only:
+        try:
+            blf.size(font_id, 14.0)
+        except TypeError:
+            blf.size(font_id, 14, 72)
+        blf.position(font_id, bar_x + bar_width + 16.0, bar_y + 4.0, 0)
+        blf.draw(font_id, "..." if indeterminate else f"{int(round(fraction * 100.0))}%")
 
     try:
         blf.size(font_id, 13.0)
     except TypeError:
         blf.size(font_id, 13, 72)
-    blf.position(font_id, bar_x, panel_y + padding, 0)
+    description_y = panel_y + padding if not text_only else panel_y + ((panel_height - 13.0) * 0.5)
+    blf.position(font_id, bar_x, description_y, 0)
     blf.draw(font_id, description)
 
 
@@ -482,12 +592,20 @@ def _remove_import_progress_overlay() -> None:
     _IMPORT_PROGRESS_DRAW_HANDLER = None
 
 
-def _begin_import_progress(context: bpy.types.Context, description: str) -> None:
+def _begin_import_progress(
+    context: bpy.types.Context,
+    description: str,
+    *,
+    indeterminate: bool = False,
+    text_only: bool = False,
+) -> None:
     global _IMPORT_PROGRESS_LAST_UPDATE
     window_manager = context.window_manager
     setattr(window_manager, _IMPORT_PROGRESS_ACTIVE_PROP, True)
     setattr(window_manager, _IMPORT_PROGRESS_VALUE_PROP, 0.0)
     setattr(window_manager, _IMPORT_PROGRESS_DESCRIPTION_PROP, description)
+    setattr(window_manager, _IMPORT_PROGRESS_INDETERMINATE_PROP, indeterminate)
+    setattr(window_manager, _IMPORT_PROGRESS_TEXT_ONLY_PROP, text_only)
     _IMPORT_PROGRESS_LAST_UPDATE = 0.0
     _ensure_import_progress_overlay()
     _tag_view3d_redraws(context)
@@ -513,6 +631,7 @@ def _update_import_progress(
     clamped = _progress_fraction(fraction)
     setattr(window_manager, _IMPORT_PROGRESS_VALUE_PROP, clamped)
     setattr(window_manager, _IMPORT_PROGRESS_DESCRIPTION_PROP, description)
+    setattr(window_manager, _IMPORT_PROGRESS_INDETERMINATE_PROP, False)
     _IMPORT_PROGRESS_LAST_UPDATE = now
     try:
         window_manager.progress_update(int(round(clamped * 100.0)))
@@ -530,6 +649,8 @@ def _end_import_progress(context: bpy.types.Context, description: str) -> None:
     window_manager = context.window_manager
     _update_import_progress(context, 1.0, description, force=True)
     setattr(window_manager, _IMPORT_PROGRESS_ACTIVE_PROP, False)
+    setattr(window_manager, _IMPORT_PROGRESS_INDETERMINATE_PROP, False)
+    setattr(window_manager, _IMPORT_PROGRESS_TEXT_ONLY_PROP, False)
     _tag_view3d_redraws(context)
     try:
         window_manager.progress_end()
@@ -844,6 +965,11 @@ class STARBREAKER_OT_import_progress_popup(Operator):
         window_manager = context.window_manager
         fraction = _progress_fraction(getattr(window_manager, _IMPORT_PROGRESS_VALUE_PROP, 0.0))
         description = getattr(window_manager, _IMPORT_PROGRESS_DESCRIPTION_PROP, "Preparing import")
+        text_only = bool(getattr(window_manager, _IMPORT_PROGRESS_TEXT_ONLY_PROP, False))
+
+        if text_only:
+            layout.label(text=description)
+            return
 
         row = layout.row(align=True)
         bar = row.row()
@@ -1328,6 +1454,9 @@ class STARBREAKER_PT_tools(Panel):
         obj = context.active_object
         package_root = _package_root_from_context(context)
         if package_root is None:
+            layout.label(text="Open scene.blend or other")
+            layout.label(text="StarBreaker exported .blend file")
+            layout.label(text="for more options")
             return
 
         package = _selected_package(context)
@@ -1582,60 +1711,77 @@ def _should_auto_refresh_package_root(obj: object, needs_material_refresh: objec
 
 
 def _material_refresh_prompt_timer(token: int | None = None) -> float | None:
-    global _AUTO_MATERIAL_REFRESH_SESSION
     if token is not None and token != _AUTO_MATERIAL_REFRESH_TOKEN:
         return None
     context = bpy.context
     prefs = _get_prefs()
-    if _AUTO_MATERIAL_REFRESH_SESSION is not None:
-        session = _AUTO_MATERIAL_REFRESH_SESSION
-        done = session.step(budget_seconds=0.04, min_objects=2)
-        package_name = session.package_root.get(PROP_PACKAGE_NAME, session.package.package_name)
-        _update_import_progress(
-            context,
-            session.progress,
-            f"Refreshing materials for {package_name}",
-            force=done,
-            redraw=False,
-        )
-        if done:
-            _end_import_progress(
-                context,
-                f"Refreshed {session.applied} material slots for {package_name}",
-            )
-            _AUTO_MATERIAL_REFRESH_SESSION = None
-            return None
-        return 0.01
 
     if not _should_auto_refresh_unloaded_materials_on_load(prefs):
         return None
 
-    for obj in bpy.data.objects:
-        if not _should_auto_refresh_package_root(obj, package_root_needs_material_refresh):
+    package_roots = _loaded_package_roots(bpy.data.objects, max_depth=2)
+    if package_roots:
+        _focus_loaded_package_root(context, package_roots[0])
+        try:
+            bpy.app.timers.register(
+                lambda root_name=package_roots[0].name: _deferred_focus_loaded_package_root(root_name),
+                first_interval=0.25,
+                persistent=False,
+            )
+        except Exception:
+            pass
+
+    for obj in package_roots:
+        get_prop = getattr(obj, "get", None)
+        if not callable(get_prop) or not bool(get_prop(PROP_PACKAGE_ROOT)):
+            continue
+        dirty_objects = dirty_package_material_objects(obj)
+        if not dirty_objects:
             continue
         palette_id = obj.get(PROP_PALETTE_ID, "")
-        _AUTO_MATERIAL_REFRESH_SESSION = MaterialRefreshSession(
+        package_name = obj.get(PROP_PACKAGE_NAME, obj.name)
+        _begin_import_progress(
+            context,
+            "Loading materials, please wait",
+            indeterminate=True,
+            text_only=True,
+        )
+        try:
+            bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=1)
+        except Exception:
+            pass
+        progress_callback = lambda fraction, description: _update_import_progress(
+            context,
+            fraction,
+            "Loading materials, please wait",
+            force=True,
+            redraw=False,
+        )
+        applied = refresh_materials_for_package_root(
             context,
             obj,
             palette_id if isinstance(palette_id, str) and palette_id else None,
+            only_unloaded=True,
+            target_objects=dirty_objects,
+            progress_callback=progress_callback,
+            progress_interval_seconds=5.0,
         )
-        _begin_import_progress(
+        _end_import_progress(
             context,
-            f"Refreshing materials for {obj.get(PROP_PACKAGE_NAME, obj.name)}",
+            f"Refreshed {applied} material slots for {package_name}",
         )
-        return 0.01
+        return None
     return None
 
 
 @persistent
 def _starbreaker_load_post(_dummy: object) -> None:
-    global _AUTO_MATERIAL_REFRESH_SESSION, _AUTO_MATERIAL_REFRESH_TOKEN
-    _AUTO_MATERIAL_REFRESH_SESSION = None
+    global _AUTO_MATERIAL_REFRESH_TOKEN
     _AUTO_MATERIAL_REFRESH_TOKEN += 1
     token = _AUTO_MATERIAL_REFRESH_TOKEN
     bpy.app.timers.register(
         lambda: _material_refresh_prompt_timer(token),
-        first_interval=0.5,
+        first_interval=0.05,
         persistent=False,
     )
 
@@ -1678,6 +1824,16 @@ def register() -> None:
         bpy.types.WindowManager,
         _IMPORT_PROGRESS_DESCRIPTION_PROP,
         StringProperty(name="StarBreaker Import Progress Description", default=""),
+    )
+    setattr(
+        bpy.types.WindowManager,
+        _IMPORT_PROGRESS_INDETERMINATE_PROP,
+        BoolProperty(name="StarBreaker Import Progress Indeterminate", default=False),
+    )
+    setattr(
+        bpy.types.WindowManager,
+        _IMPORT_PROGRESS_TEXT_ONLY_PROP,
+        BoolProperty(name="StarBreaker Import Progress Text Only", default=False),
     )
     setattr(
         bpy.types.Scene,
@@ -1811,6 +1967,8 @@ def unregister() -> None:
         _IMPORT_PROGRESS_ACTIVE_PROP,
         _IMPORT_PROGRESS_VALUE_PROP,
         _IMPORT_PROGRESS_DESCRIPTION_PROP,
+        _IMPORT_PROGRESS_INDETERMINATE_PROP,
+        _IMPORT_PROGRESS_TEXT_ONLY_PROP,
     ):
         if hasattr(bpy.types.WindowManager, prop_name):
             delattr(bpy.types.WindowManager, prop_name)

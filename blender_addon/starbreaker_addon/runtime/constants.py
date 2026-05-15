@@ -39,6 +39,8 @@ PROP_PAINT_VARIANT_SIDECAR = "starbreaker_paint_variant_sidecar"
 PROP_SOURCE_NODE_NAME = "starbreaker_source_node_name"
 PROP_MISSING_ASSET = "starbreaker_missing_asset"
 PROP_SURFACE_SHADER_MODE = "starbreaker_surface_shader_mode"
+PROP_DECAL_HOST_CHANNEL = "starbreaker_decal_host_channel"
+PROP_DECAL_HOST_RGB = "starbreaker_decal_host_rgb"
 # True when the source submaterial's StringGenMask decoded to
 # ``has_parallax_occlusion_mapping``. Used by the MeshDecal host-tint
 # rebinder to keep host tint on POM decals only (phases 10+11).

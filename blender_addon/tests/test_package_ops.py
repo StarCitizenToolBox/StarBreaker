@@ -775,11 +775,11 @@ class PackageOpsTests(unittest.TestCase):
             self.assertTrue(self.package_ops.package_root_needs_material_refresh(package_root))
 
             mesh.material_slots = [
-                FakeSlot(FakeMaterial("linked", library=object(), starbreaker_material_identity="id"))
+                FakeSlot(FakeMaterial("mesh_mtl_local_00", library=object(), starbreaker_material_identity="id"))
             ]
             self.assertTrue(self.package_ops.package_root_needs_material_refresh(package_root))
 
-            mesh.material_slots = [FakeSlot(FakeMaterial("local_placeholder"))]
+            mesh.material_slots = [FakeSlot(FakeMaterial("mesh_mtl_local_00"))]
             self.assertTrue(self.package_ops.package_root_needs_material_refresh(package_root))
 
             local_built = FakeMaterial("local_built")
@@ -793,6 +793,148 @@ class PackageOpsTests(unittest.TestCase):
             self.assertFalse(self.package_ops.package_root_needs_material_refresh(package_root))
         finally:
             self.package_ops._load_package_from_root = original_load
+
+    def test_package_root_needs_material_refresh_ignores_unmappable_placeholder(self) -> None:
+        package_root = FakeObject("Root", starbreaker_package_root=True)
+        mesh = FakeObject("mesh", starbreaker_material_sidecar="mesh.materials.json")
+        mesh.type = "MESH"
+        mesh.parent = package_root
+        package_root.children.append(mesh)
+        mesh.material_slots = [FakeSlot(FakeMaterial("mesh_mtl_material_0_00"))]
+        sidecar = types.SimpleNamespace(
+            submaterials=[types.SimpleNamespace(index=0, submaterial_name="ActualMaterial")]
+        )
+        package = types.SimpleNamespace(load_material_sidecar=lambda _path: sidecar)
+        original_load = self.package_ops._load_package_from_root
+        try:
+            self.package_ops._load_package_from_root = lambda _root: package
+            self.assertFalse(self.package_ops.package_root_needs_material_refresh(package_root))
+        finally:
+            self.package_ops._load_package_from_root = original_load
+
+    def test_refresh_materials_for_package_root_only_unloaded_skips_built_meshes(self) -> None:
+        @contextmanager
+        def _no_suspend(_context):
+            yield
+
+        @contextmanager
+        def _no_mode(_context):
+            yield
+
+        package_root = FakeObject(
+            "StarBreaker Test",
+            starbreaker_package_root=True,
+            starbreaker_scene_path="/tmp/test/scene.json",
+        )
+        dirty_mesh = FakeObject("dirty", starbreaker_material_sidecar="mesh.materials.json")
+        dirty_mesh.type = "MESH"
+        dirty_mesh.data = FakeMeshData(FakeUVLayers(["UVMap"]))
+        dirty_mesh.parent = package_root
+        dirty_mesh.material_slots = [FakeSlot(FakeMaterial("mesh_mtl_Mat_A_00"))]
+        package_root.children.append(dirty_mesh)
+
+        built_mesh = FakeObject("built", starbreaker_material_sidecar="mesh.materials.json")
+        built_mesh.type = "MESH"
+        built_mesh.data = FakeMeshData(FakeUVLayers(["UVMap"]))
+        built_mesh.parent = package_root
+        built_material = FakeMaterial("mesh_mtl_Mat_A_00")
+        built_material.node_tree = FakeNodeTree(1.0)
+        built_mesh.material_slots = [FakeSlot(built_material)]
+        package_root.children.append(built_mesh)
+
+        sidecar = types.SimpleNamespace(
+            submaterials=[types.SimpleNamespace(index=0, submaterial_name="Mat_A")]
+        )
+        package = types.SimpleNamespace(
+            scene_path=Path("/tmp/test/scene.json"),
+            package_name="Test Package",
+            load_material_sidecar=lambda _path: sidecar,
+        )
+        importer_stub = sys.modules["sb_pkg_test_runtime.importer"]
+        importer_stub.events = []
+        original_load = self.package_ops._load_package_from_root
+        original_suspend = self.package_ops._suspend_heavy_viewports
+        original_mode = self.package_ops._temporary_object_mode
+        try:
+            self.package_ops._load_package_from_root = lambda _root: package
+            self.package_ops._suspend_heavy_viewports = _no_suspend
+            self.package_ops._temporary_object_mode = _no_mode
+            applied = self.package_ops.refresh_materials_for_package_root(
+                types.SimpleNamespace(view_layer=FakeViewLayer()),
+                package_root,
+                only_unloaded=True,
+            )
+        finally:
+            self.package_ops._load_package_from_root = original_load
+            self.package_ops._suspend_heavy_viewports = original_suspend
+            self.package_ops._temporary_object_mode = original_mode
+
+        self.assertEqual(applied, 1)
+        self.assertEqual(importer_stub.events, [("rebuild", "dirty", None)])
+
+    def test_refresh_materials_for_package_root_reports_coarse_progress(self) -> None:
+        @contextmanager
+        def _no_suspend(_context):
+            yield
+
+        @contextmanager
+        def _no_mode(_context):
+            yield
+
+        package_root = FakeObject(
+            "StarBreaker Test",
+            starbreaker_package_root=True,
+            starbreaker_scene_path="/tmp/test/scene.json",
+        )
+        meshes = []
+        for name in ("mesh_a", "mesh_b", "mesh_c"):
+            mesh = FakeObject(name, starbreaker_material_sidecar=f"{name}.materials.json")
+            mesh.type = "MESH"
+            mesh.data = FakeMeshData(FakeUVLayers(["UVMap"]))
+            mesh.parent = package_root
+            package_root.children.append(mesh)
+            meshes.append(mesh)
+
+        package = types.SimpleNamespace(
+            scene_path=Path("/tmp/test/scene.json"),
+            package_name="Test Package",
+            load_material_sidecar=lambda path: types.SimpleNamespace(submaterials=[types.SimpleNamespace(index=0, submaterial_name=path)]),
+        )
+        importer_stub = sys.modules["sb_pkg_test_runtime.importer"]
+        importer_stub.events = []
+        progress_updates: list[tuple[float, str]] = []
+        clock_values = iter([0.0, 1.0, 2.0, 6.0, 7.0, 8.0, 9.0, 10.0])
+        original_load = self.package_ops._load_package_from_root
+        original_suspend = self.package_ops._suspend_heavy_viewports
+        original_mode = self.package_ops._temporary_object_mode
+        original_monotonic = self.package_ops.time.monotonic
+        try:
+            self.package_ops._load_package_from_root = lambda _root: package
+            self.package_ops._suspend_heavy_viewports = _no_suspend
+            self.package_ops._temporary_object_mode = _no_mode
+            self.package_ops.time.monotonic = lambda: next(clock_values)
+            applied = self.package_ops.refresh_materials_for_package_root(
+                types.SimpleNamespace(view_layer=FakeViewLayer()),
+                package_root,
+                progress_callback=lambda fraction, description: progress_updates.append((fraction, description)),
+                progress_interval_seconds=5.0,
+            )
+        finally:
+            self.package_ops._load_package_from_root = original_load
+            self.package_ops._suspend_heavy_viewports = original_suspend
+            self.package_ops._temporary_object_mode = original_mode
+            self.package_ops.time.monotonic = original_monotonic
+
+        self.assertEqual(applied, 3)
+        self.assertEqual(
+            [description for _, description in progress_updates],
+            [
+                "Refreshing 0/3 objects",
+                "Refreshing 3/3 objects",
+                "Cleaning up...",
+                "Done",
+            ],
+        )
 
     def test_apply_engine_glow_to_package_root_updates_targeted_materials(self) -> None:
         package_root = FakeObject(

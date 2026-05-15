@@ -32,6 +32,7 @@ from .constants import (
     PROP_ENGINE_GLOW_CONTROL_JSON,
     PROP_ENGINE_GLOW_STRENGTH,
     PROP_INSTANCE_JSON,
+    PROP_IMPORTED_SLOT_MAP,
     PROP_LIGHT_ACTIVE_STATE,
     PROP_LIGHT_SEMANTIC_KIND,
     PROP_LIGHT_STATES_JSON,
@@ -231,6 +232,11 @@ def refresh_materials_for_package_root(
     context: bpy.types.Context,
     package_root: bpy.types.Object,
     palette_id: str | None = None,
+    *,
+    only_unloaded: bool = False,
+    target_objects: list[bpy.types.Object] | None = None,
+    progress_callback: Callable[[float, str], None] | None = None,
+    progress_interval_seconds: float = 0.0,
 ) -> int:
     from .importer import PackageImporter
 
@@ -238,17 +244,41 @@ def refresh_materials_for_package_root(
     importer = PackageImporter(context, package, package_root=package_root, create_template_collection=False)
     applied = 0
     needs_view_layer_update = False
+    sidecar_cache: dict[str, Any] = {}
+    objects = target_objects if target_objects is not None else list(_iter_package_objects(package_root))
+    work_items: list[tuple[bpy.types.Object, str, Any]] = []
+    for obj in objects:
+        if getattr(obj, "type", None) != "MESH":
+            continue
+        sidecar_path = _string_prop(obj, PROP_MATERIAL_SIDECAR)
+        if sidecar_path is None:
+            continue
+        sidecar = _material_refresh_sidecar(package, sidecar_cache, sidecar_path)
+        if only_unloaded and target_objects is None and not _object_needs_material_refresh(obj, sidecar):
+            continue
+        work_items.append((obj, sidecar_path, sidecar))
+    total_work_items = len(work_items)
+    last_progress_update = time.monotonic()
+    if progress_callback is not None:
+        progress_callback(0.0, f"Refreshing 0/{total_work_items} objects")
     with _suspend_heavy_viewports(context), _temporary_object_mode(context):
-        for obj in _iter_package_objects(package_root):
-            if getattr(obj, "type", None) != "MESH":
-                continue
-            if _string_prop(obj, PROP_MATERIAL_SIDECAR) is None:
-                continue
+        for index, (obj, _sidecar_path, _sidecar) in enumerate(work_items, start=1):
             object_palette_id = _material_refresh_palette_id(package, obj, palette_id)
             applied += importer.rebuild_object_materials(obj, object_palette_id)
             needs_view_layer_update = _refresh_mesh_material_evaluation(obj) or needs_view_layer_update
             if palette_id is not None:
                 obj[PROP_PALETTE_ID] = palette_id
+            if progress_callback is not None:
+                now = time.monotonic()
+                if (
+                    index == total_work_items
+                    or now - last_progress_update >= progress_interval_seconds
+                ):
+                    last_progress_update = now
+                    progress_callback(
+                        0.95 * (index / max(total_work_items, 1)),
+                        f"Refreshing {index}/{total_work_items} objects",
+                    )
         if palette_id is not None:
             package_root[PROP_PALETTE_ID] = palette_id
     if needs_view_layer_update:
@@ -258,10 +288,14 @@ def refresh_materials_for_package_root(
             update()
     if engine_glow_control_enabled(package_root):
         apply_engine_glow_to_package_root(package_root, engine_glow_strength(package_root))
+    if progress_callback is not None:
+        progress_callback(0.95, "Cleaning up...")
     _purge_orphaned_managed_materials()
     _purge_orphaned_runtime_groups()
     _purge_orphaned_runtime_actions()
     _purge_orphaned_file_backed_images()
+    if progress_callback is not None:
+        progress_callback(1.0, "Done")
     return applied
 
 
@@ -521,29 +555,31 @@ def _tag_id_for_refresh(data_block: Any) -> bool:
 
 
 def package_root_needs_material_refresh(package_root: bpy.types.Object) -> bool:
+    return bool(dirty_package_material_objects(package_root, limit=1))
+
+
+def dirty_package_material_objects(
+    package_root: bpy.types.Object,
+    *,
+    limit: int | None = None,
+) -> list[bpy.types.Object]:
     package: PackageBundle | None = None
     sidecar_cache: dict[str, Any] = {}
+    dirty_objects: list[bpy.types.Object] = []
     for obj in _iter_package_objects(package_root):
         if getattr(obj, "type", None) != "MESH":
             continue
         sidecar_path = _string_prop(obj, PROP_MATERIAL_SIDECAR)
         if sidecar_path is None:
             continue
-        material_slots = getattr(obj, "material_slots", ())
-        if len(material_slots) == 0:
-            if package is None:
-                package = _load_package_from_root(package_root)
-            sidecar = _material_refresh_sidecar(package, sidecar_cache, sidecar_path)
-            if _sidecar_has_submaterial_index(sidecar, 0):
-                return True
-            continue
-        for slot in material_slots:
-            material = getattr(slot, "material", None)
-            if material is None:
-                continue
-            if _material_slot_needs_refresh(material):
-                return True
-    return False
+        if package is None:
+            package = _load_package_from_root(package_root)
+        sidecar = _material_refresh_sidecar(package, sidecar_cache, sidecar_path)
+        if _object_needs_material_refresh(obj, sidecar):
+            dirty_objects.append(obj)
+            if limit is not None and len(dirty_objects) >= limit:
+                break
+    return dirty_objects
 
 
 def _material_slot_needs_refresh(material: Any) -> bool:
@@ -556,6 +592,106 @@ def _material_slot_needs_refresh(material: Any) -> bool:
     if nodes is not None and len(nodes) == 0:
         return True
     return False
+
+
+def _object_needs_material_refresh(obj: bpy.types.Object, sidecar: Any) -> bool:
+    material_slots = getattr(obj, "material_slots", ())
+    if len(material_slots) == 0:
+        return _sidecar_has_submaterial_index(sidecar, 0)
+    for slot_index, slot in enumerate(material_slots):
+        material = getattr(slot, "material", None)
+        if material is None or not _material_slot_needs_refresh(material):
+            continue
+        if _material_slot_can_refresh(obj, slot_index, material, sidecar):
+            return True
+    return False
+
+
+def _material_slot_can_refresh(
+    obj: bpy.types.Object,
+    slot_index: int,
+    material: Any,
+    sidecar: Any,
+) -> bool:
+    slot_mapping = _slot_mapping_for_object(obj)
+    if slot_mapping is not None and slot_index < len(slot_mapping):
+        mapped_index = slot_mapping[slot_index]
+        if mapped_index is not None and _sidecar_has_submaterial_index(sidecar, mapped_index):
+            return True
+
+    material_name = getattr(material, "name", "")
+    if not isinstance(material_name, str) or not material_name:
+        return False
+    canonical_name = _canonical_source_name(material_name)
+    if not canonical_name:
+        return False
+    if canonical_name in _unique_submaterials_by_name(sidecar):
+        return True
+    return canonical_name in _submaterials_by_name(sidecar)
+
+
+def _canonical_source_name(name: str) -> str:
+    if len(name) > 4 and name[-4] == "." and name[-3:].isdigit():
+        name = name[:-4]
+    if "_mtl_" in name:
+        material_name = name.rsplit("_mtl_", 1)[1]
+        stem, separator, suffix = material_name.rpartition("_")
+        if separator and suffix.isdigit():
+            return stem
+        return material_name
+    return name
+
+
+def _slot_mapping_for_object(obj: bpy.types.Object) -> list[int | None] | None:
+    data = getattr(obj, "data", None)
+    if data is None:
+        return None
+    get_prop = getattr(data, "get", None)
+    if not callable(get_prop):
+        return None
+    mapping_raw = get_prop(PROP_IMPORTED_SLOT_MAP)
+    if not isinstance(mapping_raw, str) or not mapping_raw:
+        return None
+    try:
+        parsed = json.loads(mapping_raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, list):
+        return None
+    mapping: list[int | None] = []
+    for value in parsed:
+        if value is None:
+            mapping.append(None)
+            continue
+        try:
+            mapping.append(int(value))
+        except (TypeError, ValueError):
+            mapping.append(None)
+    return mapping
+
+
+def _unique_submaterials_by_name(sidecar: Any) -> dict[str, Any]:
+    grouped: dict[str, list[Any]] = {}
+    for submaterial in getattr(sidecar, "submaterials", ()):
+        name = getattr(submaterial, "submaterial_name", "").strip()
+        if not name:
+            continue
+        grouped.setdefault(name, []).append(submaterial)
+    return {
+        name: submaterials[0]
+        for name, submaterials in grouped.items()
+        if len(submaterials) == 1
+    }
+
+
+def _submaterials_by_name(sidecar: Any) -> dict[str, list[Any]]:
+    grouped: dict[str, list[Any]] = {}
+    for submaterial in getattr(sidecar, "submaterials", ()):
+        name = getattr(submaterial, "submaterial_name", "").strip()
+        if not name:
+            continue
+        grouped.setdefault(name, []).append(submaterial)
+    return grouped
 
 
 def _material_refresh_sidecar(

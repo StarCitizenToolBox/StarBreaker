@@ -26,6 +26,8 @@ from ..constants import (
     MATERIAL_IDENTITY_SCHEMA,
     NON_COLOR_INPUT_KEYWORDS,
     POM_DETAIL_DEFAULT,
+    PROP_DECAL_HOST_CHANNEL,
+    PROP_DECAL_HOST_RGB,
     PROP_MATERIAL_IDENTITY,
     PROP_MATERIAL_SIDECAR,
     PROP_PALETTE_ID,
@@ -2242,6 +2244,146 @@ class BuildersMixin:
             material_pointers.append(cls._id_pointer(mat))
         return data_pointer, tuple(material_pointers)
 
+    @staticmethod
+    def _stored_decal_host_channel(obj: bpy.types.Object | None) -> str | None:
+        if obj is None or not hasattr(obj, "get"):
+            return None
+        channel = obj.get(PROP_DECAL_HOST_CHANNEL)
+        if not isinstance(channel, str):
+            return None
+        normalized = channel.strip().lower()
+        if normalized in {"primary", "secondary", "tertiary", "glass"}:
+            return normalized
+        return None
+
+    @staticmethod
+    def _stored_decal_host_rgb(obj: bpy.types.Object | None) -> tuple[float, float, float] | None:
+        if obj is None or not hasattr(obj, "get"):
+            return None
+        rgb = obj.get(PROP_DECAL_HOST_RGB)
+        if not isinstance(rgb, (list, tuple)) or len(rgb) < 3:
+            return None
+        try:
+            return (float(rgb[0]), float(rgb[1]), float(rgb[2]))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _submaterial_palette_channel(submaterial: SubmaterialRecord) -> str | None:
+        routing = getattr(submaterial, "palette_routing", None)
+        material_channel = getattr(routing, "material_channel", None) if routing is not None else None
+        if material_channel is not None:
+            name = getattr(material_channel, "name", None)
+            if isinstance(name, str) and name:
+                return name.lower()
+        for binding in getattr(routing, "layer_channels", []) or []:
+            channel = getattr(binding, "channel", None)
+            name = getattr(channel, "name", None) if channel is not None else None
+            if isinstance(name, str) and name:
+                return name.lower()
+        return None
+
+    @staticmethod
+    def _submaterial_authored_tint_rgb(
+        submaterial: SubmaterialRecord,
+    ) -> tuple[float, float, float] | None:
+        for layer in getattr(submaterial, "layer_manifest", []) or []:
+            tint_color = getattr(layer, "tint_color", None)
+            if isinstance(tint_color, (list, tuple)) and len(tint_color) >= 3:
+                rgb = (float(tint_color[0]), float(tint_color[1]), float(tint_color[2]))
+                if rgb != (1.0, 1.0, 1.0):
+                    return rgb
+            for attribute in getattr(layer, "authored_attributes", []) or []:
+                name = str((attribute or {}).get("name", "")).lower()
+                if name != "tintcolor":
+                    continue
+                value = (attribute or {}).get("value")
+                if not isinstance(value, str):
+                    continue
+                parts = [part.strip() for part in value.split(",")]
+                if len(parts) < 3:
+                    continue
+                try:
+                    rgb = (float(parts[0]), float(parts[1]), float(parts[2]))
+                except ValueError:
+                    continue
+                if rgb != (1.0, 1.0, 1.0):
+                    return rgb
+        return None
+
+    @staticmethod
+    def _submaterial_is_host_candidate(submaterial: SubmaterialRecord) -> bool:
+        shader_family = getattr(submaterial, "shader_family", None)
+        if shader_family == "MeshDecal":
+            return False
+        try:
+            if template_plan_for_submaterial(submaterial).template_key == "decal_stencil":
+                return False
+        except Exception:
+            pass
+        return True
+
+    def _polygon_counts_by_material_index(self, obj: bpy.types.Object) -> dict[int, int]:
+        cache = getattr(self, "mesh_polygon_counts_cache", None)
+        data = getattr(obj, "data", None)
+        data_pointer = self._id_pointer(data)
+        if cache is not None and data_pointer in cache:
+            return cache[data_pointer]
+        counts: dict[int, int] = {}
+        polygons = getattr(data, "polygons", None) if data is not None else None
+        if polygons is None:
+            return counts
+        for poly in polygons:
+            idx = int(getattr(poly, "material_index", 0))
+            counts[idx] = counts.get(idx, 0) + 1
+        if cache is not None:
+            cache[data_pointer] = counts
+        return counts
+
+    def _derive_decal_host_route_from_submaterials(
+        self,
+        obj: bpy.types.Object,
+        slot_submaterials: list[SubmaterialRecord | None],
+    ) -> tuple[str | None, tuple[float, float, float] | None]:
+        priorities = ("primary", "secondary", "tertiary", "glass")
+        slot_channels: dict[int, str] = {}
+        slot_tints: dict[int, tuple[float, float, float]] = {}
+        for slot_index, submaterial in enumerate(slot_submaterials):
+            if submaterial is None or not self._submaterial_is_host_candidate(submaterial):
+                continue
+            channel = self._submaterial_palette_channel(submaterial)
+            if channel in priorities:
+                slot_channels[slot_index] = channel
+            tint = self._submaterial_authored_tint_rgb(submaterial)
+            if tint is not None:
+                slot_tints[slot_index] = tint
+
+        if slot_channels:
+            unique_channels = set(slot_channels.values())
+            if len(unique_channels) == 1:
+                return next(iter(unique_channels)), None
+            counts = self._polygon_counts_by_material_index(obj)
+            channel_counts: dict[str, int] = {}
+            for slot_index, channel in slot_channels.items():
+                channel_counts[channel] = channel_counts.get(channel, 0) + max(1, counts.get(slot_index, 0))
+            return (
+                min(channel_counts, key=lambda channel: (-channel_counts[channel], priorities.index(channel))),
+                None,
+            )
+
+        if slot_tints:
+            if len(slot_tints) == 1:
+                return None, next(iter(slot_tints.values()))
+            counts = self._polygon_counts_by_material_index(obj)
+            weighted_tints = [
+                (max(1, counts.get(slot_index, 0)), tint)
+                for slot_index, tint in slot_tints.items()
+            ]
+            weighted_tints.sort(key=lambda item: item[0], reverse=True)
+            return None, weighted_tints[0][1]
+
+        return None, None
+
     def _mesh_decal_host_channel_for_object(self, obj: bpy.types.Object) -> str | None:
         """Scan ``obj``'s material slots for a non-decal paint material
         with a palette channel assignment. Returns the canonical channel
@@ -2254,11 +2396,17 @@ class BuildersMixin:
         materials (typical of ``dec_*`` children split off their host
         ``geo_*`` geometry).
         """
+        stored = self._stored_decal_host_channel(obj)
+        if stored is not None:
+            return stored
         channel = self._scan_slots_for_host_channel(obj)
         if channel is not None:
             return channel
         parent = getattr(obj, "parent", None)
         if parent is not None:
+            stored = self._stored_decal_host_channel(parent)
+            if stored is not None:
+                return stored
             channel = self._scan_slots_for_host_channel(parent)
         return channel
 
@@ -2356,9 +2504,15 @@ class BuildersMixin:
         favour the main panel colour over structural accents. Returns
         None if no usable host colour can be read.
         """
+        stored = self._stored_decal_host_rgb(obj)
+        if stored is not None:
+            return stored
         for candidate in (obj, getattr(obj, "parent", None)):
             if candidate is None:
                 continue
+            stored = self._stored_decal_host_rgb(candidate)
+            if stored is not None:
+                return stored
             rgb = self._dominant_paint_tint_for_object(candidate)
             if rgb is not None:
                 return rgb
@@ -2618,6 +2772,9 @@ class BuildersMixin:
         self,
         obj: bpy.types.Object,
         palette: PaletteRecord | None,
+        *,
+        host_channel: str | None = None,
+        fallback_rgb: tuple[float, float, float] | None = None,
     ) -> int:
         """Post-pass called after all slots on ``obj`` have been
         assigned. For each slot carrying a MeshDecal material, detect
@@ -2655,13 +2812,13 @@ class BuildersMixin:
         if not decal_slots:
             return 0
 
-        channel = (
-            self._mesh_decal_host_channel_for_object(obj)
-            if palette is not None
-            else None
-        )
-        fallback_rgb = None if channel is not None else self._mesh_decal_host_rgb_for_object(obj)
-        if channel is None and fallback_rgb is None:
+        channel = host_channel if palette is not None else None
+        if channel is None and palette is not None:
+            channel = self._mesh_decal_host_channel_for_object(obj)
+        resolved_fallback_rgb = fallback_rgb
+        if channel is None and resolved_fallback_rgb is None:
+            resolved_fallback_rgb = self._mesh_decal_host_rgb_for_object(obj)
+        if channel is None and resolved_fallback_rgb is None:
             return 0
         rebound = 0
         for slot, mat, is_mesh_decal in decal_slots:
@@ -2674,7 +2831,7 @@ class BuildersMixin:
                 if channel is not None and palette is not None:
                     variant_rgb = palette_color(palette, channel)
                 if variant_rgb is None:
-                    variant_rgb = fallback_rgb
+                    variant_rgb = resolved_fallback_rgb
                 if variant_rgb is None:
                     continue
                 key = mat.get("starbreaker_decal_host_rgb_key")

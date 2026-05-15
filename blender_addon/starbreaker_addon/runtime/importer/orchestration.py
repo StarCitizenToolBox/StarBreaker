@@ -22,6 +22,8 @@ import mathutils
 
 from ..constants import (
     PACKAGE_ROOT_PREFIX,
+    PROP_DECAL_HOST_CHANNEL,
+    PROP_DECAL_HOST_RGB,
     PROP_ENGINE_GLOW_CONTROL_JSON,
     PROP_ENGINE_GLOW_STRENGTH,
     PROP_ENTITY_NAME,
@@ -107,11 +109,12 @@ class OrchestrationMixin:
         self.sidecar_submaterials_by_name_all: dict[str, dict[str, list[SubmaterialRecord]]] = {}
         self.slot_mapping_cache: dict[int, list[int | None] | None] = {}
         self.material_slot_layout_cache: dict[
-            tuple[int, str, str, str | None, tuple[int | None, ...], tuple[int, tuple[int, ...]] | None],
+            tuple[int, str, str, str | None, tuple[int | None, ...], object | None],
             tuple[tuple[bpy.types.Material | None, ...], int],
         ] = {}
         self.host_channel_cache: dict[tuple[int, tuple[int, ...]], str | None] = {}
         self.host_rgb_cache: dict[tuple[int, tuple[int, ...]], tuple[float, float, float] | None] = {}
+        self.mesh_polygon_counts_cache: dict[int, dict[int, int]] = {}
         self.progress_callback = progress_callback
         self._progress_total_steps = 1
         self._progress_completed_steps = 0
@@ -237,6 +240,87 @@ class OrchestrationMixin:
             grouped.setdefault(submaterial_name, []).append(submaterial)
         self.sidecar_submaterials_by_name_all[cache_key] = grouped
         return grouped
+
+    def _slot_submaterials_for_object(
+        self,
+        obj: bpy.types.Object,
+        sidecar_path: str,
+        sidecar: MaterialSidecar,
+        slot_mapping: list[int | None] | None,
+    ) -> list[SubmaterialRecord | None]:
+        slot_count = len(getattr(obj, "material_slots", []) or [])
+        if slot_mapping is not None:
+            slot_count = max(slot_count, len(slot_mapping))
+        by_index = self._submaterials_by_index(sidecar_path, sidecar)
+        slot_submaterials: list[SubmaterialRecord | None] = []
+        for slot_index in range(slot_count):
+            mapped_index = (
+                slot_mapping[slot_index]
+                if slot_mapping is not None and slot_index < len(slot_mapping)
+                else slot_index
+            )
+            slot_submaterials.append(
+                by_index.get(mapped_index) if mapped_index is not None else None
+            )
+        return slot_submaterials
+
+    def _store_object_decal_host_route(
+        self,
+        obj: bpy.types.Object,
+        channel: str | None,
+        rgb: tuple[float, float, float] | None,
+    ) -> None:
+        try:
+            if channel:
+                obj[PROP_DECAL_HOST_CHANNEL] = channel
+            elif PROP_DECAL_HOST_CHANNEL in obj:
+                del obj[PROP_DECAL_HOST_CHANNEL]
+        except Exception:
+            pass
+        try:
+            if rgb is not None:
+                obj[PROP_DECAL_HOST_RGB] = [float(rgb[0]), float(rgb[1]), float(rgb[2])]
+            elif PROP_DECAL_HOST_RGB in obj:
+                del obj[PROP_DECAL_HOST_RGB]
+        except Exception:
+            pass
+
+    def _precomputed_decal_host_route(
+        self,
+        obj: bpy.types.Object,
+        sidecar_path: str,
+        sidecar: MaterialSidecar,
+        slot_mapping: list[int | None] | None,
+    ) -> tuple[str | None, tuple[float, float, float] | None]:
+        stored_channel = self._stored_decal_host_channel(obj)
+        stored_rgb = self._stored_decal_host_rgb(obj)
+        if stored_channel is not None or stored_rgb is not None:
+            return stored_channel, stored_rgb
+
+        channel, rgb = self._derive_decal_host_route_from_submaterials(
+            obj,
+            self._slot_submaterials_for_object(obj, sidecar_path, sidecar, slot_mapping),
+        )
+        if channel is None and rgb is None:
+            parent = getattr(obj, "parent", None)
+            parent_sidecar_path = _string_prop(parent, PROP_MATERIAL_SIDECAR) if parent is not None else None
+            if parent is not None and getattr(parent, "type", None) == "MESH" and parent_sidecar_path is not None:
+                parent_sidecar = self.package.load_material_sidecar(parent_sidecar_path)
+                if parent_sidecar is not None:
+                    parent_data = getattr(parent, "data", None)
+                    parent_pointer = parent_data.as_pointer() if parent_data is not None else 0
+                    parent_slot_mapping = self.slot_mapping_cache.get(parent_pointer)
+                    if parent_pointer not in self.slot_mapping_cache:
+                        parent_slot_mapping = _slot_mapping_for_object(parent)
+                        self.slot_mapping_cache[parent_pointer] = parent_slot_mapping
+                    channel, rgb = self._precomputed_decal_host_route(
+                        parent,
+                        parent_sidecar_path,
+                        parent_sidecar,
+                        parent_slot_mapping,
+                    )
+        self._store_object_decal_host_route(obj, channel, rgb)
+        return channel, rgb
 
     def _effective_palette_id(self, palette_id: str | None) -> str | None:
         inherited_palette_id = None
@@ -440,6 +524,12 @@ class OrchestrationMixin:
                 inferred_matches += 1
             if inferred_matches > 0:
                 slot_mapping = inferred_slot_mapping
+        precomputed_host_channel, precomputed_host_rgb = self._precomputed_decal_host_route(
+            obj,
+            sidecar_path,
+            sidecar,
+            slot_mapping,
+        )
         if slot_mapping is not None:
             if mesh_materials is not None:
                 while len(mesh_materials) < len(slot_mapping):
@@ -451,8 +541,10 @@ class OrchestrationMixin:
                 source_sidecar_path,
                 effective_palette_id,
                 tuple(slot_mapping),
-                self._object_material_signature(getattr(obj, "parent", None))
-                if getattr(obj, "parent", None) is not None
+                ("channel", precomputed_host_channel)
+                if precomputed_host_channel is not None
+                else ("rgb", tuple(round(component, 6) for component in precomputed_host_rgb))
+                if precomputed_host_rgb is not None
                 else None,
             )
             material_slot_layout_cache = getattr(self, "material_slot_layout_cache", None)
@@ -522,7 +614,12 @@ class OrchestrationMixin:
             # Option E2-Lite: after every slot is assigned, rebind decal
             # slots to per-host-channel clones so each decal picks up the
             # palette colour of the nearest paint material on the mesh.
-            self._rebind_mesh_decal_for_host(obj, palette)
+            self._rebind_mesh_decal_for_host(
+                obj,
+                palette,
+                host_channel=precomputed_host_channel,
+                fallback_rgb=precomputed_host_rgb,
+            )
             material_slot_layout_cache[layout_key] = (
                 tuple(
                     obj.material_slots[index].material
@@ -553,7 +650,12 @@ class OrchestrationMixin:
         # Option E2-Lite: after every slot is assigned, rebind decal
         # slots to per-host-channel clones so each decal picks up the
         # palette colour of the nearest paint material on the mesh.
-        self._rebind_mesh_decal_for_host(obj, palette)
+        self._rebind_mesh_decal_for_host(
+            obj,
+            palette,
+            host_channel=precomputed_host_channel,
+            fallback_rgb=precomputed_host_rgb,
+        )
         return applied
 
     def apply_palette_to_package_root(self, package_root: bpy.types.Object, palette_id: str | None) -> int:

@@ -67,6 +67,8 @@ if "bpy" not in sys.modules:
 
 
 from starbreaker_addon.runtime.constants import (
+    PROP_DECAL_HOST_CHANNEL,
+    PROP_DECAL_HOST_RGB,
     PROP_HAS_POM,
     PROP_MATERIAL_IDENTITY,
     PROP_MATERIAL_SIDECAR,
@@ -184,6 +186,12 @@ class ImporterUnderTest(BuildersMixin):
     def _ensure_illum_pom_host_rgb_variant(self, material, rgb):
         self.illum_rgb_calls.append(rgb)
         return FakeMaterial(f"{material.name}__host_rgb", **dict(material))
+
+
+class HostRoutingImporterUnderTest(BuildersMixin):
+    def __init__(self):
+        self.host_channel_cache = {}
+        self.host_rgb_cache = {}
 
 
 class FakePackage:
@@ -407,13 +415,14 @@ class FakePackageWithSidecars:
         return self.sidecar
 
 
-class OrchestrationImporterUnderTest(OrchestrationMixin):
+class OrchestrationImporterUnderTest(OrchestrationMixin, BuildersMixin):
     def __init__(self, sidecar):
         self.package = FakePackageWithSidecars(sidecar)
         self.package_root = None
         self.import_palette_override = None
         self.import_paint_variant_sidecar = None
         self.exterior_material_sidecars = None
+        self.mesh_polygon_counts_cache = {}
         self.slot_mapping_cache = {}
         self.sidecar_submaterials_by_index = {}
         self.sidecar_submaterials_by_name = {}
@@ -431,7 +440,7 @@ class OrchestrationImporterUnderTest(OrchestrationMixin):
     def _remove_replaced_slot_material(self, material) -> None:
         return None
 
-    def _rebind_mesh_decal_for_host(self, obj, palette) -> int:
+    def _rebind_mesh_decal_for_host(self, obj, palette, **_kwargs) -> int:
         return 0
 
 
@@ -606,6 +615,98 @@ class DecalOffsetTests(unittest.TestCase):
         importer = ImporterUnderTest()
 
         self.assertEqual(importer._scan_slots_for_host_channel(obj), "tertiary")
+
+    def test_mesh_decal_host_channel_prefers_precomputed_object_property(self) -> None:
+        obj = FakeObject(
+            material_slots=[],
+            mesh=FakeMesh(polygons=[], vertex_count=0),
+            **{PROP_DECAL_HOST_CHANNEL: "glass"},
+        )
+        importer = HostRoutingImporterUnderTest()
+
+        self.assertEqual(importer._mesh_decal_host_channel_for_object(obj), "glass")
+
+    def test_mesh_decal_host_channel_falls_back_to_parent_precomputed_property(self) -> None:
+        parent = FakeObject(
+            material_slots=[],
+            mesh=FakeMesh(polygons=[], vertex_count=0),
+            **{PROP_DECAL_HOST_CHANNEL: "secondary"},
+        )
+        obj = FakeObject(
+            material_slots=[],
+            mesh=FakeMesh(polygons=[], vertex_count=0),
+        )
+        obj.parent = parent
+        importer = HostRoutingImporterUnderTest()
+
+        self.assertEqual(importer._mesh_decal_host_channel_for_object(obj), "secondary")
+
+    def test_mesh_decal_host_rgb_prefers_precomputed_object_property(self) -> None:
+        obj = FakeObject(
+            material_slots=[],
+            mesh=FakeMesh(polygons=[], vertex_count=0),
+            **{PROP_DECAL_HOST_RGB: [0.2, 0.4, 0.6]},
+        )
+        importer = HostRoutingImporterUnderTest()
+
+        self.assertEqual(importer._mesh_decal_host_rgb_for_object(obj), (0.2, 0.4, 0.6))
+
+    def test_derive_decal_host_route_from_submaterials_uses_polygon_weight(self) -> None:
+        obj = FakeObject(
+            material_slots=[],
+            mesh=FakeMesh(
+                polygons=[
+                    FakePolygon(0, [0, 1, 2]),
+                    FakePolygon(1, [3, 4, 5]),
+                    FakePolygon(1, [6, 7, 8]),
+                ],
+                vertex_count=9,
+            ),
+        )
+        importer = HostRoutingImporterUnderTest()
+        slot_submaterials = [
+            SubmaterialRecord.from_value(
+                {
+                    "shader_family": "HardSurface",
+                    "palette_routing": {"material_channel": {"name": "primary"}},
+                }
+            ),
+            SubmaterialRecord.from_value(
+                {
+                    "shader_family": "HardSurface",
+                    "palette_routing": {"material_channel": {"name": "tertiary"}},
+                }
+            ),
+        ]
+
+        channel, rgb = importer._derive_decal_host_route_from_submaterials(obj, slot_submaterials)
+
+        self.assertEqual(channel, "tertiary")
+        self.assertIsNone(rgb)
+
+    def test_derive_decal_host_route_from_submaterials_falls_back_to_authored_tint(self) -> None:
+        obj = FakeObject(
+            material_slots=[],
+            mesh=FakeMesh(polygons=[FakePolygon(0, [0, 1, 2])], vertex_count=3),
+        )
+        importer = HostRoutingImporterUnderTest()
+        slot_submaterials = [
+            SubmaterialRecord.from_value(
+                {
+                    "shader_family": "HardSurface",
+                    "layer_manifest": [
+                        {
+                            "tint_color": [0.2, 0.4, 0.6],
+                        }
+                    ],
+                }
+            )
+        ]
+
+        channel, rgb = importer._derive_decal_host_route_from_submaterials(obj, slot_submaterials)
+
+        self.assertIsNone(channel)
+        self.assertEqual(rgb, (0.2, 0.4, 0.6))
 
     def test_parallax_bias_value_prefers_authored_height_bias(self) -> None:
         importer = ImporterUnderTest()
