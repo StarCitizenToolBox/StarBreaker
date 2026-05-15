@@ -71,6 +71,7 @@ from starbreaker_addon.palette import (
     resolved_palette_id,
 )
 from starbreaker_addon.runtime.constants import PROP_PALETTE_ID
+from starbreaker_addon.runtime.importer.palette import _palette_output_color
 from starbreaker_addon.runtime.importer.orchestration import OrchestrationMixin
 from starbreaker_addon.runtime.palette_utils import (
     _hard_surface_palette_iridescence_channel,
@@ -99,6 +100,10 @@ AURORA_SCENE = _existing_scene(
     "ships/Packages/RSI Aurora Mk2/scene.json",
     "ships/Packages/RSI Aurora Mk2_LOD0_TEX0/scene.json",
 )
+PITBULL_SCENE = _existing_scene(
+    "ships/Packages/DRAK Pitbull_LOD0_TEX0/scene.json",
+    "ships/Packages/ship/DRAK Pitbull_LOD0_TEX0/scene.json",
+)
 
 
 @unittest.skipUnless(
@@ -106,6 +111,12 @@ AURORA_SCENE = _existing_scene(
     f"ARGO MOLE fixture not present at {ARGO_SCENE}; skipping palette tests",
 )
 class PaletteTests(unittest.TestCase):
+    def test_palette_output_color_preserves_glass_values(self) -> None:
+        self.assertEqual(
+            _palette_output_color("glass", (0.5, 0.5, 0.5)),
+            (0.5, 0.5, 0.5),
+        )
+
     def test_available_ids_are_loaded_from_fixture_manifests(self) -> None:
         package = PackageBundle.load(ARGO_SCENE)
         self.assertIn("palette/argo_mole", available_palette_ids(package))
@@ -307,6 +318,21 @@ class AuroraPaletteTests(unittest.TestCase):
             ),
             "tertiary",
         )
+
+
+@unittest.skipUnless(
+    PITBULL_SCENE.is_file(),
+    f"DRAK Pitbull fixture not present at {PITBULL_SCENE}; skipping Pitbull palette tests",
+)
+class PitbullPaletteTests(unittest.TestCase):
+    def test_root_palette_preserves_real_glass_color(self) -> None:
+        package = PackageBundle.load(PITBULL_SCENE)
+        palette = palette_for_id(package, "palette/drak_pitbull")
+        self.assertIsNotNone(palette)
+        assert palette is not None
+        self.assertAlmostEqual(palette.glass[0], 1.0, places=6)
+        self.assertAlmostEqual(palette.glass[1], 0.11443537, places=6)
+        self.assertAlmostEqual(palette.glass[2], 0.00560539, places=6)
 
 
 class PaletteOverrideImporterUnderTest(OrchestrationMixin):

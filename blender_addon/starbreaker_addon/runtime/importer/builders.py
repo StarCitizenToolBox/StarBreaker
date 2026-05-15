@@ -479,63 +479,107 @@ class BuildersMixin:
             self._patch_mesh_decal_template_emission(group)
         return group
 
-    @staticmethod
-    def _patch_glass_template_lightpath(group: bpy.types.ShaderNodeTree) -> None:
-        """Insert a Light Path / Transparent mix for readable glass.
-
-        Aurora (and other cockpits) stack many interior panes behind the
-        canopy; with plain Glass BSDF the Beer-Lambert tinting compounds on
-        transmission/shadow/diffuse/glossy rays and reads near-black. For
-        non-camera rays we swap the Glass BSDF for a white Transparent BSDF.
-        Camera rays use a mostly-transparent mix that keeps a faint glass
-        surface without making interiors opaque. Idempotent via a versioned
-        property marker so older loaded groups are upgraded.
-        """
-        if group.get("starbreaker_glass_lightpath_patch_version") == 2:
+    def _patch_glass_template_lightpath(self, group: bpy.types.ShaderNodeTree) -> None:
+        """Patch the bundled GlassPBR template to the live validated graph."""
+        if group.get("starbreaker_glass_lightpath_patch_version") == 4:
             return
+        ddna_group = self._ensure_runtime_ddna_roughness_group()
         nodes = group.nodes
         links = group.links
-        out_node = next((n for n in nodes if n.bl_idname == "NodeGroupOutput"), None)
-        glass = nodes.get("Glass BSDF")
-        if out_node is None or glass is None:
+        group_input = next((n for n in nodes if n.bl_idname == "NodeGroupInput"), None)
+        group_output = next((n for n in nodes if n.bl_idname == "NodeGroupOutput"), None)
+        if group_input is None or group_output is None:
             return
-        shader_input = out_node.inputs.get("Shader") or (out_node.inputs[0] if out_node.inputs else None)
+        for node in list(nodes):
+            if node not in {group_input, group_output}:
+                nodes.remove(node)
+        group_input.location = (-132.14703369140625, -617.05126953125)
+        group_output.location = (1639.01513671875, -298.6864929199219)
+        shader_input = group_output.inputs.get("Shader") or (group_output.inputs[0] if group_output.inputs else None)
         if shader_input is None:
             return
-        transparent = nodes.get("SB Glass Transparent") or nodes.new("ShaderNodeBsdfTransparent")
-        transparent.name = "SB Glass Transparent"
-        transparent.label = "Glass Transparent (non-camera)"
-        transparent.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
-        transparent.location = (glass.location.x, glass.location.y - 220)
-        light_path = nodes.get("SB Glass LightPath") or nodes.new("ShaderNodeLightPath")
-        light_path.name = "SB Glass LightPath"
-        light_path.location = (glass.location.x - 200, glass.location.y + 250)
-        camera_glass_mix = nodes.get("SB Glass Camera Transparency Mix") or nodes.new("ShaderNodeMixShader")
-        camera_glass_mix.name = "SB Glass Camera Transparency Mix"
-        camera_glass_mix.label = "Camera Glass/Transparent Mix"
-        camera_glass_mix.location = (glass.location.x + 120, glass.location.y - 160)
-        camera_glass_mix.inputs["Fac"].default_value = 0.25
-        mix = nodes.get("SB Glass Camera Mix") or nodes.new("ShaderNodeMixShader")
-        mix.name = "SB Glass Camera Mix"
-        mix.label = "Camera Ray Mix"
-        mix.location = (glass.location.x + 260, glass.location.y)
-        for socket in (
-            shader_input,
-            camera_glass_mix.inputs[1],
-            camera_glass_mix.inputs[2],
-            mix.inputs[1],
-            mix.inputs[2],
+        mix_legacy = nodes.new("ShaderNodeMixRGB")
+        mix_legacy.name = "Mix (Legacy)"
+        mix_legacy.location = (474.3709716796875, -582.9908447265625)
+        mix_legacy.blend_type = "MULTIPLY"
+        mix_legacy.inputs[0].default_value = 1.0
+
+        normal_map = nodes.new("ShaderNodeNormalMap")
+        normal_map.name = "Normal Map"
+        normal_map.location = (775.9833984375, -803.2053833007812)
+        normal_map.space = "TANGENT"
+        normal_map.inputs["Strength"].default_value = 0.25
+
+        map_range = nodes.new("ShaderNodeMapRange")
+        map_range.name = "Map Range"
+        map_range.location = (790.1220703125, -230.03060913085938)
+        map_range.data_type = "FLOAT"
+        map_range.interpolation_type = "LINEAR"
+        map_range.clamp = True
+        map_range.inputs[1].default_value = 0.0
+        map_range.inputs[2].default_value = 0.8000000715255737
+        map_range.inputs[3].default_value = 0.07000000029802322
+        map_range.inputs[4].default_value = 1.0
+
+        hue_saturation = nodes.new("ShaderNodeHueSaturation")
+        hue_saturation.name = "Hue/Saturation/Value"
+        hue_saturation.location = (777.0719604492188, -579.3798828125)
+        hue_saturation.inputs["Hue"].default_value = 0.57
+        hue_saturation.inputs["Saturation"].default_value = 1.0
+        hue_saturation.inputs["Value"].default_value = 1.0
+        hue_saturation.inputs["Factor"].default_value = 1.0
+
+        principled = nodes.new("ShaderNodeBsdfPrincipled")
+        principled.name = "Principled BSDF.001"
+        principled.location = (1303.1201171875, -303.4607238769531)
+        transmission_socket = _input_socket(principled, "Transmission Weight", "Transmission")
+        if transmission_socket is not None:
+            transmission_socket.default_value = 1.0
+        principled_ior = _input_socket(principled, "IOR")
+        if principled_ior is not None:
+            principled_ior.default_value = 1.05
+
+        maths = nodes.new("ShaderNodeMath")
+        maths.name = "Maths"
+        maths.location = (478.7479553222656, -291.1023254394531)
+        maths.operation = "MULTIPLY"
+        maths.use_clamp = False
+
+        roughness_group = nodes.new("ShaderNodeGroup")
+        roughness_group.name = "StarBreaker Runtime DDNA Roughness"
+        roughness_group.location = (193.330810546875, -532.6305541992188)
+        roughness_group.node_tree = ddna_group
+
+        tint_color_socket = _output_socket(group_input, "TexSlot4_TintColor")
+        palette_glass_socket = _output_socket(group_input, "Palette_Glass")
+        normal_socket = _output_socket(group_input, "TexSlot2_NormalGloss")
+        smoothness_socket = _output_socket(group_input, "TexSlot6_WearGloss")
+        dirt_socket = _output_socket(group_input, "TexSlot11_Dirt")
+        roughness_socket = _output_socket(roughness_group, "Roughness") or roughness_group.outputs[0]
+        shader_output_socket = _output_socket(principled, "BSDF") or principled.outputs[0]
+        if (
+            tint_color_socket is None
+            or palette_glass_socket is None
+            or normal_socket is None
+            or smoothness_socket is None
+            or dirt_socket is None
         ):
-            for link in list(socket.links):
-                links.remove(link)
-        links.new(transparent.outputs["BSDF"], camera_glass_mix.inputs[1])
-        links.new(glass.outputs["BSDF"], camera_glass_mix.inputs[2])
-        links.new(light_path.outputs["Is Camera Ray"], mix.inputs["Fac"])
-        links.new(transparent.outputs["BSDF"], mix.inputs[1])
-        links.new(camera_glass_mix.outputs["Shader"], mix.inputs[2])
-        links.new(mix.outputs["Shader"], shader_input)
+            return
+
+        links.new(tint_color_socket, mix_legacy.inputs[1])
+        links.new(palette_glass_socket, mix_legacy.inputs[2])
+        links.new(normal_socket, normal_map.inputs["Color"])
+        links.new(_output_socket(mix_legacy, "Color") or mix_legacy.outputs[0], hue_saturation.inputs["Color"])
+        links.new(_output_socket(map_range, "Result") or map_range.outputs[0], _input_socket(principled, "Roughness"))
+        links.new(shader_output_socket, shader_input)
+        links.new(smoothness_socket, _input_socket(roughness_group, "Smoothness") or roughness_group.inputs[0])
+        links.new(roughness_socket, maths.inputs[0])
+        links.new(dirt_socket, maths.inputs[1])
+        links.new(_output_socket(maths, "Value") or maths.outputs[0], map_range.inputs[0])
+        links.new(_output_socket(hue_saturation, "Color") or hue_saturation.outputs[0], _input_socket(principled, "Base Color"))
+        links.new(_output_socket(normal_map, "Normal") or normal_map.outputs[0], _input_socket(principled, "Normal"))
         group["starbreaker_glass_lightpath_patched"] = 1
-        group["starbreaker_glass_lightpath_patch_version"] = 2
+        group["starbreaker_glass_lightpath_patch_version"] = 4
 
     @staticmethod
     def _patch_mesh_decal_template_emission(group: bpy.types.ShaderNodeTree) -> None:

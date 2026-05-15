@@ -959,6 +959,10 @@ pub(crate) fn write_decomposed_export(
     let total_start = Instant::now();
     let mut phase_start = Instant::now();
     report_progress(progress, ROOT_ASSETS_START, "Writing root assets");
+    let root_palette_id = input
+        .root_palette
+        .as_ref()
+        .map(|palette| register_palette(&mut palette_records, palette));
     for palette in &input.available_palettes {
         register_palette(&mut palette_records, palette);
     }
@@ -1002,10 +1006,6 @@ pub(crate) fn write_decomposed_export(
         )
     });
     let mut engine_glow_targets = Vec::new();
-    let root_palette_id = input
-        .root_palette
-        .as_ref()
-        .map(|palette| register_palette(&mut palette_records, palette));
     register_livery_usage(
         &mut livery_usage,
         root_palette_id.as_deref(),

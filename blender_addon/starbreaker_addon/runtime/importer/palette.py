@@ -524,22 +524,10 @@ class PaletteMixin:
                 rgb = group.nodes.new("ShaderNodeRGB")
                 rgb.location = (120, y)
                 rgb.label = socket_name
-                color_rgb = palette_color(palette, channel_name)
-                # CryEngine authors the glass palette channel as a subtle
-                # overlay tint (often (0,0,0) or neutral gray) rather than
-                # the primary BSDF colour. SB_GlassPBR_v1 multiplies the
-                # glass dirt/tint textures by this output, so any value
-                # below white darkens every pane — neutral grays make
-                # glass render almost fully opaque black. Promote any
-                # desaturated (channel spread < 0.05) value darker than
-                # near-white to pure white so the multiply becomes a
-                # neutral pass-through; saturated colour tints (e.g.
-                # livery-tinted cockpit glass) are preserved.
-                if channel_name == "glass":
-                    r, g, b = color_rgb
-                    channel_spread = max(r, g, b) - min(r, g, b)
-                    if channel_spread < 0.05 and max(r, g, b) < 0.95:
-                        color_rgb = (1.0, 1.0, 1.0)
+                color_rgb = _palette_output_color(
+                    channel_name,
+                    palette_color(palette, channel_name),
+                )
                 rgb.outputs[0].default_value = (*color_rgb, 1.0)
                 group.links.new(rgb.outputs[0], output.inputs[socket_name])
 
@@ -664,3 +652,15 @@ class PaletteMixin:
             color=_output_socket(group_node, "Decal Color"),
             alpha=_output_socket(group_node, "Decal Alpha"),
         )
+def _palette_output_color(
+    channel_name: str,
+    color_rgb: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    """Return the authored palette color for a node-group output channel.
+
+    Glass palette colors must stay authored here. Any visual softening needed for
+    transmission should happen inside the glass shader itself, not by mutating the
+    palette group output and losing the true exported color.
+    """
+
+    return color_rgb
