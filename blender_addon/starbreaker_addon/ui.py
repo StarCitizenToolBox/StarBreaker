@@ -756,6 +756,80 @@ def _package_root_from_context(context: bpy.types.Context) -> bpy.types.Object |
     return None
 
 
+def _collection_instance_objects(package_root: bpy.types.Object) -> list[bpy.types.Object]:
+    candidates = [package_root, *list(getattr(package_root, "children_recursive", ()))]
+    return [
+        obj
+        for obj in candidates
+        if getattr(obj, "instance_collection", None) is not None
+    ]
+
+
+def _linked_object_data_objects(package_root: bpy.types.Object) -> list[bpy.types.Object]:
+    candidates = [package_root, *list(getattr(package_root, "children_recursive", ()))]
+    return [
+        obj
+        for obj in candidates
+        if getattr(getattr(obj, "data", None), "library", None) is not None
+    ]
+
+
+def _make_package_collection_instances_real(
+    context: bpy.types.Context,
+    package_root: bpy.types.Object,
+    *,
+    chunk_size: int = 100,
+) -> int:
+    total_processed = 0
+    while True:
+        current_instances = _collection_instance_objects(package_root)
+        if not current_instances:
+            return total_processed
+
+        batch_size = len(current_instances)
+        for chunk_start in range(0, batch_size, chunk_size):
+            chunk = current_instances[chunk_start : chunk_start + chunk_size]
+            if not chunk:
+                continue
+            bpy.ops.object.select_all(action="DESELECT")
+            first_instance = None
+            for obj in chunk:
+                obj.select_set(True)
+                if first_instance is None:
+                    first_instance = obj
+            if first_instance is None:
+                continue
+
+            view_layer = getattr(context, "view_layer", None)
+            objects = getattr(view_layer, "objects", None)
+            if objects is not None:
+                objects.active = first_instance
+
+            bpy.ops.object.duplicates_make_real(use_base_parent=True, use_hierarchy=True)
+            for obj in chunk:
+                obj.instance_type = "NONE"
+                obj.instance_collection = None
+
+        total_processed += batch_size
+
+
+def _make_package_linked_object_data_local(package_root: bpy.types.Object) -> int:
+    localized_data: dict[int, bpy.types.ID] = {}
+    localized_count = 0
+    for obj in _linked_object_data_objects(package_root):
+        data = getattr(obj, "data", None)
+        if data is None:
+            continue
+        pointer = data.as_pointer() if hasattr(data, "as_pointer") else id(data)
+        local_data = localized_data.get(pointer)
+        if local_data is None:
+            local_data = data.copy()
+            localized_data[pointer] = local_data
+            localized_count += 1
+        obj.data = local_data
+    return localized_count
+
+
 def _selected_package(context: bpy.types.Context) -> PackageBundle | None:
     package_root = _package_root_from_context(context)
     if package_root is None:
@@ -1211,6 +1285,46 @@ class STARBREAKER_OT_dump_metadata(Operator):
         return {"FINISHED"}
 
 
+class STARBREAKER_OT_make_instances_real(Operator):
+    bl_idname = "starbreaker.make_instances_real"
+    bl_label = "Make Instances Real"
+    bl_options = {"REGISTER", "UNDO"}
+    bl_description = "Makes instances real, useful for 3d printing or exporting"
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return _package_root_from_context(context) is not None
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        if getattr(context, "mode", "OBJECT") != "OBJECT":
+            self.report({"ERROR"}, "Switch to Object Mode before making instances real")
+            return {"CANCELLED"}
+
+        package_root = _package_root_from_context(context)
+        if package_root is None:
+            self.report({"ERROR"}, "Select an imported StarBreaker object first")
+            return {"CANCELLED"}
+
+        realized_instances = _make_package_collection_instances_real(context, package_root)
+        localized_data = _make_package_linked_object_data_local(package_root)
+        if realized_instances == 0 and localized_data == 0:
+            self.report(
+                {"INFO"},
+                "No collection instances or linked object data found under the selected StarBreaker package",
+            )
+            return {"FINISHED"}
+
+        _focus_loaded_package_root(context, package_root)
+        self.report(
+            {"INFO"},
+            (
+                f"Made {realized_instances} instance container(s) real and "
+                f"localized {localized_data} linked datablock(s)"
+            ),
+        )
+        return {"FINISHED"}
+
+
 class STARBREAKER_OT_apply_animation_mode(Operator):
     bl_idname = "starbreaker.apply_animation_mode"
     bl_label = "Apply Animation Mode"
@@ -1586,6 +1700,14 @@ class STARBREAKER_PT_tools(Panel):
             if shared_glow_control_enabled(package_root):
                 light_box.prop(context.scene, SCENE_SHARED_GLOW_PROP, text="Shared Glow", slider=True)
 
+        tools_box = layout.box()
+        tools_box.label(text="Tools")
+        tools_box.operator(
+            STARBREAKER_OT_make_instances_real.bl_idname,
+            text="Make Instances Real",
+            icon="OUTLINER_OB_EMPTY",
+        )
+
         if package is not None:
             animation_items = available_package_animation_items(package)
             animation_box = layout.box()
@@ -1846,6 +1968,7 @@ CLASSES = [
     STARBREAKER_OT_apply_livery,
     STARBREAKER_OT_switch_light_state,
     STARBREAKER_OT_dump_metadata,
+    STARBREAKER_OT_make_instances_real,
     STARBREAKER_OT_apply_animation_mode,
     STARBREAKER_OT_edit_animation_instance,
     STARBREAKER_OT_delete_animation_instance,
