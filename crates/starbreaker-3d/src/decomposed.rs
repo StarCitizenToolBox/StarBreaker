@@ -2594,6 +2594,8 @@ fn load_and_render_gfx(spec: &UiStillSpec, gfx_path: &str, p4k: &MappedP4k) -> R
     let gfx_file = parse_gfx(&gfx_bytes).map_err(|e| format!("Failed to parse GFX: {}", e))?;
 
     // Load imported bitmap textures
+    // Note: GFX files may contain SWF display-lists with vector shapes and text
+    // rather than rasterized bitmaps. Texture imports are prioritized.
     let mut bitmaps = Vec::new();
     for import in &gfx_file.imports {
         if import.kind == ImportedResourceKind::Texture {
@@ -2609,9 +2611,13 @@ fn load_and_render_gfx(spec: &UiStillSpec, gfx_path: &str, p4k: &MappedP4k) -> R
     }
 
     if bitmaps.is_empty() {
-        // For now, if no bitmaps are found, we'll just render with empty bitmaps
-        // This allows testing the rendering pipeline even without textures
-        // In the final implementation, this should fail
+        // GFX files may not contain rasterized bitmap textures
+        // (e.g., SWF files with vector shapes/text require a SWF interpreter)
+        // For now, fail explicitly to indicate GFX rendering is not yet supported
+        return Err(format!(
+            "GFX file {} contains no bitmap textures; SWF interpretation not yet implemented",
+            gfx_entry.name
+        ));
     }
 
     // Create a raster context and render
@@ -2632,11 +2638,18 @@ fn load_imported_bitmap(texture_path: &str, p4k: &MappedP4k) -> Option<image::Rg
         .and_then(|entry| p4k.read(entry).ok())?;
 
     // Try to parse as DDS
-    if let Ok(_dds) = starbreaker_dds::DdsFile::from_bytes(&bytes) {
-        // Convert DDS to RgbaImage
-        // For now, we'll create a placeholder or skip if conversion fails
-        // A full implementation would handle various DDS formats
-        return None; // TODO: implement DDS to RgbaImage conversion
+    if let Ok(dds) = starbreaker_dds::DdsFile::from_bytes(&bytes) {
+        // Convert DDS to RgbaImage using the first mipmap level
+        if let Ok(rgba_data) = dds.decode_rgba(0) {
+            let (width, height) = dds.dimensions(0);
+            if width > 0 && height > 0 {
+                // Convert Vec<u8> RGBA data to RgbaImage
+                if let Some(img) = image::RgbaImage::from_raw(width, height, rgba_data) {
+                    return Some(img);
+                }
+            }
+        }
+        // If DDS decoding failed, fall through to try other formats
     }
 
     // Try to parse as PNG/JPG/etc

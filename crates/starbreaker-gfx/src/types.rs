@@ -47,6 +47,8 @@ pub enum GfxSignature {
     Cws,
     /// LZMA-compressed SWF container (`ZWS`).
     Zws,
+    /// Compressed GFx container (`CFX`).
+    Cfx,
 }
 
 impl GfxSignature {
@@ -56,6 +58,7 @@ impl GfxSignature {
             b"FWS" => Ok(Self::Fws),
             b"CWS" => Ok(Self::Cws),
             b"ZWS" => Ok(Self::Zws),
+            b"CFX" => Ok(Self::Cfx),
             other => Err(GfxError::malformed(format!(
                 "unsupported signature {:?}",
                 String::from_utf8_lossy(other)

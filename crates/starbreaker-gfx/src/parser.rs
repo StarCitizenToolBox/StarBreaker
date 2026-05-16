@@ -57,17 +57,19 @@ pub fn parse_gfx(bytes: &[u8]) -> GfxResult<GfxFile> {
 }
 
 fn decoded_movie_bytes(signature: GfxSignature, bytes: &[u8], declared_len: u32) -> GfxResult<Vec<u8>> {
-    if signature != GfxSignature::Cws {
-        return Ok(bytes.to_vec());
+    match signature {
+        GfxSignature::Cws | GfxSignature::Cfx => {
+            // Both CWS and CFX use zlib compression
+            let mut decoded = Vec::with_capacity(declared_len as usize);
+            decoded.extend_from_slice(&bytes[..HEADER_LEN]);
+            let mut decoder = ZlibDecoder::new(&bytes[HEADER_LEN..]);
+            decoder
+                .read_to_end(&mut decoded)
+                .map_err(|err| GfxError::malformed(format!("failed to decompress {:?} body: {err}", signature)))?;
+            Ok(decoded)
+        }
+        _ => Ok(bytes.to_vec()),
     }
-
-    let mut decoded = Vec::with_capacity(declared_len as usize);
-    decoded.extend_from_slice(&bytes[..HEADER_LEN]);
-    let mut decoder = ZlibDecoder::new(&bytes[HEADER_LEN..]);
-    decoder
-        .read_to_end(&mut decoded)
-        .map_err(|err| GfxError::malformed(format!("failed to decompress CWS body: {err}")))?;
-    Ok(decoded)
 }
 
 struct MovieHeader {
