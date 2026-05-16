@@ -521,6 +521,7 @@ class InteriorPlacementRecord:
     entity_class_guid: str | None
     transform: Matrix4
     raw: JsonDict
+    ui_bindings: list[JsonDict] = field(default_factory=list)
 
     @classmethod
     def from_value(cls, value: Any) -> InteriorPlacementRecord:
@@ -531,6 +532,7 @@ class InteriorPlacementRecord:
             mesh_asset=_normalize_relative_path(_as_str(data.get("mesh_asset"))),
             material_sidecar=_normalize_relative_path(_as_str(data.get("material_sidecar"))),
             entity_class_guid=_as_str(data.get("entity_class_guid")),
+            ui_bindings=[_as_dict(item) for item in data.get("ui_bindings", []) if _as_dict(item)],
             transform=_matrix4(data.get("transform")),
             raw=data,
         )
@@ -570,6 +572,7 @@ class SceneInstanceRecord:
     material_sidecar: str | None
     mesh_asset: str | None
     palette_id: str | None
+    ui_bindings: list[JsonDict] = field(default_factory=list)
     parent_entity_name: str | None = None
     parent_node_name: str | None = None
     source_transform_basis: str | None = None
@@ -592,6 +595,7 @@ class SceneInstanceRecord:
             material_sidecar=_normalize_relative_path(_as_str(data.get("material_sidecar"))),
             mesh_asset=_normalize_relative_path(_as_str(data.get("mesh_asset"))),
             palette_id=_as_str(data.get("palette_id")),
+            ui_bindings=[_as_dict(item) for item in data.get("ui_bindings", []) if _as_dict(item)],
             parent_entity_name=_as_str(data.get("parent_entity_name")),
             parent_node_name=_as_str(data.get("parent_node_name")),
             source_transform_basis=_as_str(data.get("source_transform_basis")),

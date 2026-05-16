@@ -7,14 +7,16 @@
 //! Also defines `LandingGearAsset` (cached landing gear geometry) and the path
 //! normalisation helpers used for decomposed export deduplication.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use starbreaker_datacore::database::Database;
+use starbreaker_datacore::query::value::Value;
+use starbreaker_datacore::types::{CigGuid, Record};
 use starbreaker_p4k::MappedP4k;
 
 use crate::mtl;
 use crate::nmc;
-use crate::types::MaterialTextures;
+use crate::types::{MaterialTextures, UiBinding};
 
 use super::*;
 
@@ -132,13 +134,13 @@ pub(crate) fn collect_child_payload_specs(
         };
 
         let child_creates_nodes = child.has_geometry || child.nmc.is_some();
+        out.push(ChildPayloadSpec {
+            child: child.clone_payload_source(),
+            parent_entity_name: parent_entity_name.to_string(),
+            parent_node_name: attach_name,
+            no_rotation,
+        });
         if child_creates_nodes {
-            out.push(ChildPayloadSpec {
-                child: child.clone_payload_source(),
-                parent_entity_name: parent_entity_name.to_string(),
-                parent_node_name: attach_name,
-                no_rotation,
-            });
             collect_child_payload_specs(&child.children, &child.entity_name, None, out);
         } else {
             collect_child_payload_specs(
@@ -279,6 +281,27 @@ pub(crate) fn load_child_payloads(
 ) -> Vec<crate::types::EntityPayload> {
     use rayon::prelude::*;
 
+    let mut ui_bindings_by_parent = HashMap::<String, Vec<UiBinding>>::new();
+    let mut direct_ui_bindings = Vec::with_capacity(specs.len());
+    for spec in &specs {
+        let binding = ui_binding_for_record(db, &spec.child.record).map(|mut binding| {
+            binding.source_entity_name = spec.child.entity_name.clone();
+            binding.helper_name = if spec.child.has_geometry {
+                None
+            } else {
+                Some(spec.parent_node_name.clone())
+            };
+            binding
+        });
+        if let Some(binding) = binding.clone() {
+            ui_bindings_by_parent
+                .entry(spec.parent_entity_name.clone())
+                .or_default()
+                .push(binding);
+        }
+        direct_ui_bindings.push(binding);
+    }
+
     let mut unique_children = Vec::new();
     let mut unique_child_indices = std::collections::HashMap::new();
     let mut spec_asset_indices = Vec::with_capacity(specs.len());
@@ -323,6 +346,18 @@ pub(crate) fn load_child_payloads(
             let child = &spec.child;
             let entity_category = entity_record_category(db, &child.record);
             let attach_def_type = entity_record_attach_def_type(db, &child.record);
+            let mut ui_bindings = ui_bindings_by_parent
+                .get(&child.entity_name)
+                .cloned()
+                .unwrap_or_default();
+            if let Some(binding) = direct_ui_bindings
+                .get(spec_index)
+                .and_then(|binding| binding.clone())
+            {
+                if !ui_bindings.iter().any(|existing| existing == &binding) {
+                    ui_bindings.push(binding);
+                }
+            }
             if child.has_geometry {
                 let asset_index = spec_asset_indices[spec_index]?;
                 let loaded = loaded_assets.get(asset_index)?.as_ref()?;
@@ -346,6 +381,7 @@ pub(crate) fn load_child_payloads(
                     offset_rotation: child.offset_rotation,
                     detach_direction: child.detach_direction,
                     port_flags: child.port_flags.clone(),
+                    ui_bindings,
                 })
             } else if child.nmc.is_some() {
                 Some(crate::types::EntityPayload {
@@ -368,6 +404,7 @@ pub(crate) fn load_child_payloads(
                     offset_rotation: child.offset_rotation,
                     detach_direction: child.detach_direction,
                     port_flags: child.port_flags.clone(),
+                    ui_bindings,
                 })
             } else {
                 None
@@ -391,4 +428,224 @@ fn entity_record_attach_def_type(
         .ok()
         .and_then(|compiled| db.query_single::<String>(&compiled, record).ok().flatten())
         .filter(|attach_def_type| !attach_def_type.is_empty())
+}
+
+pub(crate) fn ui_binding_for_record(db: &Database, record: &Record) -> Option<UiBinding> {
+    let owner_source_file =
+        query_string_path(db, record, "Components[UIOwnerEntityComponentParams].element.sourceFile");
+    let runtime_image_source = query_string_path(
+        db,
+        record,
+        "Components[UIRenderToTextureEntityComponentParams].runtimeImageSource",
+    );
+    let (default_state_name, default_light_color, default_light_intensity_milli) =
+        default_display_screen_state(record, db);
+    if let Some(canvas_guid) = query_stringish_path(
+        db,
+        record,
+        "Components[UIMapEntityComponentParams].uiElementsCanvasGUID",
+    )
+    .or_else(|| {
+        query_stringish_path(
+            db,
+            record,
+            "Components[UIMapEntityComponentParams].starMapParams.uiElementsCanvasGUID",
+        )
+    }) {
+        let (canvas_record_name, canvas_record_path) = resolve_record_metadata(db, &canvas_guid);
+        return Some(UiBinding {
+            binding_kind: "radar".to_string(),
+            source_entity_name: String::new(),
+            helper_name: None,
+            default_view: None,
+            default_state_name: default_state_name.clone(),
+            default_light_color,
+            default_light_intensity_milli,
+            canvas_guid: Some(canvas_guid),
+            canvas_record_name,
+            canvas_record_path,
+            owner_source_file,
+            runtime_image_source,
+            generated_image_path: None,
+        });
+    }
+
+    let layers = query_value_path(db, record, "Components[UIBuildingBlocksEntityComponentParams].layers")?;
+    let first_layer = match layers {
+        Value::Array(values) => values.into_iter().next()?,
+        other => other,
+    };
+    let default_view = value_object(&first_layer, "defaultView")
+        .and_then(|default_view| value_object_string(default_view, "name"));
+    let canvas_guid = value_object(&first_layer, "defaultView")
+        .and_then(|default_view| value_object(default_view, "component"))
+        .and_then(|component| value_object_string(component, "canvas"))
+        .or_else(|| {
+            value_object(&first_layer, "element")
+                .and_then(|element| value_object_string(element, "canvas"))
+        })
+        .or_else(|| value_object_string(&first_layer, "canvas"));
+    let (canvas_record_name, canvas_record_path) = canvas_guid
+        .as_deref()
+        .map(|guid| resolve_record_metadata(db, guid))
+        .unwrap_or((None, None));
+    let binding_kind = match default_view.as_deref() {
+        Some("_mfd") => "mfd",
+        Some("_physicalScreen") => "physical",
+        _ => "physical",
+    };
+    Some(UiBinding {
+        binding_kind: binding_kind.to_string(),
+        source_entity_name: String::new(),
+        helper_name: None,
+        default_view,
+        default_state_name,
+        default_light_color,
+        default_light_intensity_milli,
+        canvas_guid,
+        canvas_record_name,
+        canvas_record_path,
+        owner_source_file,
+        runtime_image_source,
+        generated_image_path: None,
+    })
+}
+
+fn default_display_screen_state(
+    record: &Record,
+    db: &Database,
+) -> (Option<String>, Option<[u8; 4]>, Option<u16>) {
+    let Some(states) = query_value_path(db, record, "Components[SCItemDisplayScreenComponentParams].screenStates")
+    else {
+        return (None, None, None);
+    };
+    let states = match states {
+        Value::Array(values) => values,
+        other => vec![other],
+    };
+    let selected = states
+        .iter()
+        .find(|state| {
+            value_object_string(state, "statename").as_deref() == Some("Normal")
+                && value_object(state, "stateLightParams")
+                    .and_then(|params| value_object_bool(params, "lightOn"))
+                    .unwrap_or(false)
+        })
+        .or_else(|| {
+            states.iter().find(|state| {
+                value_object_string(state, "statename")
+                    .is_some_and(|name| !name.is_empty())
+            })
+        });
+    let Some(selected) = selected else {
+        return (None, None, None);
+    };
+    let default_state_name = value_object_string(selected, "statename");
+    let default_light_color = value_object(selected, "stateLightParams")
+        .and_then(|params| value_object(params, "color"))
+        .and_then(value_rgba8);
+    let default_light_intensity_milli = value_object(selected, "stateLightParams")
+        .and_then(|params| value_object(params, "intensity"))
+        .and_then(value_f64)
+        .map(|value| (value.clamp(0.0, 65.535) * 1000.0).round() as u16);
+    (
+        default_state_name,
+        default_light_color,
+        default_light_intensity_milli,
+    )
+}
+
+fn query_string_path(db: &Database, record: &Record, path: &str) -> Option<String> {
+    db.compile_path::<String>(record.struct_id(), path)
+        .ok()
+        .and_then(|compiled| db.query_single::<String>(&compiled, record).ok().flatten())
+        .filter(|value| !value.is_empty())
+}
+
+fn query_stringish_path(db: &Database, record: &Record, path: &str) -> Option<String> {
+    query_value_path(db, record, path).and_then(|value| match value {
+        Value::String(text) => (!text.is_empty()).then_some(text.to_string()),
+        Value::Guid(guid) => Some(guid.to_string()),
+        Value::Object { record_id: Some(guid), .. } => Some(guid.to_string()),
+        _ => None,
+    })
+}
+
+fn query_value_path<'a>(db: &'a Database<'a>, record: &'a Record, path: &str) -> Option<Value<'a>> {
+    db.compile_path::<Value>(record.struct_id(), path)
+        .ok()
+        .and_then(|compiled| db.query_no_references(&compiled, record).ok())
+        .and_then(|mut values| if values.is_empty() { None } else { Some(values.remove(0)) })
+}
+
+fn value_object<'a>(value: &'a Value<'a>, key: &str) -> Option<&'a Value<'a>> {
+    match value {
+        Value::Object { fields, .. } => fields.iter().find(|(name, _)| *name == key).map(|(_, value)| value),
+        _ => None,
+    }
+}
+
+fn value_object_string(value: &Value<'_>, key: &str) -> Option<String> {
+    match value_object(value, key) {
+        Some(Value::String(text)) if !text.is_empty() => Some((*text).to_string()),
+        Some(Value::Guid(guid)) => Some(guid.to_string()),
+        _ => None,
+    }
+}
+
+fn value_object_bool(value: &Value<'_>, key: &str) -> Option<bool> {
+    match value_object(value, key) {
+        Some(Value::Bool(flag)) => Some(*flag),
+        _ => None,
+    }
+}
+
+fn value_rgba8(value: &Value<'_>) -> Option<[u8; 4]> {
+    Some([
+        value_object(value, "r").and_then(value_u8)?,
+        value_object(value, "g").and_then(value_u8)?,
+        value_object(value, "b").and_then(value_u8)?,
+        value_object(value, "a").and_then(value_u8)?,
+    ])
+}
+
+fn value_u8(value: &Value<'_>) -> Option<u8> {
+    match value {
+        Value::Int8(value) => Some(*value as u8),
+        Value::UInt8(value) => Some(*value),
+        Value::Int16(value) => u8::try_from(*value).ok(),
+        Value::UInt16(value) => u8::try_from(*value).ok(),
+        Value::Int32(value) => u8::try_from(*value).ok(),
+        Value::UInt32(value) => u8::try_from(*value).ok(),
+        _ => None,
+    }
+}
+
+fn value_f64(value: &Value<'_>) -> Option<f64> {
+    match value {
+        Value::Float(value) => Some(f64::from(*value)),
+        Value::Double(value) => Some(*value),
+        Value::Int8(value) => Some(f64::from(*value)),
+        Value::UInt8(value) => Some(f64::from(*value)),
+        Value::Int16(value) => Some(f64::from(*value)),
+        Value::UInt16(value) => Some(f64::from(*value)),
+        Value::Int32(value) => Some(f64::from(*value)),
+        Value::UInt32(value) => Some(f64::from(*value)),
+        Value::Int64(value) => Some(*value as f64),
+        Value::UInt64(value) => Some(*value as f64),
+        _ => None,
+    }
+}
+
+fn resolve_record_metadata(db: &Database, guid: &str) -> (Option<String>, Option<String>) {
+    let Ok(record_guid) = guid.parse::<CigGuid>() else {
+        return (None, None);
+    };
+    let Some(record) = db.record_by_id(&record_guid) else {
+        return (None, None);
+    };
+    let name = Some(db.resolve_string2(record.name_offset).to_string()).filter(|value| !value.is_empty());
+    let path = Some(db.resolve_string(record.file_name_offset).replace('\\', "/"))
+        .filter(|value| !value.is_empty());
+    (name, path)
 }

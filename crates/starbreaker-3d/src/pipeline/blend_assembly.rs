@@ -195,6 +195,10 @@ fn scene_instance_properties(entity_name: &str, instance: &LinkedMeshInstance) -
         "mesh_asset": instance.mesh_asset,
         "material_sidecar": instance.material_sidecar,
         "palette_id": instance.palette_id,
+        "source_object_name": instance.source_object_name,
+        "source_parent_name": instance.source_parent_name,
+        "source_ancestors": instance.source_ancestors.iter().map(|ancestor| ancestor.name.clone()).collect::<Vec<_>>(),
+        "ui_bindings": instance.ui_bindings,
     })
     .to_string();
     let mut props = vec![
@@ -409,6 +413,7 @@ struct SceneManifestInstance {
     mesh_asset: String,
     material_sidecar: Option<String>,
     palette_id: Option<String>,
+    ui_bindings: Vec<serde_json::Value>,
     parent_node_name: Option<String>,
     loc: [f32; 3],
     quat: [f32; 4],
@@ -584,6 +589,11 @@ fn scene_manifest_instances(manifest_files: &[ExportedFile]) -> Vec<SceneManifes
             .and_then(|v| v.as_str())
             .filter(|path| !path.is_empty())
             .map(ToOwned::to_owned);
+        let ui_bindings = value
+            .get("ui_bindings")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
         let sidecar_palette_id = material_sidecar
             .as_deref()
             .and_then(|path| default_palette_by_sidecar.get(path).cloned());
@@ -609,6 +619,7 @@ fn scene_manifest_instances(manifest_files: &[ExportedFile]) -> Vec<SceneManifes
                 .filter(|palette| !palette.is_empty())
                 .map(ToOwned::to_owned)
                 .or(sidecar_palette_id),
+            ui_bindings,
             parent_node_name: value
                 .get("parent_node_name")
                 .and_then(|v| v.as_str())
@@ -700,6 +711,11 @@ fn scene_manifest_instances(manifest_files: &[ExportedFile]) -> Vec<SceneManifes
                             .map(ToOwned::to_owned)
                             .or_else(|| interior_palette_id.clone())
                             .or(sidecar_palette_id),
+                        ui_bindings: placement
+                            .get("ui_bindings")
+                            .and_then(|v| v.as_array())
+                            .cloned()
+                            .unwrap_or_default(),
                         parent_node_name: None,
                         loc,
                         quat,
@@ -1252,6 +1268,7 @@ pub fn write_decomposed_export_blend(
                         material_names: linked_mesh_ref.material_names.clone(),
                         material_sidecar: None,
                         palette_id: None,
+                        ui_bindings: Vec::new(),
                         source_nodes: if idx == 0 {
                             source_nodes_by_asset
                                 .get(&file.relative_path)
@@ -1306,6 +1323,7 @@ pub fn write_decomposed_export_blend(
                         material_names: linked_mesh_ref.material_names.clone(),
                         material_sidecar: manifest_instance.material_sidecar.clone(),
                         palette_id: manifest_instance.palette_id.clone(),
+                        ui_bindings: manifest_instance.ui_bindings.clone(),
                         source_nodes: instance_source_nodes,
                         source_ancestors: linked_mesh_ref.ancestors.clone(),
                         source_parent_name: linked_mesh_ref.source_parent_name.clone(),
@@ -3434,6 +3452,7 @@ pub struct LinkedMeshInstance {
     pub material_names: Vec<String>,
     pub material_sidecar: Option<String>,
     pub palette_id: Option<String>,
+    pub ui_bindings: Vec<serde_json::Value>,
     /// Source asset empty ancestors, ordered root-to-parent.
     pub source_ancestors: Vec<LinkedSourceAncestor>,
     /// Full source empty tree for this scene instance, when available.
@@ -3525,6 +3544,7 @@ pub fn create_scene_blend(
                 material_names: Vec::new(),
                 material_sidecar: None,
                 palette_id: None,
+                ui_bindings: Vec::new(),
                 source_nodes: Vec::new(),
                 source_ancestors: Vec::new(),
                 source_loc: [0.0, 0.0, 0.0],

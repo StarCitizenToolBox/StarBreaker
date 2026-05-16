@@ -84,6 +84,7 @@ def _material_is_compatible(
     submaterial: SubmaterialRecord,
     palette: PaletteRecord | None,
     palette_scope: str,
+    ui_image_path: str | None = None,
 ) -> bool:
     existing_sidecar_path = _string_prop(material, PROP_MATERIAL_SIDECAR)
     canonical_sidecar_path = _canonical_material_sidecar_path(sidecar_path, sidecar)
@@ -103,7 +104,17 @@ def _material_is_compatible(
     if not _managed_material_runtime_graph_is_sane(material):
         return False
 
-    return _string_prop(material, PROP_PALETTE_SCOPE) == palette_scope
+    if _string_prop(material, PROP_PALETTE_SCOPE) != palette_scope:
+        return False
+
+    if ui_image_path is not None:
+        existing_identity = _string_prop(material, PROP_MATERIAL_IDENTITY)
+        if existing_identity is not None and f"|ui:{ui_image_path}" not in existing_identity:
+            expected_identity_suffix = f"|ui:{ui_image_path}"
+            if not existing_identity.endswith(expected_identity_suffix):
+                return False
+
+    return True
 
 
 def _managed_material_runtime_graph_is_sane(material: bpy.types.Material) -> bool:

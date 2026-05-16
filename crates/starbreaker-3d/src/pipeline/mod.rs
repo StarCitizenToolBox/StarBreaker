@@ -7,8 +7,6 @@
 //! `dump_nmc_nodes`, `dump_hierarchy`.
 
 use std::collections::HashSet;
-use std::str::FromStr;
-
 use starbreaker_datacore::database::Database;
 use starbreaker_datacore::types::Record;
 use starbreaker_dds::ReadSibling;
@@ -546,23 +544,23 @@ pub fn dump_hierarchy(
             "    {{\n      \"container\": {:?},\n      \"meshes\": [\n",
             container.name
         );
-        for (cgf_idx, transform, _placement_palette) in &container.placements {
-            let entry = &interiors.unique_cgfs[*cgf_idx];
-            let tx = transform[3][0];
-            let ty = transform[3][1];
-            let tz = transform[3][2];
+        for placement in &container.placements {
+            let entry = &interiors.unique_cgfs[placement.mesh_index];
+            let tx = placement.transform[3][0];
+            let ty = placement.transform[3][1];
+            let tz = placement.transform[3][2];
             // Extract scale from rotation columns
-            let sx = (transform[0][0] * transform[0][0]
-                + transform[0][1] * transform[0][1]
-                + transform[0][2] * transform[0][2])
+            let sx = (placement.transform[0][0] * placement.transform[0][0]
+                + placement.transform[0][1] * placement.transform[0][1]
+                + placement.transform[0][2] * placement.transform[0][2])
                 .sqrt();
-            let sy = (transform[1][0] * transform[1][0]
-                + transform[1][1] * transform[1][1]
-                + transform[1][2] * transform[1][2])
+            let sy = (placement.transform[1][0] * placement.transform[1][0]
+                + placement.transform[1][1] * placement.transform[1][1]
+                + placement.transform[1][2] * placement.transform[1][2])
                 .sqrt();
-            let sz = (transform[2][0] * transform[2][0]
-                + transform[2][1] * transform[2][1]
-                + transform[2][2] * transform[2][2])
+            let sz = (placement.transform[2][0] * placement.transform[2][0]
+                + placement.transform[2][1] * placement.transform[2][1]
+                + placement.transform[2][2] * placement.transform[2][2])
                 .sqrt();
             let _ = write!(
                 out,
@@ -818,18 +816,22 @@ mod tests {
         let mut specs = Vec::new();
         collect_child_payload_specs(&[proxy, rack], "root_ship", None, &mut specs);
 
-        assert_eq!(specs.len(), 3);
-        assert_eq!(specs[0].child.entity_name, "weapon");
+        assert_eq!(specs.len(), 4);
+        assert_eq!(specs[0].child.entity_name, "proxy");
         assert_eq!(specs[0].parent_entity_name, "root_ship");
         assert_eq!(specs[0].parent_node_name, "hardpoint_proxy");
 
-        assert_eq!(specs[1].child.entity_name, "rack");
+        assert_eq!(specs[1].child.entity_name, "weapon");
         assert_eq!(specs[1].parent_entity_name, "root_ship");
-        assert_eq!(specs[1].parent_node_name, "hardpoint_rack");
+        assert_eq!(specs[1].parent_node_name, "hardpoint_proxy");
 
-        assert_eq!(specs[2].child.entity_name, "missile");
-        assert_eq!(specs[2].parent_entity_name, "rack");
-        assert_eq!(specs[2].parent_node_name, "hardpoint_missile");
+        assert_eq!(specs[2].child.entity_name, "rack");
+        assert_eq!(specs[2].parent_entity_name, "root_ship");
+        assert_eq!(specs[2].parent_node_name, "hardpoint_rack");
+
+        assert_eq!(specs[3].child.entity_name, "missile");
+        assert_eq!(specs[3].parent_entity_name, "rack");
+        assert_eq!(specs[3].parent_node_name, "hardpoint_missile");
     }
 
     #[test]

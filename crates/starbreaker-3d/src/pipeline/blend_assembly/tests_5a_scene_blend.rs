@@ -997,6 +997,7 @@ fn test_create_scene_blend_links_object_ids_instead_of_empty_mesh_stubs() {
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: Vec::new(),
         source_ancestors: Vec::new(),
         source_loc: [0.0, 0.0, 0.0],
@@ -1056,6 +1057,7 @@ fn test_create_scene_blend_disambiguates_duplicate_library_basenames() {
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: Vec::new(),
         source_ancestors: Vec::new(),
         source_loc: [0.0, 0.0, 0.0],
@@ -1087,6 +1089,7 @@ fn test_create_scene_blend_disambiguates_duplicate_library_basenames() {
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: Vec::new(),
         source_ancestors: Vec::new(),
         source_loc: [0.0, 0.0, 0.0],
@@ -1149,6 +1152,7 @@ fn test_create_scene_blend_writes_addon_style_scene_anchors() {
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: Vec::new(),
         source_ancestors: vec![
             LinkedSourceAncestor {
@@ -1265,6 +1269,7 @@ fn test_interior_meshes_do_not_parent_to_global_coordinate_nodes() {
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: vec![LinkedSourceNode {
             name: "StarBreaker_Y_up".to_string(),
             parent_name: None,
@@ -1302,6 +1307,7 @@ fn test_interior_meshes_do_not_parent_to_global_coordinate_nodes() {
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: vec![LinkedSourceNode {
             name: "interior_helper".to_string(),
             parent_name: None,
@@ -1366,6 +1372,7 @@ fn test_create_scene_blend_uses_full_source_empty_tree_for_parent_nodes() {
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: vec![
             LinkedSourceNode {
                 name: "hardpoint_child".to_string(),
@@ -1412,6 +1419,7 @@ fn test_create_scene_blend_uses_full_source_empty_tree_for_parent_nodes() {
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: Vec::new(),
         source_ancestors: Vec::new(),
         source_loc: [0.0, 0.0, 0.0],
@@ -1476,6 +1484,7 @@ fn test_create_scene_blend_parents_source_empty_to_local_mesh_object() {
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: vec![LinkedSourceNode {
             name: "child_empty".to_string(),
             parent_name: Some("parent_mesh".to_string()),
@@ -1527,6 +1536,7 @@ fn test_create_scene_blend_uses_instance_local_source_parent_before_global_name(
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: vec![LinkedSourceNode {
             name: "shared_source_parent".to_string(),
             parent_name: None,
@@ -1564,6 +1574,7 @@ fn test_create_scene_blend_uses_instance_local_source_parent_before_global_name(
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: vec![LinkedSourceNode {
             name: "shared_source_parent".to_string(),
             parent_name: None,
@@ -1625,6 +1636,7 @@ fn test_create_scene_blend_reuses_source_tree_for_same_scene_instance_mesh_refs(
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: vec![LinkedSourceNode {
             name: "mav_main".to_string(),
             parent_name: None,
@@ -1662,6 +1674,7 @@ fn test_create_scene_blend_reuses_source_tree_for_same_scene_instance_mesh_refs(
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: vec![LinkedSourceNode {
             name: "mav_main".to_string(),
             parent_name: None,
@@ -1699,6 +1712,7 @@ fn test_create_scene_blend_reuses_source_tree_for_same_scene_instance_mesh_refs(
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: Vec::new(),
         source_ancestors: Vec::new(),
         source_loc: [0.0, 0.0, 0.0],
@@ -1752,6 +1766,7 @@ fn test_create_scene_blend_resolves_parent_node_against_matching_parent_entity_i
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: vec![LinkedSourceNode {
             name: "hardpoint_class_2".to_string(),
             parent_name: None,
@@ -1789,6 +1804,7 @@ fn test_create_scene_blend_resolves_parent_node_against_matching_parent_entity_i
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: Vec::new(),
         source_ancestors: Vec::new(),
         source_loc: [0.0, 0.0, 0.0],
@@ -1820,6 +1836,7 @@ fn test_create_scene_blend_resolves_parent_node_against_matching_parent_entity_i
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: vec![LinkedSourceNode {
             name: "hardpoint_class_2".to_string(),
             parent_name: None,
@@ -1857,6 +1874,7 @@ fn test_create_scene_blend_resolves_parent_node_against_matching_parent_entity_i
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: Vec::new(),
         source_ancestors: Vec::new(),
         source_loc: [0.0, 0.0, 0.0],
@@ -1913,6 +1931,7 @@ fn test_create_scene_blend_resolves_parent_node_case_insensitively() {
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: vec![LinkedSourceNode {
             name: "hardpoint_Right_Main_Retro".to_string(),
             parent_name: None,
@@ -1950,6 +1969,7 @@ fn test_create_scene_blend_resolves_parent_node_case_insensitively() {
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: Vec::new(),
         source_ancestors: Vec::new(),
         source_loc: [0.0, 0.0, 0.0],
@@ -2056,6 +2076,7 @@ fn create_test_input(
             offset_rotation: [0.0, 0.0, 0.0],
             detach_direction: [0.0, 0.0, 0.0],
             port_flags: String::new(),
+            ui_bindings: Vec::new(),
         });
     }
 
@@ -2147,6 +2168,7 @@ fn test_create_scene_blend_hides_invisible_linked_instance_objects() {
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_ancestors: Vec::new(),
         source_nodes: Vec::new(),
         source_loc: [0.0, 0.0, 0.0],
@@ -2190,6 +2212,7 @@ fn test_create_scene_blend_writes_decal_offset_modifier_for_decal_mesh_asset() {
         material_names: Vec::new(),
         material_sidecar: Some("Data/Objects/Spaceships/Ships/DRAK/Clipper/drak_clipper_ext_TEX0.materials.json".to_string()),
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_ancestors: Vec::new(),
         source_nodes: Vec::new(),
         source_loc: [0.0, 0.0, 0.0],

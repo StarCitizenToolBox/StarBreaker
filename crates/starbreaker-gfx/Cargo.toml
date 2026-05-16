@@ -1,0 +1,13 @@
+[package]
+name = "starbreaker-gfx"
+edition = "2024"
+version.workspace = true
+
+[dependencies]
+flate2 = "1"
+image = { version = "0.25", default-features = false, features = ["png", "tiff"] }
+starbreaker-dds = { path = "../starbreaker-dds" }
+thiserror = "2"
+
+[lints]
+workspace = true

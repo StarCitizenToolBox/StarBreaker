@@ -5194,6 +5194,7 @@ dependencies = [
  "starbreaker-cryxml",
  "starbreaker-datacore",
  "starbreaker-dds",
+ "starbreaker-gfx",
  "starbreaker-p4k",
  "thiserror 2.0.18",
  "zerocopy",
@@ -5317,6 +5318,16 @@ dependencies = [
  "starbreaker-common",
  "thiserror 2.0.18",
  "zerocopy",
+]
+
+[[package]]
+name = "starbreaker-gfx"
+version = "0.3.1"
+dependencies = [
+ "flate2",
+ "image",
+ "starbreaker-dds",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

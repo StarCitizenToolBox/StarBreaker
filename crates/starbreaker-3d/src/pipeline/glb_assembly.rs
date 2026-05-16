@@ -205,6 +205,7 @@ pub fn assemble_glb_with_loadout_with_progress(
                     offset_rotation: [0.0; 3],
                     detach_direction: [0.0; 3],
                     port_flags: String::new(),
+                    ui_bindings: Vec::new(),
                 });
                 log::info!("  landing gear '{gear_path}' → '{bone_name}', {verts} verts");
             }

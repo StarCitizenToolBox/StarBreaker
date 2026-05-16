@@ -492,6 +492,23 @@ impl ResolvedNode {
 }
 
 /// All the data needed to add one child entity's geometry to a glTF scene.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UiBinding {
+    pub binding_kind: String,
+    pub source_entity_name: String,
+    pub helper_name: Option<String>,
+    pub default_view: Option<String>,
+    pub default_state_name: Option<String>,
+    pub default_light_color: Option<[u8; 4]>,
+    pub default_light_intensity_milli: Option<u16>,
+    pub canvas_guid: Option<String>,
+    pub canvas_record_name: Option<String>,
+    pub canvas_record_path: Option<String>,
+    pub owner_source_file: Option<String>,
+    pub runtime_image_source: Option<String>,
+    pub generated_image_path: Option<String>,
+}
+
 pub struct EntityPayload {
     pub mesh: Mesh,
     pub materials: Option<crate::mtl::MtlFile>,
@@ -527,6 +544,8 @@ pub struct EntityPayload {
     pub detach_direction: [f32; 3],
     /// Raw item port flags from SItemPortDef (e.g. "invisible uneditable").
     pub port_flags: String,
+    /// Screen/UI bindings discovered from this entity and any attached UI children.
+    pub ui_bindings: Vec<UiBinding>,
 }
 
 /// A light extracted from a CryXMLB entity in a .soc file.
@@ -625,6 +644,15 @@ pub struct InteriorMesh {
     /// Entity class short name from socpak root item-port XML when no GUID is
     /// authored but the room setup still names a visual entity to spawn.
     pub entity_class_name: Option<String>,
+}
+
+/// A resolved mesh placement from a .soc interior container.
+#[derive(Debug, Clone)]
+pub struct InteriorPlacement {
+    pub mesh_index: usize,
+    pub transform: [[f32; 4]; 4],
+    pub palette: Option<crate::mtl::TintPalette>,
+    pub ui_bindings: Vec<UiBinding>,
 }
 
 /// All geometry and lights from a single socpak interior container.

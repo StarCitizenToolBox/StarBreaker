@@ -76,7 +76,7 @@ from starbreaker_addon.runtime.constants import (
     PROP_SUBMATERIAL_JSON,
     PROP_TEMPLATE_KEY,
 )
-from starbreaker_addon.manifest import MaterialSidecar, SubmaterialRecord
+from starbreaker_addon.manifest import MaterialSidecar, SceneInstanceRecord, SubmaterialRecord
 from starbreaker_addon.runtime.importer.builders import (
     BuildersMixin,
     _mesh_decal_neutral_breakup_default,
@@ -232,6 +232,7 @@ class MaterialReuseImporterUnderTest(MaterialsMixin):
         submaterial,
         palette,
         material_identity,
+        ui_image_path=None,
     ) -> None:
         self.rebuild_calls.append(material.name)
         material[PROP_TEMPLATE_KEY] = template_plan_for_submaterial(submaterial).template_key
@@ -409,7 +410,7 @@ class FakePackageWithSidecars:
     def __init__(self, sidecar):
         self.sidecar = sidecar
         self.palettes = {}
-        self.scene = types.SimpleNamespace(root_entity=types.SimpleNamespace(palette_id=None))
+        self.scene = types.SimpleNamespace(root_entity=types.SimpleNamespace(palette_id=None), children=[])
 
     def load_material_sidecar(self, sidecar_path):
         return self.sidecar
@@ -434,7 +435,7 @@ class OrchestrationImporterUnderTest(OrchestrationMixin, BuildersMixin):
     def _effective_palette_id(self, palette_id: str | None) -> str | None:
         return palette_id
 
-    def material_for_submaterial(self, sidecar_path, sidecar, submaterial, palette):
+    def material_for_submaterial(self, sidecar_path, sidecar, submaterial, palette, ui_image_path=None):
         return FakeMaterial(f"material_{submaterial.index}")
 
     def _remove_replaced_slot_material(self, material) -> None:
@@ -502,6 +503,54 @@ class DecalOffsetTests(unittest.TestCase):
         self.assertIsNotNone(obj.material_slots[1].material)
         self.assertIsNone(obj.material_slots[2].material)
         self.assertIsNone(obj.material_slots[3].material)
+
+    def test_ui_binding_for_object_falls_back_to_manifest_bindings_for_native_blend_meshes(self) -> None:
+        sidecar_path = "Data/Materials/vehicles/manufacturer/DRAK/drak_int_master_01_TEX0.materials.json"
+        mesh_asset = "Data/Objects/Spaceships/Seats/DRAK/clipper/drak_clipper_dashboard_pilot_LOD0.blend"
+        importer = OrchestrationImporterUnderTest(FakeSidecar([FakeSubmaterial(0, "RTT_Screen")]))
+        importer.package.scene.children = [
+            SceneInstanceRecord.from_value(
+                {
+                    "entity_name": "DRAK_Clipper_Dashboard",
+                    "mesh_asset": mesh_asset,
+                    "material_sidecar": sidecar_path,
+                    "parent_node_name": "hardpoint_seat_pilot_dashboard",
+                    "ui_bindings": [
+                        {
+                            "helper_name": "Screen_Left_Upper_RTT",
+                            "generated_image_path": "Data/UI/Generated/1e7b5c1786ffb083_TEX0.png",
+                        }
+                    ],
+                }
+            )
+        ]
+        parent = FakeObject(material_slots=[], mesh=FakeMesh(polygons=[], vertex_count=0), name="body_50_hardpoint_seat_pilot_dashboard")
+        obj = FakeObject(
+            material_slots=[],
+            mesh=FakeMesh(polygons=[], vertex_count=0),
+            name="Screen_Left_Upper_RTT",
+            starbreaker_mesh_asset=mesh_asset,
+            starbreaker_material_sidecar=sidecar_path,
+            starbreaker_instance_json=json.dumps(
+                {
+                    "source_object_name": "Screen_Left_Upper_RTT",
+                    "source_parent_name": "screen_top_left_geo",
+                    "source_ancestors": ["Frame", "Main_Body"],
+                    "ui_bindings": [],
+                }
+            ),
+        )
+        obj.parent = parent
+
+        binding = importer._ui_binding_for_object(obj)
+
+        self.assertEqual(
+            binding,
+            {
+                "helper_name": "Screen_Left_Upper_RTT",
+                "generated_image_path": "Data/UI/Generated/1e7b5c1786ffb083_TEX0.png",
+            },
+        )
 
     def test_illum_pom_rebind_uses_palette_channel_rgb_when_no_authored_fallback_exists(self) -> None:
         decal = FakeMaterial(

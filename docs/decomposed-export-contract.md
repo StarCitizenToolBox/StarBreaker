@@ -150,6 +150,13 @@ Each `*.materials.json` sidecar preserves:
 - per-submaterial name, raw shader string, shader family classification if known, and activation state
 - decoded feature flags from `StringGenMask`
 - direct texture-slot inventory with semantic roles, virtual-input flags, source paths, and exported texture paths
+- DisplayScreen/UIPlane render-to-texture slots may carry additive `generated_ui`
+  metadata when the exporter can provide default visible content:
+  - `export_kind = "generated_ui_still"` when the slot is bound to a
+    deterministic source-derived PNG for runtime-only RTT content
+  - `generated_ui.source_path`, `generated_ui.identity`,
+    `generated_ui.frame_selection`, and `generated_ui.provenance` explain how
+    the exported `export_path` was selected
 - DDNA identity markers on exported normal-gloss source PNGs plus `alpha_semantic` markers such as `smoothness` when the source texture alpha carries shader-relevant data
 - structured `texture_transform` objects derived from authored `TexMod` blocks when texture UV animation or tiling metadata is present
 - public params as structured JSON values where simple coercion is safe

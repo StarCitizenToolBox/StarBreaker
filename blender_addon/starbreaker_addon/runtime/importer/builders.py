@@ -388,6 +388,7 @@ class BuildersMixin:
         submaterial: SubmaterialRecord,
         palette: PaletteRecord | None,
         material_identity: str,
+        ui_image_path: str | None = None,
     ) -> None:
         palette_key = palette.id if palette is not None else "none"
         material.use_nodes = True
@@ -401,14 +402,14 @@ class BuildersMixin:
             self._build_illum_material(material, submaterial, palette, plan)
         else:
             group_contract = None if plan.template_key == "layered_wear" else self._group_contract_for_submaterial(submaterial)
-            if group_contract is not None and self._build_contract_group_material(material, submaterial, palette, plan, group_contract):
+            if plan.template_key == "screen_hud":
+                self._build_screen_material(material, submaterial, palette, plan, ui_image_path)
+            elif group_contract is not None and self._build_contract_group_material(material, submaterial, palette, plan, group_contract):
                 if submaterial.shader_family == "GlassPBR":
                     surface_mode = SURFACE_SHADER_MODE_GLASS
             elif submaterial.shader_family == "GlassPBR":
                 self._build_glass_material(material, submaterial, palette, plan)
                 surface_mode = SURFACE_SHADER_MODE_GLASS
-            elif plan.template_key == "screen_hud":
-                self._build_screen_material(material, submaterial, palette, plan)
             elif plan.template_key == "effects":
                 self._build_effect_material(material, submaterial, palette, plan)
             else:
@@ -1684,6 +1685,7 @@ class BuildersMixin:
         submaterial: SubmaterialRecord,
         palette: PaletteRecord | None,
         plan: Any,
+        ui_image_path: str | None = None,
     ) -> None:
         nodes = material.node_tree.nodes
         links = material.node_tree.links
@@ -1702,7 +1704,7 @@ class BuildersMixin:
         self._set_socket_default(_input_socket(shader_group, "Mix Factor"), 0.12)
         self._set_socket_default(_input_socket(shader_group, "Use Checker"), 0.0)
 
-        image_path = representative_textures(submaterial)["base_color"]
+        image_path = ui_image_path or representative_textures(submaterial)["base_color"]
         color_source = self._color_source_socket(nodes, submaterial, palette, image_path, x=0, y=0)
         if color_source is not None:
             self._link_group_input(links, color_source, shader_group, "Base Color")

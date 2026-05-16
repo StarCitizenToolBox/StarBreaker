@@ -8,13 +8,15 @@
 //! `expand_loadout_into_placements` (loadout→interior placement expansion).
 //! Public types: `LoadedInteriors`, `InteriorCgfEntry`, `InteriorContainerData`.
 
+use std::str::FromStr;
+
 use starbreaker_datacore::database::Database;
 use starbreaker_datacore::query::value::Value;
 use starbreaker_datacore::types::Record;
 use starbreaker_p4k::MappedP4k;
 
 use crate::mtl;
-use crate::types::MaterialTextures;
+use crate::types::{InteriorPlacement, MaterialTextures, UiBinding};
 
 use super::*;
 
@@ -50,12 +52,10 @@ pub(crate) struct InteriorContainerData {
     pub parent_node_name: Option<String>,
     /// 4×4 column-major transform positioning this container relative to the hull.
     pub container_transform: [[f32; 4]; 4],
-    /// Each entry: (index into unique_cgfs, per-object local transform,
-    /// optional per-placement tint palette override that takes precedence over
-    /// the container's palette). Loadout-attached children resolve their own
+    /// Per-object mesh placements. Loadout-attached children resolve their own
     /// palette from the child entity's SGeometryResourceParams so each gadget
     /// tints independently of the parent socpak's tint palette.
-    pub placements: Vec<(usize, [[f32; 4]; 4], Option<mtl::TintPalette>)>,
+    pub placements: Vec<crate::types::InteriorPlacement>,
     pub lights: Vec<crate::types::LightInfo>,
     /// Tint palette resolved from the socpak's IncludedObjects tint_palette_paths.
     pub palette: Option<mtl::TintPalette>,
@@ -202,10 +202,10 @@ fn remove_root_geometry_duplicate_interior_placements(
         if container.parent_entity_name.is_some() {
             continue;
         }
-        container.placements.retain(|(mesh_index, _, _)| {
+        container.placements.retain(|placement| {
             let duplicate = interiors
                 .unique_cgfs
-                .get(*mesh_index)
+                .get(placement.mesh_index)
                 .is_some_and(|entry| normalize_geometry_path_key(&entry.cgf_path) == root_key);
             if duplicate {
                 removed += 1;
@@ -220,8 +220,8 @@ fn remove_root_geometry_duplicate_interior_placements(
 
     let mut used_indices = std::collections::HashSet::<usize>::new();
     for container in &interiors.containers {
-        for (mesh_index, _, _) in &container.placements {
-            used_indices.insert(*mesh_index);
+        for placement in &container.placements {
+            used_indices.insert(placement.mesh_index);
         }
     }
 
@@ -240,9 +240,9 @@ fn remove_root_geometry_duplicate_interior_placements(
     }
 
     for container in &mut interiors.containers {
-        for (mesh_index, _, _) in &mut container.placements {
-            if let Some(new_index) = remap.get(mesh_index).copied() {
-                *mesh_index = new_index;
+        for placement in &mut container.placements {
+            if let Some(new_index) = remap.get(&placement.mesh_index).copied() {
+                placement.mesh_index = new_index;
             }
         }
     }
@@ -482,7 +482,7 @@ pub(crate) fn merge_interiors(target: &mut LoadedInteriors, source: LoadedInteri
 
     for mut container in source.containers {
         for placement in &mut container.placements {
-            let entry = &source.unique_cgfs[placement.0];
+            let entry = &source.unique_cgfs[placement.mesh_index];
             let key = (entry.cgf_path.to_ascii_lowercase(), entry.material_path.clone());
             let merged_index = if let Some(index) = index_by_key.get(&key).copied() {
                 index
@@ -496,7 +496,7 @@ pub(crate) fn merge_interiors(target: &mut LoadedInteriors, source: LoadedInteri
                 index_by_key.insert(key, index);
                 index
             };
-            placement.0 = merged_index;
+            placement.mesh_index = merged_index;
         }
         target.containers.push(container);
     }
@@ -513,7 +513,6 @@ pub(crate) fn build_interiors_from_payloads(
 ) -> LoadedInteriors {
     use std::collections::{HashMap, HashSet};
     use starbreaker_common::CigGuid;
-    use std::str::FromStr;
 
     let guid_geom_compiled = db.compile_rooted::<String>(
         "EntityClassDefinition.Components[SGeometryResourceParams].Geometry.Geometry.Geometry.path",
@@ -613,7 +612,13 @@ pub(crate) fn build_interiors_from_payloads(
                 if !placement_keys.insert(placement_key) {
                     continue;
                 }
-                placements.push((idx, im.transform, None));
+                let ui_bindings = interior_ui_bindings_for_mesh(db, im);
+                placements.push(InteriorPlacement {
+                    mesh_index: idx,
+                    transform: im.transform,
+                    palette: None,
+                    ui_bindings,
+                });
 
                 // Expand entity loadout attachments. Many interior entities
                 // (e.g. fire-extinguisher cabinets, kit lockers) carry their
@@ -702,6 +707,52 @@ fn is_metadata_only_geometry(p4k: &MappedP4k, cgf_path: &str, lod_level: u32) ->
         && p4k
             .entry_case_insensitive(&resolve_companion_path(p4k, &p4k_geom_path, lod_level))
             .is_none()
+}
+
+fn interior_ui_bindings_for_mesh(
+    db: &Database,
+    mesh: &crate::types::InteriorMesh,
+) -> Vec<UiBinding> {
+    let source = mesh
+        .entity_class_name
+        .as_ref()
+        .and_then(|entity_class_name| {
+            resolve_named_entity_record(db, entity_class_name)
+                .map(|record| (record, entity_class_name.clone()))
+        })
+        .or_else(|| {
+            let guid_str = mesh.entity_class_guid.as_ref()?;
+            let guid = starbreaker_common::CigGuid::from_str(guid_str).ok()?;
+            let record = db.record_by_id(&guid)?;
+            let source_entity_name = db
+                .resolve_string2(record.name_offset)
+                .rsplit('.')
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            Some((record, source_entity_name))
+        });
+
+    let Some((record, source_entity_name)) = source else {
+        return Vec::new();
+    };
+    let Some(mut binding) = super::child_payload::ui_binding_for_record(db, record) else {
+        return Vec::new();
+    };
+    binding.source_entity_name = source_entity_name;
+    vec![binding]
+}
+
+fn ui_binding_for_loadout_node(
+    db: &Database,
+    child: &starbreaker_datacore::loadout::LoadoutNode,
+) -> Vec<UiBinding> {
+    let Some(mut binding) = super::child_payload::ui_binding_for_record(db, &child.record) else {
+        return Vec::new();
+    };
+    binding.source_entity_name = child.entity_name.clone();
+    binding.helper_name = child.helper_bone_name.clone();
+    vec![binding]
 }
 
 /// Resolve an EntityClassGUID to its geometry + material paths via DataCore.
@@ -889,7 +940,7 @@ pub(crate) fn expand_loadout_into_placements(
     nmc_cache: &mut std::collections::HashMap<String, Option<crate::nmc::NodeMeshCombo>>,
     cgf_cache: &mut std::collections::HashMap<String, Option<usize>>,
     unique_cgfs: &mut Vec<InteriorCgfEntry>,
-    placements: &mut Vec<(usize, [[f32; 4]; 4], Option<mtl::TintPalette>)>,
+    placements: &mut Vec<InteriorPlacement>,
 ) {
     if children.is_empty() {
         return;
@@ -960,7 +1011,12 @@ pub(crate) fn expand_loadout_into_placements(
             Some(idx)
         });
         if let Some(idx) = child_idx {
-            placements.push((idx, mat4_to_array(child_world), child_palette));
+            placements.push(InteriorPlacement {
+                mesh_index: idx,
+                transform: mat4_to_array(child_world),
+                palette: child_palette,
+                ui_bindings: ui_binding_for_loadout_node(db, child),
+            });
         }
 
         if !child.children.is_empty() {
@@ -1084,8 +1140,8 @@ pub(crate) fn collect_interior_palettes(
 
         // Per-placement palette overrides (e.g. loadout-attached gadgets that
         // carry their own tint palette via SGeometryResourceParams).
-        for (_, _, placement_palette) in &container.placements {
-            if let Some(pal) = placement_palette {
+        for placement in &container.placements {
+            if let Some(pal) = &placement.palette {
                 let h = tint_palette_hash(Some(pal));
                 if seen.insert(h) {
                     palettes.push((h, Some(pal.clone())));
@@ -1181,6 +1237,7 @@ mod tests {
         transform_bits_key, InteriorCgfEntry, InteriorContainerData, LoadedInteriors,
     };
     use crate::pipeline::nmc_bridge::mat4_from_array;
+    use crate::types::InteriorPlacement;
 
     #[test]
     fn helper_node_name_matches_prefixed_helper_suffix() {
@@ -1383,7 +1440,20 @@ mod tests {
                     parent_entity_name: None,
                     parent_node_name: None,
                     container_transform: identity,
-                    placements: vec![(0, identity, None), (1, identity, None)],
+                    placements: vec![
+                        InteriorPlacement {
+                            mesh_index: 0,
+                            transform: identity,
+                            palette: None,
+                            ui_bindings: Vec::new(),
+                        },
+                        InteriorPlacement {
+                            mesh_index: 1,
+                            transform: identity,
+                            palette: None,
+                            ui_bindings: Vec::new(),
+                        },
+                    ],
                     lights: Vec::new(),
                     palette: None,
                 },
@@ -1392,7 +1462,12 @@ mod tests {
                     parent_entity_name: Some("child".to_string()),
                     parent_node_name: Some("helper".to_string()),
                     container_transform: identity,
-                    placements: vec![(0, identity, None)],
+                    placements: vec![InteriorPlacement {
+                        mesh_index: 0,
+                        transform: identity,
+                        palette: None,
+                        ui_bindings: Vec::new(),
+                    }],
                     lights: Vec::new(),
                     palette: None,
                 },

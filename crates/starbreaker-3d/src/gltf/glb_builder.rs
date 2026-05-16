@@ -810,11 +810,10 @@ impl GlbBuilder {
 
             let mut container_children = Vec::new();
 
-            for (mesh_array_idx, transform, placement_palette) in container
-                .placements
-                .iter()
-                .map(|(i, t, p)| (*i, t, p.as_ref()))
-            {
+            for placement in &container.placements {
+                let mesh_array_idx = placement.mesh_index;
+                let transform = &placement.transform;
+                let placement_palette = placement.palette.as_ref();
                 // Per-placement palette override (loadout-attached gadgets)
                 // takes precedence over the container's palette; fall back to
                 // the container palette otherwise.
@@ -2787,4 +2786,3 @@ fn pack_texture_deduped(
     cache.insert(key, region);
     Some(region)
 }
-

@@ -5,6 +5,10 @@ use std::time::Instant;
 use gltf_json as json;
 use starbreaker_common::progress::{report as report_progress, Progress};
 use starbreaker_dds;
+use starbreaker_gfx::{
+    OutputIdentity, UiLightCue, UiStillBinding, UiStillSpec, render_default_still_png,
+    select_default_still,
+};
 use starbreaker_p4k::MappedP4k;
 
 use crate::error::Error;
@@ -17,7 +21,7 @@ use crate::pipeline::{
     PngCache,
 };
 use crate::skeleton::Bone;
-use crate::types::{EntityPayload, Mesh};
+use crate::types::{EntityPayload, Mesh, UiBinding};
 
 pub(crate) struct DecomposedInput {
     pub entity_name: String,
@@ -104,6 +108,7 @@ struct SceneInstanceRecord {
     offset_rotation: [f32; 3],
     detach_direction: [f32; 3],
     port_flags: String,
+    ui_bindings: Vec<UiBinding>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -328,6 +333,7 @@ fn resolve_child_instance_transforms(input: &DecomposedInput) -> Vec<ResolvedChi
                 offset_rotation: child.offset_rotation,
                 detach_direction: child.detach_direction,
                 port_flags: child.port_flags.clone(),
+                ui_bindings: child.ui_bindings.clone(),
             },
             &scene_nodes,
             MaterialMode::None,
@@ -357,6 +363,7 @@ struct InteriorPlacementRecord {
     mesh_asset: String,
     material_sidecar: Option<String>,
     entity_class_guid: Option<String>,
+    ui_bindings: Vec<UiBinding>,
     transform: [[f32; 4]; 4],
     /// Per-placement tint palette id that overrides the container's palette.
     /// Populated for loadout-attached children that carry their own palette
@@ -1129,6 +1136,11 @@ pub(crate) fn write_decomposed_export(
             &child.entity_name,
             material_sidecar.as_deref(),
         );
+        let ui_bindings = child
+            .ui_bindings
+            .iter()
+            .map(|binding| generated_ui_binding_record(&mut files, binding, opts.texture_mip))
+            .collect();
 
         let resolved_transform = resolved_child_transforms[index];
         child_instances.push(SceneInstanceRecord {
@@ -1148,6 +1160,7 @@ pub(crate) fn write_decomposed_export(
             offset_rotation: child.offset_rotation,
             detach_direction: child.detach_direction,
             port_flags: child.port_flags.clone(),
+            ui_bindings,
         });
 
         if child_count > 0 {
@@ -1200,19 +1213,21 @@ pub(crate) fn write_decomposed_export(
             .map(|palette| register_palette(&mut palette_records, palette));
         let mut placements = Vec::with_capacity(container.placements.len());
         let placement_start = Instant::now();
-        for (cgf_idx, transform, placement_palette) in &container.placements {
-            let entry = &input.interiors.unique_cgfs[*cgf_idx];
+        for placement in &container.placements {
+            let entry = &input.interiors.unique_cgfs[placement.mesh_index];
             // Per-placement palette override (loadout-attached children like
             // fire-extinguisher tanks with their own `kegr_red_black` palette)
             // takes precedence over the container's palette. Register it in
             // the manifest so the addon can look it up by id.
-            let placement_palette_id = placement_palette
+            let placement_palette_id = placement
+                .palette
                 .as_ref()
                 .map(|palette| register_palette(&mut palette_records, palette));
             let effective_palette_id = placement_palette_id
                 .clone()
                 .or_else(|| palette_id.clone());
-            let effective_palette_ref = placement_palette
+            let effective_palette_ref = placement
+                .palette
                 .as_ref()
                 .or(container.palette.as_ref());
             let normalized_cgf_path = normalize_source_path(p4k, &entry.cgf_path);
@@ -1366,7 +1381,12 @@ pub(crate) fn write_decomposed_export(
                 mesh_asset,
                 material_sidecar,
                 entity_class_guid: None,
-                transform: *transform,
+                ui_bindings: placement
+                    .ui_bindings
+                    .iter()
+                    .map(|binding| generated_ui_binding_record(&mut files, binding, opts.texture_mip))
+                    .collect(),
+                transform: placement.transform,
                 palette_id: placement_palette_id,
             });
             processed_interior_placements += 1;
@@ -1877,6 +1897,21 @@ fn scene_instance_json(instance: &SceneInstanceRecord) -> serde_json::Value {
         "offset_rotation": instance.offset_rotation,
         "detach_direction": instance.detach_direction,
         "port_flags": instance.port_flags,
+        "ui_bindings": instance.ui_bindings.iter().map(|binding| serde_json::json!({
+            "binding_kind": binding.binding_kind,
+            "source_entity_name": binding.source_entity_name,
+            "helper_name": binding.helper_name,
+            "default_view": binding.default_view,
+            "default_state_name": binding.default_state_name,
+            "default_light_color": binding.default_light_color,
+            "default_light_intensity_milli": binding.default_light_intensity_milli,
+            "canvas_guid": binding.canvas_guid,
+            "canvas_record_name": binding.canvas_record_name,
+            "canvas_record_path": binding.canvas_record_path,
+            "owner_source_file": binding.owner_source_file,
+            "runtime_image_source": binding.runtime_image_source,
+            "generated_image_path": binding.generated_image_path,
+        })).collect::<Vec<_>>(),
     })
 }
 
@@ -1894,11 +1929,30 @@ fn interior_container_json(container: &InteriorContainerRecord) -> serde_json::V
                 "mesh_asset": placement.mesh_asset,
                 "material_sidecar": placement.material_sidecar,
                 "entity_class_guid": placement.entity_class_guid,
+                "ui_bindings": placement.ui_bindings.iter().map(ui_binding_json).collect::<Vec<_>>(),
                 "transform": placement.transform,
                 "palette_id": placement.palette_id,
             })
         }).collect::<Vec<_>>(),
         "lights": container.lights,
+    })
+}
+
+fn ui_binding_json(binding: &UiBinding) -> serde_json::Value {
+    serde_json::json!({
+        "binding_kind": binding.binding_kind,
+        "source_entity_name": binding.source_entity_name,
+        "helper_name": binding.helper_name,
+        "default_view": binding.default_view,
+        "default_state_name": binding.default_state_name,
+        "default_light_color": binding.default_light_color,
+        "default_light_intensity_milli": binding.default_light_intensity_milli,
+        "canvas_guid": binding.canvas_guid,
+        "canvas_record_name": binding.canvas_record_name,
+        "canvas_record_path": binding.canvas_record_path,
+        "owner_source_file": binding.owner_source_file,
+        "runtime_image_source": binding.runtime_image_source,
+        "generated_image_path": binding.generated_image_path,
     })
 }
 
@@ -1964,6 +2018,7 @@ fn write_material_sidecar(
                 texture_mip,
                 existing_asset_paths,
                 mtl_cache,
+                &source_material_path,
             )
         })
         .collect::<Vec<_>>();
@@ -2032,6 +2087,7 @@ fn extract_material_entry(
     texture_mip: u32,
     existing_asset_paths: Option<&HashSet<String>>,
     mtl_cache: &mut HashMap<String, Option<MtlFile>>,
+    source_material_path: &str,
 ) -> ExtractedMaterialEntry {
     let semantic_slots = material.semantic_texture_slots();
     let slot_exports = semantic_slots
@@ -2043,6 +2099,8 @@ fn extract_material_entry(
                 png_cache,
                 texture_cache,
                 binding,
+                material,
+                source_material_path,
                 texture_mip,
                 existing_asset_paths,
             )
@@ -2119,6 +2177,8 @@ fn extract_material_entry(
                                 png_cache,
                                 texture_cache,
                                 binding,
+                                sub,
+                                &layer_material_path,
                                 texture_mip,
                                 existing_asset_paths,
                             )
@@ -2358,12 +2418,27 @@ fn build_slot_export_value(
     png_cache: &mut PngCache,
     texture_cache: &mut HashMap<(String, TextureFlavor), String>,
     binding: &SemanticTextureBinding,
+    material: &SubMaterial,
+    source_material_path: &str,
     texture_mip: u32,
     existing_asset_paths: Option<&HashSet<String>>,
 ) -> serde_json::Value {
     let source_path = slot_source_path(Some(p4k), binding);
     let export_flavor = slot_texture_flavor(binding.role);
-    let export_path = if binding.is_virtual {
+    let generated_ui = generated_ui_texture_for_binding(
+        files,
+        p4k,
+        png_cache,
+        texture_cache,
+        material,
+        binding,
+        source_material_path,
+        texture_mip,
+        existing_asset_paths,
+    );
+    let export_path = if let Some(generated) = generated_ui.as_ref() {
+        Some(generated.export_path.clone())
+    } else if binding.is_virtual {
         None
     } else {
         export_texture_asset(
@@ -2384,7 +2459,15 @@ fn build_slot_export_value(
         ("is_virtual".to_string(), serde_json::json!(binding.is_virtual)),
         ("source_path".to_string(), serde_json::json!(source_path)),
         ("export_path".to_string(), serde_json::json!(export_path)),
-        ("export_kind".to_string(), serde_json::json!(texture_export_kind(export_flavor))),
+        (
+            "export_kind".to_string(),
+            serde_json::json!(
+                generated_ui
+                    .as_ref()
+                    .map(|generated| generated.export_kind.as_str())
+                    .unwrap_or_else(|| texture_export_kind(export_flavor))
+            ),
+        ),
         (
             "authored_attributes".to_string(),
             authored_attributes_json(&binding.authored_attributes),
@@ -2403,7 +2486,193 @@ fn build_slot_export_value(
     if let Some(texture_transform) = texture_transform_json(&binding.authored_child_blocks) {
         value.insert("texture_transform".to_string(), texture_transform);
     }
+    if let Some(generated) = generated_ui {
+        value.insert(
+            "generated_ui".to_string(),
+            serde_json::json!({
+                "identity": generated.identity_components,
+                "frame_selection": "default_on",
+                "source_path": generated.source_path,
+                "provenance": generated.provenance,
+            }),
+        );
+    }
     serde_json::Value::Object(value)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GeneratedUiTexture {
+    export_path: String,
+    export_kind: String,
+    source_path: String,
+    provenance: String,
+    identity_components: Vec<String>,
+}
+
+fn generated_ui_texture_for_binding(
+    files: &mut BTreeMap<String, Vec<u8>>,
+    _p4k: &MappedP4k,
+    _png_cache: &mut PngCache,
+    _texture_cache: &mut HashMap<(String, TextureFlavor), String>,
+    material: &SubMaterial,
+    binding: &SemanticTextureBinding,
+    source_material_path: &str,
+    texture_mip: u32,
+    _existing_asset_paths: Option<&HashSet<String>>,
+) -> Option<GeneratedUiTexture> {
+    if !binding.is_virtual || binding.role != TextureSemanticRole::RenderToTexture {
+        return None;
+    }
+    if !matches!(
+        material.shader_family(),
+        ShaderFamily::DisplayScreen | ShaderFamily::UiPlane
+    ) {
+        return None;
+    }
+
+    let identity_components = generated_ui_identity_components(material, binding, source_material_path);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    identity_components.hash(&mut hasher);
+    let hash = hasher.finish();
+    let export_path = format!("Data/UI/Generated/{hash:016x}_TEX{texture_mip}.png");
+    if !files.contains_key(&export_path) {
+        let identity = identity_components
+            .iter()
+            .fold(OutputIdentity::new(), |identity, component| {
+                identity.with_component(component)
+            });
+        let spec = UiStillSpec::drake_physical(
+            identity,
+            format!("{}:{}", material.shader_family().as_str(), material.name),
+        );
+        let bytes = render_default_still_png(&spec)
+            .expect("generated UI still render requires GFX display-list data and bitmaps");
+        insert_binary_file(files, export_path.clone(), bytes);
+    }
+
+    Some(GeneratedUiTexture {
+        export_path,
+        export_kind: "generated_ui_still".to_string(),
+        source_path: binding.path.clone(),
+        provenance: "source-derived UI still; ActionScript is not executed".to_string(),
+        identity_components,
+    })
+}
+
+fn generated_ui_binding_record(
+    files: &mut BTreeMap<String, Vec<u8>>,
+    binding: &UiBinding,
+    texture_mip: u32,
+) -> UiBinding {
+    let mut binding = binding.clone();
+    let identity_components = generated_ui_binding_identity_components(&binding);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    identity_components.hash(&mut hasher);
+    let hash = hasher.finish();
+    let export_path = format!("Data/UI/Generated/{hash:016x}_TEX{texture_mip}.png");
+    if !files.contains_key(&export_path) {
+        let identity = identity_components
+            .iter()
+            .fold(OutputIdentity::new(), |identity, component| {
+                identity.with_component(component)
+            });
+        let spec = select_default_still(
+            identity,
+            &UiStillBinding {
+                binding_kind: &binding.binding_kind,
+                source_entity_name: &binding.source_entity_name,
+                helper_name: binding.helper_name.as_deref(),
+                default_view: binding.default_view.as_deref(),
+                default_state_name: binding.default_state_name.as_deref(),
+                canvas_guid: binding.canvas_guid.as_deref(),
+                canvas_record_name: binding.canvas_record_name.as_deref(),
+                canvas_record_path: binding.canvas_record_path.as_deref(),
+                owner_source_file: binding.owner_source_file.as_deref(),
+                runtime_image_source: binding.runtime_image_source.as_deref(),
+                light_cue: binding.default_light_color.map(|color| UiLightCue {
+                    color,
+                    intensity_milli: binding.default_light_intensity_milli.unwrap_or(25),
+                }),
+            },
+        );
+        let bytes = render_default_still_png(&spec)
+            .expect("generated UI still render should succeed for fixed dimensions");
+        insert_binary_file(files, export_path.clone(), bytes);
+    }
+    binding.generated_image_path = Some(export_path);
+    binding
+}
+
+fn generated_ui_identity_components(
+    material: &SubMaterial,
+    binding: &SemanticTextureBinding,
+    source_material_path: &str,
+) -> Vec<String> {
+    let mut components = vec![
+        format!("source_material:{source_material_path}"),
+        format!("shader_family:{}", material.shader_family().as_str()),
+        format!("shader:{}", material.shader),
+        format!("submaterial:{}", material.name),
+        format!("slot:{}", binding.slot),
+        format!("virtual_source:{}", binding.path),
+        format!("string_gen_mask:{}", material.string_gen_mask),
+    ];
+    for slot in material.semantic_texture_slots() {
+        if !slot.is_virtual {
+            components.push(format!("{}:{}:{}", slot.slot, slot.role.as_str(), slot.path));
+        }
+    }
+    for param in &material.public_params {
+        components.push(format!("param:{}={}", param.name, param.value));
+    }
+    components.sort();
+    components
+}
+
+fn generated_ui_binding_identity_components(binding: &UiBinding) -> Vec<String> {
+    let mut components = vec![
+        format!("binding_kind:{}", binding.binding_kind),
+        format!("source_entity:{}", binding.source_entity_name),
+    ];
+    if let Some(helper_name) = &binding.helper_name {
+        components.push(format!("helper:{helper_name}"));
+    }
+    if let Some(default_view) = &binding.default_view {
+        components.push(format!("default_view:{default_view}"));
+    }
+    if let Some(default_state_name) = &binding.default_state_name {
+        components.push(format!("default_state:{default_state_name}"));
+    }
+    if let Some(default_light_color) = &binding.default_light_color {
+        components.push(format!(
+            "default_light_color:{},{},{},{}",
+            default_light_color[0],
+            default_light_color[1],
+            default_light_color[2],
+            default_light_color[3]
+        ));
+    }
+    if let Some(default_light_intensity_milli) = binding.default_light_intensity_milli {
+        components.push(format!(
+            "default_light_intensity_milli:{default_light_intensity_milli}"
+        ));
+    }
+    if let Some(canvas_guid) = &binding.canvas_guid {
+        components.push(format!("canvas_guid:{canvas_guid}"));
+    }
+    if let Some(canvas_record_name) = &binding.canvas_record_name {
+        components.push(format!("canvas_record_name:{canvas_record_name}"));
+    }
+    if let Some(canvas_record_path) = &binding.canvas_record_path {
+        components.push(format!("canvas_record_path:{canvas_record_path}"));
+    }
+    if let Some(owner_source_file) = &binding.owner_source_file {
+        components.push(format!("owner_source_file:{owner_source_file}"));
+    }
+    if let Some(runtime_image_source) = &binding.runtime_image_source {
+        components.push(format!("runtime_image_source:{runtime_image_source}"));
+    }
+    components
 }
 
 fn slot_source_path(p4k: Option<&MappedP4k>, binding: &SemanticTextureBinding) -> String {
@@ -4257,6 +4526,7 @@ mod tests {
             offset_rotation: [0.0, 90.0, 0.0],
             detach_direction: [0.0, 0.0, -1.0],
             port_flags: "invisible uneditable".into(),
+            ui_bindings: Vec::new(),
         };
         let interior = InteriorContainerRecord {
             name: "interior_main".into(),
@@ -4275,6 +4545,7 @@ mod tests {
                 mesh_asset: "Data/Objects/Ships/Test/interior_panel.glb".into(),
                 material_sidecar: Some("Data/Objects/Ships/Test/interior_panel.materials.json".into()),
                 entity_class_guid: Some("1234".into()),
+                ui_bindings: Vec::new(),
                 transform: [
                     [1.0, 0.0, 0.0, 0.0],
                     [0.0, 1.0, 0.0, 0.0],
@@ -4422,6 +4693,7 @@ mod tests {
             offset_rotation: [0.0; 3],
             detach_direction: [0.0; 3],
             port_flags: String::new(),
+            ui_bindings: Vec::new(),
         };
         assert!(should_export_engine_glow_targets(&child));
 
@@ -4552,6 +4824,7 @@ mod tests {
             offset_rotation: [0.0; 3],
             detach_direction: [0.0; 3],
             port_flags: "Docking_Request_Accepting".to_string(),
+            ui_bindings: Vec::new(),
         };
 
         let offset = docking_entity_attachment_offset(&builder, target_idx, &child)
