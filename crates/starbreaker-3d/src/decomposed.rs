@@ -7,7 +7,7 @@ use starbreaker_common::progress::{report as report_progress, Progress};
 use starbreaker_dds;
 use starbreaker_gfx::{
     OutputIdentity, UiLightCue, UiStillBinding, UiStillSpec, render_default_still_png,
-    select_default_still, RasterContext, parse_gfx,
+    render_gfx_still_png, select_default_still, RasterContext, parse_gfx, ImportedResourceKind,
 };
 use starbreaker_p4k::MappedP4k;
 
@@ -2559,7 +2559,7 @@ fn generated_ui_texture_for_binding(
     })
 }
 
-fn load_and_render_gfx(_spec: &UiStillSpec, gfx_path: &str, p4k: &MappedP4k) -> Result<Vec<u8>, String> {
+fn load_and_render_gfx(spec: &UiStillSpec, gfx_path: &str, p4k: &MappedP4k) -> Result<Vec<u8>, String> {
     // Find and load the GFX file from P4k
     // Note: P4kEntry uses `name` field, not `path`
     let gfx_bytes = p4k
@@ -2570,14 +2570,62 @@ fn load_and_render_gfx(_spec: &UiStillSpec, gfx_path: &str, p4k: &MappedP4k) -> 
         .ok_or_else(|| format!("GFX file not found in P4k: {}", gfx_path))?;
 
     // Parse the GFX file
-    let _gfx_file = parse_gfx(&gfx_bytes).map_err(|e| format!("Failed to parse GFX: {}", e))?;
+    let gfx_file = parse_gfx(&gfx_bytes).map_err(|e| format!("Failed to parse GFX: {}", e))?;
+
+    // Load imported bitmap textures
+    let mut bitmaps = Vec::new();
+    for import in &gfx_file.imports {
+        if import.kind == ImportedResourceKind::Texture {
+            // Try to load the imported texture from P4k
+            if let Some(bitmap) = load_imported_bitmap(&import.source, p4k) {
+                // Try to find the corresponding character ID from the symbol table
+                // For now, we use the import index as a placeholder
+                // In a full implementation, we'd match by name to character ID
+                let character_id = (bitmaps.len() as u16) + 1;
+                bitmaps.push((character_id, bitmap));
+            }
+        }
+    }
+
+    if bitmaps.is_empty() {
+        return Err("No bitmap textures found in GFX file".to_string());
+    }
 
     // Create a raster context and render
-    let _context = RasterContext::new();
+    let context = RasterContext::new();
     
-    // TODO: Extract bitmaps from GFX and pass to render_gfx_still_png
-    // For now, this is a placeholder that demonstrates the integration point
-    Err("GFX bitmap extraction not yet implemented".to_string())
+    // Render the GFX display-list with loaded bitmaps
+    render_gfx_still_png(spec, &gfx_file.render_tree, context, bitmaps)
+        .map_err(|e| format!("GFX rendering failed: {}", e))
+}
+
+/// Load a bitmap texture from P4k and convert to RgbaImage.
+fn load_imported_bitmap(texture_path: &str, p4k: &MappedP4k) -> Option<image::RgbaImage> {
+    // Try to load from P4k
+    let bytes = p4k
+        .entries()
+        .iter()
+        .find(|entry| entry.name.eq_ignore_ascii_case(texture_path))
+        .and_then(|entry| p4k.read(entry).ok())?;
+
+    // Try to parse as DDS
+    if let Ok(_dds) = starbreaker_dds::DdsFile::from_bytes(&bytes) {
+        // Convert DDS to RgbaImage
+        // For now, we'll create a placeholder or skip if conversion fails
+        // A full implementation would handle various DDS formats
+        return None; // TODO: implement DDS to RgbaImage conversion
+    }
+
+    // Try to parse as PNG/JPG/etc
+    let reader = image::ImageReader::new(std::io::Cursor::new(&bytes));
+    if let Ok(guessed_format) = reader.with_guessed_format() {
+        if let Ok(img) = guessed_format.decode() {
+            return Some(img.to_rgba8());
+        }
+    }
+
+    // Try to parse as other formats...
+    None
 }
 
 fn generated_ui_binding_record(
