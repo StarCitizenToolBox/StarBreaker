@@ -2560,14 +2560,23 @@ fn generated_ui_texture_for_binding(
 }
 
 fn load_and_render_gfx(spec: &UiStillSpec, gfx_path: &str, p4k: &MappedP4k) -> Result<Vec<u8>, String> {
-    // Find and load the GFX file from P4k
-    // Note: P4kEntry uses `name` field, not `path`
-    let gfx_bytes = p4k
+    // The runtime_image_source might be just a name like "UserInterface"
+    // We need to search for .gfx files in P4k that match this name
+    let gfx_pattern = format!("{}.gfx", gfx_path.to_lowercase());
+    
+    let gfx_entry = p4k
         .entries()
         .iter()
-        .find(|entry| entry.name.eq_ignore_ascii_case(gfx_path))
-        .and_then(|entry| p4k.read(entry).ok())
-        .ok_or_else(|| format!("GFX file not found in P4k: {}", gfx_path))?;
+        .find(|entry| {
+            // Look for files that end with the pattern or contain the name
+            let entry_lower = entry.name.to_lowercase();
+            entry_lower.ends_with(&gfx_pattern) || 
+            (entry_lower.contains(&gfx_pattern) && entry_lower.ends_with(".gfx"))
+        })
+        .ok_or_else(|| format!("GFX file not found for: {}", gfx_path))?;
+
+    let gfx_bytes = p4k.read(gfx_entry)
+        .map_err(|e| format!("Failed to read GFX file: {}", e))?;
 
     // Parse the GFX file
     let gfx_file = parse_gfx(&gfx_bytes).map_err(|e| format!("Failed to parse GFX: {}", e))?;
