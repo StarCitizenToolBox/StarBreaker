@@ -7,7 +7,7 @@ use starbreaker_common::progress::{report as report_progress, Progress};
 use starbreaker_dds;
 use starbreaker_gfx::{
     OutputIdentity, UiLightCue, UiStillBinding, UiStillSpec, render_default_still_png,
-    select_default_still,
+    select_default_still, RasterContext, parse_gfx,
 };
 use starbreaker_p4k::MappedP4k;
 
@@ -1139,7 +1139,7 @@ pub(crate) fn write_decomposed_export(
         let ui_bindings = child
             .ui_bindings
             .iter()
-            .map(|binding| generated_ui_binding_record(&mut files, binding, opts.texture_mip))
+            .map(|binding| generated_ui_binding_record(&mut files, binding, p4k, opts.texture_mip))
             .collect();
 
         let resolved_transform = resolved_child_transforms[index];
@@ -1384,7 +1384,7 @@ pub(crate) fn write_decomposed_export(
                 ui_bindings: placement
                     .ui_bindings
                     .iter()
-                    .map(|binding| generated_ui_binding_record(&mut files, binding, opts.texture_mip))
+                    .map(|binding| generated_ui_binding_record(&mut files, binding, p4k, opts.texture_mip))
                     .collect(),
                 transform: placement.transform,
                 palette_id: placement_palette_id,
@@ -2559,9 +2559,31 @@ fn generated_ui_texture_for_binding(
     })
 }
 
+fn load_and_render_gfx(_spec: &UiStillSpec, gfx_path: &str, p4k: &MappedP4k) -> Result<Vec<u8>, String> {
+    // Find and load the GFX file from P4k
+    // Note: P4kEntry uses `name` field, not `path`
+    let gfx_bytes = p4k
+        .entries()
+        .iter()
+        .find(|entry| entry.name.eq_ignore_ascii_case(gfx_path))
+        .and_then(|entry| p4k.read(entry).ok())
+        .ok_or_else(|| format!("GFX file not found in P4k: {}", gfx_path))?;
+
+    // Parse the GFX file
+    let _gfx_file = parse_gfx(&gfx_bytes).map_err(|e| format!("Failed to parse GFX: {}", e))?;
+
+    // Create a raster context and render
+    let _context = RasterContext::new();
+    
+    // TODO: Extract bitmaps from GFX and pass to render_gfx_still_png
+    // For now, this is a placeholder that demonstrates the integration point
+    Err("GFX bitmap extraction not yet implemented".to_string())
+}
+
 fn generated_ui_binding_record(
     files: &mut BTreeMap<String, Vec<u8>>,
     binding: &UiBinding,
+    p4k: &MappedP4k,
     texture_mip: u32,
 ) -> UiBinding {
     let mut binding = binding.clone();
@@ -2595,8 +2617,23 @@ fn generated_ui_binding_record(
                 }),
             },
         );
-        let bytes = render_default_still_png(&spec)
-            .expect("generated UI still render should succeed for fixed dimensions");
+        
+        // Try to load and render actual GFX data if available
+        let bytes = if let Some(gfx_path) = binding.runtime_image_source.as_ref() {
+            match load_and_render_gfx(&spec, gfx_path, p4k) {
+                Ok(gfx_bytes) => gfx_bytes,
+                Err(e) => {
+                    // Log error but fall back to placeholder
+                    eprintln!("GFX rendering failed for {}: {}", gfx_path, e);
+                    render_default_still_png(&spec)
+                        .expect("generated UI still render should succeed for fixed dimensions")
+                }
+            }
+        } else {
+            render_default_still_png(&spec)
+                .expect("generated UI still render should succeed for fixed dimensions")
+        };
+        
         insert_binary_file(files, export_path.clone(), bytes);
     }
     binding.generated_image_path = Some(export_path);
