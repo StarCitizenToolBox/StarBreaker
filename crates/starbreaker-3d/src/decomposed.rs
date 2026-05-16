@@ -7,7 +7,7 @@ use starbreaker_common::progress::{report as report_progress, Progress};
 use starbreaker_dds;
 use starbreaker_gfx::{
     OutputIdentity, UiLightCue, UiStillBinding, UiStillSpec, render_default_still_png,
-    render_gfx_still_png, select_default_still, RasterContext, parse_gfx, ImportedResourceKind,
+    render_gfx_still_png, render_swf_still_png, select_default_still, RasterContext, parse_gfx, ImportedResourceKind,
 };
 use starbreaker_p4k::MappedP4k;
 
@@ -2610,22 +2610,40 @@ fn load_and_render_gfx(spec: &UiStillSpec, gfx_path: &str, p4k: &MappedP4k) -> R
         }
     }
 
-    if bitmaps.is_empty() {
-        // GFX files may not contain rasterized bitmap textures
-        // (e.g., SWF files with vector shapes/text require a SWF interpreter)
-        // For now, fail explicitly to indicate GFX rendering is not yet supported
-        return Err(format!(
-            "GFX file {} contains no bitmap textures; SWF interpretation not yet implemented",
-            gfx_entry.name
-        ));
+    if !bitmaps.is_empty() {
+        // We have bitmap textures, use the bitmap rendering path
+        let context = RasterContext::new();
+        return render_gfx_still_png(spec, &gfx_file.render_tree, context, bitmaps)
+            .map_err(|e| format!("GFX rendering failed: {}", e));
     }
 
-    // Create a raster context and render
-    let context = RasterContext::new();
-    
-    // Render the GFX display-list with loaded bitmaps
-    render_gfx_still_png(spec, &gfx_file.render_tree, context, bitmaps)
-        .map_err(|e| format!("GFX rendering failed: {}", e))
+    // No bitmap textures found. Check if we have SWF imports to render instead.
+    let has_swf_imports = gfx_file.imports.iter().any(|imp| 
+        imp.kind == ImportedResourceKind::Movie && imp.source.to_lowercase().ends_with(".swf")
+    );
+
+    if has_swf_imports {
+        // Try to load and render one of the SWF imports
+        for import in &gfx_file.imports {
+            if import.kind == ImportedResourceKind::Movie && import.source.to_lowercase().ends_with(".swf") {
+                if let Some(swf_bytes) = load_swf_from_p4k(&import.source, p4k) {
+                    match render_swf_still_png(spec, &swf_bytes) {
+                        Ok(png) => return Ok(png),
+                        Err(e) => {
+                            eprintln!("Failed to render SWF {}: {}", import.source, e);
+                            // Continue to next SWF or fallback
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // GFX file contains no bitmap textures and either has no SWF imports or they failed to load/render
+    Err(format!(
+        "GFX file {} contains no bitmap textures and SWF rendering unavailable",
+        gfx_entry.name
+    ))
 }
 
 /// Load a bitmap texture from P4k and convert to RgbaImage.
@@ -2661,6 +2679,36 @@ fn load_imported_bitmap(texture_path: &str, p4k: &MappedP4k) -> Option<image::Rg
     }
 
     // Try to parse as other formats...
+    None
+}
+
+/// Load a SWF file from P4k by path.
+fn load_swf_from_p4k(swf_path: &str, p4k: &MappedP4k) -> Option<Vec<u8>> {
+    // First try the exact path
+    if let Some(entry) = p4k
+        .entries()
+        .iter()
+        .find(|entry| entry.name.eq_ignore_ascii_case(swf_path)) {
+        return p4k.read(entry).ok();
+    }
+
+    // If not found, try searching by filename in common locations
+    let filename = swf_path.split('\\').last().unwrap_or(swf_path);
+    
+    // Try to find in the same directory as the GFX file (localization directories)
+    for entry in p4k.entries() {
+        if entry.name.to_lowercase().ends_with(&format!("\\{}", filename.to_lowercase())) {
+            return p4k.read(entry).ok();
+        }
+    }
+
+    // Last resort: search for the filename anywhere in P4k
+    for entry in p4k.entries() {
+        if entry.name.to_lowercase().ends_with(&filename.to_lowercase()) {
+            return p4k.read(entry).ok();
+        }
+    }
+
     None
 }
 
