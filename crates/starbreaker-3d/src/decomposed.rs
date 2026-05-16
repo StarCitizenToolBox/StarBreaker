@@ -7,7 +7,7 @@ use starbreaker_common::progress::{report as report_progress, Progress};
 use starbreaker_dds;
 use starbreaker_gfx::{
     OutputIdentity, UiLightCue, UiStillBinding, UiStillSpec, render_default_still_png,
-    render_gfx_still_png, render_swf_still_png, select_default_still, RasterContext, parse_gfx, ImportedResourceKind,
+    render_gfx_still_png, render_swf_to_png, select_default_still, RasterContext, parse_gfx, ImportedResourceKind,
 };
 use starbreaker_p4k::MappedP4k;
 
@@ -2627,7 +2627,7 @@ fn load_and_render_gfx(spec: &UiStillSpec, gfx_path: &str, p4k: &MappedP4k) -> R
         for import in &gfx_file.imports {
             if import.kind == ImportedResourceKind::Movie && import.source.to_lowercase().ends_with(".swf") {
                 if let Some(swf_bytes) = load_swf_from_p4k(&import.source, p4k) {
-                    match render_swf_still_png(spec, &swf_bytes) {
+                    match render_swf_to_png(spec, &swf_bytes) {
                         Ok(png) => return Ok(png),
                         Err(e) => {
                             eprintln!("Failed to render SWF {}: {}", import.source, e);
