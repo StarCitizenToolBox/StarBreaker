@@ -6,14 +6,23 @@ use rmcp::{
     model::{ServerCapabilities, ServerInfo},
     schemars, tool, tool_router,
 };
+use starbreaker_datacore::database::Database;
 use starbreaker_p4k::{MappedP4k, P4kArchive};
 
 /// Lazily-loaded game data. Initialized on first tool call.
 struct GameData {
     p4k_path: PathBuf,
     p4k: Arc<MappedP4k>,
-    dcb_bytes: Vec<u8>,
+    dcb_bytes: &'static [u8],
+    db: Database<'static>,
 }
+
+const MAX_DATACORE_QUERY_RESULTS: usize = 32;
+const MAX_DATACORE_QUERY_JSON_NODES: usize = 50_000;
+const MAX_DATACORE_QUERY_JSON_DEPTH: usize = 16;
+const MAX_DATACORE_QUERY_ARRAY_ITEMS: usize = 256;
+const MAX_DATACORE_QUERY_OBJECT_FIELDS: usize = 256;
+const MAX_DATACORE_QUERY_STRING_CHARS: usize = 2048;
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct P4kSetDataPathRequest {
@@ -238,6 +247,9 @@ impl StarBreakerMcp {
             .read_file("Data\\Game2.dcb")
             .or_else(|_| p4k.read_file("Data\\Game.dcb"))
             .map_err(|e| anyhow::anyhow!("Failed to read DataCore from {}: {e}", p4k_path.display()))?;
+        let dcb_bytes: &'static [u8] = Box::leak(dcb_bytes.into_boxed_slice());
+        let db = Database::from_bytes(dcb_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to parse DataCore from {}: {e}", p4k_path.display()))?;
         log::info!(
             "DataCore: {} bytes, loaded in {:.1}s",
             dcb_bytes.len(),
@@ -248,6 +260,7 @@ impl StarBreakerMcp {
             p4k_path,
             p4k,
             dcb_bytes,
+            db,
         })
     }
 
@@ -456,8 +469,7 @@ impl StarBreakerMcp {
     #[tool(description = "Search DataCore for entity records by name substring. Returns JSON array of matches sorted by name length (best match first).")]
     fn search_entities(&self, Parameters(req): Parameters<SearchEntitiesRequest>) -> String {
         let data = self.data();
-        let db = starbreaker_datacore::database::Database::from_bytes(&data.dcb_bytes)
-            .expect("DataCore bytes validated at load");
+        let db = &data.db;
         let limit = req.limit.unwrap_or(20) as usize;
         let search = req.query.to_lowercase();
 
@@ -498,8 +510,7 @@ impl StarBreakerMcp {
     #[tool(description = "Dump the resolved loadout tree for an entity. This is PROCESSED output from StarBreaker's loadout resolver — it resolves entityClassName references and queries geometry paths. For raw DataCore data, use datacore_query with path 'Components[SEntityComponentDefaultLoadoutParams]' instead.")]
     fn entity_loadout(&self, Parameters(req): Parameters<EntityLoadoutRequest>) -> String {
         let data = self.data();
-        let db = starbreaker_datacore::database::Database::from_bytes(&data.dcb_bytes)
-            .expect("DataCore bytes validated at load");
+        let db = &data.db;
         let record = match self.find_entity(&db, &req.name) {
             Some(r) => r,
             None => return format!("No entity found matching '{}'", req.name),
@@ -516,8 +527,7 @@ impl StarBreakerMcp {
     #[tool(description = "Dump a full DataCore record as pretty-printed JSON. Accepts a GUID or a name substring (uses shortest match).")]
     fn datacore_record(&self, Parameters(req): Parameters<DatacoreRecordRequest>) -> String {
         let data = self.data();
-        let db = starbreaker_datacore::database::Database::from_bytes(&data.dcb_bytes)
-            .expect("DataCore bytes validated at load");
+        let db = &data.db;
 
         let record = match self.find_record(&db, &req.id) {
             Some(r) => r,
@@ -531,11 +541,10 @@ impl StarBreakerMcp {
         }
     }
 
-    #[tool(description = "Query a specific property path on a DataCore record. Returns the JSON value at that path. Example paths: 'Components[VehicleComponentParams].vehicleDefinition', 'Components[SGeometryResourceParams].Geometry.Geometry.Geometry.path'")]
+    #[tool(description = "Query a specific property path on a DataCore record. Returns JSON at that path using bounded no-reference materialization, so broad object/array queries fail fast instead of expanding the whole graph. Example paths: 'Components[VehicleComponentParams].vehicleDefinition', 'Components[SGeometryResourceParams].Geometry.Geometry.Geometry.path'")]
     fn datacore_query(&self, Parameters(req): Parameters<DatacoreQueryRequest>) -> String {
         let data = self.data();
-        let db = starbreaker_datacore::database::Database::from_bytes(&data.dcb_bytes)
-            .expect("DataCore bytes validated at load");
+        let db = &data.db;
 
         let record = match self.find_record(&db, &req.id) {
             Some(r) => r,
@@ -550,10 +559,24 @@ impl StarBreakerMcp {
             Err(e) => return format!("Invalid path '{}': {e}", req.path),
         };
 
-        match db.query::<starbreaker_datacore::query::value::Value>(&compiled, record) {
+        match db.query_no_references(&compiled, record) {
             Ok(results) => {
-                let json_values: Vec<serde_json::Value> =
-                    results.iter().map(value_to_json).collect();
+                if results.len() > MAX_DATACORE_QUERY_RESULTS {
+                    return format!(
+                        "Query result too large: {} top-level values matched (limit {}). Narrow the path before retrying.",
+                        results.len(),
+                        MAX_DATACORE_QUERY_RESULTS
+                    );
+                }
+                let mut budget = JsonBudget::new();
+                let json_values: Result<Vec<serde_json::Value>, String> = results
+                    .iter()
+                    .map(|value| value_to_json_limited(value, 0, &mut budget))
+                    .collect();
+                let json_values = match json_values {
+                    Ok(values) => values,
+                    Err(err) => return err,
+                };
                 if json_values.len() == 1 {
                     serde_json::to_string_pretty(&json_values[0])
                         .unwrap_or_else(|e| format!("JSON error: {e}"))
@@ -626,8 +649,7 @@ impl StarBreakerMcp {
     #[tool(description = "Search all DataCore records by name substring. Unlike search_entities which only searches EntityClassDefinition records, this searches ALL record types. Optionally filter by struct type.")]
     fn search_records(&self, Parameters(req): Parameters<SearchRecordsRequest>) -> String {
         let data = self.data();
-        let db = starbreaker_datacore::database::Database::from_bytes(&data.dcb_bytes)
-            .expect("DataCore bytes validated at load");
+        let db = &data.db;
         let limit = req.limit.unwrap_or(20) as usize;
         let search = req.query.to_lowercase();
 
@@ -1192,8 +1214,7 @@ impl StarBreakerMcp {
     #[tool(description = "Dump the Mannequin Animation Database (ADB) plus its companion ControllerDef for an entity. Returns structured JSON listing every Mannequin Fragment with group name, GUID, tags, FragTags, BlendOutDuration, OptionWeight, animations, scopes (resolved from the ControllerDef), and procedurals. Use to inspect fragment-scope metadata for animation troubleshooting (Phase 37). Note: the ADB has no per-bone blend-mode flag; use dba_dump's `rot_format_flags`/`pos_format_flags` for per-bone CAF metadata.")]
     fn mannequin_dump(&self, Parameters(req): Parameters<MannequinDumpRequest>) -> String {
         let data = self.data();
-        let db = starbreaker_datacore::database::Database::from_bytes(&data.dcb_bytes)
-            .expect("DataCore bytes validated at load");
+        let db = &data.db;
         let record = match self.find_entity(&db, &req.entity) {
             Some(r) => r,
             None => return format!("No entity matching '{}'", req.entity),
@@ -1722,43 +1743,111 @@ fn format_loadout_node(
     }
 }
 
-/// Convert a DataCore `Value` to a `serde_json::Value`.
-fn value_to_json(v: &starbreaker_datacore::query::value::Value) -> serde_json::Value {
+struct JsonBudget {
+    remaining_nodes: usize,
+}
+
+impl JsonBudget {
+    fn new() -> Self {
+        Self {
+            remaining_nodes: MAX_DATACORE_QUERY_JSON_NODES,
+        }
+    }
+
+    fn consume(&mut self, detail: impl Into<String>) -> Result<(), String> {
+        if self.remaining_nodes == 0 {
+            return Err(format!(
+                "Query result too large: exceeded JSON node limit {} while serializing {}. Narrow the path before retrying.",
+                MAX_DATACORE_QUERY_JSON_NODES,
+                detail.into()
+            ));
+        }
+        self.remaining_nodes -= 1;
+        Ok(())
+    }
+}
+
+/// Convert a DataCore `Value` to a bounded `serde_json::Value`.
+fn value_to_json_limited(
+    v: &starbreaker_datacore::query::value::Value,
+    depth: usize,
+    budget: &mut JsonBudget,
+) -> Result<serde_json::Value, String> {
     use starbreaker_datacore::query::value::Value;
+    if depth > MAX_DATACORE_QUERY_JSON_DEPTH {
+        return Err(format!(
+            "Query result too deep: exceeded nesting limit {}. Narrow the path before retrying.",
+            MAX_DATACORE_QUERY_JSON_DEPTH
+        ));
+    }
+    budget.consume(format!("depth {}", depth))?;
     match v {
-        Value::Null => serde_json::Value::Null,
-        Value::Bool(b) => serde_json::Value::Bool(*b),
-        Value::Int8(n) => serde_json::json!(*n),
-        Value::Int16(n) => serde_json::json!(*n),
-        Value::Int32(n) => serde_json::json!(*n),
-        Value::Int64(n) => serde_json::json!(*n),
-        Value::UInt8(n) => serde_json::json!(*n),
-        Value::UInt16(n) => serde_json::json!(*n),
-        Value::UInt32(n) => serde_json::json!(*n),
-        Value::UInt64(n) => serde_json::json!(*n),
-        Value::Float(n) => serde_json::json!(*n),
-        Value::Double(n) => serde_json::json!(*n),
-        Value::String(s) => serde_json::Value::String(s.to_string()),
-        Value::Guid(g) => serde_json::Value::String(format!("{g}")),
-        Value::Enum(s) => serde_json::Value::String(s.to_string()),
-        Value::Locale(s) => serde_json::Value::String(s.to_string()),
+        Value::Null => Ok(serde_json::Value::Null),
+        Value::Bool(b) => Ok(serde_json::Value::Bool(*b)),
+        Value::Int8(n) => Ok(serde_json::json!(*n)),
+        Value::Int16(n) => Ok(serde_json::json!(*n)),
+        Value::Int32(n) => Ok(serde_json::json!(*n)),
+        Value::Int64(n) => Ok(serde_json::json!(*n)),
+        Value::UInt8(n) => Ok(serde_json::json!(*n)),
+        Value::UInt16(n) => Ok(serde_json::json!(*n)),
+        Value::UInt32(n) => Ok(serde_json::json!(*n)),
+        Value::UInt64(n) => Ok(serde_json::json!(*n)),
+        Value::Float(n) => Ok(serde_json::json!(*n)),
+        Value::Double(n) => Ok(serde_json::json!(*n)),
+        Value::String(s) => Ok(serde_json::Value::String(truncate_string(s))),
+        Value::Guid(g) => Ok(serde_json::Value::String(format!("{g}"))),
+        Value::Enum(s) => Ok(serde_json::Value::String(truncate_string(s))),
+        Value::Locale(s) => Ok(serde_json::Value::String(truncate_string(s))),
         Value::Array(items) => {
-            serde_json::Value::Array(items.iter().map(value_to_json).collect())
+            if items.len() > MAX_DATACORE_QUERY_ARRAY_ITEMS {
+                return Err(format!(
+                    "Query result too large: array has {} items (limit {}). Narrow the path before retrying.",
+                    items.len(),
+                    MAX_DATACORE_QUERY_ARRAY_ITEMS
+                ));
+            }
+            let values = items
+                .iter()
+                .map(|item| value_to_json_limited(item, depth + 1, budget))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(serde_json::Value::Array(values))
         }
         Value::Object {
             type_name, fields, record_id,
         } => {
+            if fields.len() > MAX_DATACORE_QUERY_OBJECT_FIELDS {
+                return Err(format!(
+                    "Query result too large: object '{}' has {} fields (limit {}). Narrow the path before retrying.",
+                    type_name,
+                    fields.len(),
+                    MAX_DATACORE_QUERY_OBJECT_FIELDS
+                ));
+            }
             let mut map = serde_json::Map::new();
             map.insert("__type".to_string(), serde_json::Value::String(type_name.to_string()));
             if let Some(rid) = record_id {
                 map.insert("__id".to_string(), serde_json::Value::String(format!("{rid}")));
             }
             for (key, val) in fields {
-                map.insert(key.to_string(), value_to_json(val));
+                map.insert(
+                    key.to_string(),
+                    value_to_json_limited(val, depth + 1, budget)?,
+                );
             }
-            serde_json::Value::Object(map)
+            Ok(serde_json::Value::Object(map))
         }
     }
+}
+
+fn truncate_string(value: &str) -> String {
+    if value.chars().count() <= MAX_DATACORE_QUERY_STRING_CHARS {
+        return value.to_string();
+    }
+    value
+        .chars()
+        .take(MAX_DATACORE_QUERY_STRING_CHARS)
+        .collect::<String>()
+        + "…"
 }
 
 /// Create a Content::Text item.
@@ -1977,8 +2066,10 @@ fn read_u64_at_le(data: &[u8], idx: usize) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        inspect_included_objects_chunk, raw_included_object_type_counts, StarBreakerMcp,
+        inspect_included_objects_chunk, raw_included_object_type_counts, value_to_json_limited,
+        JsonBudget, StarBreakerMcp,
     };
+    use starbreaker_datacore::query::value::Value;
 
     fn build_included_objects_chunk(object_payloads: &[Vec<u8>]) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -2093,5 +2184,35 @@ mod tests {
         assert!(StarBreakerMcp::split_socpak_entry_path("foo.socpak::").is_none());
         assert!(StarBreakerMcp::split_socpak_entry_path("::inner.entxml").is_none());
         assert!(StarBreakerMcp::split_socpak_entry_path("plain/path.xml").is_none());
+    }
+
+    #[test]
+    fn value_to_json_limited_rejects_large_arrays() {
+        let value = Value::Array(
+            (0..(super::MAX_DATACORE_QUERY_ARRAY_ITEMS + 1))
+                .map(|_| Value::Int32(1))
+                .collect(),
+        );
+
+        let err = value_to_json_limited(&value, 0, &mut JsonBudget::new())
+            .expect_err("large array should be rejected");
+
+        assert!(err.contains("array has"));
+    }
+
+    #[test]
+    fn value_to_json_limited_truncates_long_strings() {
+        let input = "a".repeat(super::MAX_DATACORE_QUERY_STRING_CHARS + 10);
+        let leaked: &'static str = Box::leak(input.into_boxed_str());
+
+        let json = value_to_json_limited(&Value::String(leaked), 0, &mut JsonBudget::new())
+            .expect("string should serialize");
+
+        let output = json.as_str().expect("serialized string");
+        assert_eq!(
+            output.chars().count(),
+            super::MAX_DATACORE_QUERY_STRING_CHARS + 1
+        );
+        assert!(output.ends_with('…'));
     }
 }
