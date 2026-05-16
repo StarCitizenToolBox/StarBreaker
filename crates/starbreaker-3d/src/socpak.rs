@@ -396,6 +396,7 @@ fn extract_root_item_port_meshes(
         }
     };
 
+    let root_bounds = parse_editor_bounds(&data).or_else(|| read_root_editor_bounds(inner, root_name));
     let root_item_port_reference_transform = infer_root_item_port_reference_transform(
         inner,
         root_name,
@@ -407,14 +408,15 @@ fn extract_root_item_port_meshes(
         container_transform,
         root_item_port_reference_transform,
     );
-    if !meshes.is_empty() {
+    let kept = filter_item_port_meshes_to_editor_bounds(meshes, root_bounds);
+    if !kept.is_empty() {
         log::debug!(
             "  root container xml '{}' → {} item-port entities",
             entry.name,
-            meshes.len()
+            kept.len()
         );
     }
-    meshes
+    kept
 }
 
 fn extract_item_port_meshes_from_container_xml(
@@ -607,7 +609,7 @@ fn infer_root_item_port_reference_transform(
     if root_item_port_reference_candidates.len() == 1 {
         return root_item_port_reference_candidates.first().copied();
     }
-    let bounds = read_root_editor_bounds(inner, root_name)?;
+    let bounds = parse_editor_bounds(root_xml_data).or_else(|| read_root_editor_bounds(inner, root_name))?;
     let item_ports = extract_item_port_meshes_from_container_xml(
         root_xml_data,
         glam::Mat4::IDENTITY.to_cols_array_2d(),
@@ -686,6 +688,24 @@ fn parse_vec3_csv(text: &str) -> Option<[f32; 3]> {
         *values.get(1)? as f32,
         *values.get(2)? as f32,
     ])
+}
+
+fn filter_item_port_meshes_to_editor_bounds(
+    meshes: Vec<InteriorMesh>,
+    bounds: Option<([f32; 3], [f32; 3])>,
+) -> Vec<InteriorMesh> {
+    let Some((min_bounds, max_bounds)) = bounds else {
+        return meshes;
+    };
+    meshes
+        .into_iter()
+        .filter(|mesh| {
+            let translation =
+                glam::Mat4::from_cols_array_2d(&mesh.transform).transform_point3(glam::Vec3::ZERO);
+            let coords = [translation.x, translation.y, translation.z];
+            (0..3).all(|axis| coords[axis] >= min_bounds[axis] && coords[axis] <= max_bounds[axis])
+        })
+        .collect()
 }
 
 fn score_reference_transform_bounds(
@@ -1545,12 +1565,14 @@ pub fn build_container_transform(pos: [f32; 3], rot_deg: [f32; 3]) -> [[f32; 4];
 #[cfg(test)]
 mod tests {
     use crate::included_objects::{IncludedObject, IncludedObjects};
+    use crate::types::InteriorMesh;
     use starbreaker_datacore::query::value::Value;
 
     use super::{
         build_container_transform, collect_object_container_refs,
         extract_item_port_meshes_from_text_xml, normalize_item_port_entity_name, parse_container_ref,
-        quat_mul, quat_rotate_vec, semantic_light_kind_for_light,
+        filter_item_port_meshes_to_editor_bounds, quat_mul, quat_rotate_vec,
+        semantic_light_kind_for_light,
     };
 
     fn approx_eq3(left: [f64; 3], right: [f64; 3]) {
@@ -1771,6 +1793,34 @@ mod tests {
         assert!((meshes[0].transform[3][0] - 7.625).abs() < 1e-6);
         assert!((meshes[0].transform[3][1] + 25.656252).abs() < 1e-6);
         assert!((meshes[0].transform[3][2] - 3.6906581).abs() < 1e-6);
+    }
+
+    #[test]
+    fn filter_item_port_meshes_to_editor_bounds_drops_out_of_bounds_ports() {
+        let inside = InteriorMesh {
+            cgf_path: String::new(),
+            material_path: None,
+            transform: glam::Mat4::from_translation(glam::Vec3::new(1.0, 2.0, 3.0))
+                .to_cols_array_2d(),
+            entity_class_guid: None,
+            entity_class_name: Some("InsideControl".to_string()),
+        };
+        let outside = InteriorMesh {
+            cgf_path: String::new(),
+            material_path: None,
+            transform: glam::Mat4::from_translation(glam::Vec3::new(1.0, 53.0, 3.0))
+                .to_cols_array_2d(),
+            entity_class_guid: None,
+            entity_class_name: Some("OutsideControl".to_string()),
+        };
+
+        let filtered = filter_item_port_meshes_to_editor_bounds(
+            vec![inside, outside],
+            Some(([-5.0, -3.0, -5.0], [5.0, 6.0, 5.0])),
+        );
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].entity_class_name.as_deref(), Some("InsideControl"));
     }
 
 }
