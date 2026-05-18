@@ -21,7 +21,7 @@ fn integration_p4k_path() -> Option<PathBuf> {
         if path.exists() {
             return Some(path);
         }
-        eprintln!("SC_DATA_P4K set but not found at {path}, skipping");
+        eprintln!("SC_DATA_P4K set but not found at {}, skipping", path.display());
         return None;
     }
     eprintln!("SC_DATA_P4K not set; skipping Phase 4 UI binding integration tests");

@@ -18,13 +18,19 @@ pub mod canvas;
 pub mod compose;
 pub mod defaults;
 pub mod error;
+pub mod pipeline;
 pub mod postprocess;
 pub mod style;
 pub mod swf_assets;
 
 pub use error::UiError;
 
-// Re-export all public canvas types for convenience.
+// Re-export pipeline entry point.
+pub use pipeline::{
+    CanvasFetcher, PipelineInputs, StyleFetcher, SwfFetcher, UiBindingView,
+    render_for_binding,
+};
+
 pub use canvas::{
     CanvasParser, CanvasRecord, CanvasView, CanvasWidgetTreeResolver, Operation, ResolvedCanvas,
     RgbaColor, SceneItem, Transform2D, Value, ViewComponent,

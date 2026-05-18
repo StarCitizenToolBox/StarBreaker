@@ -17,8 +17,8 @@ pub use inspect::{GfxMetadata, dump_metadata};
 pub use parser::parse_gfx;
 pub use raster::RasterContext;
 pub use render::{
-    UiLightCue, UiStillBinding, UiStillSpec, render_default_still_png,
-    render_display_list_still_png, render_gfx_still_png, select_default_still,
+    UiLightCue, UiStillBinding, UiStillSpec,
+    render_gfx_still_png, select_default_still,
 };
 pub use resolver::{AssetResolver, ResolvedAsset, ResolvedAssetKind};
 pub use swf_interpreter::render_swf_to_png;

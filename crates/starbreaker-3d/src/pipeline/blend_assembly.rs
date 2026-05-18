@@ -19,6 +19,7 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 use starbreaker_common::progress::{report as report_progress, Progress};
+use starbreaker_datacore::Database;
 use starbreaker_p4k::MappedP4k;
 use starbreaker_blend::{
     allocate_idprop_blocks,
@@ -821,6 +822,7 @@ fn decal_face_indices_for_mesh(mesh: &Mesh, mesh_with_decals: &MeshWithDecals) -
 ///
 /// Returns `DecomposedExport` with all files including real mesh geometry
 pub fn write_decomposed_export_blend(
+    db: &Database<'_>,
     p4k: &MappedP4k,
     input: DecomposedInput,
     opts: &ExportOptions,
@@ -948,6 +950,7 @@ pub fn write_decomposed_export_blend(
     // native .blend asset list with the shared decomposed exporter. Mesh asset
     // payloads are populated with real .blend bytes below.
     let base_export = crate::decomposed::write_decomposed_export(
+        db,
         p4k,
         input,
         opts,

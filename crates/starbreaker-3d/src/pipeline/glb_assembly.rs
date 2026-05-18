@@ -397,6 +397,7 @@ pub fn assemble_glb_with_loadout_with_progress(
         
         let phase_start = Instant::now();
         let decomposed = crate::pipeline::write_decomposed_export_blend(
+            db,
             p4k,
             decomposed_input,
             opts,

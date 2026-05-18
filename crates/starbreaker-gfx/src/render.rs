@@ -105,70 +105,6 @@ pub fn render_gfx_still_png(
     encode_png(&img)
 }
 
-/// Legacy function: renders a clearly marked placeholder when GFX data unavailable.
-///
-/// Phase 6 implementation note: this function is a temporary placeholder pending
-/// full GFX display-list rendering implementation. It generates a placeholder image
-/// marked with "GFX PENDING" text so the user can identify which screens need
-/// proper GFX rendering.
-///
-/// TODO: Replace with actual GFX rendering once asset loading is integrated.
-pub fn render_default_still_png(spec: &UiStillSpec) -> GfxResult<Vec<u8>> {
-    // Generate a clearly marked placeholder for now
-    // This allows exports to proceed while Phase 6 GFX implementation continues
-    generate_gfx_pending_placeholder(spec)
-}
-
-fn generate_gfx_pending_placeholder(spec: &UiStillSpec) -> GfxResult<Vec<u8>> {
-    use image::{ImageBuffer, Rgba};
-
-    let mut img = ImageBuffer::new(spec.width, spec.height);
-
-    // Fill with dark background
-    for pixel in img.pixels_mut() {
-        *pixel = Rgba([20, 20, 30, 255]);
-    }
-
-    // Draw border
-    for x in 0..spec.width {
-        if let Some(pixel) = img.get_pixel_mut_checked(x, 0) {
-            *pixel = Rgba([200, 100, 100, 255]);
-        }
-        if let Some(pixel) = img.get_pixel_mut_checked(x, spec.height.saturating_sub(1)) {
-            *pixel = Rgba([200, 100, 100, 255]);
-        }
-    }
-    for y in 0..spec.height {
-        if let Some(pixel) = img.get_pixel_mut_checked(0, y) {
-            *pixel = Rgba([200, 100, 100, 255]);
-        }
-        if let Some(pixel) = img.get_pixel_mut_checked(spec.width.saturating_sub(1), y) {
-            *pixel = Rgba([200, 100, 100, 255]);
-        }
-    }
-
-    // Add marker text (simple bars to indicate "GFX PENDING")
-    let marker_y = spec.height / 2;
-    let marker_height = 20;
-    for x in (spec.width / 4)..(spec.width * 3 / 4) {
-        for y in marker_y..(marker_y + marker_height).min(spec.height) {
-            if let Some(pixel) = img.get_pixel_mut_checked(x, y) {
-                *pixel = Rgba([200, 100, 100, 255]);
-            }
-        }
-    }
-
-    encode_png(&img)
-}
-
-/// Legacy function: kept for compatibility.
-///
-/// To render with actual GFX data, use render_gfx_still_png.
-pub fn render_display_list_still_png(_spec: &UiStillSpec, _render_tree: &RenderTree) -> GfxResult<Vec<u8>> {
-    Err(GfxError::malformed(
-        "render_display_list_still_png is deprecated; use render_gfx_still_png with bitmap data"
-    ))
-}
 
 /// Select a deterministic default frame from binding metadata.
 pub fn select_default_still(identity: OutputIdentity, binding: &UiStillBinding<'_>) -> UiStillSpec {
@@ -222,19 +158,6 @@ fn encode_png(img: &image::RgbaImage) -> GfxResult<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn render_default_still_png_rejects_without_gfx_data() {
-        let spec = UiStillSpec::new(
-            OutputIdentity::new().with_component("test"),
-            1600,
-            900,
-            "test",
-        );
-
-        let result = render_default_still_png(&spec);
-        assert!(result.is_err());
-    }
 
     #[test]
     fn select_default_still_mfd() {

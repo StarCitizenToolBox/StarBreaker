@@ -5282,6 +5282,7 @@ dependencies = [
  "quick-xml 0.37.5",
  "rayon",
  "serde_json",
+ "sha2",
  "smallvec",
  "starbreaker-blend",
  "starbreaker-chunks",
@@ -5291,6 +5292,7 @@ dependencies = [
  "starbreaker-dds",
  "starbreaker-gfx",
  "starbreaker-p4k",
+ "starbreaker-ui",
  "thiserror 2.0.18",
  "zerocopy",
 ]

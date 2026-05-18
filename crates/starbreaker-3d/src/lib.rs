@@ -13,6 +13,7 @@ pub mod types;
 pub mod animation;
 pub mod chrparams;
 pub mod validation;
+pub mod ui_pipeline;
 
 pub use error::Error;
 pub use included_objects::{IncludedObject, IncludedObjects};

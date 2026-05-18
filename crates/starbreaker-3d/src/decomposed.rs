@@ -5,10 +5,8 @@ use std::time::Instant;
 use gltf_json as json;
 use starbreaker_common::progress::{report as report_progress, Progress};
 use starbreaker_dds;
-use starbreaker_gfx::{
-    OutputIdentity, UiLightCue, UiStillBinding, UiStillSpec, render_default_still_png,
-    render_gfx_still_png, render_swf_to_png, select_default_still, RasterContext, parse_gfx, ImportedResourceKind,
-};
+use sha2::{Digest, Sha256};
+use starbreaker_datacore::Database;
 use starbreaker_p4k::MappedP4k;
 
 use crate::error::Error;
@@ -929,6 +927,7 @@ fn helper_name_is_excluded(value: &str, include_nodraw: bool, _include_shields: 
 }
 
 pub(crate) fn write_decomposed_export(
+    db: &Database<'_>,
     p4k: &MappedP4k,
     input: DecomposedInput,
     opts: &ExportOptions,
@@ -1139,7 +1138,7 @@ pub(crate) fn write_decomposed_export(
         let ui_bindings = child
             .ui_bindings
             .iter()
-            .map(|binding| generated_ui_binding_record(&mut files, binding, p4k, opts.texture_mip))
+            .map(|binding| generated_ui_binding_record(&mut files, binding, db, p4k, opts.texture_mip))
             .collect();
 
         let resolved_transform = resolved_child_transforms[index];
@@ -1384,7 +1383,7 @@ pub(crate) fn write_decomposed_export(
                 ui_bindings: placement
                     .ui_bindings
                     .iter()
-                    .map(|binding| generated_ui_binding_record(&mut files, binding, p4k, opts.texture_mip))
+                    .map(|binding| generated_ui_binding_record(&mut files, binding, db, p4k, opts.texture_mip))
                     .collect(),
                 transform: placement.transform,
                 palette_id: placement_palette_id,
@@ -2500,14 +2499,14 @@ struct GeneratedUiTexture {
 }
 
 fn generated_ui_texture_for_binding(
-    files: &mut BTreeMap<String, Vec<u8>>,
+    _files: &mut BTreeMap<String, Vec<u8>>,
     _p4k: &MappedP4k,
     _png_cache: &mut PngCache,
     _texture_cache: &mut HashMap<(String, TextureFlavor), String>,
     material: &SubMaterial,
     binding: &SemanticTextureBinding,
-    source_material_path: &str,
-    texture_mip: u32,
+    _source_material_path: &str,
+    _texture_mip: u32,
     _existing_asset_paths: Option<&HashSet<String>>,
 ) -> Option<GeneratedUiTexture> {
     if !binding.is_virtual || binding.role != TextureSemanticRole::RenderToTexture {
@@ -2519,323 +2518,39 @@ fn generated_ui_texture_for_binding(
     ) {
         return None;
     }
-
-    let identity_components = generated_ui_identity_components(material, binding, source_material_path);
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    identity_components.hash(&mut hasher);
-    let hash = hasher.finish();
-    let export_path = format!("Data/UI/Generated/{hash:016x}_TEX{texture_mip}.png");
-    if !files.contains_key(&export_path) {
-        let identity = identity_components
-            .iter()
-            .fold(OutputIdentity::new(), |identity, component| {
-                identity.with_component(component)
-            });
-        let spec = UiStillSpec::drake_physical(
-            identity,
-            format!("{}:{}", material.shader_family().as_str(), material.name),
-        );
-        let bytes = render_default_still_png(&spec)
-            .expect("generated UI still render requires GFX display-list data and bitmaps");
-        insert_binary_file(files, export_path.clone(), bytes);
-    }
-
-    Some(GeneratedUiTexture {
-        export_path,
-        export_kind: "generated_ui_still".to_string(),
-        source_path: binding.path.clone(),
-        provenance: "source-derived UI still; ActionScript is not executed".to_string(),
-        identity_components,
-    })
-}
-
-fn load_and_render_gfx(spec: &UiStillSpec, gfx_path: &str, p4k: &MappedP4k) -> Result<Vec<u8>, String> {
-    // Map generic reference names to actual GFX files
-    // This is a temporary mapping pending proper DataCore resolution
-    let actual_gfx_path = match gfx_path.to_lowercase().as_str() {
-        "userinterface" | "ui" => "Data\\UI\\HUD_2D.gfx".to_string(),
-        "hud" | "hud3d" => "Data\\UI\\HUD_3D.gfx".to_string(),
-        _ => gfx_path.to_string(),
-    };
-
-    // Try both forward and backslash paths
-    let gfx_entry = p4k
-        .entries()
-        .iter()
-        .find(|entry| {
-            let entry_lower = entry.name.to_lowercase();
-            let path_lower = actual_gfx_path.to_lowercase();
-            // Try both path separators
-            entry_lower.eq_ignore_ascii_case(&actual_gfx_path) ||
-            entry_lower.eq_ignore_ascii_case(&path_lower.replace("\\", "/")) ||
-            entry_lower.ends_with(
-                path_lower
-                    .split('\\')
-                    .last()
-                    .unwrap_or(&"")
-            )
-        })
-        .ok_or_else(|| format!("GFX file not found for: {} (resolved to: {})", gfx_path, actual_gfx_path))?;
-
-    let gfx_bytes = p4k.read(gfx_entry)
-        .map_err(|e| format!("Failed to read GFX file: {}", e))?;
-
-    // Parse the GFX file
-    let gfx_file = parse_gfx(&gfx_bytes).map_err(|e| format!("Failed to parse GFX: {}", e))?;
-
-    // Load imported bitmap textures
-    // Note: GFX files may contain SWF display-lists with vector shapes and text
-    // rather than rasterized bitmaps. Texture imports are prioritized.
-    let mut bitmaps = Vec::new();
-    for import in &gfx_file.imports {
-        if import.kind == ImportedResourceKind::Texture {
-            // Try to load the imported texture from P4k
-            if let Some(bitmap) = load_imported_bitmap(&import.source, p4k) {
-                // Try to find the corresponding character ID from the symbol table
-                // For now, we use the import index as a placeholder
-                // In a full implementation, we'd match by name to character ID
-                let character_id = (bitmaps.len() as u16) + 1;
-                bitmaps.push((character_id, bitmap));
-            }
-        }
-    }
-
-    if !bitmaps.is_empty() {
-        // We have bitmap textures, use the bitmap rendering path
-        let context = RasterContext::new();
-        return render_gfx_still_png(spec, &gfx_file.render_tree, context, bitmaps)
-            .map_err(|e| format!("GFX rendering failed: {}", e));
-    }
-
-    // No bitmap textures found. Check if we have SWF imports to render instead.
-    let has_swf_imports = gfx_file.imports.iter().any(|imp| 
-        imp.kind == ImportedResourceKind::Movie && imp.source.to_lowercase().ends_with(".swf")
-    );
-
-    if has_swf_imports {
-        // Try to load and render one of the SWF imports
-        for import in &gfx_file.imports {
-            if import.kind == ImportedResourceKind::Movie && import.source.to_lowercase().ends_with(".swf") {
-                if let Some(swf_bytes) = load_swf_from_p4k(&import.source, p4k) {
-                    match render_swf_to_png(spec, &swf_bytes) {
-                        Ok(png) => return Ok(png),
-                        Err(e) => {
-                            eprintln!("Failed to render SWF {}: {}", import.source, e);
-                            // Continue to next SWF or fallback
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // GFX file contains no bitmap textures and either has no SWF imports or they failed to load/render
-    Err(format!(
-        "GFX file {} contains no bitmap textures and SWF rendering unavailable",
-        gfx_entry.name
-    ))
-}
-
-/// Load a bitmap texture from P4k and convert to RgbaImage.
-fn load_imported_bitmap(texture_path: &str, p4k: &MappedP4k) -> Option<image::RgbaImage> {
-    // Try to load from P4k
-    let bytes = p4k
-        .entries()
-        .iter()
-        .find(|entry| entry.name.eq_ignore_ascii_case(texture_path))
-        .and_then(|entry| p4k.read(entry).ok())?;
-
-    // Try to parse as DDS
-    if let Ok(dds) = starbreaker_dds::DdsFile::from_bytes(&bytes) {
-        // Convert DDS to RgbaImage using the first mipmap level
-        if let Ok(rgba_data) = dds.decode_rgba(0) {
-            let (width, height) = dds.dimensions(0);
-            if width > 0 && height > 0 {
-                // Convert Vec<u8> RGBA data to RgbaImage
-                if let Some(img) = image::RgbaImage::from_raw(width, height, rgba_data) {
-                    return Some(img);
-                }
-            }
-        }
-        // If DDS decoding failed, fall through to try other formats
-    }
-
-    // Try to parse as PNG/JPG/etc
-    let reader = image::ImageReader::new(std::io::Cursor::new(&bytes));
-    if let Ok(guessed_format) = reader.with_guessed_format() {
-        if let Ok(img) = guessed_format.decode() {
-            return Some(img.to_rgba8());
-        }
-    }
-
-    // Try to parse as other formats...
-    None
-}
-
-/// Load a SWF file from P4k by path.
-fn load_swf_from_p4k(swf_path: &str, p4k: &MappedP4k) -> Option<Vec<u8>> {
-    // First try the exact path
-    if let Some(entry) = p4k
-        .entries()
-        .iter()
-        .find(|entry| entry.name.eq_ignore_ascii_case(swf_path)) {
-        return p4k.read(entry).ok();
-    }
-
-    // If not found, try searching by filename in common locations
-    let filename = swf_path.split('\\').last().unwrap_or(swf_path);
-    
-    // Try to find in the same directory as the GFX file (localization directories)
-    for entry in p4k.entries() {
-        if entry.name.to_lowercase().ends_with(&format!("\\{}", filename.to_lowercase())) {
-            return p4k.read(entry).ok();
-        }
-    }
-
-    // Last resort: search for the filename anywhere in P4k
-    for entry in p4k.entries() {
-        if entry.name.to_lowercase().ends_with(&filename.to_lowercase()) {
-            return p4k.read(entry).ok();
-        }
-    }
-
+    // Canvas-based rendering is handled by the UiBinding path (generated_ui_binding_record).
+    // The material RTT texture slot has no static image for this export phase.
     None
 }
 
 fn generated_ui_binding_record(
     files: &mut BTreeMap<String, Vec<u8>>,
     binding: &UiBinding,
+    db: &Database<'_>,
     p4k: &MappedP4k,
     texture_mip: u32,
 ) -> UiBinding {
     let mut binding = binding.clone();
-    let identity_components = generated_ui_binding_identity_components(&binding);
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    identity_components.hash(&mut hasher);
-    let hash = hasher.finish();
-    let export_path = format!("Data/UI/Generated/{hash:016x}_TEX{texture_mip}.png");
-    if !files.contains_key(&export_path) {
-        let identity = identity_components
-            .iter()
-            .fold(OutputIdentity::new(), |identity, component| {
-                identity.with_component(component)
-            });
-        let spec = select_default_still(
-            identity,
-            &UiStillBinding {
-                binding_kind: &binding.binding_kind,
-                source_entity_name: &binding.source_entity_name,
-                helper_name: binding.helper_name.as_deref(),
-                default_view: binding.default_view.as_deref(),
-                default_state_name: binding.default_state_name.as_deref(),
-                canvas_guid: binding.canvas_guid.as_deref(),
-                canvas_record_name: binding.canvas_record_name.as_deref(),
-                canvas_record_path: binding.canvas_record_path.as_deref(),
-                owner_source_file: binding.owner_source_file.as_deref(),
-                runtime_image_source: binding.runtime_image_source.as_deref(),
-                light_cue: binding.default_light_color.map(|color| UiLightCue {
-                    color,
-                    intensity_milli: binding.default_light_intensity_milli.unwrap_or(25),
-                }),
-            },
-        );
-        
-        // Try to load and render actual GFX data if available
-        let bytes = if let Some(gfx_path) = binding.runtime_image_source.as_ref() {
-            match load_and_render_gfx(&spec, gfx_path, p4k) {
-                Ok(gfx_bytes) => gfx_bytes,
-                Err(e) => {
-                    // Log error but fall back to placeholder
-                    eprintln!("GFX rendering failed for {}: {}", gfx_path, e);
-                    render_default_still_png(&spec)
-                        .expect("generated UI still render should succeed for fixed dimensions")
-                }
+    match crate::ui_pipeline::render_ui_binding_png(&binding, db, p4k, texture_mip) {
+        Ok(png_bytes) => {
+            let hash_bytes = Sha256::digest(&png_bytes);
+            let hash_hex: String = hash_bytes[..8].iter().map(|b| format!("{b:02x}")).collect();
+            let export_path = format!("Data/UI/Generated/{hash_hex}_TEX{texture_mip}.png");
+            if !files.contains_key(&export_path) {
+                insert_binary_file(files, export_path.clone(), png_bytes);
             }
-        } else {
-            render_default_still_png(&spec)
-                .expect("generated UI still render should succeed for fixed dimensions")
-        };
-        
-        insert_binary_file(files, export_path.clone(), bytes);
+            binding.generated_image_path = Some(export_path);
+        }
+        Err(e) => {
+            log::warn!(
+                "ui render failed for helper {:?} (kind {}): {}",
+                binding.helper_name, binding.binding_kind, e
+            );
+        }
     }
-    binding.generated_image_path = Some(export_path);
     binding
 }
 
-fn generated_ui_identity_components(
-    material: &SubMaterial,
-    binding: &SemanticTextureBinding,
-    source_material_path: &str,
-) -> Vec<String> {
-    let mut components = vec![
-        format!("source_material:{source_material_path}"),
-        format!("shader_family:{}", material.shader_family().as_str()),
-        format!("shader:{}", material.shader),
-        format!("submaterial:{}", material.name),
-        format!("slot:{}", binding.slot),
-        format!("virtual_source:{}", binding.path),
-        format!("string_gen_mask:{}", material.string_gen_mask),
-    ];
-    for slot in material.semantic_texture_slots() {
-        if !slot.is_virtual {
-            components.push(format!("{}:{}:{}", slot.slot, slot.role.as_str(), slot.path));
-        }
-    }
-    for param in &material.public_params {
-        components.push(format!("param:{}={}", param.name, param.value));
-    }
-    components.sort();
-    components
-}
-
-fn generated_ui_binding_identity_components(binding: &UiBinding) -> Vec<String> {
-    let mut components = vec![
-        format!("binding_kind:{}", binding.binding_kind),
-        format!("source_entity:{}", binding.source_entity_name),
-    ];
-    if let Some(helper_name) = &binding.helper_name {
-        components.push(format!("helper:{helper_name}"));
-    }
-    if let Some(default_view) = &binding.default_view {
-        components.push(format!("default_view:{default_view}"));
-    }
-    if let Some(default_state_name) = &binding.default_state_name {
-        components.push(format!("default_state:{default_state_name}"));
-    }
-    if let Some(default_light_color) = &binding.default_light_color {
-        components.push(format!(
-            "default_light_color:{},{},{},{}",
-            default_light_color[0],
-            default_light_color[1],
-            default_light_color[2],
-            default_light_color[3]
-        ));
-    }
-    if let Some(default_light_intensity_milli) = binding.default_light_intensity_milli {
-        components.push(format!(
-            "default_light_intensity_milli:{default_light_intensity_milli}"
-        ));
-    }
-    if let Some(canvas_guid) = &binding.canvas_guid {
-        components.push(format!("canvas_guid:{canvas_guid}"));
-    }
-    if let Some(canvas_record_name) = &binding.canvas_record_name {
-        components.push(format!("canvas_record_name:{canvas_record_name}"));
-    }
-    if let Some(canvas_record_path) = &binding.canvas_record_path {
-        components.push(format!("canvas_record_path:{canvas_record_path}"));
-    }
-    if let Some(content_canvas_guid) = &binding.content_canvas_guid {
-        components.push(format!("content_canvas_guid:{content_canvas_guid}"));
-    }
-    if let Some(owner_source_file) = &binding.owner_source_file {
-        components.push(format!("owner_source_file:{owner_source_file}"));
-    }
-    if let Some(runtime_image_source) = &binding.runtime_image_source {
-        components.push(format!("runtime_image_source:{runtime_image_source}"));
-    }
-    components
-}
 
 fn slot_source_path(p4k: Option<&MappedP4k>, binding: &SemanticTextureBinding) -> String {
     if binding.is_virtual {
