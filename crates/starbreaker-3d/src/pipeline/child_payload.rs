@@ -282,7 +282,7 @@ pub(crate) fn load_child_payloads(
     use rayon::prelude::*;
 
     // Pre-resolve dashboard screen canvases for each unique parent entity so that
-    // physical/mfd bindings with no inline content canvas can be assigned one.
+    // physical bindings with no inline content canvas can be assigned one positionally.
     let dashboard_canvases_by_parent: HashMap<String, Vec<(u32, u32, String, Option<String>)>> = {
         let mut map: HashMap<String, Vec<(u32, u32, String, Option<String>)>> = HashMap::new();
         for spec in &specs {
@@ -306,7 +306,24 @@ pub(crate) fn load_child_payloads(
         }
         map
     };
-    // Per-parent counter tracking how many screen canvases have been assigned so far.
+    // Pre-resolve MFD default content canvases keyed by geometry name (helper_name).
+    // Each MFD binding is looked up by name rather than positionally.
+    let mfd_canvases_by_parent: HashMap<String, HashMap<String, (String, Option<String>)>> = {
+        let mut map = HashMap::new();
+        for spec in &specs {
+            let parent_name = &spec.parent_entity_name;
+            if map.contains_key(parent_name) {
+                continue;
+            }
+            let canvases = find_entity_record_by_name(db, parent_name)
+                .map(|parent_record| collect_mfd_default_canvases(db, parent_record))
+                .unwrap_or_default();
+            // Always insert (even empty) to prevent re-querying the same parent.
+            map.insert(parent_name.clone(), canvases);
+        }
+        map
+    };
+    // Per-parent counter tracking how many physical screen canvases have been assigned.
     let mut parent_canvas_used: HashMap<String, usize> = HashMap::new();
 
     let mut ui_bindings_by_parent = HashMap::<String, Vec<UiBinding>>::new();
@@ -319,13 +336,25 @@ pub(crate) fn load_child_payloads(
             } else {
                 Some(spec.parent_node_name.clone())
             };
-            // For physical/mfd bindings without an inline content canvas, attempt to
-            // resolve the content canvas from the parent vehicle's dashboard canvas def.
-            // Canvases are assigned positionally in the order specs are processed.
+            // For bindings without an inline content canvas, attempt to resolve
+            // one from the parent vehicle's data.  MFD screens are matched by
+            // geometry name (helper_name) via the MFD mode config; physical screens
+            // are assigned positionally from the dashboard canvas def.
             if binding.content_canvas_guid.is_none()
                 && matches!(binding.binding_kind.as_str(), "physical" | "mfd")
             {
-                if let Some(canvases) = dashboard_canvases_by_parent.get(&spec.parent_entity_name) {
+                if binding.binding_kind == "mfd" {
+                    if let Some((guid, name)) = binding.helper_name.as_deref().and_then(|h| {
+                        mfd_canvases_by_parent
+                            .get(&spec.parent_entity_name)
+                            .and_then(|m| m.get(h))
+                    }) {
+                        binding.content_canvas_guid = Some(guid.clone());
+                        binding.content_canvas_record_name = name.clone();
+                    }
+                } else if let Some(canvases) =
+                    dashboard_canvases_by_parent.get(&spec.parent_entity_name)
+                {
                     let used = parent_canvas_used
                         .entry(spec.parent_entity_name.clone())
                         .or_insert(0);
@@ -750,8 +779,13 @@ fn find_canvas_record_by_path_or_guid<'a>(db: &'a Database<'a>, path: &str) -> O
 /// Find an `EntityClassDefinition` record by exact name.
 fn find_entity_record_by_name<'a>(db: &'a Database<'a>, name: &str) -> Option<&'a Record> {
     let entity_struct = db.struct_id("EntityClassDefinition")?;
-    db.records_of_type(entity_struct)
-        .find(|record| db.resolve_string2(record.name_offset) == name)
+    // Record names are stored as "EntityClassDefinition.ShortName". Support matching either
+    // the full qualified name or just the short name after the last dot.
+    let qualified = format!("EntityClassDefinition.{name}");
+    db.records_of_type(entity_struct).find(|record| {
+        let record_name = db.resolve_string2(record.name_offset);
+        record_name == name || record_name == qualified
+    })
 }
 
 /// Collect all non-null screen canvas entries from a `SCItemUIView_DashboardCanvasDef`
@@ -793,9 +827,160 @@ pub(crate) fn collect_dashboard_screen_canvases(
     result
 }
 
+/// Build a map from MFD view-type enum name (e.g. `"eView_TargetStatus"`) to
+/// `(canvas_guid, canvas_record_name)` by scanning all `SMFDView` records.
+/// `eView_Off` entries are excluded since they carry no renderable content.
+///
+/// `landscapeCanvas` is a DataCore Reference field.  Materializing the whole
+/// `SMFDView` record with `skip_references = true` converts it to
+/// `Value::Guid(record_id)` — the correct way to extract the target GUID.
+fn build_mfd_view_canvas_map(db: &Database) -> HashMap<String, (String, Option<String>)> {
+    use starbreaker_datacore::query::execute::materialize_struct_as_value_no_refs;
+    use starbreaker_datacore::reader::SpanReader;
+
+    let mut map = HashMap::new();
+    for record in db.records_by_type_name("SMFDView") {
+        let instance_bytes =
+            db.get_instance(record.struct_index, record.instance_index as i32);
+        let mut reader = SpanReader::new(instance_bytes);
+        let smfd_value =
+            match materialize_struct_as_value_no_refs(db, record.struct_index, &mut reader) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+        // viewType is DataType::EnumChoice → Value::Enum(str).
+        let view_type = match value_object(&smfd_value, "viewType") {
+            Some(Value::Enum(vt)) if !vt.is_empty() && *vt != "eView_Off" => (*vt).to_string(),
+            Some(Value::String(vt)) if !vt.is_empty() && *vt != "eView_Off" => (*vt).to_string(),
+            _ => continue,
+        };
+        // landscapeCanvas is DataType::Reference → Value::Guid(record_id) in materialized struct.
+        let canvas_guid = match value_object(&smfd_value, "landscapeCanvas") {
+            Some(Value::Guid(guid)) => guid.to_string(),
+            _ => continue,
+        };
+        let name = parse_guid(&canvas_guid)
+            .and_then(|g| db.record_by_id(&g))
+            .map(|r| db.resolve_string2(r.name_offset).to_string())
+            .filter(|n| !n.is_empty());
+        // Keep the first record found for each view type (avoids duplicates).
+        map.entry(view_type).or_insert((canvas_guid, name));
+    }
+    map
+}
+
+/// Collect per-MFD default content canvases from a dashboard entity that carries
+/// `SCItemSeatDashboardParams.MFDParams`.  Returns a map from geometry name
+/// (e.g. `"Screen_Left_Upper_RTT"`) to `(canvas_guid, canvas_record_name)`.
+///
+/// The selection logic mirrors the game's runtime default:
+/// - `primaryMFD`          → `defaultConfiguration.primaryMFDScreenView`
+/// - `defaultCommsCallMFD` → `defaultConfiguration.rightCastView`
+/// - remaining MFDs (in `MFDs[]` order) → `leftCastView`, then
+///   `secondaryMFDScreen1View` … `secondaryMFDScreen5View`
+pub(crate) fn collect_mfd_default_canvases(
+    db: &Database,
+    dashboard_entity_record: &Record,
+) -> HashMap<String, (String, Option<String>)> {
+    let struct_id = dashboard_entity_record.struct_id();
+
+    // All MFD geometry names in loadout order.
+    let all_mfd_names: Vec<String> = db
+        .compile_path::<String>(
+            struct_id,
+            "Components[SCItemSeatDashboardParams].MFDParams.MFDs[SMFD].geometryName",
+        )
+        .ok()
+        .and_then(|c| db.query::<String>(&c, dashboard_entity_record).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|n| !n.is_empty())
+        .collect();
+
+    if all_mfd_names.is_empty() {
+        return HashMap::new();
+    }
+
+    let primary_name = query_string_path(
+        db,
+        dashboard_entity_record,
+        "Components[SCItemSeatDashboardParams].MFDParams.primaryMFD.geometryName",
+    );
+    let comms_name = query_string_path(
+        db,
+        dashboard_entity_record,
+        "Components[SCItemSeatDashboardParams].MFDParams.defaultCommsCallMFD.geometryName",
+    );
+
+    let base = "Components[SCItemSeatDashboardParams].MFDParams.modeConfiguration.defaultConfiguration";
+    let primary_view = query_string_path(
+        db,
+        dashboard_entity_record,
+        &format!("{base}.primaryMFDScreenView"),
+    );
+    let right_cast_view = query_string_path(
+        db,
+        dashboard_entity_record,
+        &format!("{base}.rightCastView"),
+    );
+    let left_cast_view = query_string_path(
+        db,
+        dashboard_entity_record,
+        &format!("{base}.leftCastView"),
+    );
+    let secondary_views: Vec<Option<String>> = (1..=5)
+        .map(|i| {
+            query_string_path(
+                db,
+                dashboard_entity_record,
+                &format!("{base}.secondaryMFDScreen{i}View"),
+            )
+        })
+        .collect();
+
+    let view_canvas = build_mfd_view_canvas_map(db);
+    let mut result = HashMap::new();
+
+    // Assign primary MFD.
+    if let (Some(name), Some(view)) = (&primary_name, &primary_view) {
+        if let Some(canvas) = view_canvas.get(view) {
+            result.insert(name.clone(), canvas.clone());
+        }
+    }
+    // Assign comms MFD.
+    if let (Some(name), Some(view)) = (&comms_name, &right_cast_view) {
+        if primary_name.as_deref() != Some(name.as_str()) {
+            if let Some(canvas) = view_canvas.get(view) {
+                result.insert(name.clone(), canvas.clone());
+            }
+        }
+    }
+    // Assign remaining MFDs in order: leftCastView, secondaryMFDScreen1View, …
+    let remaining_views: Vec<&str> = std::iter::once(left_cast_view.as_deref())
+        .chain(secondary_views.iter().map(|v| v.as_deref()))
+        .flatten()
+        .collect();
+    let remaining_names: Vec<&String> = all_mfd_names
+        .iter()
+        .filter(|n| {
+            primary_name.as_deref() != Some(n.as_str())
+                && comms_name.as_deref() != Some(n.as_str())
+        })
+        .collect();
+    for (name, view) in remaining_names.iter().zip(remaining_views.iter()) {
+        if let Some(canvas) = view_canvas.get(*view) {
+            result.insert((*name).clone(), canvas.clone());
+        }
+    }
+
+    result
+}
+
 fn value_stringish(value: &Value<'_>) -> Option<String> {
     match value {
         Value::String(text) => (!text.is_empty()).then_some((*text).to_string()),
+        Value::Enum(text) => (!text.is_empty()).then_some((*text).to_string()),
         Value::Guid(guid) => Some(guid.to_string()),
         Value::Object { record_id: Some(guid), .. } => Some(guid.to_string()),
         _ => None,
@@ -877,6 +1062,7 @@ fn query_string_path(db: &Database, record: &Record, path: &str) -> Option<Strin
 fn query_stringish_path(db: &Database, record: &Record, path: &str) -> Option<String> {
     query_value_path(db, record, path).and_then(|value| match value {
         Value::String(text) => (!text.is_empty()).then_some(text.to_string()),
+        Value::Enum(text) => (!text.is_empty()).then_some(text.to_string()),
         Value::Guid(guid) => Some(guid.to_string()),
         Value::Object { record_id: Some(guid), .. } => Some(guid.to_string()),
         _ => None,
