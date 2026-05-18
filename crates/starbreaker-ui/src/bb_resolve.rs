@@ -69,6 +69,24 @@ fn resolve_canvas_graph_inner(
         return Ok(scene);
     }
 
+    // Collect Pass 2 URLs from the ROOT canvas's own scene nodes BEFORE Pass 1
+    // merges child canvas nodes.  Without this guard, Pass 2 would follow
+    // WidgetCanvas.canvas references that originated in merged child scenes
+    // (e.g. sub-view tabs inside a master canvas), pulling in unrelated sibling
+    // canvases and producing a mixed-content scene.
+    //
+    // Pass 1 below may still add new WidgetCanvas nodes via child canvas merges,
+    // but those children are responsible for following their own WidgetCanvas
+    // URLs in their own recursive resolve calls — not in ours.
+    let root_canvas_urls: Vec<String> = scene
+        .nodes
+        .values()
+        .filter(|n| n.ty == BbNodeType::WidgetCanvas)
+        .filter_map(|n| n.raw.get("canvas").and_then(|v| v.as_str()))
+        .filter(|url| !url.is_empty() && *url != "null")
+        .map(|url| url.to_owned())
+        .collect();
+
     // Pass 1: follow defaultStyles / brandStyles canvas-reference modifiers.
     //
     // Each referenced child canvas is resolved recursively so multi-level
@@ -133,15 +151,11 @@ fn resolve_canvas_graph_inner(
     // in `defaultStyles.entries`.  We fetch and resolve each such URL so the
     // merged scene captures the full content hierarchy.  The same `visited`
     // set prevents cycles between canvas-field references and style-references.
+    //
+    // Only the URLs collected from the root canvas's own nodes (before Pass 1)
+    // are followed here — see the comment above.
     {
-        let canvas_urls: Vec<String> = scene
-            .nodes
-            .values()
-            .filter(|n| n.ty == BbNodeType::WidgetCanvas)
-            .filter_map(|n| n.raw.get("canvas").and_then(|v| v.as_str()))
-            .filter(|url| !url.is_empty())
-            .map(|url| url.to_owned())
-            .collect();
+        let canvas_urls = root_canvas_urls;
 
         for url in canvas_urls {
             let norm = extract_record_name(&url).to_ascii_lowercase();
@@ -767,5 +781,139 @@ mod tests {
         assert_eq!(fetch_count.get(), 2, "expected 2 fetches (child + grandchild), got {}", fetch_count.get());
         // root(1) + child(1) + grandchild(3) = 5 nodes
         assert_eq!(scene.nodes.len(), 5, "expected 5 merged nodes (root+child+grandchild), got {}", scene.nodes.len());
+    }
+
+    #[test]
+    fn pass2_does_not_follow_widget_canvas_urls_from_pass1_merged_children() {
+        // Regression test for B3.3: Pass 2 must only follow WidgetCanvas.canvas
+        // URLs that exist in the ROOT canvas's own scene BEFORE Pass 1 runs.
+        //
+        // Scenario (mirrors the real MC_S_Power_Master / MC_S_Self_Master bug):
+        //
+        //   master_canvas  (1 root node; NO WidgetCanvas nodes of its own)
+        //     └── Pass 1 style ref → child_canvas.json
+        //           child_canvas  (root + WidgetCanvas with canvas = "side_canvas.json")
+        //
+        // Because master has no WidgetCanvas nodes of its own, Pass 2 must
+        // follow zero additional URLs at the master level.
+        //
+        // child_canvas's WidgetCanvas URL IS correctly followed by child's own
+        // Pass 2 (since it appears in child's scene before child's Pass 1).
+        // The visited set then prevents master's old-code Pass 2 from fetching
+        // it a second time.  With this fix, master's Pass 2 does not even
+        // attempt to collect the URL (collected list is empty before Pass 1).
+        //
+        // Verification: the fetcher is called exactly once for side_canvas
+        // (by child's Pass 2, not master's), and the resolved scene has the
+        // correct content — no spurious additional nodes from a phantom fetch.
+        let side_canvas = serde_json::json!({
+            "_RecordName_": "side_canvas",
+            "_RecordId_": "00000000-0000-0000-0000-0000000000bb",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "side_root"},
+                    {"_Pointer_": "ptr:2", "_Type_": "BuildingBlocks_WidgetIcon", "name": "side_icon", "parent": "_PointsTo_:ptr:1"}
+                ]
+            }
+        });
+
+        // child_canvas has a WidgetCanvas node pointing to side_canvas.
+        let child_canvas = serde_json::json!({
+            "_RecordName_": "child_canvas",
+            "_RecordId_": "00000000-0000-0000-0000-0000000000cc",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "child_root"},
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetCanvas",
+                        "name": "child_widget_canvas",
+                        "parent": "_PointsTo_:ptr:1",
+                        "canvas": "file://./side_canvas.json"
+                    }
+                ]
+            }
+        });
+
+        // master_canvas has no WidgetCanvas nodes in its own scene.
+        let master_canvas = canvas_with_style_ref("master_canvas", "file://./child_canvas.json");
+
+        let fetch_count = std::cell::Cell::new(0u32);
+        let scene = resolve_canvas_graph(&master_canvas, None, &|url| {
+            fetch_count.set(fetch_count.get() + 1);
+            match url {
+                "file://./side_canvas.json" => Ok(side_canvas.clone()),
+                "file://./child_canvas.json" => Ok(child_canvas.clone()),
+                _ => Err(format!("unexpected fetch: {url}")),
+            }
+        })
+        .expect("resolve failed");
+
+        // side_canvas should be fetched exactly once (by child's own Pass 2).
+        // master's Pass 2 has an empty URL list (master had no WidgetCanvas nodes
+        // before Pass 1) so it never even attempts to follow side_canvas.
+        // The visited set is a backstop but the fetch count must be 1 either way.
+        assert_eq!(
+            fetch_count.get(),
+            2,
+            "expected exactly 2 fetches (child_canvas + side_canvas), got {}",
+            fetch_count.get()
+        );
+
+        // master(1) + child(2) + side(2) = 5 nodes — child correctly carries side content.
+        assert_eq!(
+            scene.nodes.len(),
+            5,
+            "expected 5 nodes (master root + child root + child WidgetCanvas + side root + side icon), got {}",
+            scene.nodes.len()
+        );
+    }
+
+    #[test]
+    fn pass2_null_canvas_url_strings_are_not_followed() {
+        // WidgetCanvas nodes may have canvas = "null" (literal string) when the
+        // slot is unassigned (e.g. canvas_Interchangeable on an MFD host canvas).
+        // These must not be passed to the fetcher.
+        let host = serde_json::json!({
+            "_RecordName_": "host",
+            "_RecordId_": "00000000-0000-0000-0000-000000000020",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 800.0, "y": 600.0, "z": 0.0},
+                "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "base_root"},
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetCanvas",
+                        "name": "canvas_interchangeable",
+                        "parent": "_PointsTo_:ptr:1",
+                        "canvas": "null"
+                    }
+                ]
+            }
+        });
+
+        let fetch_called = std::cell::Cell::new(false);
+        let scene = resolve_canvas_graph(&host, None, &|url| {
+            fetch_called.set(true);
+            Err(format!("fetcher must not be called, got url: {url}"))
+        })
+        .expect("resolve must succeed even with null canvas URL");
+
+        assert!(
+            !fetch_called.get(),
+            "fetcher must not be called for canvas=\"null\" WidgetCanvas nodes"
+        );
+        assert_eq!(scene.nodes.len(), 2, "expected 2 original nodes, got {}", scene.nodes.len());
     }
 }

@@ -292,14 +292,12 @@ pub(crate) fn load_child_payloads(
             }
             let canvases = find_entity_record_by_name(db, parent_name)
                 .and_then(|parent_record| {
-                    let guid = query_stringish_path(
+                    let config_val = query_value_path(
                         db,
                         parent_record,
                         "Components[SCItemUIViewOwnerParams].dashboardCanvasConfig",
                     )?;
-                    let parsed = parse_guid(&guid)?;
-                    let dashboard_record = db.record_by_id(&parsed)?;
-                    Some(collect_dashboard_screen_canvases(db, dashboard_record))
+                    Some(collect_dashboard_screen_canvases_from_value(db, &config_val))
                 })
                 .unwrap_or_default();
             map.insert(parent_name.clone(), canvases);
@@ -617,15 +615,44 @@ pub(crate) fn ui_binding_for_record(db: &Database, record: &Record) -> Option<Ui
                 .and_then(|element| value_object_string(element, "canvas"))
         })
         .or_else(|| value_object_string(&first_layer, "canvas"));
+
+    // When the defaultView has no canvas (e.g. the entity's default is an "Off"
+    // view), search the layer's views[] array for the first entry that does carry
+    // a non-null canvas.  The path is stored in canvas_widget_canvas_path so it
+    // is visible in the exported scene.json; the rendering pipeline does not yet
+    // support P4K file-path canvases, so no image is generated for these.
+    let canvas_guid_is_absent = canvas_guid
+        .as_deref()
+        .map(|g| g.is_empty() || g == "null" || is_zero_guid(g))
+        .unwrap_or(true);
+    let fallback_canvas_path: Option<String> = if canvas_guid_is_absent {
+        let views_val = value_object(&first_layer, "views");
+        views_val
+            .and_then(|v| if let Value::Array(a) = v { Some(a) } else { None })
+            .and_then(|views| {
+                views.iter().find_map(|view| {
+                    value_object(view, "component")
+                        .and_then(|c| value_object_string(c, "canvas"))
+                        .filter(|s| !s.is_empty() && s != "null" && !is_zero_guid(s))
+                })
+            })
+    } else {
+        None
+    };
     let (canvas_record_name, canvas_record_path) = canvas_guid
         .as_deref()
         .map(|guid| resolve_record_metadata(db, guid))
         .unwrap_or((None, None));
-    let (canvas_widget_canvas_path, canvas_widget_url_postfix, canvas_widget_url_optional, canvas_variable_binding) =
+    let (mut canvas_widget_canvas_path, canvas_widget_url_postfix, canvas_widget_url_optional, canvas_variable_binding) =
         canvas_guid
             .as_deref()
             .map(|guid| canvas_widget_context_for_guid(db, guid))
             .unwrap_or((None, None, None, None));
+    // When the canvas_guid resolution yielded no widget-canvas path but we found
+    // a fallback path from views[], record it so it appears in the exported scene.
+    if canvas_widget_canvas_path.is_none() {
+        canvas_widget_canvas_path = fallback_canvas_path;
+    }
     let binding_kind = match default_view.as_deref() {
         Some("_mfd") => "mfd",
         Some("_physicalScreen") => "physical",
@@ -788,19 +815,22 @@ fn find_entity_record_by_name<'a>(db: &'a Database<'a>, name: &str) -> Option<&'
     })
 }
 
-/// Collect all non-null screen canvas entries from a `SCItemUIView_DashboardCanvasDef`
-/// record.  Returns `(view_index, screen_slot, canvas_guid, canvas_record_name)` tuples
-/// in `View[]` order, skipping null/zero-GUID entries.
-pub(crate) fn collect_dashboard_screen_canvases(
+/// Find a `SCItemUIView_DashboardCanvasDef` record from a `dashboardCanvasConfig` value.
+///
+/// Collect non-null screen canvas entries from an inline `SCItemUIView_DashboardCanvasDef`
+/// `Value` (i.e. the materialized `dashboardCanvasConfig` field on the parent entity).
+///
+/// Screens may be stored as DataCore `Reference` fields, which `query_no_references` leaves
+/// as `Value::Guid` — handled by [`value_stringish`].  Returns
+/// `(view_index, screen_slot, canvas_guid, canvas_record_name)` tuples.
+fn collect_dashboard_screen_canvases_from_value(
     db: &Database,
-    dashboard_record: &Record,
+    config_val: &Value,
 ) -> Vec<(u32, u32, String, Option<String>)> {
-    let views = match query_value_path(db, dashboard_record, "View") {
+    let views = match value_object(config_val, "views") {
         Some(Value::Array(v)) => v,
-        Some(other) => vec![other],
-        None => return Vec::new(),
+        _ => return Vec::new(),
     };
-
     let mut result = Vec::new();
     for (view_idx, view) in views.iter().enumerate() {
         let screens = match value_object(view, "screens") {
@@ -809,13 +839,22 @@ pub(crate) fn collect_dashboard_screen_canvases(
             None => continue,
         };
         for (slot_idx, screen) in screens.iter().enumerate() {
-            let path = match value_stringish(screen) {
-                Some(p) if !p.is_empty() && p != "null" && !is_zero_guid(&p) => p,
-                _ => continue,
+            // When screens are stored as DataCore References, query_no_references yields
+            // Value::Guid(record_id) containing the exact CigGuid.  Using it directly
+            // avoids a lossy string round-trip through the mixed-endian display format.
+            let canvas_record = match screen {
+                Value::Guid(g) if !g.is_empty() => db.record_by_id(g),
+                _ => {
+                    // Fall back to string extraction for file-path or GUID strings.
+                    let path = match value_stringish(screen) {
+                        Some(p) if !p.is_empty() && p != "null" && !is_zero_guid(&p) => p,
+                        _ => continue,
+                    };
+                    find_canvas_record_by_path_or_guid(db, &path)
+                }
             };
-            let Some(canvas_record) = find_canvas_record_by_path_or_guid(db, &path) else {
-                continue;
-            };
+            let Some(canvas_record) = canvas_record else { continue };
+            if canvas_record.id.is_empty() { continue; }
             let guid = canvas_record.id.to_string();
             let name = {
                 let n = db.resolve_string2(canvas_record.name_offset).to_string();
@@ -993,19 +1032,7 @@ fn is_zero_guid(value: &str) -> bool {
 
 fn parse_guid(value: &str) -> Option<CigGuid> {
     let trimmed = value.trim().trim_matches('{').trim_matches('}');
-    let mut bytes = [0u8; 16];
-    let mut chars = trimmed.chars().filter(|ch| *ch != '-');
-    for byte in &mut bytes {
-        let hi = chars.next()?;
-        let lo = chars.next()?;
-        let hi = hi.to_digit(16)? as u8;
-        let lo = lo.to_digit(16)? as u8;
-        *byte = (hi << 4) | lo;
-    }
-    if chars.next().is_some() {
-        return None;
-    }
-    Some(CigGuid::from_bytes(bytes))
+    trimmed.parse::<CigGuid>().ok()
 }
 
 fn default_display_screen_state(
