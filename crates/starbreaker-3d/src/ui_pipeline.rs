@@ -145,24 +145,70 @@ fn p4k_asset_candidates(path: &str) -> Vec<String> {
     candidates
 }
 
-/// Resolves the manufacturer style by delegating to [`StyleLoader`].
+/// Resolves the manufacturer style by looking up a `BuildingBlocks_Style`
+/// record in DataCore.
 ///
-/// Falls back to the Drake amber defaults (with a warning) for any manufacturer
-/// whose DataCore style record is not resolvable in the current pipeline.
-/// No ship-specific branches — the style is driven entirely by the
-/// `manufacturer_id` string passed from the ship's `UiBinding`.
-struct ManufacturerStyleFetcher;
+/// Discovery strategy (no hardcoded ship/manufacturer names):
+/// 1. Enumerate all `BuildingBlocks_Style` records.
+/// 2. Match the record name against the manufacturer id (case-insensitive
+///    substring/suffix/prefix on the dotted-stem). Allows authored names like
+///    `BuildingBlocks_Style.DRAK_Default` or `Style_drak` to resolve for
+///    `manufacturer_id = "drak"`.
+/// 3. Parse the matched record via
+///    [`StyleLoader::parse_buildingblocks_style_record`].
+/// 4. If no record matches, fall back to the Drake amber defaults *with a
+///    warning*.  This is the only allowed fallback path.
+struct ManufacturerStyleFetcher<'a> {
+    db: &'a Database<'a>,
+}
 
-impl StyleFetcher for ManufacturerStyleFetcher {
+impl<'a> StyleFetcher for ManufacturerStyleFetcher<'a> {
     fn fetch_manufacturer_style(&self, manufacturer_id: &str) -> Result<ManufacturerStyle, UiError> {
-        let style = StyleLoader::for_manufacturer(manufacturer_id).drake_amber_fallback();
-        if manufacturer_id != "drak" {
+        let loader = StyleLoader::for_manufacturer(manufacturer_id);
+        let needle = manufacturer_id.to_ascii_lowercase();
+
+        let candidates: Vec<_> = self
+            .db
+            .records_by_type_name("BuildingBlocks_Style")
+            .filter_map(|record| {
+                let full = self.db.resolve_string2(record.name_offset).to_string();
+                let stem = full.rsplit('.').next().unwrap_or(&full).to_ascii_lowercase();
+                if stem.contains(&needle) {
+                    Some((full, record))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if let Some((full_name, record)) = candidates.first() {
+            match starbreaker_datacore::export::to_json_compact(self.db, record) {
+                Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    Ok(value) => match loader.parse_buildingblocks_style_record(&value) {
+                        Ok(style) => return Ok(style),
+                        Err(e) => warn!(
+                            "ui: failed to parse BuildingBlocks_Style record '{}' for manufacturer '{}': {}; using Drake amber fallback",
+                            full_name, manufacturer_id, e
+                        ),
+                    },
+                    Err(e) => warn!(
+                        "ui: failed to deserialize BuildingBlocks_Style record '{}' for manufacturer '{}': {}; using Drake amber fallback",
+                        full_name, manufacturer_id, e
+                    ),
+                },
+                Err(e) => warn!(
+                    "ui: failed to export BuildingBlocks_Style record '{}' for manufacturer '{}': {}; using Drake amber fallback",
+                    full_name, manufacturer_id, e
+                ),
+            }
+        } else {
             warn!(
-                "ui: manufacturer '{}' has no authored style record; using Drake amber fallback",
+                "ui: no BuildingBlocks_Style record matches manufacturer '{}'; using Drake amber fallback",
                 manufacturer_id
             );
         }
-        Ok(style)
+
+        Ok(loader.drake_amber_fallback())
     }
 }
 
@@ -196,7 +242,7 @@ pub fn render_ui_binding_png(
         binding: &view,
         canvas_fetcher: &DatacoreCanvasFetcher { db },
         swf_fetcher: &P4kSwfFetcher { p4k },
-        style_fetcher: &ManufacturerStyleFetcher,
+        style_fetcher: &ManufacturerStyleFetcher { db },
         asset_fetcher: &P4kAssetFetcher { p4k },
         target_size,
         // Phase 11: postprocess is disabled while compose.rs is the magenta-grid
