@@ -117,21 +117,41 @@ pub struct LayoutResult {
 
 /// Compute pixel-space rects for every node in `scene` at `(target_w, target_h)`.
 ///
+/// # Scale and letterboxing
+/// The BB canvas declares an authoring coordinate size (`scene.canvas_size`).  A
+/// **uniform** scale factor `scale = min(target_w / canvas_w, target_h / canvas_h)`
+/// is applied so that `Fixed`-unit node positions / sizes are never stretched or
+/// squeezed disproportionately.  The scaled canvas is centred within the target:
+///
+/// ```text
+/// letterbox_x = (target_w − canvas_w × scale) / 2
+/// letterbox_y = (target_h − canvas_h × scale) / 2
+/// ```
+///
+/// Roots receive the centred canvas rect as their `parent_inner`; percent-based
+/// children fill that rect naturally.
+///
 /// # Panics
 /// Never panics on well-formed input.  Unknown `BbValue` behaviors produce
 /// warnings and fall back to filling the parent dimension.
 pub fn layout(scene: &BbScene, target_w: u32, target_h: u32) -> LayoutResult {
+    let canvas_scale = if scene.canvas_size.0 > 0.0 && scene.canvas_size.1 > 0.0 {
+        let sx = target_w as f32 / scene.canvas_size.0;
+        let sy = target_h as f32 / scene.canvas_size.1;
+        sx.min(sy)
+    } else {
+        1.0
+    };
+
+    // Centred canvas rect inside the target.
+    let scaled_w = scene.canvas_size.0 * canvas_scale;
+    let scaled_h = scene.canvas_size.1 * canvas_scale;
+    let offset_x = ((target_w as f32 - scaled_w) * 0.5).max(0.0);
+    let offset_y = ((target_h as f32 - scaled_h) * 0.5).max(0.0);
+    let canvas_rect = Rect { x: offset_x, y: offset_y, w: scaled_w, h: scaled_h };
+
+    // The LayoutResult.canvas always spans the full target.
     let canvas = Rect { x: 0.0, y: 0.0, w: target_w as f32, h: target_h as f32 };
-    let canvas_scale_x = if scene.canvas_size.0 > 0.0 {
-        target_w as f32 / scene.canvas_size.0
-    } else {
-        1.0
-    };
-    let canvas_scale_y = if scene.canvas_size.1 > 0.0 {
-        target_h as f32 / scene.canvas_size.1
-    } else {
-        1.0
-    };
 
     let mut rects: BTreeMap<BbNodeId, Rect> = BTreeMap::new();
     let mut draw_order: Vec<BbNodeId> = Vec::new();
@@ -146,10 +166,10 @@ pub fn layout(scene: &BbScene, target_w: u32, target_h: u32) -> LayoutResult {
     for root_id in roots {
         layout_node(
             root_id,
-            canvas,
+            canvas_rect,
             scene,
-            canvas_scale_x,
-            canvas_scale_y,
+            canvas_scale,
+            canvas_scale,
             &mut rects,
             &mut draw_order,
         );
@@ -580,8 +600,79 @@ mod tests {
         // Must not panic.
         let result = layout(&scene, 1600, 900);
         let rect = result.rects[&1];
-        // Fallback is fill → width = parent_inner.w = 1600.
+        // Fallback is fill → width = parent_inner.w
         assert!(rect.w > 0.0, "fallback width must be positive");
         assert!(rect.h > 0.0, "fallback height must be positive");
+    }
+
+    /// A3-PIVOT.3: when the canvas declares a 4:3 aspect (e.g. 800×600) and the
+    /// target is 16:9 (1600×900), a uniform-scale letterbox is applied.  A root
+    /// node with `Fixed(800)` sizing must NOT produce a rect of width 1600
+    /// (the old non-uniform-stretch result); instead it should be scaled to 1200
+    /// and horizontally centred with 200 px letterbox on each side.
+    #[test]
+    fn uniform_scale_letterboxes_mismatched_aspect() {
+        use crate::bb_scene::{BbNode, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+        use crate::bb_scene::BbNodeType;
+
+        // Canvas 800×600, Fixed(800)×Fixed(600) root.
+        let node = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![],
+            ty: BbNodeType::WidgetCard,
+            name: "root_card".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing {
+                width: BbValue::Fixed(800.0),
+                height: BbValue::Fixed(600.0),
+            },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, node);
+        let scene = BbScene { canvas_size: (800.0, 600.0), roots: vec![1], nodes };
+
+        let result = layout(&scene, 1600, 900);
+        let rect = result.rects[&1];
+
+        // Uniform scale = min(1600/800, 900/600) = min(2.0, 1.5) = 1.5.
+        // Fixed(800) → 800 × 1.5 = 1200.  NOT 1600 (old non-uniform stretch).
+        assert_ne!(
+            (rect.w, rect.h),
+            (1600.0, 900.0),
+            "Fixed(800×600) node must not be stretched to 1600×900"
+        );
+        assert!(
+            (rect.w - 1200.0).abs() < 1.0,
+            "expected width ≈ 1200 (uniform scale 1.5), got {:.1}",
+            rect.w
+        );
+        assert!(
+            (rect.h - 900.0).abs() < 1.0,
+            "expected height ≈ 900 (uniform scale 1.5), got {:.1}",
+            rect.h
+        );
+        // Letterbox: x offset = (1600 − 1200) / 2 = 200.
+        assert!(
+            (rect.x - 200.0).abs() < 1.0,
+            "expected x ≈ 200 (letterbox), got {:.1}",
+            rect.x
+        );
     }
 }

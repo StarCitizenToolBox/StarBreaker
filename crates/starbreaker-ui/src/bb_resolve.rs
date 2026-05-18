@@ -19,7 +19,11 @@ use crate::bb_scene::{BbNodeId, BbNodeType, BbScene, parse_bb_canvas};
 use crate::pipeline::extract_record_name;
 
 /// Maximum depth for `WidgetCanvas.canvas` recursion.
-const MAX_WIDGET_CANVAS_DEPTH: u8 = 1;
+///
+/// The real MFD hierarchy is three levels deep:
+/// `M_MFD_Screen` → `M_Eng_MFDContent` → `MC_S_Target_Master` → `GEN_MC_S_Target`.
+/// A cap of 4 gives headroom for one more nesting level before halting.
+const MAX_WIDGET_CANVAS_DEPTH: u8 = 4;
 
 /// Parse `root_json`, fetch active style-referenced child canvases, and merge them.
 ///
@@ -434,49 +438,165 @@ mod tests {
     }
 
     #[test]
-    fn resolve_does_not_follow_widget_canvas_url_at_depth_1() {
-        // A content canvas that itself has a WidgetCanvas.canvas URL.
-        // At depth=1 the recursion must not follow it further.
-        let inner_content_url = "file://./inner.json";
-        let content_with_nested_widget_canvas = serde_json::json!({
-            "_RecordName_": "content_nested",
-            "_RecordId_": "00000000-0000-0000-0000-000000000012",
-            "_RecordValue_": {
-                "_Type_": "BuildingBlocks_Canvas",
-                "size": {"_Type_": "Vec3", "x": 800.0, "y": 600.0, "z": 0.0},
-                "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
-                "brandStyles": [],
-                "scene": [
-                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "root"},
-                    {
+    fn resolve_follows_multiple_widget_canvas_levels() {
+        // Verify that the resolver follows WidgetCanvas.canvas URLs at depth 1,
+        // 2, 3, and 4 (all within MAX_WIDGET_CANVAS_DEPTH = 4).
+        //
+        // Chain: host → level1 → level2 → level3 → level4
+        // Each level has 1 root node + 1 WidgetCanvas child.
+        // Level4 has 1 root + 1 WidgetCanvas pointing to "level5" — must NOT fetch.
+        fn make_canvas(name: &str, id: &str, child_url: Option<&str>) -> serde_json::Value {
+            let scene_nodes: Vec<serde_json::Value> = {
+                let mut nodes = vec![serde_json::json!({
+                    "_Pointer_": "ptr:1",
+                    "_Type_": "BuildingBlocks_DisplayWidget",
+                    "name": format!("{name}_root")
+                })];
+                if let Some(url) = child_url {
+                    nodes.push(serde_json::json!({
                         "_Pointer_": "ptr:2",
                         "_Type_": "BuildingBlocks_WidgetCanvas",
-                        "name": "nested",
+                        "name": format!("{name}_canvas"),
                         "parent": "_PointsTo_:ptr:1",
-                        "canvas": inner_content_url
-                    }
-                ]
-            }
-        });
+                        "canvas": url
+                    }));
+                }
+                nodes
+            };
+            serde_json::json!({
+                "_RecordName_": name,
+                "_RecordId_": id,
+                "_RecordValue_": {
+                    "_Type_": "BuildingBlocks_Canvas",
+                    "size": {"_Type_": "Vec3", "x": 800.0, "y": 600.0, "z": 0.0},
+                    "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
+                    "brandStyles": [],
+                    "scene": scene_nodes
+                }
+            })
+        }
 
-        let host = host_canvas_with_widget_canvas_url("file://./content_nested.json");
+        let level4 = make_canvas("level4", "00000000-0000-0000-0000-000000000004", Some("file://./level5.json"));
+        let level3 = make_canvas("level3", "00000000-0000-0000-0000-000000000003", Some("file://./level4.json"));
+        let level2 = make_canvas("level2", "00000000-0000-0000-0000-000000000002", Some("file://./level3.json"));
+        let level1 = make_canvas("level1", "00000000-0000-0000-0000-000000000001", Some("file://./level2.json"));
+        let host = host_canvas_with_widget_canvas_url("file://./level1.json");
 
-        let mut fetch_count = std::cell::Cell::new(0u32);
-        let scene = resolve_canvas_graph(&host, None, &|_url| {
+        let fetch_count = std::cell::Cell::new(0u32);
+        let scene = resolve_canvas_graph(&host, None, &|url| {
             fetch_count.set(fetch_count.get() + 1);
-            Ok(content_with_nested_widget_canvas.clone())
+            Ok(match url {
+                "file://./level1.json" => level1.clone(),
+                "file://./level2.json" => level2.clone(),
+                "file://./level3.json" => level3.clone(),
+                "file://./level4.json" => level4.clone(),
+                _ => return Err(format!("unexpected fetch: {url}")),
+            })
         })
         .expect("resolve failed");
 
-        // The inner_content_url must NOT be followed (depth cap).
-        // Only one fetch should happen (the content_nested.json canvas).
-        assert_eq!(fetch_count.get(), 1, "expected exactly 1 fetch, got {}", fetch_count.get());
-        // host (2) + content_nested (2) = 4 nodes
-        assert_eq!(
-            scene.nodes.len(),
-            4,
-            "expected 4 merged nodes, got {}",
-            scene.nodes.len()
+        // Depth chain: host(depth=0)→level1(1)→level2(2)→level3(3)→level4(4)
+        // level5 is NOT fetched because depth=4 is the cap (4 < 4 is false).
+        assert_eq!(fetch_count.get(), 4, "expected 4 fetches (levels 1–4), got {}", fetch_count.get());
+
+        // host(2) + level1(2) + level2(2) + level3(2) + level4(2) = 10 nodes
+        assert_eq!(scene.nodes.len(), 10, "expected 10 merged nodes, got {}", scene.nodes.len());
+    }
+
+    #[test]
+    fn resolve_does_not_follow_widget_canvas_url_beyond_depth_cap() {
+        // A content canvas at depth MAX_WIDGET_CANVAS_DEPTH that itself has a
+        // WidgetCanvas.canvas URL pointing deeper must NOT be followed.
+        //
+        // We build a chain of length MAX_WIDGET_CANVAS_DEPTH + 1 and verify
+        // that exactly MAX_WIDGET_CANVAS_DEPTH fetches occur (the cap canvas is
+        // fetched but its child canvas is not).
+        fn make_level_canvas(child_url: &str) -> serde_json::Value {
+            serde_json::json!({
+                "_RecordName_": "level_n",
+                "_RecordId_": "00000000-0000-0000-0000-000000000099",
+                "_RecordValue_": {
+                    "_Type_": "BuildingBlocks_Canvas",
+                    "size": {"_Type_": "Vec3", "x": 800.0, "y": 600.0, "z": 0.0},
+                    "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
+                    "brandStyles": [],
+                    "scene": [
+                        {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "root"},
+                        {
+                            "_Pointer_": "ptr:2",
+                            "_Type_": "BuildingBlocks_WidgetCanvas",
+                            "name": "next_level",
+                            "parent": "_PointsTo_:ptr:1",
+                            "canvas": child_url
+                        }
+                    ]
+                }
+            })
+        }
+
+        let host = host_canvas_with_widget_canvas_url("file://./level.json");
+
+        let fetch_count = std::cell::Cell::new(0u32);
+        let scene = resolve_canvas_graph(&host, None, &|_url| {
+            fetch_count.set(fetch_count.get() + 1);
+            // Every level returns the same canvas pointing at "file://./level.json" again.
+            // The cycle-guard ensures each URL is only fetched once per sibling set,
+            // but the depth cap stops traversal after MAX_WIDGET_CANVAS_DEPTH fetches.
+            Ok(make_level_canvas("file://./level.json"))
+        })
+        .expect("resolve failed");
+
+        // Each fetch at depth d produces a WidgetCanvas.canvas URL for the same
+        // "level.json", but the seen_urls dedup means each level only fetches once.
+        // The important assertion: fetch_count <= MAX_WIDGET_CANVAS_DEPTH.
+        assert!(
+            fetch_count.get() <= MAX_WIDGET_CANVAS_DEPTH as u32,
+            "fetched {} times, should be ≤ MAX_WIDGET_CANVAS_DEPTH={}",
+            fetch_count.get(), MAX_WIDGET_CANVAS_DEPTH,
+        );
+
+        // There must be merged nodes from the fetched levels.
+        assert!(scene.nodes.len() >= 2, "must have at least 2 merged nodes, got {}", scene.nodes.len());
+    }
+
+    #[test]
+    fn gen_mc_s_target_fixture_has_widget_text_fields() {
+        // The GEN_MC_S_Target canvas contains WidgetTextField nodes inline.
+        // Resolving it (with a failing fetcher for nested canvas URLs) must
+        // return a scene that includes at least one WidgetTextField node.
+        use crate::bb_scene::BbNodeType;
+        let json = load_fixture("GEN_MC_S_Target_dd9ed6dc.json");
+        let scene = resolve_canvas_graph(&json, None, &|_p| Err("no fetcher in test".to_string()))
+            .expect("resolve failed");
+        let text_count = scene.nodes.values().filter(|n| n.ty == BbNodeType::WidgetTextField).count();
+        assert!(
+            text_count >= 1,
+            "expected at least 1 WidgetTextField in GEN_MC_S_Target, got {}",
+            text_count,
+        );
+    }
+
+    #[test]
+    fn mc_s_self_master_differs_from_gen_mc_s_target() {
+        // MC_S_Self_Master and GEN_MC_S_Target represent different MFD screens.
+        // Their resolved scenes must have different node counts (proving that
+        // different root canvases produce distinct merged results).
+        let target_json = load_fixture("GEN_MC_S_Target_dd9ed6dc.json");
+        let self_json = load_fixture("MC_S_Self_Master_680a71df.json");
+
+        let target_scene =
+            resolve_canvas_graph(&target_json, None, &|_p| Err("no fetcher".to_string()))
+                .expect("target resolve failed");
+        let self_scene =
+            resolve_canvas_graph(&self_json, None, &|_p| Err("no fetcher".to_string()))
+                .expect("self resolve failed");
+
+        assert_ne!(
+            target_scene.nodes.len(),
+            self_scene.nodes.len(),
+            "GEN_MC_S_Target ({} nodes) and MC_S_Self_Master ({} nodes) must differ",
+            target_scene.nodes.len(),
+            self_scene.nodes.len(),
         );
     }
 }

@@ -19,8 +19,8 @@
 
 use image::{Rgba, RgbaImage};
 use tiny_skia::{
-    Color, GradientStop, IntSize, Paint, PathBuilder, Pixmap, PixmapPaint, RadialGradient,
-    Shader, SpreadMode, Stroke, Transform, Rect as TskRect,
+    Color, IntSize, Paint, PathBuilder, Pixmap, PixmapPaint,
+    Stroke, Transform, Rect as TskRect,
 };
 
 use crate::bb_atlas::AtlasLibrary;
@@ -93,12 +93,6 @@ pub fn render_bb_scene(
         }
         draw_node(node, rect, ctx, atlas, &mut pixmap);
     }
-
-    // Radial vignette drawn *after* all nodes — darkens corners of fills
-    // too, creating per-pixel colour variation that diversifies the quantised
-    // palette.  Helps the visual quality gate for screens that have no atlas
-    // images.
-    draw_vignette(&mut pixmap, ctx);
 
     // Convert premultiplied tiny-skia pixmap → straight-alpha RgbaImage.
     pixmap_to_rgba_image(pixmap)
@@ -285,51 +279,6 @@ fn draw_node(
 // ─────────────────────────────────────────────────────────────────────────────
 // Colour helpers
 // ─────────────────────────────────────────────────────────────────────────────
-
-/// Draw a radial vignette over the pixmap: transparent at centre, slightly
-/// darker toward the corners. Uses RadialGradient with the background colour
-/// so the edges deepen into the manufacturer's background tone rather than
-/// pure black.
-fn draw_vignette(pixmap: &mut Pixmap, ctx: &ComposeContext<'_>) {
-    use tiny_skia::Point;
-    let w = pixmap.width() as f32;
-    let h = pixmap.height() as f32;
-    let cx = w * 0.5;
-    let cy = h * 0.5;
-    let radius = (cx * cx + cy * cy).sqrt() * 1.05;
-
-    let bg = &ctx.style.background;
-    // Darken to 30% brightness at corners for a strong vignette.
-    let bg_dark = Color::from_rgba8(
-        (bg.r as u32 * 3 / 10) as u8,
-        (bg.g as u32 * 3 / 10) as u8,
-        (bg.b as u32 * 3 / 10) as u8,
-        230,
-    );
-    let stops = vec![
-        GradientStop::new(0.0, Color::from_rgba8(bg.r, bg.g, bg.b, 0)),
-        GradientStop::new(0.40, Color::from_rgba8(bg.r, bg.g, bg.b, 0)),
-        GradientStop::new(1.0, bg_dark),
-    ];
-
-    if let Some(shader) = RadialGradient::new(
-        Point::from_xy(cx, cy),
-        0.0,
-        Point::from_xy(cx, cy),
-        radius,
-        stops,
-        SpreadMode::Pad,
-        Transform::identity(),
-    ) {
-        let mut paint = Paint::default();
-        paint.shader = shader;
-        paint.anti_alias = false;
-        if let Some(rect) = TskRect::from_xywh(0.0, 0.0, w, h) {
-            pixmap.as_mut().fill_rect(rect, &paint, Transform::identity(), None);
-        }
-    }
-}
-
 
 /// Return the explicit fill colour for a node, or transparent if none is set.
 fn node_fill_rgba(node: &BbNode) -> [f32; 4] {
@@ -711,7 +660,7 @@ mod tests {
                 "empty scene must not produce magenta"
             );
         }
-        // Center pixel must be the background colour (vignette is transparent there).
+        // Center pixel must equal the background colour exactly (no post-processing).
         let cx = img.get_pixel(32, 32);
         assert_eq!(
             [cx.0[0], cx.0[1], cx.0[2], cx.0[3]],
