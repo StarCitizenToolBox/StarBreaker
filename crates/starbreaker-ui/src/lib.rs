@@ -8,9 +8,9 @@
 //! # Modules
 //! - [`canvas`]    — BuildingBlocks canvas record parser and widget tree resolver.
 //! - [`compose`]   — Canvas-to-image compositor via `tiny-skia` (stub).
-//! - [`defaults`]  — Default "switched on" state values for game-state-bound widgets (stub).
+//! - [`defaults`]  — Default "switched on" state values for game-state-bound widgets.
 //! - [`error`]     — Unified [`UiError`] type.
-//! - [`style`]     — Manufacturer style (tint, CRT params) loader (stub).
+//! - [`style`]     — Manufacturer style (tint, CRT params) loader.
 //! - [`swf_assets`] — SWF static-atom extractor and [`SwfAssetLibrary`].
 
 pub mod canvas;
@@ -27,3 +27,9 @@ pub use canvas::{
     CanvasParser, CanvasRecord, CanvasView, CanvasWidgetTreeResolver, Operation, ResolvedCanvas,
     RgbaColor, SceneItem, Transform2D, Value, ViewComponent,
 };
+
+// Re-export defaults registry.
+pub use defaults::DefaultValueRegistry;
+
+// Re-export manufacturer style types.
+pub use style::{CrtParams, ManufacturerStyle, StyleLoader};
