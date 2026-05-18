@@ -1,0 +1,675 @@
+//! SWF shape rasterizer — renders static SWF shapes into a `tiny-skia` `Pixmap`.
+//!
+//! # Public API
+//! [`draw_swf_symbol`] is the single entry point: look up `symbol_name` in a
+//! [`SwfAssetLibrary`], decode the referenced shape character (or the first
+//! frame of a sprite character), build `tiny-skia` paths from the SWF
+//! edge records, and fill/stroke them into `pixmap` mapped into `dest`.
+//!
+//! # Coordinate system
+//! SWF coordinates are in **Twips** (1/20 px). Shape bounds are used to
+//! define the SWF-space viewport; `dest` is the pixel-space viewport.  A
+//! linear mapping (no rotation) from shape-bounds → dest is applied to
+//! every control point.
+//!
+//! # Fill/line support
+//! - `FillStyle::Color` — solid RGBA fill.
+//! - `LineStyle` with a `FillStyle::Color` fill — solid stroke.
+//! - Gradient and bitmap fills are **not** rendered; `draw_swf_symbol`
+//!   returns `false` for shapes that contain *only* gradient/bitmap fills
+//!   and no `Color` fills or strokes.
+//!
+//! # Tinting
+//! When `tint` is opaque white (`#FFFFFFFF`), the SWF authored colour is
+//! used unchanged.  When the SWF fill colour is white (255, 255, 255) and
+//! `tint` is not opaque white, the fill colour is replaced by `tint`
+//! (recolour mode).  This lets manufacturer chrome that is authored as
+//! white be tinted to the manufacturer primary colour.
+
+use tiny_skia::{
+    Color, FillRule, Paint, Path, PathBuilder, Pixmap, Stroke, Transform,
+    Rect as TskRect,
+};
+
+use crate::swf_assets::{PlaceRecord, ShapeRecord, SwfAssetLibrary};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Public API
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Rasterise the SWF shape named `symbol_name` into `pixmap`, mapped into the
+/// pixel `dest` rect.
+///
+/// Returns `false` if:
+/// - the symbol is not found in `assets.exports`,
+/// - the referenced character is neither a shape nor a sprite,
+/// - the shape has no `Color` fill or `Color`-filled line styles,
+/// - no visible pixels were produced.
+///
+/// On `false` the caller should fall back to whatever makes sense (typically
+/// drawing nothing).
+pub fn draw_swf_symbol(
+    pixmap: &mut Pixmap,
+    assets: &SwfAssetLibrary,
+    symbol_name: &str,
+    dest: TskRect,
+    tint: Color,
+    alpha: f32,
+) -> bool {
+    let Some(char_id) = assets.lookup_export(symbol_name) else {
+        log::debug!("draw_swf_symbol: symbol '{symbol_name}' not found in exports");
+        return false;
+    };
+
+    if let Some(shape) = assets.get_shape(char_id) {
+        draw_shape(pixmap, shape, dest, tint, alpha)
+    } else {
+        // Try as a sprite: take first frame, draw each placed shape.
+        let places: Vec<PlaceRecord> = assets.extract_sprite_first_frame(char_id);
+        if places.is_empty() {
+            log::debug!(
+                "draw_swf_symbol: char id={char_id} for '{symbol_name}' is not a shape or sprite"
+            );
+            return false;
+        }
+
+        let mut drew_any = false;
+        for place in &places {
+            if let Some(shape) = assets.get_shape(place.character_id) {
+                // Build a dest rect that applies the PlaceObject matrix on top of
+                // the shape-bounds → dest mapping.
+                let effective_dest = apply_place_matrix_to_dest(shape, &place.matrix, dest);
+                if draw_shape(pixmap, shape, effective_dest, tint, alpha) {
+                    drew_any = true;
+                }
+            }
+        }
+        drew_any
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Core rasteriser
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Map one SWF shape character into `dest`, using `tint` / `alpha`.
+///
+/// Returns `true` if at least one fill or stroke was successfully painted.
+fn draw_shape(
+    pixmap: &mut Pixmap,
+    shape: &ShapeRecord,
+    dest: TskRect,
+    tint: Color,
+    alpha: f32,
+) -> bool {
+    let bounds = &shape.shape_bounds;
+    let bx0 = bounds.x_min.to_pixels() as f32;
+    let by0 = bounds.y_min.to_pixels() as f32;
+    let bw = (bounds.x_max - bounds.x_min).to_pixels() as f32;
+    let bh = (bounds.y_max - bounds.y_min).to_pixels() as f32;
+
+    // Degenerate shape — nothing to draw.
+    if bw <= 0.0 || bh <= 0.0 {
+        return false;
+    }
+
+    // Transform: SWF pixel → dest pixel.
+    // tx_px = dest.left() + (swf_x_px - bx0) * sx
+    let sx = dest.width() / bw;
+    let sy = dest.height() / bh;
+    let dx = dest.left() - bx0 * sx;
+    let dy = dest.top() - by0 * sy;
+
+    // Collect active fill/line style indices from the records.
+    // We walk the records once per (fill_style, sub_path) group.
+    let mut drew_any = false;
+
+    // ── Fill pass ────────────────────────────────────────────────────────────
+    // We need to draw sub-paths per fill style index.  A single pass
+    // collects the geometry and the active style index simultaneously.
+    // fill_style_1 (the "left side" fill) is the one that closes filled
+    // regions in standard SWF authoring.
+
+    let num_fill = shape.fill_styles.len();
+    for style_idx in 1..=(num_fill as u32) {
+        let fill = &shape.fill_styles[(style_idx - 1) as usize];
+        let color = match fill {
+            swf::FillStyle::Color(c) => *c,
+            // Gradients / bitmaps: skip for now.
+            _ => continue,
+        };
+
+        if let Some(path) = build_path_for_fill(shape, style_idx, sx, sy, dx, dy) {
+            let rgba = tinted_color(color, tint, alpha);
+            let mut paint = Paint::default();
+            paint.set_color(rgba);
+            paint.anti_alias = true;
+            pixmap.fill_path(
+                &path,
+                &paint,
+                FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
+            drew_any = true;
+        }
+    }
+
+    // ── Stroke pass ──────────────────────────────────────────────────────────
+    for (ls_idx, line_style) in shape.line_styles.iter().enumerate() {
+        let color = match line_style.fill_style() {
+            swf::FillStyle::Color(c) => *c,
+            _ => continue,
+        };
+
+        let ls_index = (ls_idx + 1) as u32;
+        if let Some(path) = build_path_for_line(shape, ls_index, sx, sy, dx, dy) {
+            let stroke_width_px =
+                (line_style.width().to_pixels() as f32 * sx.abs()).max(0.5);
+            let rgba = tinted_color(color, tint, alpha);
+            let mut paint = Paint::default();
+            paint.set_color(rgba);
+            paint.anti_alias = true;
+            let mut stroke = Stroke::default();
+            stroke.width = stroke_width_px;
+            pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+            drew_any = true;
+        }
+    }
+
+    drew_any
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Path builders
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Build a `tiny-skia` `Path` containing all sub-paths whose `fill_style_1`
+/// equals `target_fill_idx`.
+fn build_path_for_fill(
+    shape: &ShapeRecord,
+    target_fill_idx: u32,
+    sx: f32,
+    sy: f32,
+    dx: f32,
+    dy: f32,
+) -> Option<Path> {
+    let mut pb = PathBuilder::new();
+    let mut cx = 0.0f32;
+    let mut cy = 0.0f32;
+    let mut active_fill1: u32 = 0;
+    let mut active_fill0: u32 = 0;
+    let mut in_sub = false;
+
+    for rec in &shape.records {
+        match rec {
+            swf::ShapeRecord::StyleChange(sc) => {
+                if in_sub {
+                    pb.close();
+                    in_sub = false;
+                }
+                if let Some(pt) = sc.move_to {
+                    cx = pt.x.to_pixels() as f32 * sx + dx;
+                    cy = pt.y.to_pixels() as f32 * sy + dy;
+                }
+                if let Some(fi) = sc.fill_style_1 {
+                    active_fill1 = fi;
+                }
+                if let Some(fi) = sc.fill_style_0 {
+                    active_fill0 = fi;
+                }
+                // Handle new style blocks (DefineShape3 inline styles).
+                if let Some(new_styles) = &sc.new_styles {
+                    // Reset to style 0 when a new style block is encountered.
+                    let _ = new_styles; // we don't track them here
+                    active_fill0 = 0;
+                    active_fill1 = 0;
+                }
+                // Start a new sub-path if this style change sets our target fill.
+                if active_fill1 == target_fill_idx || active_fill0 == target_fill_idx {
+                    pb.move_to(cx, cy);
+                    in_sub = true;
+                }
+            }
+            swf::ShapeRecord::StraightEdge { delta } => {
+                if active_fill1 != target_fill_idx && active_fill0 != target_fill_idx {
+                    let ex = cx + delta.dx.to_pixels() as f32 * sx;
+                    let ey = cy + delta.dy.to_pixels() as f32 * sy;
+                    cx = ex;
+                    cy = ey;
+                    continue;
+                }
+                if !in_sub {
+                    pb.move_to(cx, cy);
+                    in_sub = true;
+                }
+                let ex = cx + delta.dx.to_pixels() as f32 * sx;
+                let ey = cy + delta.dy.to_pixels() as f32 * sy;
+                pb.line_to(ex, ey);
+                cx = ex;
+                cy = ey;
+            }
+            swf::ShapeRecord::CurvedEdge {
+                control_delta,
+                anchor_delta,
+            } => {
+                if active_fill1 != target_fill_idx && active_fill0 != target_fill_idx {
+                    let ctrl_x = cx + control_delta.dx.to_pixels() as f32 * sx;
+                    let ctrl_y = cy + control_delta.dy.to_pixels() as f32 * sy;
+                    let anch_x = ctrl_x + anchor_delta.dx.to_pixels() as f32 * sx;
+                    let anch_y = ctrl_y + anchor_delta.dy.to_pixels() as f32 * sy;
+                    cx = anch_x;
+                    cy = anch_y;
+                    continue;
+                }
+                if !in_sub {
+                    pb.move_to(cx, cy);
+                    in_sub = true;
+                }
+                let ctrl_x = cx + control_delta.dx.to_pixels() as f32 * sx;
+                let ctrl_y = cy + control_delta.dy.to_pixels() as f32 * sy;
+                let anch_x = ctrl_x + anchor_delta.dx.to_pixels() as f32 * sx;
+                let anch_y = ctrl_y + anchor_delta.dy.to_pixels() as f32 * sy;
+                pb.quad_to(ctrl_x, ctrl_y, anch_x, anch_y);
+                cx = anch_x;
+                cy = anch_y;
+            }
+        }
+    }
+    if in_sub {
+        pb.close();
+    }
+
+    pb.finish()
+}
+
+/// Build a `tiny-skia` `Path` containing all segments whose active `line_style`
+/// equals `target_ls_idx`.
+fn build_path_for_line(
+    shape: &ShapeRecord,
+    target_ls_idx: u32,
+    sx: f32,
+    sy: f32,
+    dx: f32,
+    dy: f32,
+) -> Option<Path> {
+    let mut pb = PathBuilder::new();
+    let mut cx = 0.0f32;
+    let mut cy = 0.0f32;
+    let mut active_ls: u32 = 0;
+    let mut in_sub = false;
+
+    for rec in &shape.records {
+        match rec {
+            swf::ShapeRecord::StyleChange(sc) => {
+                if in_sub && active_ls != target_ls_idx {
+                    in_sub = false;
+                }
+                if let Some(pt) = sc.move_to {
+                    cx = pt.x.to_pixels() as f32 * sx + dx;
+                    cy = pt.y.to_pixels() as f32 * sy + dy;
+                    in_sub = false;
+                }
+                if let Some(ls) = sc.line_style {
+                    active_ls = ls;
+                }
+                if let Some(_) = &sc.new_styles {
+                    active_ls = 0;
+                }
+            }
+            swf::ShapeRecord::StraightEdge { delta } => {
+                let ex = cx + delta.dx.to_pixels() as f32 * sx;
+                let ey = cy + delta.dy.to_pixels() as f32 * sy;
+                if active_ls == target_ls_idx {
+                    if !in_sub {
+                        pb.move_to(cx, cy);
+                        in_sub = true;
+                    }
+                    pb.line_to(ex, ey);
+                }
+                cx = ex;
+                cy = ey;
+            }
+            swf::ShapeRecord::CurvedEdge {
+                control_delta,
+                anchor_delta,
+            } => {
+                let ctrl_x = cx + control_delta.dx.to_pixels() as f32 * sx;
+                let ctrl_y = cy + control_delta.dy.to_pixels() as f32 * sy;
+                let anch_x = ctrl_x + anchor_delta.dx.to_pixels() as f32 * sx;
+                let anch_y = ctrl_y + anchor_delta.dy.to_pixels() as f32 * sy;
+                if active_ls == target_ls_idx {
+                    if !in_sub {
+                        pb.move_to(cx, cy);
+                        in_sub = true;
+                    }
+                    pb.quad_to(ctrl_x, ctrl_y, anch_x, anch_y);
+                }
+                cx = anch_x;
+                cy = anch_y;
+            }
+        }
+    }
+
+    pb.finish()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sprite placement helper
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Compute an effective dest rect for a shape placed inside a sprite, taking
+/// the sprite's PlaceObject matrix into account.
+///
+/// The matrix is in SWF space (Fixed16 scale + Twips translation).  We map
+/// the shape bounds through the matrix to get a transformed bounding box in
+/// SWF pixels, then map that box into the dest rect proportionally.
+fn apply_place_matrix_to_dest(
+    shape: &ShapeRecord,
+    matrix: &swf::Matrix,
+    parent_dest: TskRect,
+) -> TskRect {
+    let b = &shape.shape_bounds;
+    let bx0 = b.x_min.to_pixels() as f32;
+    let by0 = b.y_min.to_pixels() as f32;
+    let bx1 = b.x_max.to_pixels() as f32;
+    let by1 = b.y_max.to_pixels() as f32;
+
+    // Transform the four corners of the shape bounds through the SWF matrix.
+    let corners = [(bx0, by0), (bx1, by0), (bx0, by1), (bx1, by1)];
+    let a = matrix.a.to_f32();
+    let b_coef = matrix.b.to_f32();
+    let c = matrix.c.to_f32();
+    let d = matrix.d.to_f32();
+    let tx = matrix.tx.to_pixels() as f32;
+    let ty = matrix.ty.to_pixels() as f32;
+
+    let transformed: Vec<(f32, f32)> = corners
+        .iter()
+        .map(|&(x, y)| (a * x + c * y + tx, b_coef * x + d * y + ty))
+        .collect();
+
+    let mx0 = transformed.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
+    let my0 = transformed.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
+    let mx1 = transformed.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
+    let my1 = transformed.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
+
+    let mw = (mx1 - mx0).max(1.0);
+    let mh = (my1 - my0).max(1.0);
+
+    // Parent dest maps the parent sprite's stage area; we don't have a
+    // separate stage rect here, so we use it as the viewport.  The transformed
+    // bounding box is mapped into parent_dest proportionally.
+    let pw = parent_dest.width().max(1.0);
+    let ph = parent_dest.height().max(1.0);
+
+    // We need to know the parent SWF viewport — approximate with the shape's
+    // own bounds since we lack the sprite's stage size here.
+    // The most defensible approach is to use the same shape→dest mapping
+    // as draw_shape would, composed with the matrix.
+    let sx = parent_dest.width() / (bx1 - bx0).max(1.0);
+    let sy = parent_dest.height() / (by1 - by0).max(1.0);
+
+    let x0_px = parent_dest.left() + (mx0 - bx0) * sx;
+    let y0_px = parent_dest.top() + (my0 - by0) * sy;
+    let w_px = (mw * sx).max(1.0);
+    let h_px = (mh * sy).max(1.0);
+    let _ = (pw, ph); // suppress unused warning
+
+    TskRect::from_xywh(x0_px, y0_px, w_px, h_px).unwrap_or(parent_dest)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Colour helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Apply tint/alpha to a SWF `Color`, returning a `tiny-skia` `Color`.
+///
+/// Tinting rule:
+/// - If `tint` is opaque white, use the SWF authored colour unchanged.
+/// - If the SWF fill colour is white (255,255,255) and `tint` is not opaque
+///   white, multiply by `tint` (recolour mode).
+/// - Otherwise use the SWF colour as-is.
+fn tinted_color(swf_color: swf::Color, tint: Color, alpha: f32) -> Color {
+    let is_tint_white = tint.red() >= 1.0 && tint.green() >= 1.0 && tint.blue() >= 1.0;
+    let swf_is_white =
+        swf_color.r == 255 && swf_color.g == 255 && swf_color.b == 255;
+
+    let (r, g, b) = if !is_tint_white && swf_is_white {
+        (tint.red(), tint.green(), tint.blue())
+    } else {
+        (
+            swf_color.r as f32 / 255.0,
+            swf_color.g as f32 / 255.0,
+            swf_color.b as f32 / 255.0,
+        )
+    };
+
+    let a = (swf_color.a as f32 / 255.0) * alpha.clamp(0.0, 1.0);
+    Color::from_rgba(r, g, b, a).unwrap_or(Color::TRANSPARENT)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tiny_skia::IntSize;
+
+    /// Build a minimal SWF with a single 100×100 red rectangle exported as `"test_shape"`.
+    fn make_exported_rect_swf() -> Vec<u8> {
+        use swf::*;
+
+        let header = Header {
+            compression: Compression::None,
+            version: 6,
+            stage_size: Rectangle {
+                x_min: Twips::ZERO,
+                x_max: Twips::from_pixels(100.0),
+                y_min: Twips::ZERO,
+                y_max: Twips::from_pixels(100.0),
+            },
+            frame_rate: Fixed8::from_f32(24.0),
+            num_frames: 1,
+        };
+
+        let shape = Shape {
+            version: 1,
+            id: 1,
+            shape_bounds: Rectangle {
+                x_min: Twips::ZERO,
+                x_max: Twips::from_pixels(100.0),
+                y_min: Twips::ZERO,
+                y_max: Twips::from_pixels(100.0),
+            },
+            edge_bounds: Rectangle {
+                x_min: Twips::ZERO,
+                x_max: Twips::from_pixels(100.0),
+                y_min: Twips::ZERO,
+                y_max: Twips::from_pixels(100.0),
+            },
+            flags: ShapeFlag::empty(),
+            styles: ShapeStyles {
+                fill_styles: vec![FillStyle::Color(Color {
+                    r: 255,
+                    g: 0,
+                    b: 0,
+                    a: 255,
+                })],
+                line_styles: vec![],
+            },
+            shape: vec![
+                ShapeRecord::StyleChange(Box::new(StyleChangeData {
+                    move_to: Some(Point::new(Twips::ZERO, Twips::ZERO)),
+                    fill_style_0: None,
+                    fill_style_1: Some(1),
+                    line_style: None,
+                    new_styles: None,
+                })),
+                ShapeRecord::StraightEdge {
+                    delta: PointDelta::new(Twips::from_pixels(100.0), Twips::ZERO),
+                },
+                ShapeRecord::StraightEdge {
+                    delta: PointDelta::new(Twips::ZERO, Twips::from_pixels(100.0)),
+                },
+                ShapeRecord::StraightEdge {
+                    delta: PointDelta::new(Twips::from_pixels(-100.0), Twips::ZERO),
+                },
+                ShapeRecord::StraightEdge {
+                    delta: PointDelta::new(Twips::ZERO, Twips::from_pixels(-100.0)),
+                },
+            ],
+        };
+
+        let export: Vec<ExportedAsset<'_>> = vec![ExportedAsset {
+            id: 1,
+            name: SwfStr::from_utf8_str("test_shape"),
+        }];
+
+        let tags = [
+            Tag::DefineShape(shape),
+            Tag::ExportAssets(export),
+            Tag::ShowFrame,
+        ];
+
+        let mut buf = Vec::new();
+        swf::write_swf(&header, &tags, &mut buf).expect("write_swf failed");
+        buf
+    }
+
+    #[test]
+    fn red_rect_shape_rasterises_to_red_pixels() {
+        let swf_bytes = make_exported_rect_swf();
+        let assets = SwfAssetLibrary::new(swf_bytes).expect("SwfAssetLibrary::new");
+
+        let size = IntSize::from_wh(100, 100).unwrap();
+        let mut pixmap = Pixmap::new(size.width(), size.height()).unwrap();
+
+        let dest = TskRect::from_xywh(0.0, 0.0, 100.0, 100.0).unwrap();
+        let white = Color::from_rgba8(255, 255, 255, 255);
+        let drew = draw_swf_symbol(&mut pixmap, &assets, "test_shape", dest, white, 1.0);
+
+        assert!(drew, "draw_swf_symbol returned false for test_shape");
+
+        // Sample the centre pixel — should be red.
+        let data = pixmap.data();
+        // tiny-skia stores premultiplied RGBA; red=255 alpha=255 → [255,0,0,255]
+        let idx = (50 * 100 + 50) * 4;
+        let r = data[idx];
+        let g = data[idx + 1];
+        let b = data[idx + 2];
+        let a = data[idx + 3];
+
+        assert!(r > 200, "expected red centre pixel, got r={r} g={g} b={b} a={a}");
+        assert!(g < 50, "expected red centre pixel, got r={r} g={g} b={b} a={a}");
+        assert!(b < 50, "expected red centre pixel, got r={r} g={g} b={b} a={a}");
+        assert!(a > 200, "expected opaque centre pixel, got a={a}");
+    }
+
+    #[test]
+    fn missing_symbol_returns_false() {
+        let swf_bytes = make_exported_rect_swf();
+        let assets = SwfAssetLibrary::new(swf_bytes).expect("SwfAssetLibrary::new");
+        let mut pixmap = Pixmap::new(64, 64).unwrap();
+        let dest = TskRect::from_xywh(0.0, 0.0, 64.0, 64.0).unwrap();
+        let white = Color::from_rgba8(255, 255, 255, 255);
+        let drew = draw_swf_symbol(&mut pixmap, &assets, "no_such_symbol", dest, white, 1.0);
+        assert!(!drew);
+    }
+
+    #[test]
+    fn white_fill_is_tinted_when_tint_is_not_white() {
+        use swf::*;
+
+        // Build SWF with a white-filled rectangle.
+        let header = Header {
+            compression: Compression::None,
+            version: 6,
+            stage_size: Rectangle {
+                x_min: Twips::ZERO,
+                x_max: Twips::from_pixels(10.0),
+                y_min: Twips::ZERO,
+                y_max: Twips::from_pixels(10.0),
+            },
+            frame_rate: Fixed8::from_f32(24.0),
+            num_frames: 1,
+        };
+        let shape = Shape {
+            version: 1,
+            id: 2,
+            shape_bounds: Rectangle {
+                x_min: Twips::ZERO,
+                x_max: Twips::from_pixels(10.0),
+                y_min: Twips::ZERO,
+                y_max: Twips::from_pixels(10.0),
+            },
+            edge_bounds: Rectangle {
+                x_min: Twips::ZERO,
+                x_max: Twips::from_pixels(10.0),
+                y_min: Twips::ZERO,
+                y_max: Twips::from_pixels(10.0),
+            },
+            flags: ShapeFlag::empty(),
+            styles: ShapeStyles {
+                fill_styles: vec![FillStyle::Color(Color {
+                    r: 255,
+                    g: 255,
+                    b: 255,
+                    a: 255,
+                })],
+                line_styles: vec![],
+            },
+            shape: vec![
+                ShapeRecord::StyleChange(Box::new(StyleChangeData {
+                    move_to: Some(Point::new(Twips::ZERO, Twips::ZERO)),
+                    fill_style_0: None,
+                    fill_style_1: Some(1),
+                    line_style: None,
+                    new_styles: None,
+                })),
+                ShapeRecord::StraightEdge {
+                    delta: PointDelta::new(Twips::from_pixels(10.0), Twips::ZERO),
+                },
+                ShapeRecord::StraightEdge {
+                    delta: PointDelta::new(Twips::ZERO, Twips::from_pixels(10.0)),
+                },
+                ShapeRecord::StraightEdge {
+                    delta: PointDelta::new(Twips::from_pixels(-10.0), Twips::ZERO),
+                },
+                ShapeRecord::StraightEdge {
+                    delta: PointDelta::new(Twips::ZERO, Twips::from_pixels(-10.0)),
+                },
+            ],
+        };
+        let export: Vec<swf::ExportedAsset<'_>> = vec![swf::ExportedAsset {
+            id: 2,
+            name: swf::SwfStr::from_utf8_str("white_rect"),
+        }];
+        let tags = [
+            Tag::DefineShape(shape),
+            Tag::ExportAssets(export),
+            Tag::ShowFrame,
+        ];
+        let mut buf = Vec::new();
+        swf::write_swf(&header, &tags, &mut buf).expect("write_swf");
+        let assets = SwfAssetLibrary::new(buf).expect("SwfAssetLibrary");
+        let mut pixmap = Pixmap::new(10, 10).unwrap();
+        let dest = TskRect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap();
+        // Amber tint — use fully qualified path since `use swf::*` shadows `tiny_skia::Color`.
+        let amber = tiny_skia::Color::from_rgba8(240, 168, 104, 255);
+        let drew = draw_swf_symbol(&mut pixmap, &assets, "white_rect", dest, amber, 1.0);
+        assert!(drew);
+
+        // Centre pixel should be amber-ish (high red, medium green, low blue).
+        let data = pixmap.data();
+        let idx = (5 * 10 + 5) * 4;
+        let r = data[idx];
+        let g = data[idx + 1];
+        let b = data[idx + 2];
+        assert!(r > 180, "expected amber-red, got r={r} g={g} b={b}");
+        assert!(g > 100 && g < 220, "expected amber-green, got r={r} g={g} b={b}");
+        assert!(b < 150, "expected amber-blue, got r={r} g={g} b={b}");
+    }
+}

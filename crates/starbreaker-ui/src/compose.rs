@@ -33,6 +33,7 @@ use crate::error::UiError;
 use crate::postprocess::PostProcessOptions;
 use crate::style::ManufacturerStyle;
 use crate::swf_assets::SwfAssetLibrary;
+use crate::swf_render;
 use crate::text::{FontKind, TextAlign, TextRenderer};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -276,15 +277,11 @@ fn draw_node(
         // Text widgets are rendered in a second RgbaImage pass after tiny-skia output.
         BbNodeType::WidgetTextField | BbNodeType::WidgetText => {}
 
-        // Custom shapes: blit atlas when available; otherwise emit nothing.
-        // BB `WidgetCustomShape` whose `svgPath` is empty AND `rendererType`
-        // is `Flash` carries no static geometry — the shape is drawn by the
-        // SWF renderer at runtime from the parent Flash movie. Painting a
-        // filled rect or diamond placeholder for these produces large opaque
-        // panels (e.g. the chevron / greeble / NoTargetBox rectangles that
-        // dominated Right_Upper output) that do not exist in the in-game
-        // reference. Only render when an atlas image is actually resolved,
-        // or when the node owns its own non-empty svgPath / authored fill.
+        // Custom shapes: blit atlas when available; otherwise try the SWF
+        // asset library by symbol name, then fall back to authored fill/border.
+        // BB `WidgetCustomShape` with `rendererType: "Flash"` carries no static
+        // geometry — the shape lives in the SWF movie. We now rasterise it via
+        // `swf_render::draw_swf_symbol` using `node.name` as the export key.
         BbNodeType::WidgetCustomShape => {
             if let Some(img) = atlas.resolve_for_node(node, iw, ih) {
                 blit_atlas_image(pixmap, &img, rect.x as i32, rect.y as i32, alpha);
@@ -292,21 +289,35 @@ fn draw_node(
                     draw_border_ts(pixmap, tsk_rect, border, ctx, alpha, &node.raw);
                 }
             } else {
-                // Fall through to authored fill / border only when one is
-                // present. Empty Flash-rendered shapes draw nothing.
-                let bg_fill = node_fill_rgba(node);
-                if bg_fill[3] > 0.005 {
-                    fill_rect_ts(pixmap, tsk_rect, bg_fill, alpha);
-                }
-                if let Some(border) = &node.border {
-                    let max_w = border
-                        .top
-                        .width
-                        .max(border.right.width)
-                        .max(border.bottom.width)
-                        .max(border.left.width);
-                    if max_w > 0.5 {
-                        draw_border_ts(pixmap, tsk_rect, border, ctx, alpha, &node.raw);
+                // Try SWF shape by symbol name.
+                let pt = &ctx.style.primary_tint;
+                let tint = Color::from_rgba8(pt.r, pt.g, pt.b, pt.a);
+                let drew_swf = swf_render::draw_swf_symbol(
+                    pixmap,
+                    ctx.assets,
+                    &node.name,
+                    tsk_rect,
+                    tint,
+                    alpha,
+                );
+
+                if !drew_swf {
+                    // Fall through to authored fill / border only when one is
+                    // present. Empty Flash-rendered shapes draw nothing.
+                    let bg_fill = node_fill_rgba(node);
+                    if bg_fill[3] > 0.005 {
+                        fill_rect_ts(pixmap, tsk_rect, bg_fill, alpha);
+                    }
+                    if let Some(border) = &node.border {
+                        let max_w = border
+                            .top
+                            .width
+                            .max(border.right.width)
+                            .max(border.bottom.width)
+                            .max(border.left.width);
+                        if max_w > 0.5 {
+                            draw_border_ts(pixmap, tsk_rect, border, ctx, alpha, &node.raw);
+                        }
                     }
                 }
             }

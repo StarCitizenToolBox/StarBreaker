@@ -27,6 +27,7 @@ pub mod pipeline;
 pub mod postprocess;
 pub mod style;
 pub mod swf_assets;
+pub mod swf_render;
 pub mod text;
 
 pub use error::UiError;
