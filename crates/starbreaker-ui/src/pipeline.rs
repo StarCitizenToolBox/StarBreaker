@@ -33,6 +33,8 @@ use crate::postprocess::PostProcessOptions;
 use crate::style::{ManufacturerStyle, StyleLoader};
 use crate::swf_assets::SwfAssetLibrary;
 
+pub use crate::bb_atlas::AssetFetcher;
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Fetcher traits
 // ──────────────────────────────────────────────────────────────────────────────
@@ -117,6 +119,8 @@ pub struct PipelineInputs<'a> {
     pub canvas_fetcher: &'a dyn CanvasFetcher,
     pub swf_fetcher: &'a dyn SwfFetcher,
     pub style_fetcher: &'a dyn StyleFetcher,
+    /// Asset fetcher for bitmap/SVG images referenced in BB nodes.
+    pub asset_fetcher: &'a dyn crate::bb_atlas::AssetFetcher,
     /// Output raster size `(width, height)` in pixels.
     pub target_size: (u32, u32),
     /// Apply manufacturer post-process (tint, scanlines, vignette) after rasterisation.
@@ -183,6 +187,69 @@ pub fn render_for_binding(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiErro
                 );
             }
         }
+    }
+
+    // ── 1c. Atlas diagnostic ────────────────────────────────────────────────
+    if let Some(root_json) = raw_root_json.as_ref()
+        && let Ok(scene) = crate::bb_resolve::resolve_canvas_graph(
+            root_json,
+            b.manufacturer_id,
+            &|p| inputs.canvas_fetcher.fetch_canvas_by_path(p).map_err(|e| e.to_string()),
+        )
+    {
+        let atlas = crate::bb_atlas::AtlasLibrary::new(inputs.asset_fetcher, b.manufacturer_id);
+        let mut resolved = 0usize;
+        let mut first_miss: Option<String> = None;
+
+        for node in scene.nodes.values() {
+            let w = bb_value_dimension(&node.sizing.width).round() as u32;
+            let h = bb_value_dimension(&node.sizing.height).round() as u32;
+            let tw = if w > 0 { w } else { 64 };
+            let th = if h > 0 { h } else { 64 };
+            if atlas.resolve_for_node(node, tw, th).is_some() {
+                resolved += 1;
+            } else {
+                let miss_path = node
+                    .icon
+                    .as_ref()
+                    .and_then(|i| i.image_record.as_deref())
+                    .or_else(|| {
+                        node.background
+                            .as_ref()
+                            .and_then(|bg| bg.svg_fill_path.as_deref())
+                    })
+                    .unwrap_or("");
+                if !miss_path.is_empty() && first_miss.is_none() {
+                    first_miss = Some(miss_path.to_string());
+                }
+            }
+        }
+
+        let with_ref = scene
+            .nodes
+            .values()
+            .filter(|n| {
+                n.icon
+                    .as_ref()
+                    .and_then(|i| i.image_record.as_deref())
+                    .filter(|p| !p.is_empty())
+                    .is_some()
+                    || n.background
+                        .as_ref()
+                        .and_then(|bg| bg.svg_fill_path.as_deref())
+                        .filter(|p| !p.is_empty())
+                        .is_some()
+            })
+            .count();
+        let missed = with_ref.saturating_sub(resolved);
+        log::info!(
+            "atlas[helper={}]: nodes_with_image={}, resolved={}, missed={} (first miss: {})",
+            b.helper_name.unwrap_or("?"),
+            with_ref,
+            resolved,
+            missed,
+            first_miss.as_deref().unwrap_or("none"),
+        );
     }
 
     // ── 2. Collect SWF paths ────────────────────────────────────────────────
@@ -290,6 +357,14 @@ fn load_first_swf(paths: &[String], fetcher: &dyn SwfFetcher) -> SwfAssetLibrary
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ];
     SwfAssetLibrary::new(minimal).expect("minimal SWF is always valid")
+}
+
+fn bb_value_dimension(value: &crate::bb_scene::BbValue) -> f32 {
+    match value {
+        crate::bb_scene::BbValue::Fixed(v)
+        | crate::bb_scene::BbValue::Percent(v)
+        | crate::bb_scene::BbValue::Other { value: v, .. } => *v,
+    }
 }
 
 /// Load the manufacturer style for `manufacturer_id` via `fetcher`.

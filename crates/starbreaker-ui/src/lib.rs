@@ -14,6 +14,7 @@
 //! - [`style`]       — Manufacturer style (tint, CRT params) loader.
 //! - [`swf_assets`]  — SWF static-atom extractor and [`SwfAssetLibrary`].
 
+pub mod bb_atlas;
 pub mod bb_layout;
 pub mod bb_resolve;
 pub mod bb_scene;

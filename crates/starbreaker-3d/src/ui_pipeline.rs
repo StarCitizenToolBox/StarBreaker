@@ -1,8 +1,9 @@
 //! Bridge between the decomposed export pipeline and `starbreaker-ui`.
 //!
-//! Implements the [`CanvasFetcher`], [`SwfFetcher`], and [`StyleFetcher`]
-//! traits over the live DataCore database and P4K archive, then exposes
-//! [`render_ui_binding_png`] as the single call-site for `decomposed.rs`.
+//! Implements the [`CanvasFetcher`], [`SwfFetcher`], [`StyleFetcher`], and
+//! atlas asset-fetcher traits over the live DataCore database and P4K archive,
+//! then exposes [`render_ui_binding_png`] as the single call-site for
+//! `decomposed.rs`.
 
 use std::str::FromStr;
 
@@ -116,6 +117,34 @@ impl<'a> SwfFetcher for P4kSwfFetcher<'a> {
     }
 }
 
+struct P4kAssetFetcher<'a> {
+    p4k: &'a MappedP4k,
+}
+
+impl<'a> starbreaker_ui::bb_atlas::AssetFetcher for P4kAssetFetcher<'a> {
+    fn fetch_image_bytes(&self, p4k_path: &str) -> Option<Vec<u8>> {
+        read_p4k_asset(self.p4k, p4k_path)
+    }
+}
+
+fn read_p4k_asset(p4k: &MappedP4k, p4k_path: &str) -> Option<Vec<u8>> {
+    for candidate in p4k_asset_candidates(p4k_path) {
+        if let Ok(bytes) = p4k.read_file(&candidate) {
+            return Some(bytes);
+        }
+    }
+    None
+}
+
+fn p4k_asset_candidates(path: &str) -> Vec<String> {
+    let native = path.replace('/', "\\");
+    let mut candidates = vec![native.clone()];
+    if !path.starts_with("data/") {
+        candidates.push(format!("Data\\{native}"));
+    }
+    candidates
+}
+
 /// Resolves the manufacturer style by delegating to [`StyleLoader`].
 ///
 /// Falls back to the Drake amber defaults (with a warning) for any manufacturer
@@ -168,6 +197,7 @@ pub fn render_ui_binding_png(
         canvas_fetcher: &DatacoreCanvasFetcher { db },
         swf_fetcher: &P4kSwfFetcher { p4k },
         style_fetcher: &ManufacturerStyleFetcher,
+        asset_fetcher: &P4kAssetFetcher { p4k },
         target_size,
         // Phase 11: postprocess is disabled while compose.rs is the magenta-grid
         // placeholder.  The tint/scanline/vignette passes assume *lit* pixels
