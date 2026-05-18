@@ -45,6 +45,10 @@ pub enum UiError {
     /// The widget tree resolver exceeded its maximum expansion depth.
     #[error("canvas expansion exceeded max depth {max_depth} at GUID {guid}")]
     MaxDepthExceeded { guid: String, max_depth: usize },
+
+    /// A canvas could not be rasterised (pixmap allocation, path build, or encode failure).
+    #[error("canvas render error: {0}")]
+    RenderError(String),
 }
 
 impl From<swf::error::Error> for UiError {

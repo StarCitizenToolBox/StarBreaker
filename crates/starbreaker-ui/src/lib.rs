@@ -7,7 +7,7 @@
 //!
 //! # Modules
 //! - [`canvas`]    — BuildingBlocks canvas record parser and widget tree resolver.
-//! - [`compose`]   — Canvas-to-image compositor via `tiny-skia` (stub).
+//! - [`compose`]   — Canvas-to-image compositor via `tiny-skia`.
 //! - [`defaults`]  — Default "switched on" state values for game-state-bound widgets.
 //! - [`error`]     — Unified [`UiError`] type.
 //! - [`style`]     — Manufacturer style (tint, CRT params) loader.
@@ -33,3 +33,9 @@ pub use defaults::DefaultValueRegistry;
 
 // Re-export manufacturer style types.
 pub use style::{CrtParams, ManufacturerStyle, StyleLoader};
+
+// Re-export composer API.
+pub use compose::{
+    ComposeContext, ComposeTarget, draw_annunciator_strip, draw_door_panel, draw_target_status,
+    encode_png, render_canvas,
+};
