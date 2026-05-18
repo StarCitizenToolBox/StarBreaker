@@ -115,9 +115,42 @@ pub fn render_for_binding(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiErro
     // ── 1. Resolve canvas tree ──────────────────────────────────────────────
 
     let resolver = CanvasWidgetTreeResolver::new();
+    let raw_root_json = inputs.canvas_fetcher.fetch_canvas_json(effective_guid).ok();
     let resolved: ResolvedCanvas = resolver.resolve(effective_guid, |guid| {
         inputs.canvas_fetcher.fetch_canvas_json(guid)
     })?;
+
+    // ── 1b. Diagnostic: parse the root canvas with the new bb_scene module
+    // and log scene stats. This is informational only — phases A1+ will
+    // migrate the actual renderer onto bb_scene.
+    if let Some(root_json) = raw_root_json.as_ref() {
+        match crate::bb_scene::parse_bb_canvas(root_json) {
+            Ok(scene) => {
+                let mut type_counts: std::collections::BTreeMap<String, usize> =
+                    std::collections::BTreeMap::new();
+                for node in scene.nodes.values() {
+                    let key = format!("{:?}", node.ty);
+                    *type_counts.entry(key).or_insert(0) += 1;
+                }
+                log::info!(
+                    "bb_scene[{}]: canvas={:?} size=({:.0}x{:.0}) nodes={} roots={} types={:?}",
+                    b.helper_name.unwrap_or("?"),
+                    effective_guid,
+                    scene.canvas_size.0,
+                    scene.canvas_size.1,
+                    scene.nodes.len(),
+                    scene.roots.len(),
+                    type_counts,
+                );
+            }
+            Err(e) => {
+                log::warn!(
+                    "bb_scene parse failed for helper {:?} canvas {}: {}",
+                    b.helper_name, effective_guid, e,
+                );
+            }
+        }
+    }
 
     // ── 2. Collect SWF paths ────────────────────────────────────────────────
 
