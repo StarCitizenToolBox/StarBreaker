@@ -35,19 +35,63 @@ impl<'a> CanvasFetcher for DatacoreCanvasFetcher<'a> {
             guid: guid.to_string(),
             source: format!("record not found in DataCore for GUID {guid}").into(),
         })?;
-        let bytes = starbreaker_datacore::export::to_json_compact(self.db, record)
-            .map_err(|e| UiError::FetchFailed {
-                guid: guid.to_string(),
-                source: Box::new(e),
-            })?;
-        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
-            UiError::FetchFailed {
-                guid: guid.to_string(),
-                source: Box::new(e),
-            }
-        })?;
-        Ok(value)
+        export_canvas_record(self.db, record, guid)
     }
+
+    fn fetch_canvas_by_name(&self, record_name: &str) -> Result<serde_json::Value, UiError> {
+        // DataCore stores the full name as "<Type>.<Stem>" in name_offset
+        // (e.g. "BuildingBlocks_Canvas.M_Eng_MFDContent").  Match against both
+        // the full name and just the stem so that callers using file-URL basenames
+        // (e.g. "m_eng_mfdcontent") still resolve correctly.
+        let matches: Vec<_> = self
+            .db
+            .records_by_type_name("BuildingBlocks_Canvas")
+            .filter(|record| {
+                let full_name = self.db.resolve_string2(record.name_offset);
+                let stem = full_name.rsplit('.').next().unwrap_or(full_name);
+                stem.eq_ignore_ascii_case(record_name)
+                    || full_name.eq_ignore_ascii_case(record_name)
+            })
+            .collect();
+
+        let Some(record) = matches.first().copied() else {
+            return Err(UiError::FetchFailed {
+                guid: record_name.to_string(),
+                source: format!("BuildingBlocks_Canvas record not found by name: {record_name}")
+                    .into(),
+            });
+        };
+
+        if matches.len() > 1 {
+            warn!(
+                "ui_pipeline: found {} BuildingBlocks_Canvas records named '{}'; using first",
+                matches.len(),
+                record_name
+            );
+        }
+
+        export_canvas_record(self.db, record, record_name)
+    }
+}
+
+fn export_canvas_record(
+    db: &Database<'_>,
+    record: &starbreaker_datacore::types::Record,
+    lookup_key: &str,
+) -> Result<serde_json::Value, UiError> {
+    let bytes = starbreaker_datacore::export::to_json_compact(db, record).map_err(|e| {
+        UiError::FetchFailed {
+            guid: lookup_key.to_string(),
+            source: Box::new(e),
+        }
+    })?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
+        UiError::FetchFailed {
+            guid: lookup_key.to_string(),
+            source: Box::new(e),
+        }
+    })?;
+    Ok(value)
 }
 
 struct P4kSwfFetcher<'a> {

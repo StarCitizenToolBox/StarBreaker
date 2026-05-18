@@ -37,12 +37,45 @@ use crate::swf_assets::SwfAssetLibrary;
 // Fetcher traits
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Extract a DataCore record name from a BuildingBlocks file URL or bare name.
+///
+/// Strips an optional `file://` prefix, keeps only the final path component, and
+/// removes a trailing `.json` extension case-insensitively.
+pub fn extract_record_name(file_url_or_name: &str) -> String {
+    let without_scheme = file_url_or_name
+        .strip_prefix("file://")
+        .unwrap_or(file_url_or_name);
+    let basename = without_scheme.rsplit('/').next().unwrap_or(without_scheme);
+    if basename
+        .get(basename.len().saturating_sub(5)..)
+        .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".json"))
+    {
+        basename[..basename.len() - 5].to_string()
+    } else {
+        basename.to_string()
+    }
+}
+
 /// Fetch a BuildingBlocks canvas record as a JSON [`serde_json::Value`].
 ///
 /// Implementations look up `guid` in DataCore (or a test fixture map) and
 /// return the record body JSON.
 pub trait CanvasFetcher {
     fn fetch_canvas_json(&self, guid: &str) -> Result<serde_json::Value, UiError>;
+
+    /// Fetch a canvas by DataCore file URL, path, or bare record name.
+    fn fetch_canvas_by_path(&self, path_or_name: &str) -> Result<serde_json::Value, UiError> {
+        let name = extract_record_name(path_or_name);
+        self.fetch_canvas_by_name(&name)
+    }
+
+    /// Fetch a canvas by exact record name.
+    fn fetch_canvas_by_name(&self, record_name: &str) -> Result<serde_json::Value, UiError> {
+        Err(UiError::FetchFailed {
+            guid: record_name.into(),
+            source: "fetch_canvas_by_name not implemented".into(),
+        })
+    }
 }
 
 /// Fetch raw SWF bytes by their P4K archive path.
@@ -120,11 +153,11 @@ pub fn render_for_binding(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiErro
         inputs.canvas_fetcher.fetch_canvas_json(guid)
     })?;
 
-    // ── 1b. Diagnostic: parse the root canvas with the new bb_scene module
-    // and log scene stats. This is informational only — phases A1+ will
-    // migrate the actual renderer onto bb_scene.
+    // ── 1b. Drill-down + diagnostic ─────────────────────────────────────────
     if let Some(root_json) = raw_root_json.as_ref() {
-        match crate::bb_scene::parse_bb_canvas(root_json) {
+        match crate::bb_resolve::resolve_canvas_graph(root_json, b.manufacturer_id, &|p| {
+            inputs.canvas_fetcher.fetch_canvas_by_path(p).map_err(|e| e.to_string())
+        }) {
             Ok(scene) => {
                 let mut type_counts: std::collections::BTreeMap<String, usize> =
                     std::collections::BTreeMap::new();
@@ -133,7 +166,7 @@ pub fn render_for_binding(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiErro
                     *type_counts.entry(key).or_insert(0) += 1;
                 }
                 log::info!(
-                    "bb_scene[{}]: canvas={:?} size=({:.0}x{:.0}) nodes={} roots={} types={:?}",
+                    "bb_scene[{}]: canvas={:?} size=({:.0}x{:.0}) merged nodes={} roots={} types={:?}",
                     b.helper_name.unwrap_or("?"),
                     effective_guid,
                     scene.canvas_size.0,
@@ -145,7 +178,7 @@ pub fn render_for_binding(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiErro
             }
             Err(e) => {
                 log::warn!(
-                    "bb_scene parse failed for helper {:?} canvas {}: {}",
+                    "bb_scene resolve failed for helper {:?} canvas {}: {}",
                     b.helper_name, effective_guid, e,
                 );
             }

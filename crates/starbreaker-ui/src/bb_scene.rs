@@ -105,6 +105,10 @@ pub enum BbNodeType {
     WidgetTextField,
     ComponentGeneralButton,
     ComponentGeneralButtonSecondary,
+    WidgetImage,
+    WidgetText,
+    WidgetCustomShape,
+    WidgetBodyBackground,
     /// Any `_Type_` not in the list above; the inner string is the full
     /// `BuildingBlocks_*` type name.
     Other(String),
@@ -122,6 +126,10 @@ impl BbNodeType {
             "WidgetTextField" => Self::WidgetTextField,
             "ComponentGeneralButton" => Self::ComponentGeneralButton,
             "ComponentGeneralButtonSecondary" => Self::ComponentGeneralButtonSecondary,
+            "WidgetImage" => Self::WidgetImage,
+            "WidgetText" => Self::WidgetText,
+            "WidgetCustomShape" => Self::WidgetCustomShape,
+            "WidgetBodyBackground" => Self::WidgetBodyBackground,
             _ => Self::Other(s.to_owned()),
         }
     }
