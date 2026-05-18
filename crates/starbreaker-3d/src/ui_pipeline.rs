@@ -107,12 +107,13 @@ pub fn render_ui_binding_png(
     db: &Database<'_>,
     p4k: &MappedP4k,
     texture_mip: u32,
+    root_manufacturer_id: Option<&str>,
 ) -> Result<Vec<u8>, String> {
     let view = UiBindingView {
         canvas_guid: binding.canvas_guid.as_deref(),
         content_canvas_guid: binding.content_canvas_guid.as_deref(),
         binding_kind: Some(&binding.binding_kind),
-        manufacturer_id: None, // Phase 10: resolve from ship record
+        manufacturer_id: root_manufacturer_id,
         helper_name: binding.helper_name.as_deref(),
         default_view_index: binding.dashboard_view_index,
         default_screen_slot: binding.dashboard_screen_slot,

@@ -944,6 +944,7 @@ pub(crate) fn write_decomposed_export(
     const INTERIOR_ASSETS_END: f32 = 0.99;
 
     let mut files = BTreeMap::new();
+    let root_manufacturer_id: Option<String> = derive_manufacturer_id(&input.entity_name);
     let mut texture_cache: HashMap<(String, TextureFlavor), String> = HashMap::new();
     let mut mtl_cache: HashMap<String, Option<MtlFile>> = HashMap::new();
     let mut png_cache = PngCache::new();
@@ -1138,7 +1139,7 @@ pub(crate) fn write_decomposed_export(
         let ui_bindings = child
             .ui_bindings
             .iter()
-            .map(|binding| generated_ui_binding_record(&mut files, binding, db, p4k, opts.texture_mip))
+            .map(|binding| generated_ui_binding_record(&mut files, binding, db, p4k, opts.texture_mip, root_manufacturer_id.as_deref()))
             .collect();
 
         let resolved_transform = resolved_child_transforms[index];
@@ -1383,7 +1384,7 @@ pub(crate) fn write_decomposed_export(
                 ui_bindings: placement
                     .ui_bindings
                     .iter()
-                    .map(|binding| generated_ui_binding_record(&mut files, binding, db, p4k, opts.texture_mip))
+                    .map(|binding| generated_ui_binding_record(&mut files, binding, db, p4k, opts.texture_mip, root_manufacturer_id.as_deref()))
                     .collect(),
                 transform: placement.transform,
                 palette_id: placement_palette_id,
@@ -2529,9 +2530,16 @@ fn generated_ui_binding_record(
     db: &Database<'_>,
     p4k: &MappedP4k,
     texture_mip: u32,
+    root_manufacturer_id: Option<&str>,
 ) -> UiBinding {
     let mut binding = binding.clone();
-    match crate::ui_pipeline::render_ui_binding_png(&binding, db, p4k, texture_mip) {
+    match crate::ui_pipeline::render_ui_binding_png(
+        &binding,
+        db,
+        p4k,
+        texture_mip,
+        root_manufacturer_id,
+    ) {
         Ok(png_bytes) => {
             let hash_bytes = Sha256::digest(&png_bytes);
             let hash_hex: String = hash_bytes[..8].iter().map(|b| format!("{b:02x}")).collect();
@@ -2549,6 +2557,61 @@ fn generated_ui_binding_record(
         }
     }
     binding
+}
+
+/// Derive a short manufacturer id (lowercase, e.g. "drak", "rsi", "aegs") from
+/// a root entity name like `DRAK_Clipper` or `RSI_AuroraMk2`.
+///
+/// Returns `None` when the prefix does not match any known manufacturer code.
+/// Production code must NOT hard-code ship/helper names — only manufacturer
+/// **codes** appear here, which are stable DataCore identifiers (not specific
+/// to any single ship or component).  Per-component manufacturer overrides
+/// (e.g. a Bioticorp medical bay installed on a Drake ship) are deferred to
+/// Phase A5 of the UI plan and require DataCore record traversal.
+fn derive_manufacturer_id(root_entity_name: &str) -> Option<String> {
+    let prefix = root_entity_name
+        .split(|c: char| c == '_' || c == '-' || c.is_whitespace())
+        .next()
+        .unwrap_or("");
+    if prefix.is_empty() {
+        return None;
+    }
+    let lower = prefix.to_ascii_lowercase();
+    // Stable DataCore manufacturer prefixes (entity-record naming convention).
+    const KNOWN_PREFIXES: &[&str] = &[
+        "drak", "rsi", "aegs", "anvl", "misc", "crus", "orig", "xian", "banu",
+        "krgn", "tmbl", "gama", "grin", "btc", "koa", "expl", "cnou", "vncl",
+        "espe", "gatc", "argo", "ksar", "drak", "kgnp",
+    ];
+    if KNOWN_PREFIXES.iter().any(|known| *known == lower.as_str()) {
+        Some(lower)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod manufacturer_id_tests {
+    use super::derive_manufacturer_id;
+
+    #[test]
+    fn drake_prefix_is_recognised() {
+        assert_eq!(derive_manufacturer_id("DRAK_Clipper"), Some("drak".into()));
+        assert_eq!(derive_manufacturer_id("drak_pitbull"), Some("drak".into()));
+    }
+
+    #[test]
+    fn rsi_aegs_anvl_recognised() {
+        assert_eq!(derive_manufacturer_id("RSI_AuroraMk2"), Some("rsi".into()));
+        assert_eq!(derive_manufacturer_id("AEGS_Gladius"), Some("aegs".into()));
+        assert_eq!(derive_manufacturer_id("ANVL_Hawk"), Some("anvl".into()));
+    }
+
+    #[test]
+    fn unknown_prefix_returns_none() {
+        assert_eq!(derive_manufacturer_id("Vehicle_Screen_MFD"), None);
+        assert_eq!(derive_manufacturer_id(""), None);
+    }
 }
 
 
