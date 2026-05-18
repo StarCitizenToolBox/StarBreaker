@@ -74,32 +74,137 @@ impl BindingResolver {
         Self { widget_to_path }
     }
 
-    /// Resolve display text for a node.
-    ///
-    /// Returns the literal text if present, the default-registry value if a
-    /// binding maps to a known path, a bracketed path for unknown bindings, or
-    /// an empty string if no binding exists at all.
+}
+
+/// Outcome of [`BindingResolver::resolve_text_detailed`].
+pub struct ResolvedText {
+    pub text: String,
+    /// True when the text comes from the widget-name fallback (no literal,
+    /// no live-binding default). Callers can use this to force centring /
+    /// upper-casing for static "switched-on default" rendering.
+    pub is_name_derived: bool,
+}
+
+impl BindingResolver {
+    /// Convenience wrapper returning just the string.
     pub fn resolve_text(
         &self,
         node_id: BbNodeId,
         node_raw: &serde_json::Value,
         defaults: &DefaultValueRegistry,
     ) -> String {
+        self.resolve_text_detailed(node_id, node_raw, defaults).text
+    }
+
+    /// Resolve display text with provenance for downstream formatting.
+    pub fn resolve_text_detailed(
+        &self,
+        node_id: BbNodeId,
+        node_raw: &serde_json::Value,
+        defaults: &DefaultValueRegistry,
+    ) -> ResolvedText {
         if let Some(lit) = node_raw.get("text").and_then(|v| v.as_str()) {
             let lit = lit.trim();
             if !lit.is_empty() {
-                return lit.to_owned();
+                return ResolvedText { text: lit.to_owned(), is_name_derived: false };
             }
         }
 
         if let Some(path) = self.widget_to_path.get(&node_id) {
             if let Some(val) = defaults.lookup_path(path) {
-                return value_to_string(val);
+                return ResolvedText {
+                    text: value_to_string(val),
+                    is_name_derived: false,
+                };
             }
-            return format!("[{path}]");
         }
 
-        String::new()
+        // Fallback: derive a human-readable label from the widget name itself.
+        if let Some(name) = node_raw.get("name").and_then(|v| v.as_str()) {
+            let derived = derive_label_from_name(name);
+            if !derived.is_empty() {
+                return ResolvedText {
+                    text: derived.to_uppercase(),
+                    is_name_derived: true,
+                };
+            }
+        }
+
+        ResolvedText { text: String::new(), is_name_derived: false }
+    }
+}
+
+/// Strip common widget prefixes and split camelCase / snake_case into spaced words.
+///
+/// Examples:
+/// - `text_NoTarget` → `No Target`
+/// - `text_BodyValueFaction` → `Body Value Faction`
+/// - `MachineTypeNameText` → `Machine Type Name`
+/// - `txt_PresetName` → `Preset Name`
+/// - `lbl_HeaderValue` → `Header Value`
+fn derive_label_from_name(name: &str) -> String {
+    let trimmed = name.trim();
+    // Strip leading prefix segments that are pure widget-role tags.
+    let stripped = strip_widget_prefix(trimmed);
+    // Strip trailing "Text"/"Label" suffix.
+    let stripped = strip_widget_suffix(stripped);
+    if stripped.is_empty() {
+        return String::new();
+    }
+
+    // Split on '_' and camelCase boundaries.
+    let mut out = String::new();
+    let mut prev_lower = false;
+    let mut prev_alpha = false;
+    for ch in stripped.chars() {
+        if ch == '_' || ch == '-' {
+            if !out.ends_with(' ') && !out.is_empty() {
+                out.push(' ');
+            }
+            prev_lower = false;
+            prev_alpha = false;
+            continue;
+        }
+        if ch.is_uppercase() && prev_lower {
+            out.push(' ');
+        } else if ch.is_ascii_digit() && prev_alpha {
+            out.push(' ');
+        }
+        out.push(ch);
+        prev_lower = ch.is_lowercase();
+        prev_alpha = ch.is_alphabetic();
+    }
+    out.trim().to_owned()
+}
+
+fn strip_widget_prefix(s: &str) -> &str {
+    const PREFIXES: &[&str] = &["text_", "txt_", "lbl_", "label_", "Text_", "Label_"];
+    for p in PREFIXES {
+        if let Some(rest) = s.strip_prefix(p) {
+            return rest;
+        }
+    }
+    s
+}
+
+fn strip_widget_suffix(s: &str) -> &str {
+    const SUFFIXES: &[&str] = &["Text", "Label"];
+    for sfx in SUFFIXES {
+        if let Some(rest) = s.strip_suffix(sfx) {
+            if !rest.is_empty() {
+                return rest;
+            }
+        }
+    }
+    s
+}
+
+#[allow(dead_code)]
+fn apply_case_modifier(s: &str, modifier: &str) -> String {
+    match modifier {
+        "Upper" | "AllCaps" => s.to_uppercase(),
+        "Lower" => s.to_lowercase(),
+        _ => s.to_owned(),
     }
 }
 

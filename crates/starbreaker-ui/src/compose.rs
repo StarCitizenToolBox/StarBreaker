@@ -451,20 +451,47 @@ fn draw_text_node(
     canvas_scale: f32,
     ctx: &ComposeContext<'_>,
 ) {
-    let text = resolver.resolve_text(node.id, &node.raw, ctx.defaults);
-    if text.is_empty() {
+    let resolved = resolver.resolve_text_detailed(node.id, &node.raw, ctx.defaults);
+    if resolved.text.is_empty() {
         return;
     }
+    let text = &resolved.text;
 
-    let size_px = match node.text.as_ref().map(|t| &t.font_size) {
-        Some(BbValue::Fixed(px)) => *px * canvas_scale,
-        _ => 12.0 * canvas_scale,
+    // Resolve nominal font size:
+    //  1. Explicit `fontSize` actually present in raw JSON (BbValue::Fixed) wins.
+    //  2. Otherwise derive from `labelProperties.style` (Heading1..6 / Body / Caption).
+    //  3. Otherwise default 22 px so widget-name-derived labels are legible at 1600×900.
+    let has_explicit_font_size = node.raw.get("fontSize").is_some();
+    let explicit_size = if has_explicit_font_size {
+        match node.text.as_ref().map(|t| &t.font_size) {
+            Some(BbValue::Fixed(px)) if *px > 0.0 => Some(*px),
+            _ => None,
+        }
+    } else {
+        None
     };
-    let align = node
-        .text
-        .as_ref()
-        .map(|t| TextAlign::from_bb_str(&t.alignment))
-        .unwrap_or(TextAlign::Left);
+    let style_size = node
+        .raw
+        .get("labelProperties")
+        .and_then(|lp| lp.get("style"))
+        .and_then(|v| v.as_str())
+        .map(font_size_from_style);
+    let nominal_px = explicit_size.or(style_size).unwrap_or(22.0);
+    let size_px = nominal_px * canvas_scale;
+
+    // Horizontal alignment: read from raw `textAlignment` (Left/Center/Right).
+    // For name-derived fallback labels, force Center — matches in-game
+    // convention where the dynamic-binding text is centred by the SWF layer.
+    let align = if resolved.is_name_derived {
+        TextAlign::Centre
+    } else {
+        node.raw
+            .get("textAlignment")
+            .and_then(|v| v.as_str())
+            .map(TextAlign::from_bb_str)
+            .or_else(|| node.text.as_ref().map(|t| TextAlign::from_bb_str(&t.alignment)))
+            .unwrap_or(TextAlign::Left)
+    };
 
     let mut colour = if let Some(c) = node.text.as_ref().and_then(|t| t.colour) {
         [
@@ -479,7 +506,27 @@ fn draw_text_node(
     };
     colour[3] = ((colour[3] as f32) * node.alpha.clamp(0.0, 1.0)).clamp(0.0, 255.0) as u8;
 
-    renderer.draw(img, &text, rect, FontKind::Sans, size_px, colour, align);
+    renderer.draw(img, text, rect, FontKind::Sans, size_px, colour, align);
+}
+
+/// Map BB `labelProperties.style` string to a nominal pixel size in authored space.
+///
+/// Sizes are approximate; per-manufacturer style overrides apply tints/colours
+/// elsewhere. Numbers are tuned to roughly match in-game references for Drake
+/// MFD headings and body text at 1600×900 authored resolution.
+fn font_size_from_style(style: &str) -> f32 {
+    match style {
+        "Heading1" => 48.0,
+        "Heading2" => 36.0,
+        "Heading3" => 28.0,
+        "Heading4" => 22.0,
+        "Heading5" => 18.0,
+        "Heading6" => 16.0,
+        "Body" | "Body1" => 16.0,
+        "Body2" => 14.0,
+        "Caption" => 12.0,
+        _ => 18.0,
+    }
 }
 
 fn colour_component_to_u8(v: f32) -> u8 {

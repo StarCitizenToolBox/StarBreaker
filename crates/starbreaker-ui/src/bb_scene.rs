@@ -420,7 +420,9 @@ fn parse_node_with_id(raw: &serde_json::Value, id: BbNodeId) -> Result<BbNode, S
     let style_tag_uuids = parse_style_tags(raw.get("styleTags"));
     let is_active = raw.get("isActive").and_then(|v| v.as_bool()).unwrap_or(true);
     let layer = raw.get("layer").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-    let alpha = f32_field(raw, "alpha");
+    // BB JSON convention: missing `alpha` means fully opaque (1.0), not transparent (0.0).
+    let alpha_raw = raw.get("alpha").and_then(|v| v.as_f64());
+    let alpha = alpha_raw.map(|v| v as f32).unwrap_or(1.0);
 
     let position = parse_vec3(raw.get("position")).unwrap_or_default();
     let position_offset = parse_vec3(raw.get("positionOffset")).unwrap_or_default();
