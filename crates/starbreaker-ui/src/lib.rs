@@ -14,6 +14,7 @@
 //! - [`style`]       — Manufacturer style (tint, CRT params) loader.
 //! - [`swf_assets`]  — SWF static-atom extractor and [`SwfAssetLibrary`].
 
+pub mod bb_scene;
 pub mod canvas;
 pub mod compose;
 pub mod defaults;
