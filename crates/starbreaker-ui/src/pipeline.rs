@@ -157,48 +157,82 @@ pub fn render_for_binding(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiErro
         inputs.canvas_fetcher.fetch_canvas_json(guid)
     })?;
 
-    // ── 1b. Drill-down + diagnostic ─────────────────────────────────────────
-    if let Some(root_json) = raw_root_json.as_ref() {
-        match crate::bb_resolve::resolve_canvas_graph(root_json, b.manufacturer_id, &|p| {
-            inputs.canvas_fetcher.fetch_canvas_by_path(p).map_err(|e| e.to_string())
-        }) {
-            Ok(scene) => {
-                let mut type_counts: std::collections::BTreeMap<String, usize> =
-                    std::collections::BTreeMap::new();
-                for node in scene.nodes.values() {
-                    let key = format!("{:?}", node.ty);
-                    *type_counts.entry(key).or_insert(0) += 1;
-                }
-                log::info!(
-                    "bb_scene[{}]: canvas={:?} size=({:.0}x{:.0}) merged nodes={} roots={} types={:?}",
-                    b.helper_name.unwrap_or("?"),
-                    effective_guid,
-                    scene.canvas_size.0,
-                    scene.canvas_size.1,
-                    scene.nodes.len(),
-                    scene.roots.len(),
-                    type_counts,
-                );
-            }
-            Err(e) => {
+    // ── 1b. Resolve BbScene (used for diagnostics, probe, and rendering) ──────
+
+    let bb_scene_opt: Option<crate::bb_scene::BbScene> =
+        raw_root_json.as_ref().and_then(|root_json| {
+            crate::bb_resolve::resolve_canvas_graph(root_json, b.manufacturer_id, &|p| {
+                inputs
+                    .canvas_fetcher
+                    .fetch_canvas_by_path(p)
+                    .map_err(|e| e.to_string())
+            })
+            .map_err(|e| {
                 log::warn!(
                     "bb_scene resolve failed for helper {:?} canvas {}: {}",
-                    b.helper_name, effective_guid, e,
+                    b.helper_name,
+                    effective_guid,
+                    e,
+                );
+            })
+            .ok()
+        });
+
+    if let Some(ref scene) = bb_scene_opt {
+        let mut type_counts: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        for node in scene.nodes.values() {
+            let key = format!("{:?}", node.ty);
+            *type_counts.entry(key).or_insert(0) += 1;
+        }
+        log::info!(
+            "bb_scene[{}]: canvas={:?} size=({:.0}x{:.0}) merged nodes={} roots={} types={:?}",
+            b.helper_name.unwrap_or("?"),
+            effective_guid,
+            scene.canvas_size.0,
+            scene.canvas_size.1,
+            scene.nodes.len(),
+            scene.roots.len(),
+            type_counts,
+        );
+
+        // A3 probe: per-node summary for first pilot binding.
+        // Guarded by env var BB_A3_PROBE=1; removed after probe run.
+        if std::env::var("BB_A3_PROBE").as_deref() == Ok("1")
+            && b.helper_name == Some("Screen_Right_Upper_RTT")
+        {
+            let probe_layout =
+                crate::bb_layout::layout(scene, inputs.target_size.0, inputs.target_size.1);
+            for (&node_id, node) in &scene.nodes {
+                let rect = probe_layout
+                    .rects
+                    .get(&node_id)
+                    .copied()
+                    .unwrap_or_default();
+                eprintln!(
+                    "A3-probe: id=ptr:{node_id} parent={} type={:?} name={:?} \
+                     rect=({:.0},{:.0},{:.0},{:.0}) bg={} icon={} text={}",
+                    node.parent
+                        .map(|p| format!("ptr:{p}"))
+                        .unwrap_or_else(|| "none".to_string()),
+                    node.ty,
+                    node.name,
+                    rect.x,
+                    rect.y,
+                    rect.w,
+                    rect.h,
+                    node.background.is_some(),
+                    node.icon.is_some(),
+                    node.text.is_some(),
                 );
             }
         }
     }
 
     // ── 1c. Atlas diagnostic ────────────────────────────────────────────────
-    if let Some(root_json) = raw_root_json.as_ref()
-        && let Ok(scene) = crate::bb_resolve::resolve_canvas_graph(
-            root_json,
-            b.manufacturer_id,
-            &|p| inputs.canvas_fetcher.fetch_canvas_by_path(p).map_err(|e| e.to_string()),
-        )
-    {
+    if let Some(ref scene) = bb_scene_opt {
         let atlas = crate::bb_atlas::AtlasLibrary::new(inputs.asset_fetcher, b.manufacturer_id);
-        let mut resolved = 0usize;
+        let mut resolved_count = 0usize;
         let mut first_miss: Option<String> = None;
 
         for node in scene.nodes.values() {
@@ -207,7 +241,7 @@ pub fn render_for_binding(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiErro
             let tw = if w > 0 { w } else { 64 };
             let th = if h > 0 { h } else { 64 };
             if atlas.resolve_for_node(node, tw, th).is_some() {
-                resolved += 1;
+                resolved_count += 1;
             } else {
                 let miss_path = node
                     .icon
@@ -241,12 +275,12 @@ pub fn render_for_binding(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiErro
                         .is_some()
             })
             .count();
-        let missed = with_ref.saturating_sub(resolved);
+        let missed = with_ref.saturating_sub(resolved_count);
         log::info!(
             "atlas[helper={}]: nodes_with_image={}, resolved={}, missed={} (first miss: {})",
             b.helper_name.unwrap_or("?"),
             with_ref,
-            resolved,
+            resolved_count,
             missed,
             first_miss.as_deref().unwrap_or("none"),
         );
@@ -269,15 +303,25 @@ pub fn render_for_binding(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiErro
     let defaults = DefaultValueRegistry::with_well_known_path_defaults();
 
     // ── 6. Rasterise ───────────────────────────────────────────────────────
+    //
+    // Prefer render_bb_scene (A3 compositor) when BbScene resolution succeeded.
+    // Fall back to render_canvas (magenta placeholder) when it failed.
+    // apply_postprocess is kept false until Phase A5.
 
     let ctx = ComposeContext { style: &style, defaults: &defaults, assets: &assets };
     let target = ComposeTarget { width: inputs.target_size.0, height: inputs.target_size.1 };
-    let opts = PostProcessOptions::default();
 
-    let img = if inputs.apply_postprocess {
-        render_canvas_with_postprocess(&resolved, &ctx, target, &opts)?
+    let img = if let Some(ref scene) = bb_scene_opt {
+        let atlas = crate::bb_atlas::AtlasLibrary::new(inputs.asset_fetcher, b.manufacturer_id);
+        crate::compose::render_bb_scene(scene, &ctx, &atlas, target)?
     } else {
-        crate::compose::render_canvas(&resolved, &ctx, target)?
+        // BbScene resolution failed — fall back to magenta placeholder.
+        let opts = PostProcessOptions::default();
+        if inputs.apply_postprocess {
+            render_canvas_with_postprocess(&resolved, &ctx, target, &opts)?
+        } else {
+            crate::compose::render_canvas(&resolved, &ctx, target)?
+        }
     };
 
     encode_png(&img)
