@@ -325,3 +325,76 @@ The Blender addon provides four playback modes per animation:
 
 - Sidecars generated without animations (older exports) simply omit the `animations` array; the Blender addon gracefully skips animation UI if absent.
 - Future exports may extend this format with additional fields such as per-bone rotation/position masks, compression metadata, or event markers. Importers should safely ignore unknown fields.
+
+## UI Bindings
+
+Ship screen textures are generated at export time and written into the shared
+`Data/UI/Generated/` tree. Each `child` object in `scene.json` may contain a
+`ui_bindings` array that records the provenance and output location of every
+resolved screen for that child entity.
+
+### `UiBinding` shape
+
+Defined in `crates/starbreaker-3d/src/types.rs`. Key fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `binding_kind` | `String` | Screen category: `"mfd"`, `"radar"`, `"physical"` (annunciator/door/etc.) |
+| `helper_name` | `Option<String>` | Named child on the seat/dashboard that places this screen (e.g. `Screen_Annunciator_L`). Same name appears as the Blender mesh name. |
+| `canvas_guid` | `Option<String>` | DataCore GUID of the BuildingBlocks canvas root record. |
+| `content_canvas_guid` | `Option<String>` | DataCore GUID of the per-helper content canvas resolved from the parent vehicle's `SCItemUIView_DashboardCanvasDef`. Takes precedence over `canvas_guid` during rendering. |
+| `generated_image_path` | `Option<String>` | Relative path from the export root to the generated PNG (e.g. `Data/UI/Generated/02ea771f3d96bf1e_TEX0.png`). `null` when rendering failed or was skipped (e.g. null canvas GUID). |
+| `generated_backend` | `Option<String>` | Rendering backend that produced the PNG (always `"starbreaker-ui/compose"`). |
+| `generated_provenance` | `Option<String>` | Freeform note explaining how the image was produced or why it was skipped. |
+
+### Content-addressed PNG layout
+
+Generated PNGs are stored at:
+
+```
+Data/UI/Generated/{hash16}_TEX{mip}.png
+```
+
+where `hash16` is the first 16 hex digits of the SHA-256 of the rendered RGBA
+buffer and `mip` is the texture mip level (`0` for full resolution). This path
+scheme is implemented in `crates/starbreaker-3d/src/ui_pipeline.rs`
+(`generate_image_path`).
+
+Content addressing means that two screen bindings that resolve to identical
+rendered output (e.g. the same canvas at the same mip) share one PNG on disk.
+
+### Composer pipeline
+
+For each `UiBinding` with a non-null canvas GUID:
+
+1. **Canvas record** — fetched from DataCore (`DatacoreCanvasFetcher`).
+   `content_canvas_guid` is preferred over `canvas_guid`.
+2. **Widget tree resolution** — `CanvasWidgetTreeResolver` recursively
+   resolves sub-canvas references to produce a flat `ResolvedCanvas`.
+3. **SWF static atoms** — any SWF paths referenced in the widget tree are
+   loaded from the P4K (`P4kSwfFetcher`). A minimal empty library is used
+   when no SWF path is present.
+4. **Manufacturer style** — `ManufacturerStyleFetcher` maps the binding's
+   manufacturer identifier to a `ManufacturerStyle` (tint colour, backlight,
+   CRT parameters). Falls back to Drake amber with a log warning for
+   unrecognised manufacturers.
+5. **Rasterisation** — `render_canvas_with_postprocess` from
+   `starbreaker_ui::compose` draws the widget tree with `tiny-skia`, then
+   applies the manufacturer CRT pass (tint, scanlines, vignette).
+6. **PNG encode + write** — the RGBA buffer is SHA-256 hashed to derive the
+   output path. The file is written only if not already present (deduplication).
+   The `generated_image_path` field is set on the binding.
+
+Canvas record → widget tree → static atoms → tint/CRT post-process → PNG is
+the complete rendering path. No AVM1/ActionScript is executed at any stage.
+
+### Consumer
+
+The Blender addon reads `scene.json` and, for each child entity with a
+`ui_bindings` array, maps each binding's `helper_name` to the corresponding
+Blender mesh object. When `generated_image_path` is non-null, the addon loads
+the PNG as a screen emission texture applied to the mesh's UI material slot.
+
+Bindings with a null `generated_image_path` are imported without a texture;
+the mesh retains its base material colour (typically near-black for a dark
+powered-off screen).

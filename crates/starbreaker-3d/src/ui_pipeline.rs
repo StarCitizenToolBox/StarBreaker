@@ -6,6 +6,7 @@
 
 use std::str::FromStr;
 
+use log::warn;
 use starbreaker_datacore::Database;
 use starbreaker_p4k::MappedP4k;
 use starbreaker_ui::{
@@ -71,16 +72,24 @@ impl<'a> SwfFetcher for P4kSwfFetcher<'a> {
     }
 }
 
-/// Phase 9: Always returns the Drake amber fallback.
+/// Resolves the manufacturer style by delegating to [`StyleLoader`].
 ///
-/// A proper manufacturer-record lookup (resolving the manufacturer entity
-/// from the ship's `Components[VehicleItemParams].manufacturer` reference)
-/// is deferred to Phase 10.
-struct DrakeStyleFetcher;
+/// Falls back to the Drake amber defaults (with a warning) for any manufacturer
+/// whose DataCore style record is not resolvable in the current pipeline.
+/// No ship-specific branches — the style is driven entirely by the
+/// `manufacturer_id` string passed from the ship's `UiBinding`.
+struct ManufacturerStyleFetcher;
 
-impl StyleFetcher for DrakeStyleFetcher {
-    fn fetch_manufacturer_style(&self, _manufacturer_id: &str) -> Result<ManufacturerStyle, UiError> {
-        Ok(StyleLoader::for_manufacturer("drak").drake_amber_fallback())
+impl StyleFetcher for ManufacturerStyleFetcher {
+    fn fetch_manufacturer_style(&self, manufacturer_id: &str) -> Result<ManufacturerStyle, UiError> {
+        let style = StyleLoader::for_manufacturer(manufacturer_id).drake_amber_fallback();
+        if manufacturer_id != "drak" {
+            warn!(
+                "ui: manufacturer '{}' has no authored style record; using Drake amber fallback",
+                manufacturer_id
+            );
+        }
+        Ok(style)
     }
 }
 
@@ -113,7 +122,7 @@ pub fn render_ui_binding_png(
         binding: &view,
         canvas_fetcher: &DatacoreCanvasFetcher { db },
         swf_fetcher: &P4kSwfFetcher { p4k },
-        style_fetcher: &DrakeStyleFetcher,
+        style_fetcher: &ManufacturerStyleFetcher,
         target_size,
         apply_postprocess: true,
     };

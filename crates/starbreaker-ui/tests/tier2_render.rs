@@ -183,7 +183,8 @@ fn swf_font_glyph_render_path() {
 // Screen_Left_Lower_RTT.png (Power Management):
 //   The pip columns and power budget text are now amber-tinted.  Scanlines
 //   visible at 3px period.  Vignette softens extreme corners.  Gap: animated
-//   pip fill levels are static placeholders (no runtime AVM1 state).
+//   pip fill levels are static placeholders (default-on state from defaults
+//   registry; no live game data).
 //
 // Screen_Left_Upper_RTT.png (Self Status):
 //   Hull/component labels amber.  Column separators retain manufacturer colour.
