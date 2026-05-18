@@ -281,6 +281,34 @@ pub(crate) fn load_child_payloads(
 ) -> Vec<crate::types::EntityPayload> {
     use rayon::prelude::*;
 
+    // Pre-resolve dashboard screen canvases for each unique parent entity so that
+    // physical/mfd bindings with no inline content canvas can be assigned one.
+    let dashboard_canvases_by_parent: HashMap<String, Vec<(u32, u32, String, Option<String>)>> = {
+        let mut map: HashMap<String, Vec<(u32, u32, String, Option<String>)>> = HashMap::new();
+        for spec in &specs {
+            let parent_name = &spec.parent_entity_name;
+            if map.contains_key(parent_name) {
+                continue;
+            }
+            let canvases = find_entity_record_by_name(db, parent_name)
+                .and_then(|parent_record| {
+                    let guid = query_stringish_path(
+                        db,
+                        parent_record,
+                        "Components[SCItemUIViewOwnerParams].dashboardCanvasConfig",
+                    )?;
+                    let parsed = parse_guid(&guid)?;
+                    let dashboard_record = db.record_by_id(&parsed)?;
+                    Some(collect_dashboard_screen_canvases(db, dashboard_record))
+                })
+                .unwrap_or_default();
+            map.insert(parent_name.clone(), canvases);
+        }
+        map
+    };
+    // Per-parent counter tracking how many screen canvases have been assigned so far.
+    let mut parent_canvas_used: HashMap<String, usize> = HashMap::new();
+
     let mut ui_bindings_by_parent = HashMap::<String, Vec<UiBinding>>::new();
     let mut direct_ui_bindings = Vec::with_capacity(specs.len());
     for spec in &specs {
@@ -291,6 +319,25 @@ pub(crate) fn load_child_payloads(
             } else {
                 Some(spec.parent_node_name.clone())
             };
+            // For physical/mfd bindings without an inline content canvas, attempt to
+            // resolve the content canvas from the parent vehicle's dashboard canvas def.
+            // Canvases are assigned positionally in the order specs are processed.
+            if binding.content_canvas_guid.is_none()
+                && matches!(binding.binding_kind.as_str(), "physical" | "mfd")
+            {
+                if let Some(canvases) = dashboard_canvases_by_parent.get(&spec.parent_entity_name) {
+                    let used = parent_canvas_used
+                        .entry(spec.parent_entity_name.clone())
+                        .or_insert(0);
+                    if let Some((view_idx, screen_slot, guid, name)) = canvases.get(*used) {
+                        binding.content_canvas_guid = Some(guid.clone());
+                        binding.content_canvas_record_name = name.clone();
+                        binding.dashboard_view_index = Some(*view_idx);
+                        binding.dashboard_screen_slot = Some(*screen_slot);
+                        *used += 1;
+                    }
+                }
+            }
             binding
         });
         if let Some(binding) = binding.clone() {
@@ -468,6 +515,10 @@ pub(crate) fn ui_binding_for_record(db: &Database, record: &Record) -> Option<Ui
                 canvas_widget_url_postfix,
                 canvas_widget_url_optional,
                 canvas_variable_binding,
+                content_canvas_guid: None,
+                content_canvas_record_name: None,
+                dashboard_view_index: None,
+                dashboard_screen_slot: None,
                 owner_source_file,
                 runtime_image_source,
                 generated_image_path: None,
@@ -508,6 +559,10 @@ pub(crate) fn ui_binding_for_record(db: &Database, record: &Record) -> Option<Ui
             canvas_widget_url_postfix,
             canvas_widget_url_optional,
             canvas_variable_binding,
+            content_canvas_guid: None,
+            content_canvas_record_name: None,
+            dashboard_view_index: None,
+            dashboard_screen_slot: None,
             owner_source_file,
             runtime_image_source,
             generated_image_path: None,
@@ -562,6 +617,10 @@ pub(crate) fn ui_binding_for_record(db: &Database, record: &Record) -> Option<Ui
         canvas_widget_url_postfix,
         canvas_widget_url_optional,
         canvas_variable_binding,
+        content_canvas_guid: None,
+        content_canvas_record_name: None,
+        dashboard_view_index: None,
+        dashboard_screen_slot: None,
         owner_source_file,
         runtime_image_source,
         generated_image_path: None,
@@ -657,6 +716,81 @@ fn canvas_widget_context_for_guid(
     }
 
     (canvas_path, url_postfix, url_optional, variable_binding)
+}
+
+/// Return the basename of a file path without its extension.
+/// E.g. `"Libraries/UI/FlightController_Annunciator.dcb"` → `"FlightController_Annunciator"`
+fn path_basename_no_ext(path: &str) -> &str {
+    let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    if let Some(dot_pos) = base.rfind('.') { &base[..dot_pos] } else { base }
+}
+
+/// Find a `BuildingBlocks_Canvas` record by matching a path string from a dashboard
+/// `screens[]` slot.  The `path` may be a bare GUID string, a filename like
+/// `"flightcontroller_annunciator.json"`, or a full library path.  GUID lookup is
+/// tried first; filename-basename matching is the fallback.
+fn find_canvas_record_by_path_or_guid<'a>(db: &'a Database<'a>, path: &str) -> Option<&'a Record> {
+    // Try as direct GUID reference first.
+    if let Some(guid) = parse_guid(path) {
+        if let Some(record) = db.record_by_id(&guid) {
+            return Some(record);
+        }
+    }
+    // Fall back: match on the basename (without extension) of the record's file path.
+    let needle = path_basename_no_ext(path).to_lowercase();
+    if needle.is_empty() {
+        return None;
+    }
+    db.records_by_type_name("BuildingBlocks_Canvas").find(|record| {
+        let file_path = db.resolve_string(record.file_name_offset);
+        path_basename_no_ext(file_path).to_lowercase() == needle
+    })
+}
+
+/// Find an `EntityClassDefinition` record by exact name.
+fn find_entity_record_by_name<'a>(db: &'a Database<'a>, name: &str) -> Option<&'a Record> {
+    let entity_struct = db.struct_id("EntityClassDefinition")?;
+    db.records_of_type(entity_struct)
+        .find(|record| db.resolve_string2(record.name_offset) == name)
+}
+
+/// Collect all non-null screen canvas entries from a `SCItemUIView_DashboardCanvasDef`
+/// record.  Returns `(view_index, screen_slot, canvas_guid, canvas_record_name)` tuples
+/// in `View[]` order, skipping null/zero-GUID entries.
+pub(crate) fn collect_dashboard_screen_canvases(
+    db: &Database,
+    dashboard_record: &Record,
+) -> Vec<(u32, u32, String, Option<String>)> {
+    let views = match query_value_path(db, dashboard_record, "View") {
+        Some(Value::Array(v)) => v,
+        Some(other) => vec![other],
+        None => return Vec::new(),
+    };
+
+    let mut result = Vec::new();
+    for (view_idx, view) in views.iter().enumerate() {
+        let screens = match value_object(view, "screens") {
+            Some(Value::Array(s)) => s.iter().collect::<Vec<_>>(),
+            Some(other) => vec![other],
+            None => continue,
+        };
+        for (slot_idx, screen) in screens.iter().enumerate() {
+            let path = match value_stringish(screen) {
+                Some(p) if !p.is_empty() && p != "null" && !is_zero_guid(&p) => p,
+                _ => continue,
+            };
+            let Some(canvas_record) = find_canvas_record_by_path_or_guid(db, &path) else {
+                continue;
+            };
+            let guid = canvas_record.id.to_string();
+            let name = {
+                let n = db.resolve_string2(canvas_record.name_offset).to_string();
+                if n.is_empty() { None } else { Some(n) }
+            };
+            result.push((view_idx as u32, slot_idx as u32, guid, name));
+        }
+    }
+    result
 }
 
 fn value_stringish(value: &Value<'_>) -> Option<String> {

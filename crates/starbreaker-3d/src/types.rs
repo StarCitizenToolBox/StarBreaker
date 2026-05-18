@@ -508,6 +508,18 @@ pub struct UiBinding {
     pub canvas_widget_url_postfix: Option<String>,
     pub canvas_widget_url_optional: Option<String>,
     pub canvas_variable_binding: Option<String>,
+    /// For MFD containers and physical screens whose container canvas has no inline
+    /// content: the GUID of the per-helper content canvas resolved from the parent
+    /// vehicle's `SCItemUIView_DashboardCanvasDef` record.
+    pub content_canvas_guid: Option<String>,
+    /// DataCore name of the record pointed to by `content_canvas_guid`.
+    pub content_canvas_record_name: Option<String>,
+    /// View index in the parent dashboard's `SCItemUIView_DashboardCanvasDef.View[]`
+    /// array that provided `content_canvas_guid`, if resolved.
+    pub dashboard_view_index: Option<u32>,
+    /// Screen slot within `View[dashboard_view_index].screens[]` that provided
+    /// `content_canvas_guid`, if resolved.
+    pub dashboard_screen_slot: Option<u32>,
     pub owner_source_file: Option<String>,
     pub runtime_image_source: Option<String>,
     pub generated_image_path: Option<String>,

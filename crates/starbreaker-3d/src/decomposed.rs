@@ -1897,21 +1897,7 @@ fn scene_instance_json(instance: &SceneInstanceRecord) -> serde_json::Value {
         "offset_rotation": instance.offset_rotation,
         "detach_direction": instance.detach_direction,
         "port_flags": instance.port_flags,
-        "ui_bindings": instance.ui_bindings.iter().map(|binding| serde_json::json!({
-            "binding_kind": binding.binding_kind,
-            "source_entity_name": binding.source_entity_name,
-            "helper_name": binding.helper_name,
-            "default_view": binding.default_view,
-            "default_state_name": binding.default_state_name,
-            "default_light_color": binding.default_light_color,
-            "default_light_intensity_milli": binding.default_light_intensity_milli,
-            "canvas_guid": binding.canvas_guid,
-            "canvas_record_name": binding.canvas_record_name,
-            "canvas_record_path": binding.canvas_record_path,
-            "owner_source_file": binding.owner_source_file,
-            "runtime_image_source": binding.runtime_image_source,
-            "generated_image_path": binding.generated_image_path,
-        })).collect::<Vec<_>>(),
+        "ui_bindings": instance.ui_bindings.iter().map(ui_binding_json).collect::<Vec<_>>(),
     })
 }
 
@@ -1950,6 +1936,10 @@ fn ui_binding_json(binding: &UiBinding) -> serde_json::Value {
         "canvas_guid": binding.canvas_guid,
         "canvas_record_name": binding.canvas_record_name,
         "canvas_record_path": binding.canvas_record_path,
+        "content_canvas_guid": binding.content_canvas_guid,
+        "content_canvas_record_name": binding.content_canvas_record_name,
+        "dashboard_view_index": binding.dashboard_view_index,
+        "dashboard_screen_slot": binding.dashboard_screen_slot,
         "owner_source_file": binding.owner_source_file,
         "runtime_image_source": binding.runtime_image_source,
         "generated_image_path": binding.generated_image_path,
@@ -2834,6 +2824,9 @@ fn generated_ui_binding_identity_components(binding: &UiBinding) -> Vec<String> 
     }
     if let Some(canvas_record_path) = &binding.canvas_record_path {
         components.push(format!("canvas_record_path:{canvas_record_path}"));
+    }
+    if let Some(content_canvas_guid) = &binding.content_canvas_guid {
+        components.push(format!("content_canvas_guid:{content_canvas_guid}"));
     }
     if let Some(owner_source_file) = &binding.owner_source_file {
         components.push(format!("owner_source_file:{owner_source_file}"));
