@@ -401,6 +401,110 @@ pub fn extract_sprite_first_frame(
     })
 }
 
+/// Extract the main-timeline display list at frame `frame_index` (0-based).
+///
+/// Walks top-level (non-sprite) tags in order. Each `ShowFrame` advances the
+/// frame counter. Returns the display list **active at** the given frame: all
+/// `PlaceObject*` tags seen up to (and including) the `(frame_index+1)`th
+/// `ShowFrame`, with `RemoveObject*` honoured.
+///
+/// Returns an empty list when `frame_index` exceeds the number of frames or
+/// if the SWF cannot be parsed.
+pub fn extract_stage_frame(swf_bytes: &[u8], frame_index: u32) -> Vec<PlaceRecord> {
+    let buf = match swf::decompress_swf(std::io::Cursor::new(swf_bytes)) {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!("extract_stage_frame: decompress failed: {e}");
+            return vec![];
+        }
+    };
+    let parsed = match swf::parse_swf(&buf) {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("extract_stage_frame: parse failed: {e}");
+            return vec![];
+        }
+    };
+
+    let mut depth_map: HashMap<Depth, PlaceRecord> = HashMap::new();
+    let mut current_frame: u32 = 0;
+
+    for tag in &parsed.tags {
+        if current_frame > frame_index {
+            break;
+        }
+        match tag {
+            Tag::ShowFrame => {
+                if current_frame == frame_index {
+                    break;
+                }
+                current_frame += 1;
+            }
+
+            Tag::PlaceObject(po) => {
+                let previous = depth_map.get(&po.depth).cloned();
+                let character_id = match po.action {
+                    swf::PlaceObjectAction::Place(id) => Some(id),
+                    swf::PlaceObjectAction::Replace(id) => Some(id),
+                    swf::PlaceObjectAction::Modify => previous.as_ref().map(|r| r.character_id),
+                };
+                let Some(character_id) = character_id else {
+                    continue;
+                };
+                depth_map.insert(
+                    po.depth,
+                    PlaceRecord {
+                        depth: po.depth,
+                        character_id,
+                        matrix: po
+                            .matrix
+                            .or_else(|| previous.as_ref().map(|r| r.matrix))
+                            .unwrap_or(Matrix::IDENTITY),
+                        color_transform: po
+                            .color_transform
+                            .or_else(|| previous.as_ref().and_then(|r| r.color_transform)),
+                        name: po.name.map(|n| n.to_string_lossy(swf::UTF_8)),
+                    },
+                );
+            }
+
+            Tag::RemoveObject(ro) => {
+                depth_map.remove(&ro.depth);
+            }
+
+            Tag::DoAction(_)
+            | Tag::DoInitAction { .. }
+            | Tag::DoAbc(_)
+            | Tag::DoAbc2(_) => {}
+
+            _ => {}
+        }
+    }
+
+    let mut records: Vec<PlaceRecord> = depth_map.into_values().collect();
+    records.sort_by_key(|r| r.depth);
+    records
+}
+
+/// Extract the stage size (width, height) in pixels from a SWF.
+///
+/// Returns `(0.0, 0.0)` when the SWF cannot be parsed.
+pub fn extract_stage_size(swf_bytes: &[u8]) -> (f32, f32) {
+    let buf = match swf::decompress_swf(std::io::Cursor::new(swf_bytes)) {
+        Ok(b) => b,
+        Err(_) => return (0.0, 0.0),
+    };
+    match swf::parse_swf(&buf) {
+        Ok(p) => {
+            let r = p.header.stage_size();
+            let w = (r.x_max - r.x_min).to_pixels() as f32;
+            let h = (r.y_max - r.y_min).to_pixels() as f32;
+            (w, h)
+        }
+        Err(_) => (0.0, 0.0),
+    }
+}
+
 /// Extract the linkage-name → character-id mapping from a SWF.
 ///
 /// Handles both `ExportAssets` (SWF3+) and `SymbolClass` (AVM2/SWF9+) tags.
@@ -537,6 +641,19 @@ impl SwfAssetLibrary {
             .find_map(|(name, &id)| (id == character_id).then(|| name.clone()))
     }
 
+    /// Return the main-timeline display list active at frame `frame_index` (0-based).
+    ///
+    /// Frame 0 is the content visible before (or at) the first `ShowFrame` tag.
+    /// Returns an empty list when `frame_index` exceeds the total frame count.
+    pub fn stage_frame(&self, frame_index: u32) -> Vec<PlaceRecord> {
+        extract_stage_frame(&self.raw, frame_index)
+    }
+
+    /// Stage size (width, height) in pixels as declared in the SWF header.
+    pub fn stage_size(&self) -> (f32, f32) {
+        extract_stage_size(&self.raw)
+    }
+
     /// Number of bitmap characters indexed.
     pub fn bitmap_count(&self) -> usize {
         self.bitmaps.len()
@@ -555,6 +672,19 @@ impl SwfAssetLibrary {
     /// Number of exported symbol linkages indexed.
     pub fn export_count(&self) -> usize {
         self.exports.len()
+    }
+
+    /// Iterate over the character IDs of visual exports — those whose linkage
+    /// name does not begin with `__Packages.` (which are AVM1 ActionScript class
+    /// registrations, not visual symbols).
+    ///
+    /// Caller should deduplicate character IDs if a character is exported under
+    /// multiple names.
+    pub fn visual_exports(&self) -> impl Iterator<Item = CharacterId> + '_ {
+        self.exports
+            .iter()
+            .filter(|(name, _)| !name.starts_with("__Packages."))
+            .map(|(_, &id)| id)
     }
 }
 

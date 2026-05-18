@@ -99,6 +99,24 @@ fn run_render(
         return Ok(());
     }
 
+    // Derive manufacturer_id from the scene's root_entity.entity_name, e.g.
+    // "EntityClassDefinition.RSI_Aurora_Mk2" → "RSI_Aurora_Mk2" → prefix "RSI" → "rsi".
+    let manufacturer_id: Option<String> = scene
+        .get("root_entity")
+        .and_then(|re| re.get("entity_name"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| {
+            // Strip optional "EntityClassDefinition." prefix.
+            let stem = s.rsplit_once('.').map(|(_, r)| r).unwrap_or(s);
+            // First underscore-separated token is the manufacturer code.
+            let prefix = stem
+                .split(|c: char| c == '_' || c == '-' || c.is_whitespace())
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if prefix.is_empty() { None } else { Some(prefix) }
+        });
+
     let mut rendered = 0usize;
     let mut failed = 0usize;
 
@@ -113,7 +131,7 @@ fn run_render(
             continue;
         }
 
-        match starbreaker_3d::ui_pipeline::render_ui_binding_png(&binding, &db, &p4k, texture_mip, None) {
+        match starbreaker_3d::ui_pipeline::render_ui_binding_png(&binding, &db, &p4k, texture_mip, manufacturer_id.as_deref()) {
             Ok(png_bytes) => {
                 let file_name = png_name_for_binding(binding, texture_mip);
                 let dest = out_dir.join(&file_name);

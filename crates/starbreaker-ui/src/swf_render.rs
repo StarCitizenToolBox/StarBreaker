@@ -26,6 +26,7 @@
 //! (recolour mode).  This lets manufacturer chrome that is authored as
 //! white be tinted to the manufacturer primary colour.
 
+use image::RgbaImage;
 use tiny_skia::{
     Color, FillRule, Paint, Path, PathBuilder, Pixmap, Stroke, Transform,
     Rect as TskRect,
@@ -88,8 +89,404 @@ pub fn draw_swf_symbol(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Core rasteriser
+/// Rasterise the SWF main-timeline stage frame 0 into `pixmap`, mapped into
+/// `dest`.
+///
+/// Walks the display list produced by [`SwfAssetLibrary::stage_frame`] at
+/// frame 0. For each placed character:
+///
+/// - **DefineShape** — maps the shape's bounding box through the PlaceObject
+///   matrix and the stage→dest scale to produce a pixel rect, then calls
+///   `draw_shape`.
+/// - **DefineSprite** — extracts the sprite's first-frame display list and
+///   recurses one level (sprites within sprites are treated as their own
+///   flat display list, no further recursion to avoid infinite loops).
+/// - Other characters (fonts, bitmaps directly) — currently skipped.
+///
+/// Returns `true` if at least one shape was drawn.
+///
+/// A `ColorTransform` on a `PlaceObject2/3` tag modulates the RGBA multiply
+/// channel: multiply factors are scaled by the authored colour before tinting.
+/// Additive terms are not yet supported.
+pub fn draw_swf_stage(
+    pixmap: &mut Pixmap,
+    assets: &SwfAssetLibrary,
+    dest: TskRect,
+    tint: Color,
+    alpha: f32,
+) -> bool {
+    let (sw, sh) = assets.stage_size();
+    if sw <= 0.0 || sh <= 0.0 {
+        log::debug!("draw_swf_stage: degenerate stage size ({sw}×{sh}), skipping");
+        return false;
+    }
+
+    let stage_places = assets.stage_frame(0);
+    if stage_places.is_empty() {
+        log::debug!("draw_swf_stage: stage frame 0 is empty");
+        return false;
+    }
+
+    let sx = dest.width() / sw;
+    let sy = dest.height() / sh;
+
+    let mut drew_any = false;
+    for place in &stage_places {
+        let ct_tint = color_transform_tint(tint, place.color_transform.as_ref());
+        if draw_stage_character(pixmap, assets, place, sw, sh, sx, sy, dest, ct_tint, alpha) {
+            drew_any = true;
+        }
+    }
+
+    log::debug!(
+        "draw_swf_stage: stage ({sw}×{sh}) → dest ({:.0}×{:.0}) drew={drew_any}",
+        dest.width(),
+        dest.height()
+    );
+    drew_any
+}
+
+/// Render the SWF main-timeline stage (frame 0) as an alpha-over composite
+/// into `img` (straight-alpha `RgbaImage`).
+///
+/// Allocates a temporary transparent [`Pixmap`], calls [`draw_swf_stage`],
+/// then composites the result using Porter-Duff "over" with proper
+/// premultiply/demultiply handling.
+///
+/// Returns `true` if any SWF pixels were composited.
+pub fn draw_swf_stage_rgba(
+    img: &mut RgbaImage,
+    assets: &SwfAssetLibrary,
+    tint: Color,
+    alpha: f32,
+) -> bool {
+    let w = img.width();
+    let h = img.height();
+    let Some(mut pixmap) = Pixmap::new(w, h) else {
+        return false;
+    };
+    let Some(dest) = TskRect::from_xywh(0.0, 0.0, w as f32, h as f32) else {
+        return false;
+    };
+    if !draw_swf_stage(&mut pixmap, assets, dest, tint, alpha) {
+        return false;
+    }
+
+    // Porter-Duff "over": pixmap (premultiplied RGBA) over img (straight-alpha RGBA).
+    let pix = pixmap.data();
+    for y in 0..h {
+        for x in 0..w {
+            let idx = ((y * w + x) as usize) * 4;
+            let a_top = pix[idx + 3] as u32;
+            if a_top == 0 {
+                continue;
+            }
+            // Un-premultiply the top layer.
+            let r_top = ((pix[idx] as u32 * 255) / a_top.max(1)).min(255);
+            let g_top = ((pix[idx + 1] as u32 * 255) / a_top.max(1)).min(255);
+            let b_top = ((pix[idx + 2] as u32 * 255) / a_top.max(1)).min(255);
+
+            let base = img.get_pixel(x, y);
+            let ba = base[3] as u32;
+
+            let out_a = (a_top + ba * (255 - a_top) / 255).min(255);
+            if out_a == 0 {
+                img.put_pixel(x, y, image::Rgba([0, 0, 0, 0]));
+            } else {
+                let blend = |top: u32, bot: u32| -> u8 {
+                    ((top * a_top / 255 + bot * ba * (255 - a_top) / 255 / 255)
+                        * 255
+                        / out_a)
+                        .min(255) as u8
+                };
+                img.put_pixel(
+                    x,
+                    y,
+                    image::Rgba([
+                        blend(r_top, base[0] as u32),
+                        blend(g_top, base[1] as u32),
+                        blend(b_top, base[2] as u32),
+                        out_a as u8,
+                    ]),
+                );
+            }
+        }
+    }
+    true
+}
+
+
+/// Render all visual exports from a Flash SWF into `pixmap`, mapped into `dest`.
+///
+/// "Visual exports" are those whose linkage name does NOT begin with
+/// `__Packages.` — those are AVM1 ActionScript class registrations with no
+/// renderable geometry.  Each remaining export (e.g. `TargetSelection_Borders`,
+/// `TargetSelection_NoTargetPlaceholder`) is placed at the SWF stage origin with
+/// an identity matrix and rendered by [`draw_stage_character`].
+///
+/// This is the correct rendering path for Flash-backed BB canvases whose main
+/// timeline is empty (shapes are placed via ActionScript at runtime). The
+/// exported symbols carry their own internal `DefineSprite` first-frame display
+/// lists with the actual shape geometry, positioned in stage coordinate space.
+///
+/// Returns `true` if at least one shape was drawn.
+pub fn draw_swf_visual_exports(
+    pixmap: &mut Pixmap,
+    assets: &SwfAssetLibrary,
+    dest: TskRect,
+    tint: Color,
+    alpha: f32,
+) -> bool {
+    let (sw, sh) = assets.stage_size();
+    if sw <= 0.0 || sh <= 0.0 {
+        log::debug!("draw_swf_visual_exports: degenerate stage size ({sw}×{sh}), skipping");
+        return false;
+    }
+
+    let sx = dest.width() / sw;
+    let sy = dest.height() / sh;
+
+    let mut drew_any = false;
+    // Deduplicate by character id — a symbol may be exported under multiple names.
+    let mut seen: std::collections::HashSet<swf::CharacterId> = std::collections::HashSet::new();
+    // Collect first to avoid borrow conflict with `assets` inside the loop.
+    let char_ids: Vec<swf::CharacterId> = assets.visual_exports().collect();
+
+    for char_id in char_ids {
+        if !seen.insert(char_id) {
+            continue;
+        }
+        let place = PlaceRecord {
+            depth: 0,
+            character_id: char_id,
+            matrix: swf::Matrix::IDENTITY,
+            color_transform: None,
+            name: None,
+        };
+        if draw_stage_character(pixmap, assets, &place, sw, sh, sx, sy, dest, tint, alpha) {
+            drew_any = true;
+        }
+    }
+
+    log::debug!(
+        "draw_swf_visual_exports: stage ({sw:.0}×{sh:.0}) → dest ({:.0}×{:.0}) drew={drew_any}",
+        dest.width(),
+        dest.height()
+    );
+    drew_any
+}
+
+/// Render all visual exports from a Flash SWF as an alpha-over composite into
+/// `img` (straight-alpha `RgbaImage`).
+///
+/// Allocates a temporary transparent [`Pixmap`], calls
+/// [`draw_swf_visual_exports`], then composites the result using Porter-Duff
+/// "over" with proper premultiply/demultiply handling.
+///
+/// Returns `true` if any SWF pixels were composited.
+pub fn draw_swf_visual_exports_rgba(
+    img: &mut RgbaImage,
+    assets: &SwfAssetLibrary,
+    tint: Color,
+    alpha: f32,
+) -> bool {
+    let w = img.width();
+    let h = img.height();
+    let Some(mut pixmap) = Pixmap::new(w, h) else {
+        return false;
+    };
+    let Some(dest) = TskRect::from_xywh(0.0, 0.0, w as f32, h as f32) else {
+        return false;
+    };
+    if !draw_swf_visual_exports(&mut pixmap, assets, dest, tint, alpha) {
+        return false;
+    }
+
+    // Porter-Duff "over": pixmap (premultiplied RGBA) over img (straight-alpha RGBA).
+    let pix = pixmap.data();
+    for y in 0..h {
+        for x in 0..w {
+            let idx = ((y * w + x) as usize) * 4;
+            let a_top = pix[idx + 3] as u32;
+            if a_top == 0 {
+                continue;
+            }
+            let r_top = ((pix[idx] as u32 * 255) / a_top.max(1)).min(255);
+            let g_top = ((pix[idx + 1] as u32 * 255) / a_top.max(1)).min(255);
+            let b_top = ((pix[idx + 2] as u32 * 255) / a_top.max(1)).min(255);
+
+            let base = img.get_pixel(x, y);
+            let ba = base[3] as u32;
+
+            let out_a = (a_top + ba * (255 - a_top) / 255).min(255);
+            if out_a == 0 {
+                img.put_pixel(x, y, image::Rgba([0, 0, 0, 0]));
+            } else {
+                let blend = |top: u32, bot: u32| -> u8 {
+                    ((top * a_top / 255 + bot * ba * (255 - a_top) / 255 / 255)
+                        * 255
+                        / out_a)
+                        .min(255) as u8
+                };
+                img.put_pixel(
+                    x,
+                    y,
+                    image::Rgba([
+                        blend(r_top, base[0] as u32),
+                        blend(g_top, base[1] as u32),
+                        blend(b_top, base[2] as u32),
+                        out_a as u8,
+                    ]),
+                );
+            }
+        }
+    }
+    true
+}
+
+
+/// Render one character from a stage or sprite display list.
+///
+/// `sw` / `sh` — parent viewport size in SWF pixels.
+/// `sx` / `sy` — parent viewport → pixmap scale (pixels per SWF pixel).
+/// `origin` — top-left corner of the parent viewport in pixmap coordinates.
+fn draw_stage_character(
+    pixmap: &mut Pixmap,
+    assets: &SwfAssetLibrary,
+    place: &PlaceRecord,
+    sw: f32,
+    sh: f32,
+    sx: f32,
+    sy: f32,
+    origin: TskRect,
+    tint: Color,
+    alpha: f32,
+) -> bool {
+    let char_id = place.character_id;
+
+    if let Some(shape) = assets.get_shape(char_id) {
+        let shape_dest = matrix_to_dest(shape, &place.matrix, sw, sh, sx, sy, origin);
+        draw_shape(pixmap, shape, shape_dest, tint, alpha)
+    } else {
+        // Try as a sprite — draw its first frame without further recursion.
+        let sprite_places = assets.extract_sprite_first_frame(char_id);
+        if sprite_places.is_empty() {
+            return false;
+        }
+        let mut drew_any = false;
+        for sp_place in &sprite_places {
+            let sp_tint = color_transform_tint(tint, sp_place.color_transform.as_ref());
+            // Compose sprite placement with parent: sprite's origin in parent
+            // coords is given by `place.matrix`; within the sprite the child
+            // place records are in the sprite's own coord space.
+            let sprite_origin = sprite_origin_in_dest(&place.matrix, sw, sh, sx, sy, origin);
+            if let Some(sp_shape) = assets.get_shape(sp_place.character_id) {
+                // The sprite's own stage is bounded by the placed shape's
+                // bounds; we use the sprite_origin as the new viewport top-left
+                // and preserve the same sx/sy scale (sprites share the stage
+                // coordinate space).
+                let sp_dest = matrix_to_dest(sp_shape, &sp_place.matrix, sw, sh, sx, sy, sprite_origin);
+                if draw_shape(pixmap, sp_shape, sp_dest, sp_tint, alpha) {
+                    drew_any = true;
+                }
+            }
+        }
+        drew_any
+    }
+}
+
+/// Compute the destination rect for a shape placed via `matrix` into a
+/// parent viewport of size (`sw`, `sh`) SWF pixels, mapped to a pixmap region
+/// anchored at `origin`.
+///
+/// For axis-aligned matrices (no rotation) this is exact. For rotated
+/// matrices it degrades gracefully by using the transformed bounding box,
+/// which may clip rotated shapes at their AABBs — acceptable for B2 scope
+/// where MFD SWF content is predominantly axis-aligned.
+fn matrix_to_dest(
+    shape: &ShapeRecord,
+    matrix: &swf::Matrix,
+    _sw: f32,
+    _sh: f32,
+    sx: f32,
+    sy: f32,
+    origin: TskRect,
+) -> TskRect {
+    let b = &shape.shape_bounds;
+    let bx0 = b.x_min.to_pixels() as f32;
+    let by0 = b.y_min.to_pixels() as f32;
+    let bx1 = b.x_max.to_pixels() as f32;
+    let by1 = b.y_max.to_pixels() as f32;
+
+    let a = matrix.a.to_f32();
+    let b_coef = matrix.b.to_f32();
+    let c = matrix.c.to_f32();
+    let d = matrix.d.to_f32();
+    let tx = matrix.tx.to_pixels() as f32;
+    let ty = matrix.ty.to_pixels() as f32;
+
+    // Transform the four corners of the shape bounds.
+    let corners = [(bx0, by0), (bx1, by0), (bx0, by1), (bx1, by1)];
+    let trans: Vec<(f32, f32)> = corners
+        .iter()
+        .map(|&(x, y)| (a * x + c * y + tx, b_coef * x + d * y + ty))
+        .collect();
+
+    let mx0 = trans.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
+    let my0 = trans.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
+    let mx1 = trans.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
+    let my1 = trans.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
+
+    let dest_x = origin.left() + mx0 * sx;
+    let dest_y = origin.top() + my0 * sy;
+    let dest_w = ((mx1 - mx0) * sx).max(1.0);
+    let dest_h = ((my1 - my0) * sy).max(1.0);
+
+    TskRect::from_xywh(dest_x, dest_y, dest_w, dest_h).unwrap_or(origin)
+}
+
+/// Compute the pixmap-space top-left origin of a sprite placed via `matrix`
+/// in the parent viewport.  Returns a degenerate 1×1 rect at the translate
+/// point when the matrix has no usable scale.
+fn sprite_origin_in_dest(
+    matrix: &swf::Matrix,
+    _sw: f32,
+    _sh: f32,
+    sx: f32,
+    sy: f32,
+    origin: TskRect,
+) -> TskRect {
+    let tx = matrix.tx.to_pixels() as f32;
+    let ty = matrix.ty.to_pixels() as f32;
+    let dest_x = origin.left() + tx * sx;
+    let dest_y = origin.top() + ty * sy;
+    let dest_w = origin.width().max(1.0);
+    let dest_h = origin.height().max(1.0);
+    TskRect::from_xywh(dest_x, dest_y, dest_w, dest_h).unwrap_or(origin)
+}
+
+/// Apply a `ColorTransform` (multiply channel only) to the current `tint`.
+///
+/// Each RGBA multiply factor (0..255 range from the SWF spec) scales the
+/// corresponding tint channel.  An absent `ColorTransform` leaves `tint`
+/// unchanged.
+fn color_transform_tint(tint: Color, ct: Option<&swf::ColorTransform>) -> Color {
+    let Some(ct) = ct else { return tint };
+    // ColorTransform multiply factors are Fixed8 (0..1 range in the swf crate).
+    let rm = ct.r_multiply.to_f32().clamp(0.0, 1.0);
+    let gm = ct.g_multiply.to_f32().clamp(0.0, 1.0);
+    let bm = ct.b_multiply.to_f32().clamp(0.0, 1.0);
+    let am = ct.a_multiply.to_f32().clamp(0.0, 1.0);
+    Color::from_rgba(
+        (tint.red() * rm).clamp(0.0, 1.0),
+        (tint.green() * gm).clamp(0.0, 1.0),
+        (tint.blue() * bm).clamp(0.0, 1.0),
+        (tint.alpha() * am).clamp(0.0, 1.0),
+    )
+    .unwrap_or(tint)
+}
+
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Map one SWF shape character into `dest`, using `tint` / `alpha`.

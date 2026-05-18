@@ -290,9 +290,47 @@ pub fn render_for_binding(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiErro
 
     let swf_paths = collect_swf_paths(&resolved);
 
-    // ── 3. Load first available SWF (lazy) ─────────────────────────────────
+    // ── 3. Load SWF asset library ───────────────────────────────────────────
+    //
+    // When the root canvas carries `BuildingBlocks_FlashRendererPolicy` on its
+    // scene items, the shapes for `WidgetCustomShape` nodes are NOT embedded in
+    // per-node `swfPath` fields — they live in a standalone SWF keyed by the
+    // canvas record name and manufacturer brand code.  Load that SWF first so
+    // that `draw_swf_symbol` can resolve exported names (shape_Chevron, etc.).
+    // Fall back to the per-node library when no Flash SWF is found or when the
+    // canvas does not use Flash rendering.
 
-    let assets = load_first_swf(&swf_paths, inputs.swf_fetcher);
+    let flash_swf_opt: Option<SwfAssetLibrary> = raw_root_json
+        .as_ref()
+        .filter(|j| canvas_has_flash_renderer(j))
+        .and_then(|j| {
+            let record_name = canvas_record_name(j).unwrap_or("");
+            let manufacturer_id = b.manufacturer_id.unwrap_or("drak");
+            let candidates = flash_swf_candidates(record_name, manufacturer_id);
+            let lib = load_first_swf(&candidates, inputs.swf_fetcher);
+            let (fsw, fsh) = lib.stage_size();
+            if fsw > 0.0 || lib.shape_count() > 0 {
+                log::info!(
+                    "flash_swf[{}]: loaded SWF ({fsw:.0}×{fsh:.0}, {} shapes) for canvas={record_name:?}",
+                    b.helper_name.unwrap_or("?"),
+                    lib.shape_count(),
+                );
+                Some(lib)
+            } else {
+                log::debug!(
+                    "flash_swf[{}]: no SWF found for Flash canvas {record_name:?} \
+                     (candidates: {candidates:?})",
+                    b.helper_name.unwrap_or("?"),
+                );
+                None
+            }
+        });
+
+    let fallback_assets = load_first_swf(&swf_paths, inputs.swf_fetcher);
+    // Prefer the Flash SWF when available — it holds all the shape symbols for
+    // the canvas.  Fall back to the first per-node SWF referenced by canvas
+    // records.
+    let assets = flash_swf_opt.as_ref().unwrap_or(&fallback_assets);
 
     // ── 4. Manufacturer style ───────────────────────────────────────────────
 
@@ -311,7 +349,7 @@ pub fn render_for_binding(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiErro
     let ctx = ComposeContext { style: &style, defaults: &defaults, assets: &assets };
     let target = ComposeTarget { width: inputs.target_size.0, height: inputs.target_size.1 };
 
-    let img = if let Some(ref scene) = bb_scene_opt {
+    let mut img = if let Some(ref scene) = bb_scene_opt {
         let atlas = crate::bb_atlas::AtlasLibrary::new(inputs.asset_fetcher, b.manufacturer_id);
         crate::compose::render_bb_scene(scene, &ctx, &atlas, target)?
     } else {
@@ -324,8 +362,49 @@ pub fn render_for_binding(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiErro
         }
     };
 
+    // ── 7. Flash SWF visual-exports overlay ────────────────────────────────────
+    //
+    // For Flash-backed canvases the BB nodes of type `WidgetCustomShape` carry
+    // no static geometry — shapes are driven by ActionScript at runtime.  Their
+    // DataCore names (e.g. `shape_Chevron`) do not match the SWF's
+    // `ExportAssets` linkage names (e.g. `TargetSelection_Borders`), so the
+    // per-node `draw_swf_symbol` path in `compose.rs` silently draws nothing.
+    //
+    // Instead, after the BB scene is composed, overlay every non-ActionScript
+    // visual export from the Flash SWF scaled to the full canvas rect.  The
+    // exported sprites carry internal first-frame `PlaceObject` lists that
+    // position their shapes in stage coordinate space (origin = canvas top-left),
+    // so the scale transform stage→canvas puts each shape in the correct place.
+    //
+    // Guard: only apply the overlay when the resolved BB scene actually contains
+    // `WidgetCustomShape` nodes.  Brand-specific canvas variants (e.g. RSI's
+    // `rsi_mc_s_target.json`) may replace all Flash shapes with WidgetCard /
+    // WidgetTextField nodes; in that case the SWF overlay would paint over
+    // already-correct BB content.
+
+    let has_flash_shapes = bb_scene_opt.as_ref().map_or(false, |scene| {
+        scene
+            .nodes
+            .values()
+            .any(|n| n.ty == crate::bb_scene::BbNodeType::WidgetCustomShape)
+    });
+
+    if has_flash_shapes {
+        if let Some(ref flash_swf) = flash_swf_opt {
+            let pt = &style.primary_tint;
+            let tint = tiny_skia::Color::from_rgba8(pt.r, pt.g, pt.b, pt.a);
+            let drew =
+                crate::swf_render::draw_swf_visual_exports_rgba(&mut img, flash_swf, tint, 1.0);
+            log::debug!(
+                "flash_overlay[{}]: drew={drew}",
+                b.helper_name.unwrap_or("?"),
+            );
+        }
+    }
+
     encode_png(&img)
 }
+
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -428,4 +507,91 @@ fn load_style(manufacturer_id: Option<&str>, fetcher: &dyn StyleFetcher) -> Manu
             StyleLoader::for_manufacturer("drak").drake_amber_fallback()
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Flash canvas detection and SWF path derivation
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Extract the `_RecordName_` from a canvas root JSON.
+fn canvas_record_name(root_json: &serde_json::Value) -> Option<&str> {
+    root_json.get("_RecordName_")?.as_str()
+}
+
+/// Return `true` when any top-level scene item in the canvas JSON declares
+/// `rendererType: "Flash"`, which indicates that the canvas content is driven
+/// by a standalone SWF rather than the BB widget system.
+fn canvas_has_flash_renderer(root_json: &serde_json::Value) -> bool {
+    let Some(rv) = root_json.get("_RecordValue_") else {
+        return false;
+    };
+    let Some(scene) = rv.get("scene") else {
+        return false;
+    };
+    let Some(items) = scene.as_array() else {
+        return false;
+    };
+    items.iter().any(|item| {
+        item.get("rendererType")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s.eq_ignore_ascii_case("Flash"))
+    })
+}
+
+/// Derive candidate P4K paths for a standalone SWF given the canvas record
+/// name and the manufacturer id.
+///
+/// The derivation is structural:
+/// 1. Extract the **stem** from the canvas record name by stripping the
+///    `BuildingBlocks_Canvas.` prefix (if present), then stripping an
+///    optional leading segment and trailing `_Master` suffix.  For example
+///    `MC_S_Target_Master` → `Target`.
+/// 2. Derive the P4K brand code as the first three characters of the
+///    manufacturer id, upper-cased (e.g. `"rsi"` → `"RSI"`, `"drak"` →
+///    `"DRA"`, `"aegs"` → `"AEG"`).  This mapping is a structural rule
+///    observed across the `Data\UI\ShipInterface\assets\SWF\` layout.
+/// 3. Build candidates under the `SupportScreen16-9` subdir:
+///    - `{stem}Status.swf` (matches `TargetStatus.swf`, `OwnShipStatus.swf`, …)
+///    - `{stem}.swf`        (fallback for SWFs without "Status" suffix)
+///
+/// Returns the list in preference order; the caller tries each in turn.
+pub fn flash_swf_candidates(record_name: &str, manufacturer_id: &str) -> Vec<String> {
+    // Strip optional DataCore prefix.
+    let name = record_name
+        .strip_prefix("BuildingBlocks_Canvas.")
+        .unwrap_or(record_name);
+
+    // Extract the stem: strip a leading "MC_S_" or "GEN_MC_S_" compound and
+    // a trailing "_Master" or "_master" suffix, case-insensitively.
+    let without_prefix = name
+        .strip_prefix("MC_S_")
+        .or_else(|| name.strip_prefix("GEN_MC_S_"))
+        .unwrap_or(name);
+    let stem = without_prefix
+        .strip_suffix("_Master")
+        .or_else(|| without_prefix.strip_suffix("_master"))
+        .unwrap_or(without_prefix);
+
+    if stem.is_empty() {
+        return vec![];
+    }
+
+    // Brand code: first ≤3 chars of manufacturer_id, upper-cased.
+    let brand: String = manufacturer_id
+        .chars()
+        .take(3)
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    if brand.is_empty() {
+        return vec![];
+    }
+
+    let base = format!(
+        r"Data\UI\ShipInterface\assets\SWF\{brand}\SupportScreen16-9\"
+    );
+
+    vec![
+        format!("{base}{stem}Status.swf"),
+        format!("{base}{stem}.swf"),
+    ]
 }

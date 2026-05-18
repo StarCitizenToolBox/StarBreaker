@@ -280,8 +280,11 @@ fn draw_node(
         // Custom shapes: blit atlas when available; otherwise try the SWF
         // asset library by symbol name, then fall back to authored fill/border.
         // BB `WidgetCustomShape` with `rendererType: "Flash"` carries no static
-        // geometry — the shape lives in the SWF movie. We now rasterise it via
-        // `swf_render::draw_swf_symbol` using `node.name` as the export key.
+        // geometry — the shape lives in the SWF movie under an ActionScript
+        // export name that does NOT match `node.name`.  The Flash overlay step
+        // in `pipeline.rs` renders all visual exports after scene composition;
+        // `draw_swf_symbol` here is a no-op for Flash-backed shapes (returns
+        // false when the name is not found in the SWF exports).
         BbNodeType::WidgetCustomShape => {
             if let Some(img) = atlas.resolve_for_node(node, iw, ih) {
                 blit_atlas_image(pixmap, &img, rect.x as i32, rect.y as i32, alpha);
