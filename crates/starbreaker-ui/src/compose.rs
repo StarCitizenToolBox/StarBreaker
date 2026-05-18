@@ -1,4 +1,4 @@
-//! Canvas-to-image compositor — Phase 6 implementation.
+//! Canvas-to-image compositor — Phase 7 implementation.
 //!
 //! Walks a [`ResolvedCanvas`] widget tree and produces an RGBA image buffer via
 //! [`tiny_skia::Pixmap`] as the intermediate raster store.
@@ -14,6 +14,7 @@
 //!    - `BuildingBlocks_TextField`   → text rendering (SWF glyphs or built-in fallback).
 //!    - `BuildingBlocks_Shape`/`Rect`/`Rectangle` → filled/stroked rectangle or path.
 //!    - `BuildingBlocks_Image`/`Bitmap` → bitmap blit with src-over alpha.
+//!    - `BuildingBlocks_Sprite`/`MovieClip` → SWF export linkage first-frame rendering.
 //!    - `BuildingBlocks_WidgetCanvas` → recursive sub-canvas compositing.
 //!    - `BuildingBlocks_Group`/`Container` → transform group (children inherit parent xform).
 //!    - Unknown kinds → skipped with `log::debug!`.
@@ -45,7 +46,7 @@ use crate::canvas::{
 use crate::defaults::DefaultValueRegistry;
 use crate::error::UiError;
 use crate::style::ManufacturerStyle;
-use crate::swf_assets::SwfAssetLibrary;
+use crate::swf_assets::{ShapeRecord, SwfAssetLibrary};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Public API types
@@ -192,7 +193,12 @@ impl<'a> DrawState<'a> {
                     .color
                     .unwrap_or_else(|| rgba_from_u32(0xFFFFFFFF))
                     .lerp_tint(self.ctx.style.primary_tint);
-                self.draw_text_at(&text, local_xform, color, pixmap);
+                let font_id = item
+                    .properties
+                    .get("fontId")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as u16);
+                self.draw_text_at_full(&text, local_xform, color, font_id, pixmap);
             }
             "Shape" | "Rectangle" | "Rect" | "Circle" | "Line" | "WidgetShape" => {
                 let fill = item
@@ -202,6 +208,21 @@ impl<'a> DrawState<'a> {
                 let w = item.properties.get("width").and_then(|v| v.as_f64()).unwrap_or(100.0) as f32;
                 let h = item.properties.get("height").and_then(|v| v.as_f64()).unwrap_or(20.0) as f32;
                 self.draw_filled_rect(local_xform, w, h, fill, pixmap);
+            }
+            "Sprite" | "WidgetSprite" | "SpriteInstance" | "MovieClip" => {
+                let swf_path = item
+                    .properties
+                    .get("swfPath")
+                    .or_else(|| item.properties.get("swf"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let linkage_name = item
+                    .properties
+                    .get("linkageName")
+                    .or_else(|| item.properties.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let _ = self.draw_sprite_component(swf_path, linkage_name, local_xform, pixmap, 0);
             }
             "Image" | "Bitmap" | "Texture" | "WidgetImage" => {
                 // No external texture loading in Phase 6 — bitmaps from SwfAssetLibrary only.
@@ -280,10 +301,62 @@ impl<'a> DrawState<'a> {
         _color: Option<RgbaColor>,
         pixmap: &mut Pixmap,
     ) {
-        if let ViewComponent::WidgetCanvas { sub_guid: Some(sg), .. } = comp {
-            if let Some(child) = self.canvas.children.get(sg) {
-                let _ = self.draw_canvas_record(child, parent_xform, pixmap);
+        match comp {
+            ViewComponent::WidgetCanvas { sub_guid: Some(sg), .. } => {
+                if let Some(child) = self.canvas.children.get(sg) {
+                    let _ = self.draw_canvas_record(child, parent_xform, pixmap);
+                }
             }
+            ViewComponent::Sprite { swf_path, linkage_name } => {
+                let _ = self.draw_sprite_component(swf_path, linkage_name, parent_xform, pixmap, 0);
+            }
+            _ => {}
+        }
+    }
+
+    fn draw_sprite_component(
+        &self,
+        swf_path: &str,
+        linkage_name: &str,
+        parent_xform: Transform,
+        pixmap: &mut Pixmap,
+        depth: u32,
+    ) -> Result<(), UiError> {
+        const MAX_DEPTH: u32 = 8;
+        if depth >= MAX_DEPTH {
+            return Err(UiError::SpriteDepthExceeded(depth));
+        }
+
+        let Some(char_id) = self.ctx.assets.lookup_export(linkage_name) else {
+            debug!("compose: sprite linkage '{}' not found in SWF '{}'", linkage_name, swf_path);
+            return Ok(());
+        };
+
+        let place_list = self.ctx.assets.extract_sprite_first_frame(char_id);
+        for place in &place_list {
+            let xform = parent_xform.pre_concat(swf_matrix_to_skia(&place.matrix));
+            if let Some(shape) = self.ctx.assets.get_shape(place.character_id) {
+                self.draw_swf_shape(shape, xform, place.color_transform, pixmap);
+            } else if let Some(nested_name) = self.ctx.assets.export_name_for(place.character_id) {
+                self.draw_sprite_component(swf_path, &nested_name, xform, pixmap, depth + 1)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn draw_swf_shape(
+        &self,
+        shape: &ShapeRecord,
+        xform: Transform,
+        _color_transform: Option<swf::ColorTransform>,
+        pixmap: &mut Pixmap,
+    ) {
+        let fill_color = self.ctx.style.primary_tint;
+        if let Some(path) = swf_shape_to_path(&shape.records) {
+            let mut paint = Paint::default();
+            paint.set_color_rgba8(fill_color.r, fill_color.g, fill_color.b, fill_color.a);
+            paint.blend_mode = BlendMode::SourceOver;
+            pixmap.fill_path(&path, &paint, FillRule::Winding, xform, None);
         }
     }
 
@@ -354,18 +427,32 @@ impl<'a> DrawState<'a> {
     /// Render `text` at the origin of `xform` with `color`.
     ///
     /// Tries SWF glyph outlines first; falls back to the built-in bitmap font.
+    #[allow(dead_code)]
     fn draw_text_at(&self, text: &str, xform: Transform, color: RgbaColor, pixmap: &mut Pixmap) {
+        self.draw_text_at_full(text, xform, color, None, pixmap);
+    }
+
+    /// Render `text`, preferring SWF glyph outlines when `font_id` resolves.
+    fn draw_text_at_full(
+        &self,
+        text: &str,
+        xform: Transform,
+        color: RgbaColor,
+        font_id: Option<u16>,
+        pixmap: &mut Pixmap,
+    ) {
         if text.is_empty() {
             return;
         }
-        // Phase 6: always use the built-in fallback (no SWF font IDs in our
-        // hand-written fixtures). When real SWF fonts are available the primary
-        // path will be used.
+        if let Some(font_id) = font_id {
+            if self.draw_text_with_swf_glyphs(text, font_id, xform, color, pixmap) {
+                return;
+            }
+        }
         draw_text_builtin(text, xform, color, pixmap);
     }
 
     /// Render `text` using glyphs from a SWF font, falling back if necessary.
-    #[allow(dead_code)]
     fn draw_text_with_swf_glyphs(
         &self,
         text: &str,
@@ -461,6 +548,7 @@ fn draw_text_builtin(text: &str, xform: Transform, color: RgbaColor, pixmap: &mu
 }
 
 /// Measure text width with the built-in font (in pixels at scale=2).
+#[allow(dead_code)]
 fn measure_text_builtin(text: &str) -> f32 {
     let scale = 2.0_f32;
     let glyph_w = 5.0 * scale;
@@ -472,6 +560,7 @@ fn measure_text_builtin(text: &str) -> f32 {
 }
 
 /// Measure text height with the built-in font (in pixels at scale=2).
+#[allow(dead_code)]
 fn measure_text_height() -> f32 {
     7.0 * 2.0
 }
@@ -667,6 +756,18 @@ fn swf_shape_to_path(records: &[swf::ShapeRecord]) -> Option<tiny_skia::Path> {
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
+
+fn swf_matrix_to_skia(m: &swf::Matrix) -> Transform {
+    Transform::from_row(
+        m.a.to_f32(),
+        m.b.to_f32(),
+        m.c.to_f32(),
+        m.d.to_f32(),
+        m.tx.get() as f32 / 20.0,
+        m.ty.get() as f32 / 20.0,
+    )
+}
+
 /// Convert a `tiny_skia::Pixmap` to an `image::RgbaImage`.
 ///
 /// tiny-skia stores pixels in premultiplied RGBA. We convert back to
@@ -778,7 +879,8 @@ impl RgbaColorExt for RgbaColor {
 /// `buttons` is a slice of `(label, lit)` pairs.  Lit buttons are drawn with
 /// an inverted (filled amber) background; unlit buttons have a dark background
 /// with an amber border.
-pub fn draw_annunciator_strip(
+#[allow(dead_code)]
+pub(crate) fn draw_annunciator_strip(
     buttons: &[(&str, bool)],
     target_w: u32,
     target_h: u32,
@@ -852,7 +954,8 @@ pub fn draw_annunciator_strip(
 ///
 /// Layout: dark background → upper dashed separator → centered `target_text` →
 /// lower dashed separator → amber footer text.
-pub fn draw_target_status(
+#[allow(dead_code)]
+pub(crate) fn draw_target_status(
     target_text: &str,
     footer_text: &str,
     target_w: u32,
@@ -897,7 +1000,8 @@ pub fn draw_target_status(
 ///
 /// Layout: dark background → "DOOR CONTROL" header → outlined OPEN / CLOSE
 /// buttons → status indicator "CLOSED".
-pub fn draw_door_panel(
+#[allow(dead_code)]
+pub(crate) fn draw_door_panel(
     status_text: &str,
     target_w: u32,
     target_h: u32,
@@ -943,6 +1047,7 @@ pub fn draw_door_panel(
     Ok(pixmap_to_rgba(pixmap))
 }
 
+#[allow(dead_code)]
 fn draw_outlined_button(
     pixmap: &mut Pixmap,
     x: f32, y: f32,
@@ -979,6 +1084,7 @@ fn draw_outlined_button(
     }
 }
 
+#[allow(dead_code)]
 fn draw_dashes(pixmap: &mut Pixmap, x: f32, y: f32, total_w: f32, color: RgbaColor) {
     let dash = 8.0_f32;
     let gap = 4.0_f32;

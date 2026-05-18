@@ -1,0 +1,192 @@
+{
+  "__name": "MC_S_Self_Master_adapted",
+  "originalCanvasSize": {
+    "width": 1920,
+    "height": 1080
+  },
+  "documentedGaps": [
+    "Wireframe ship region requires runtime mesh data."
+  ],
+  "views": [
+    {
+      "name": "_mfd",
+      "default": true,
+      "screens": []
+    }
+  ],
+  "scene": [
+    {
+      "_Type_": "BuildingBlocks_Rectangle",
+      "transform": {
+        "tx": 60,
+        "ty": 55,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      },
+      "width": 904,
+      "height": 2,
+      "color": {
+        "r": 255,
+        "g": 158,
+        "b": 57,
+        "a": 220
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_TextField",
+      "text": "SELF STATUS",
+      "transform": {
+        "tx": 455,
+        "ty": 32,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_TextField",
+      "text": "HP",
+      "transform": {
+        "tx": 120,
+        "ty": 150,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_TextField",
+      "text": "MAX / MAX",
+      "transform": {
+        "tx": 240,
+        "ty": 150,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_Rectangle",
+      "transform": {
+        "tx": 100,
+        "ty": 185,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      },
+      "width": 330,
+      "height": 28,
+      "color": {
+        "r": 255,
+        "g": 158,
+        "b": 57,
+        "a": 95
+      },
+      "fill": 1314053
+    },
+    {
+      "_Type_": "BuildingBlocks_TextField",
+      "text": "SHIELD",
+      "transform": {
+        "tx": 120,
+        "ty": 250,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_TextField",
+      "text": "MAX / MAX",
+      "transform": {
+        "tx": 240,
+        "ty": 250,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_Rectangle",
+      "transform": {
+        "tx": 100,
+        "ty": 285,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      },
+      "width": 330,
+      "height": 28,
+      "color": {
+        "r": 255,
+        "g": 158,
+        "b": 57,
+        "a": 95
+      },
+      "fill": 1314053
+    },
+    {
+      "_Type_": "BuildingBlocks_Rectangle",
+      "transform": {
+        "tx": 565,
+        "ty": 155,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      },
+      "width": 300,
+      "height": 330,
+      "color": {
+        "r": 255,
+        "g": 158,
+        "b": 57,
+        "a": 95
+      },
+      "fill": 1314053
+    },
+    {
+      "_Type_": "BuildingBlocks_TextField",
+      "text": "WIREFRAME DATA UNAVAILABLE",
+      "transform": {
+        "tx": 610,
+        "ty": 315,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_Rectangle",
+      "transform": {
+        "tx": 60,
+        "ty": 655,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      },
+      "width": 904,
+      "height": 2,
+      "color": {
+        "r": 255,
+        "g": 158,
+        "b": 57,
+        "a": 220
+      }
+    }
+  ],
+  "operations": [
+    {
+      "_Type_": "BuildingBlocks_BindingsFloatVariable",
+      "binding": "/ship/hp/current",
+      "property": "text",
+      "defaultValue": "MAX"
+    },
+    {
+      "_Type_": "BuildingBlocks_BindingsFloatVariable",
+      "binding": "/ship/hp/max",
+      "property": "text",
+      "defaultValue": "MAX"
+    }
+  ]
+}

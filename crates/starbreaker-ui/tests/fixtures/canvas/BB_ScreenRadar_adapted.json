@@ -1,0 +1,324 @@
+{
+  "__name": "BB_ScreenRadar_adapted",
+  "originalCanvasSize": {
+    "width": 1920,
+    "height": 1080
+  },
+  "documentedGaps": [
+    "Contact markers require runtime radar data."
+  ],
+  "views": [
+    {
+      "name": "_mfd",
+      "default": true,
+      "screens": []
+    }
+  ],
+  "scene": [
+    {
+      "_Type_": "BuildingBlocks_TextField",
+      "text": "RADAR",
+      "transform": {
+        "tx": 488,
+        "ty": 40,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_Rectangle",
+      "transform": {
+        "tx": 362,
+        "ty": 384,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      },
+      "width": 300,
+      "height": 2,
+      "color": {
+        "r": 255,
+        "g": 158,
+        "b": 57,
+        "a": 220
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_Rectangle",
+      "transform": {
+        "tx": 512,
+        "ty": 234,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      },
+      "width": 2,
+      "height": 300,
+      "color": {
+        "r": 255,
+        "g": 158,
+        "b": 57,
+        "a": 220
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_Rectangle",
+      "transform": {
+        "tx": 300,
+        "ty": 172,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      },
+      "width": 424,
+      "height": 424,
+      "color": {
+        "r": 255,
+        "g": 158,
+        "b": 57,
+        "a": 95
+      },
+      "fill": 1314053
+    },
+    {
+      "_Type_": "BuildingBlocks_Rectangle",
+      "transform": {
+        "tx": 512,
+        "ty": 142,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      },
+      "width": 2,
+      "height": 34,
+      "color": {
+        "r": 255,
+        "g": 158,
+        "b": 57,
+        "a": 220
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_Rectangle",
+      "transform": {
+        "tx": 512,
+        "ty": 592,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      },
+      "width": 2,
+      "height": 34,
+      "color": {
+        "r": 255,
+        "g": 158,
+        "b": 57,
+        "a": 220
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_Rectangle",
+      "transform": {
+        "tx": 262,
+        "ty": 384,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      },
+      "width": 34,
+      "height": 2,
+      "color": {
+        "r": 255,
+        "g": 158,
+        "b": 57,
+        "a": 220
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_Rectangle",
+      "transform": {
+        "tx": 728,
+        "ty": 384,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      },
+      "width": 34,
+      "height": 2,
+      "color": {
+        "r": 255,
+        "g": 158,
+        "b": 57,
+        "a": 220
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_Rectangle",
+      "transform": {
+        "tx": 335,
+        "ty": 207,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      },
+      "width": 24,
+      "height": 2,
+      "color": {
+        "r": 255,
+        "g": 158,
+        "b": 57,
+        "a": 220
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_Rectangle",
+      "transform": {
+        "tx": 690,
+        "ty": 207,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      },
+      "width": 24,
+      "height": 2,
+      "color": {
+        "r": 255,
+        "g": 158,
+        "b": 57,
+        "a": 220
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_Rectangle",
+      "transform": {
+        "tx": 335,
+        "ty": 560,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      },
+      "width": 24,
+      "height": 2,
+      "color": {
+        "r": 255,
+        "g": 158,
+        "b": 57,
+        "a": 220
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_Rectangle",
+      "transform": {
+        "tx": 690,
+        "ty": 560,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      },
+      "width": 24,
+      "height": 2,
+      "color": {
+        "r": 255,
+        "g": 158,
+        "b": 57,
+        "a": 220
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_Rectangle",
+      "transform": {
+        "tx": 390,
+        "ty": 165,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      },
+      "width": 2,
+      "height": 24,
+      "color": {
+        "r": 255,
+        "g": 158,
+        "b": 57,
+        "a": 220
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_Rectangle",
+      "transform": {
+        "tx": 635,
+        "ty": 165,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      },
+      "width": 2,
+      "height": 24,
+      "color": {
+        "r": 255,
+        "g": 158,
+        "b": 57,
+        "a": 220
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_Rectangle",
+      "transform": {
+        "tx": 390,
+        "ty": 580,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      },
+      "width": 2,
+      "height": 24,
+      "color": {
+        "r": 255,
+        "g": 158,
+        "b": 57,
+        "a": 220
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_Rectangle",
+      "transform": {
+        "tx": 635,
+        "ty": 580,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      },
+      "width": 2,
+      "height": 24,
+      "color": {
+        "r": 255,
+        "g": 158,
+        "b": 57,
+        "a": 220
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_TextField",
+      "text": "\u25b2",
+      "transform": {
+        "tx": 506,
+        "ty": 375,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_TextField",
+      "text": "0\u00b0  0.0km",
+      "transform": {
+        "tx": 470,
+        "ty": 690,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      }
+    }
+  ],
+  "operations": []
+}

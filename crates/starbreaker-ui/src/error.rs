@@ -46,6 +46,10 @@ pub enum UiError {
     #[error("canvas expansion exceeded max depth {max_depth} at GUID {guid}")]
     MaxDepthExceeded { guid: String, max_depth: usize },
 
+    /// Sprite recursion exceeded the compositor safety limit.
+    #[error("SWF sprite recursion exceeded max depth at depth {0}")]
+    SpriteDepthExceeded(u32),
+
     /// A canvas could not be rasterised (pixmap allocation, path build, or encode failure).
     #[error("canvas render error: {0}")]
     RenderError(String),

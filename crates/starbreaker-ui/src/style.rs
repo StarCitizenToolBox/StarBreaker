@@ -178,6 +178,49 @@ impl StyleLoader {
         })
     }
 
+
+    /// Parse a `ManufacturerStyle` from a real `BuildingBlocks_Style` DataCore record.
+    ///
+    /// The real schema uses `_RecordValue_.colorStyles[]` - a flat array of color definitions
+    /// indexed by style slot number:
+    /// - Index 0: primary tint (amber for Drake)
+    /// - Index 8: background (near-black for Drake)
+    /// - Index 11: backlight/highlight color
+    ///
+    /// Falls back gracefully if indices are missing (uses Drake amber defaults).
+    pub fn parse_buildingblocks_style_record(
+        &self,
+        record_json: &serde_json::Value,
+    ) -> Result<ManufacturerStyle, UiError> {
+        let fallback = self.drake_amber_fallback();
+        let color_styles = record_json
+            .get("_RecordValue_")
+            .and_then(|v| v.get("colorStyles"))
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| {
+                UiError::ParseError(
+                    "BuildingBlocks_Style record missing _RecordValue_.colorStyles[]".to_string(),
+                )
+            })?;
+
+        let primary_tint = parse_color_style_slot(color_styles, 0)
+            .unwrap_or(fallback.primary_tint);
+        let background = parse_color_style_slot(color_styles, 8)
+            .unwrap_or(fallback.background);
+        let backlight = parse_color_style_slot(color_styles, 11)
+            .unwrap_or(fallback.backlight);
+
+        Ok(ManufacturerStyle {
+            name: self.manufacturer.clone(),
+            primary_tint,
+            secondary_tint: Some(backlight),
+            background,
+            backlight,
+            font_family_hints: fallback.font_family_hints,
+            crt: fallback.crt,
+        })
+    }
+
     /// Non-authoritative Drake amber fallback used when no DataCore record is
     /// available (e.g. in unit tests or during early development).
     ///
@@ -250,6 +293,22 @@ fn parse_crt_params(v: &serde_json::Value) -> CrtParams {
         scanline_intensity: v["scanlineIntensity"].as_f64().unwrap_or(0.15) as f32,
         vignette_strength: v["vignetteStrength"].as_f64().unwrap_or(0.3) as f32,
     }
+}
+
+
+fn parse_color_style_slot(styles: &[serde_json::Value], index: usize) -> Option<RgbaColor> {
+    styles
+        .get(index)
+        .and_then(|v| v.get("color"))
+        .and_then(parse_color_value_lossy)
+}
+
+fn parse_color_value_lossy(v: &serde_json::Value) -> Option<RgbaColor> {
+    let r = v.get("r")?.as_u64()?;
+    let g = v.get("g")?.as_u64()?;
+    let b = v.get("b")?.as_u64()?;
+    let a = v.get("a").and_then(|a| a.as_u64()).unwrap_or(255);
+    Some(RgbaColor { r: r as u8, g: g as u8, b: b as u8, a: a as u8 })
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

@@ -87,12 +87,14 @@ pub struct FontGlyphSet {
 pub struct PlaceRecord {
     /// Display-list depth.
     pub depth: Depth,
-    /// Character placed at this depth, or `None` for a modify-only `PlaceObject`.
-    pub character_id: Option<CharacterId>,
+    /// Character placed at this depth.
+    pub character_id: CharacterId,
     /// Local-to-parent transform matrix.
-    pub matrix: Option<Matrix>,
+    pub matrix: Matrix,
     /// Color/alpha multiplier+add transform.
     pub color_transform: Option<ColorTransform>,
+    /// Optional instance name from PlaceObject2/3.
+    pub name: Option<String>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -359,21 +361,21 @@ pub fn extract_sprite_first_frame(
                 Tag::ShowFrame => break 'walk,
 
                 Tag::PlaceObject(po) => {
+                    let previous = depth_map.get(&po.depth).cloned();
                     let character_id = match po.action {
                         swf::PlaceObjectAction::Place(id) => Some(id),
                         swf::PlaceObjectAction::Replace(id) => Some(id),
-                        swf::PlaceObjectAction::Modify => {
-                            // Modify: update existing entry if present.
-                            depth_map.get(&po.depth).map(|r| r.character_id).flatten()
-                        }
+                        swf::PlaceObjectAction::Modify => previous.as_ref().map(|r| r.character_id),
                     };
+                    let Some(character_id) = character_id else { continue };
                     depth_map.insert(
                         po.depth,
                         PlaceRecord {
                             depth: po.depth,
                             character_id,
-                            matrix: po.matrix,
-                            color_transform: po.color_transform,
+                            matrix: po.matrix.or_else(|| previous.as_ref().map(|r| r.matrix)).unwrap_or(Matrix::IDENTITY),
+                            color_transform: po.color_transform.or_else(|| previous.as_ref().and_then(|r| r.color_transform)),
+                            name: po.name.map(|n| n.to_string_lossy(swf::UTF_8)),
                         },
                     );
                 }
@@ -521,6 +523,18 @@ impl SwfAssetLibrary {
         sprite_id: CharacterId,
     ) -> Result<Vec<PlaceRecord>, UiError> {
         extract_sprite_first_frame(&self.raw, sprite_id)
+    }
+
+    /// Return the first-frame display list for `character_id`, or an empty list if absent.
+    pub fn extract_sprite_first_frame(&self, character_id: CharacterId) -> Vec<PlaceRecord> {
+        self.get_sprite_first_frame(character_id).unwrap_or_default()
+    }
+
+    /// Reverse lookup an export linkage name by character id.
+    pub fn export_name_for(&self, character_id: CharacterId) -> Option<String> {
+        self.exports
+            .iter()
+            .find_map(|(name, &id)| (id == character_id).then(|| name.clone()))
     }
 
     /// Number of bitmap characters indexed.

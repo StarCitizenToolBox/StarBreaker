@@ -35,7 +35,4 @@ pub use defaults::DefaultValueRegistry;
 pub use style::{CrtParams, ManufacturerStyle, StyleLoader};
 
 // Re-export composer API.
-pub use compose::{
-    ComposeContext, ComposeTarget, draw_annunciator_strip, draw_door_panel, draw_target_status,
-    encode_png, render_canvas,
-};
+pub use compose::{ComposeContext, ComposeTarget, encode_png, render_canvas};

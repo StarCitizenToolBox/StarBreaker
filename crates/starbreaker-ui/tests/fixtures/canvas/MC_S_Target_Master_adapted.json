@@ -1,0 +1,151 @@
+{
+  "__name": "MC_S_Target_Master_adapted",
+  "originalCanvasSize": {
+    "width": 1920,
+    "height": 1080
+  },
+  "views": [
+    {
+      "name": "_mfd",
+      "default": true,
+      "screens": []
+    }
+  ],
+  "scene": [
+    {
+      "_Type_": "BuildingBlocks_Rectangle",
+      "transform": {
+        "tx": 60,
+        "ty": 57,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      },
+      "width": 904,
+      "height": 2,
+      "color": {
+        "r": 255,
+        "g": 158,
+        "b": 57,
+        "a": 220
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_TextField",
+      "text": ">> NO TARGET <<",
+      "transform": {
+        "tx": 430,
+        "ty": 312,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_TextField",
+      "text": "SHIP:",
+      "transform": {
+        "tx": 260,
+        "ty": 392,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_TextField",
+      "text": "CLASS:",
+      "transform": {
+        "tx": 260,
+        "ty": 426,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_TextField",
+      "text": "FACTION:",
+      "transform": {
+        "tx": 260,
+        "ty": 460,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_TextField",
+      "text": "DIST:",
+      "transform": {
+        "tx": 260,
+        "ty": 494,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_Rectangle",
+      "transform": {
+        "tx": 430,
+        "ty": 388,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      },
+      "width": 330,
+      "height": 135,
+      "color": {
+        "r": 255,
+        "g": 158,
+        "b": 57,
+        "a": 95
+      },
+      "fill": 1314053
+    },
+    {
+      "_Type_": "BuildingBlocks_Rectangle",
+      "transform": {
+        "tx": 60,
+        "ty": 654,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      },
+      "width": 904,
+      "height": 2,
+      "color": {
+        "r": 255,
+        "g": 158,
+        "b": 57,
+        "a": 220
+      }
+    },
+    {
+      "_Type_": "BuildingBlocks_TextField",
+      "text": "< TARGET STATUS >",
+      "transform": {
+        "tx": 420,
+        "ty": 682,
+        "sx": 1.0,
+        "sy": 1.0,
+        "angle": 0.0
+      }
+    }
+  ],
+  "operations": [
+    {
+      "_Type_": "BuildingBlocks_BindingsBooleanVariable",
+      "binding": "/targetselector/lockedtarget/isvalidtarget",
+      "property": "visible",
+      "defaultValue": false
+    },
+    {
+      "_Type_": "BuildingBlocks_BindingsObjectVariable",
+      "binding": "/uicontroller/targetinfo/model",
+      "property": "model",
+      "defaultValue": "NO TARGET"
+    }
+  ]
+}

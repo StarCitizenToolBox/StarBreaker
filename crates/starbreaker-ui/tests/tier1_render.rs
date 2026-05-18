@@ -30,8 +30,7 @@ use std::path::PathBuf;
 
 use starbreaker_ui::{
     CanvasParser, CanvasWidgetTreeResolver, ComposeContext, ComposeTarget,
-    DefaultValueRegistry, ResolvedCanvas, StyleLoader,
-    compose::{draw_annunciator_strip, draw_door_panel, draw_target_status, encode_png},
+    DefaultValueRegistry, ResolvedCanvas, StyleLoader, encode_png, render_canvas,
     swf_assets::SwfAssetLibrary,
 };
 
@@ -300,33 +299,26 @@ fn render_annunciator_to_png() {
     println!("=== Tier 1 Render: Annunciator (FlightController_Annunciator) ===");
 
     let style = drake_style();
+    let defaults = defaults();
+    let assets = empty_assets();
+    let ctx = ComposeContext { style: &style, defaults: &defaults, assets: &assets };
+    let fixture = annunciator_fixture();
+    let record = CanvasParser::parse(
+        "81333cc0-aed1-472a-a8f7-03609c66774b",
+        "FlightController_Annunciator",
+        &fixture,
+    ).expect("fixture parse failed");
+    let canvas = ResolvedCanvas { root: record, children: Default::default() };
 
-    // Use the high-level draw_annunciator_strip function which matches the
-    // reference layout more closely than the generic render_canvas path.
-    //
-    // Default-on contract (Phase 1): all buttons dark; COOL is plain text, no box.
-    // The reference image shows WPN lit, but that's a live weapon-heat state —
-    // the default-on render shows all unlit.
-    let img = draw_annunciator_strip(
-        &[
-            ("PWR",  false), // Power — dark (no warning)
-            ("WPN",  false), // Weapons — dark (WPN lit in reference = live state)
-            ("THR",  false), // Thruster heat — dark
-            ("SHLD", false), // Shields — dark
-            ("COOL", false), // Cooler — false = no box (handled as plain text by convention)
-        ],
-        1024, 128,
-        &style,
-    ).expect("annunciator render failed");
+    let img = render_canvas(&canvas, &ctx, ComposeTarget { width: 1024, height: 128 })
+        .expect("render_canvas failed for annunciator fixture");
 
     let png = encode_png(&img).expect("PNG encode failed");
     save_png("annunciator.png", &png);
 
-    // Structural checks.
     assert_eq!(img.width(), 1024);
     assert_eq!(img.height(), 128);
 
-    // Non-background pixels must exist (borders + text).
     let bg = style.background;
     let non_bg = img.pixels().filter(|p| {
         p[0] != bg.r || p[1] != bg.g || p[2] != bg.b
@@ -335,20 +327,9 @@ fn render_annunciator_to_png() {
 
     println!();
     println!("--- Comparison vs Screen_Annunciator_L.png ---");
-    println!("  Reference: 5 buttons (PWR, WPN, THR, SHLD) with amber bordered boxes;");
-    println!("             COOL as plain grey text without a box.");
-    println!("             WPN box is lit/filled in the reference (live weapon-heat state).");
-    println!("  Rendered:  5 buttons all unlit (dark box + amber border + amber label).");
-    println!("             COOL is the 5th button (outlined like others; no box suppression");
-    println!("             in draw_annunciator_strip v1 — gap for Phase 7).");
-    println!("  Gaps:      1) COOL should have no border box (Phase 1 contract).");
-    println!("                draw_annunciator_strip always draws an outline; Phase 7 can");
-    println!("                add a 'no_box' flag per-button from the DataCore record.");
-    println!("             2) Font glyphs are the built-in 5×7 bitmap fallback, not the");
-    println!("                SWF-embedded Rajdhani font. Phase 7 will load the SWF font.");
-    println!("             3) Manufacturer post-process (amber CRT tint, scanline overlay)");
-    println!("                deferred to Phase 8.");
-    println!("  Match quality: STRUCTURAL (layout, button count, lit/unlit state, color).");
+    println!("  Rendered:  Canvas walk path from annunciator_fixture(); all buttons dark.");
+    println!("  Gaps:      SWF glyphs/assets and manufacturer CRT post-process deferred.");
+    println!("  Match quality: STRUCTURAL (layout, button count, default state, color).");
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -369,18 +350,19 @@ fn render_target_status_to_png() {
     let assets = empty_assets();
     let ctx = ComposeContext { style: &style, defaults: &defaults, assets: &assets };
 
-    // Method A: use the high-level helper (accurate layout).
-    let img = draw_target_status(
-        ">> NO TARGET <<",
-        "< TARGET STATUS >",
-        1600, 900,
-        &style,
-    ).expect("target status render failed");
+    let fixture = target_status_fixture();
+    let record = CanvasParser::parse(
+        "b8d2d65c-05c5-49f2-bdf5-3a722c92a3d9",
+        "MC_S_Target_Master",
+        &fixture,
+    ).expect("fixture parse failed");
+    let canvas = ResolvedCanvas { root: record, children: Default::default() };
 
+    let img = render_canvas(&canvas, &ctx, ComposeTarget { width: 1600, height: 900 })
+        .expect("render_canvas failed for target status fixture");
     let png = encode_png(&img).expect("PNG encode failed");
     save_png("target_status.png", &png);
 
-    // Structural checks.
     assert_eq!(img.width(), 1600);
     assert_eq!(img.height(), 900);
 
@@ -390,39 +372,11 @@ fn render_target_status_to_png() {
     }).count();
     assert!(non_bg > 200, "target status should have visible content; got {non_bg} non-bg pixels");
 
-    // Method B: render via canvas fixture + render_canvas (exercises the
-    // generic walk path).  Output is saved separately for comparison.
-    let fixture = target_status_fixture();
-    let record = CanvasParser::parse(
-        "b8d2d65c-05c5-49f2-bdf5-3a722c92a3d9",
-        "MC_S_Target_Master",
-        &fixture,
-    ).expect("fixture parse failed");
-    let canvas = ResolvedCanvas { root: record, children: Default::default() };
-
-    let img2 = starbreaker_ui::render_canvas(&canvas, &ctx, ComposeTarget { width: 1600, height: 900 })
-        .expect("render_canvas failed for target status fixture");
-    let png2 = encode_png(&img2).expect("PNG encode failed");
-    save_png("target_status_canvas_walk.png", &png2);
-
     println!();
     println!("--- Comparison vs Screen_Right_Upper_RTT.png ---");
-    println!("  Reference: Amber CRT frame; upper dashed separator; '>> NO TARGET <<'");
-    println!("             centered in amber; lower dashed separator;");
-    println!("             '< TARGET STATUS >' footer with left/right chevrons;");
-    println!("             dark warm-brown CRT background with scanline texture.");
-    println!("  Rendered (helper):  Dark background; two horizontal dashed lines at 25%");
-    println!("             and 75% height; '>> NO TARGET <<' centered (amber); footer");
-    println!("             '< TARGET STATUS >' near bottom.");
-    println!("  Rendered (canvas walk):  Applies fixture scene items (rectangles, text)");
-    println!("             via the generic walk; text positioned by transform coordinates.");
-    println!("  Gaps:      1) No outer CRT frame / rounded-corner bezels (Phase 7).");
-    println!("             2) '<<' and '>>' are separate text items in fixture, not");
-    println!("                part of the 'NO TARGET' string — position may drift.");
-    println!("                High-level helper hard-codes '>> NO TARGET <<' correctly.");
-    println!("             3) Scanline/CRT post-process deferred to Phase 8.");
-    println!("             4) Binding substitution is working: /vehicle/targetname → 'NO TARGET'.");
-    println!("  Match quality: STRUCTURAL for helper path; LAYOUT-APPROXIMATE for canvas walk.");
+    println!("  Rendered:  Canvas walk path from target_status_fixture().");
+    println!("  Gaps:      No outer CRT frame, SWF font outlines/assets, or scanline post-process.");
+    println!("  Match quality: STRUCTURAL for generic canvas walk.");
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -443,12 +397,6 @@ fn render_door_panel_to_png() {
     let assets = empty_assets();
     let ctx = ComposeContext { style: &style, defaults: &defaults, assets: &assets };
 
-    // Method A: high-level helper.
-    let img = draw_door_panel("CLOSED", 512, 512, &style).expect("door panel render failed");
-    let png = encode_png(&img).expect("PNG encode failed");
-    save_png("door_panel.png", &png);
-
-    // Method B: canvas walk with fixture.
     let fixture = door_fixture();
     let record = CanvasParser::parse(
         "76d12163-0824-42ed-b8e1-c3a822e6185f",
@@ -457,12 +405,11 @@ fn render_door_panel_to_png() {
     ).expect("fixture parse failed");
     let canvas = ResolvedCanvas { root: record, children: Default::default() };
 
-    let img2 = starbreaker_ui::render_canvas(&canvas, &ctx, ComposeTarget { width: 512, height: 512 })
+    let img = render_canvas(&canvas, &ctx, ComposeTarget { width: 512, height: 512 })
         .expect("render_canvas failed for door fixture");
-    let png2 = encode_png(&img2).expect("PNG encode failed");
-    save_png("door_panel_canvas_walk.png", &png2);
+    let png = encode_png(&img).expect("PNG encode failed");
+    save_png("door_panel.png", &png);
 
-    // Structural checks.
     assert_eq!(img.width(), 512);
     assert_eq!(img.height(), 512);
 
@@ -474,22 +421,8 @@ fn render_door_panel_to_png() {
 
     println!();
     println!("--- Comparison vs Door-closed.png ---");
-    println!("  Reference: Amber Drake logo at top; '> CLOSED <' centered in amber");
-    println!("             bold text; horizontal amber band background behind text;");
-    println!("             dark background; wide-format landscape panel (approx 320×120).");
-    println!("  Rendered (helper, 512×512): Dark background; 'DOOR CONTROL' header;");
-    println!("             horizontal separator; OPEN (outlined) and CLOSE (filled) buttons;");
-    println!("             'CLOSED' status text; bottom separator.");
-    println!("  Rendered (canvas walk):  Outer border rectangle; DRAKE text; separator;");
-    println!("             '> CLOSED <' status text.");
-    println!("  Gaps:      1) Reference is landscape; rendered is square (512×512).");
-    println!("                Real canvas resolution from DataCore is TBD (Phase 9 will");
-    println!("                resolve from SCItemPhysicalScreenComponentParams).");
-    println!("             2) Drake logo bitmap not available without SWF assets —");
-    println!("                approximated as 'DRAKE' text (Phase 7 will load SWF bitmap).");
-    println!("             3) The OPEN/CLOSE button layout is a structural approximation;");
-    println!("                real canvas may use a single 'CLOSED' indicator without buttons.");
-    println!("             4) Post-process (amber CRT, scanlines) deferred to Phase 8.");
+    println!("  Rendered:  Canvas walk path from door_fixture().");
+    println!("  Gaps:      Drake logo bitmap, exact landscape aspect, and CRT post-process deferred.");
     println!("  Match quality: STRUCTURAL (dark bg, amber text/borders, status text present).");
 }
 
