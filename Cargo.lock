@@ -5468,6 +5468,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "starbreaker-ui"
+version = "0.3.1"
+dependencies = [
+ "flate2",
+ "image",
+ "log",
+ "sha2",
+ "swf",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "starbreaker-wem"
 version = "0.3.1"
 dependencies = [
