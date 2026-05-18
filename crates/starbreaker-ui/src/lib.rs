@@ -6,17 +6,19 @@
 //! `RgbaImage` outputs for ship screen textures.
 //!
 //! # Modules
-//! - [`canvas`]    — BuildingBlocks canvas record parser and widget tree resolver.
-//! - [`compose`]   — Canvas-to-image compositor via `tiny-skia`.
-//! - [`defaults`]  — Default "switched on" state values for game-state-bound widgets.
-//! - [`error`]     — Unified [`UiError`] type.
-//! - [`style`]     — Manufacturer style (tint, CRT params) loader.
-//! - [`swf_assets`] — SWF static-atom extractor and [`SwfAssetLibrary`].
+//! - [`canvas`]      — BuildingBlocks canvas record parser and widget tree resolver.
+//! - [`compose`]     — Canvas-to-image compositor via `tiny-skia`.
+//! - [`defaults`]    — Default "switched on" state values for game-state-bound widgets.
+//! - [`error`]       — Unified [`UiError`] type.
+//! - [`postprocess`] — Manufacturer post-process passes (tint, scanlines, vignette).
+//! - [`style`]       — Manufacturer style (tint, CRT params) loader.
+//! - [`swf_assets`]  — SWF static-atom extractor and [`SwfAssetLibrary`].
 
 pub mod canvas;
 pub mod compose;
 pub mod defaults;
 pub mod error;
+pub mod postprocess;
 pub mod style;
 pub mod swf_assets;
 
@@ -35,4 +37,7 @@ pub use defaults::DefaultValueRegistry;
 pub use style::{CrtParams, ManufacturerStyle, StyleLoader};
 
 // Re-export composer API.
-pub use compose::{ComposeContext, ComposeTarget, encode_png, render_canvas};
+pub use compose::{ComposeContext, ComposeTarget, encode_png, render_canvas, render_canvas_with_postprocess};
+
+// Re-export post-process API.
+pub use postprocess::{PostProcessOptions, PostProcessor};

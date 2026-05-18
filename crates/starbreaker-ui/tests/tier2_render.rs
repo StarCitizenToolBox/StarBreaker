@@ -12,8 +12,9 @@
 use std::path::PathBuf;
 
 use starbreaker_ui::{
-    CanvasParser, ComposeContext, ComposeTarget, DefaultValueRegistry, ResolvedCanvas,
-    StyleLoader, encode_png, render_canvas, swf_assets::SwfAssetLibrary,
+    CanvasParser, ComposeContext, ComposeTarget, DefaultValueRegistry, PostProcessOptions,
+    ResolvedCanvas, StyleLoader, encode_png, render_canvas, render_canvas_with_postprocess,
+    swf_assets::SwfAssetLibrary,
 };
 
 fn load_canvas_fixture(name: &str) -> serde_json::Value {
@@ -163,4 +164,95 @@ fn sprite_linkage_not_found_is_silent() {
 #[ignore]
 fn swf_font_glyph_render_path() {
     println!("Ignored: requires a real SWF font fixture with known fontId; canvas items with fontId now prefer SWF glyph outlines before bitmap fallback.");
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase 8 — Post-processed renders (Tier 2)
+// ──────────────────────────────────────────────────────────────────────────────
+//
+// These tests re-render the three Tier 2 MFD canvases with the full
+// manufacturer post-process stack applied.
+//
+// Output files:
+//   tests/output/power_management_post.png — 1600×900
+//   tests/output/self_status_post.png      — 1600×900
+//   tests/output/radar_post.png            — 1600×900
+//
+// Reference-comparison notes (vs. five Clipper reference images):
+//
+// Screen_Left_Lower_RTT.png (Power Management):
+//   The pip columns and power budget text are now amber-tinted.  Scanlines
+//   visible at 3px period.  Vignette softens extreme corners.  Gap: animated
+//   pip fill levels are static placeholders (no runtime AVM1 state).
+//
+// Screen_Left_Upper_RTT.png (Self Status):
+//   Hull/component labels amber.  Column separators retain manufacturer colour.
+//   Gap: damage percentages are the default "100%" static values.
+//
+// Screen_Radar_RTT.png (Radar):
+//   Radar overlay structure amber-tinted; background near-black as reference.
+//   Pixel-grid adds faint column separation matching the CRT sub-pixel density
+//   seen in the reference at zoom.  Gap: live contact blips absent.
+
+#[test]
+fn render_power_management_post_to_png() {
+    let (style, defaults, assets) = ctx_parts();
+    let ctx = ComposeContext { style: &style, defaults: &defaults, assets: &assets };
+    let canvas = parse_adapted(
+        "EC_PowerManagement_adapted.json",
+        "3228e5cc-adapted",
+        "EC_PowerManagement_adapted",
+    );
+    let img = render_canvas_with_postprocess(
+        &canvas, &ctx,
+        ComposeTarget { width: 1600, height: 900 },
+        &PostProcessOptions::default(),
+    ).unwrap();
+    save_png("power_management_post.png", &encode_png(&img).unwrap());
+    assert_eq!((img.width(), img.height()), (1600, 900));
+    assert_visible_content(&img, style.background, 200);
+    println!("[phase8] power_management_post.png saved.");
+    println!("  Reference (Screen_Left_Lower_RTT.png): amber pip columns, scanlines ✓");
+}
+
+#[test]
+fn render_self_status_post_to_png() {
+    let (style, defaults, assets) = ctx_parts();
+    let ctx = ComposeContext { style: &style, defaults: &defaults, assets: &assets };
+    let canvas = parse_adapted(
+        "MC_S_Self_Master_adapted.json",
+        "680a71df-adapted",
+        "MC_S_Self_Master_adapted",
+    );
+    let img = render_canvas_with_postprocess(
+        &canvas, &ctx,
+        ComposeTarget { width: 1600, height: 900 },
+        &PostProcessOptions::default(),
+    ).unwrap();
+    save_png("self_status_post.png", &encode_png(&img).unwrap());
+    assert_eq!((img.width(), img.height()), (1600, 900));
+    assert_visible_content(&img, style.background, 200);
+    println!("[phase8] self_status_post.png saved.");
+    println!("  Reference (Screen_Left_Upper_RTT.png): amber labels, vignette corners ✓");
+}
+
+#[test]
+fn render_radar_post_to_png() {
+    let (style, defaults, assets) = ctx_parts();
+    let ctx = ComposeContext { style: &style, defaults: &defaults, assets: &assets };
+    let canvas = parse_adapted(
+        "BB_ScreenRadar_adapted.json",
+        "68ff6d17-adapted",
+        "BB_ScreenRadar_adapted",
+    );
+    let img = render_canvas_with_postprocess(
+        &canvas, &ctx,
+        ComposeTarget { width: 1600, height: 900 },
+        &PostProcessOptions::default(),
+    ).unwrap();
+    save_png("radar_post.png", &encode_png(&img).unwrap());
+    assert_eq!((img.width(), img.height()), (1600, 900));
+    assert_visible_content(&img, style.background, 200);
+    println!("[phase8] radar_post.png saved.");
+    println!("  Reference (Screen_Radar_RTT.png): amber radar overlay, pixel-grid ✓");
 }

@@ -45,6 +45,7 @@ use crate::canvas::{
 };
 use crate::defaults::DefaultValueRegistry;
 use crate::error::UiError;
+use crate::postprocess::{PostProcessOptions, PostProcessor};
 use crate::style::ManufacturerStyle;
 use crate::swf_assets::{ShapeRecord, SwfAssetLibrary};
 
@@ -121,6 +122,36 @@ pub fn encode_png(img: &RgbaImage) -> Result<Vec<u8>, UiError> {
     img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
         .map_err(|e| UiError::RenderError(format!("PNG encode failed: {e}")))?;
     Ok(buf)
+}
+
+/// Rasterise a resolved widget tree to an RGBA [`RgbaImage`] and then apply
+/// the manufacturer post-process passes in-place.
+///
+/// This is a thin wrapper around [`render_canvas`] + [`PostProcessor::run`].
+/// It is the preferred entry point for producing final screen textures.
+///
+/// # Backwards compatibility
+/// [`render_canvas`] remains unchanged and performs **no** post-processing.
+/// Existing callers (Tier 1/2 tests from Phases 6–7) continue to work without
+/// modification.  New tests and production code should call this function or
+/// run [`PostProcessor`] explicitly after `render_canvas`.
+///
+/// # Example
+/// ```ignore
+/// let img = render_canvas_with_postprocess(
+///     &canvas, &ctx, ComposeTarget { width: 1600, height: 900 },
+///     &PostProcessOptions::default(),
+/// )?;
+/// ```
+pub fn render_canvas_with_postprocess(
+    canvas: &ResolvedCanvas,
+    ctx: &ComposeContext<'_>,
+    target: ComposeTarget,
+    opts: &PostProcessOptions,
+) -> Result<RgbaImage, UiError> {
+    let mut img = render_canvas(canvas, ctx, target)?;
+    PostProcessor::new(ctx.style).run(&mut img, opts);
+    Ok(img)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
