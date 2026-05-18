@@ -91,7 +91,27 @@ fn resolve_canvas_graph_inner(
     //
     // Each referenced child canvas is resolved recursively so multi-level
     // hierarchies (master → gen → leaf) are fully expanded.
+    //
+    // Style entries may be unconditional (always active) or conditional
+    // (mode-specific, e.g. GunsMode vs NavMode vs TurretMode on a self-status
+    // canvas).  Following *all* conditional entries in a static render merges
+    // every sub-view at the canvas origin and produces overlapping text.
+    // To avoid this, only the first conditional entry is followed; subsequent
+    // ones are skipped.  Unconditional entries (empty `conditionsList`) are
+    // always followed since they represent always-visible content.
+    let mut conditional_entry_seen = false;
     for entry in pick_active_entries(record_value, manufacturer_id) {
+        let has_conditions = entry
+            .get("conditionsList")
+            .and_then(|v| v.as_array())
+            .map(|arr| !arr.is_empty())
+            .unwrap_or(false);
+        if has_conditions {
+            if conditional_entry_seen {
+                continue;
+            }
+            conditional_entry_seen = true;
+        }
         let match_to = entry.get("matchTo").and_then(|v| v.as_str()).unwrap_or("");
         let Some(modifiers) = entry.get("modifiers").and_then(|v| v.as_array()) else {
             continue;

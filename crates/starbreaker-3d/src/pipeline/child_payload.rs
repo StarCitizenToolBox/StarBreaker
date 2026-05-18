@@ -281,24 +281,17 @@ pub(crate) fn load_child_payloads(
 ) -> Vec<crate::types::EntityPayload> {
     use rayon::prelude::*;
 
-    // Pre-resolve dashboard screen canvases for each unique parent entity so that
-    // physical bindings with no inline content canvas can be assigned one positionally.
-    let dashboard_canvases_by_parent: HashMap<String, Vec<(u32, u32, String, Option<String>)>> = {
-        let mut map: HashMap<String, Vec<(u32, u32, String, Option<String>)>> = HashMap::new();
+    // Pre-resolve physical screen canvases for each unique parent entity, keyed
+    // by geometry name so physical bindings are matched by name, not position.
+    let physical_screen_canvases_by_parent: HashMap<String, HashMap<String, (String, Option<String>)>> = {
+        let mut map = HashMap::new();
         for spec in &specs {
             let parent_name = &spec.parent_entity_name;
             if map.contains_key(parent_name) {
                 continue;
             }
             let canvases = find_entity_record_by_name(db, parent_name)
-                .and_then(|parent_record| {
-                    let config_val = query_value_path(
-                        db,
-                        parent_record,
-                        "Components[SCItemUIViewOwnerParams].dashboardCanvasConfig",
-                    )?;
-                    Some(collect_dashboard_screen_canvases_from_value(db, &config_val))
-                })
+                .map(|parent_record| collect_physical_screen_canvases(db, parent_record))
                 .unwrap_or_default();
             map.insert(parent_name.clone(), canvases);
         }
@@ -321,9 +314,6 @@ pub(crate) fn load_child_payloads(
         }
         map
     };
-    // Per-parent counter tracking how many physical screen canvases have been assigned.
-    let mut parent_canvas_used: HashMap<String, usize> = HashMap::new();
-
     let mut ui_bindings_by_parent = HashMap::<String, Vec<UiBinding>>::new();
     let mut direct_ui_bindings = Vec::with_capacity(specs.len());
     for spec in &specs {
@@ -334,35 +324,22 @@ pub(crate) fn load_child_payloads(
             } else {
                 Some(spec.parent_node_name.clone())
             };
-            // For bindings without an inline content canvas, attempt to resolve
-            // one from the parent vehicle's data.  MFD screens are matched by
-            // geometry name (helper_name) via the MFD mode config; physical screens
-            // are assigned positionally from the dashboard canvas def.
+    // For bindings without an inline content canvas, attempt to resolve
+            // one from the parent vehicle's data.  MFD screens and physical screens
+            // are both matched by geometry name (helper_name).
             if binding.content_canvas_guid.is_none()
                 && matches!(binding.binding_kind.as_str(), "physical" | "mfd")
             {
-                if binding.binding_kind == "mfd" {
-                    if let Some((guid, name)) = binding.helper_name.as_deref().and_then(|h| {
-                        mfd_canvases_by_parent
-                            .get(&spec.parent_entity_name)
-                            .and_then(|m| m.get(h))
-                    }) {
-                        binding.content_canvas_guid = Some(guid.clone());
-                        binding.content_canvas_record_name = name.clone();
-                    }
-                } else if let Some(canvases) =
-                    dashboard_canvases_by_parent.get(&spec.parent_entity_name)
-                {
-                    let used = parent_canvas_used
-                        .entry(spec.parent_entity_name.clone())
-                        .or_insert(0);
-                    if let Some((view_idx, screen_slot, guid, name)) = canvases.get(*used) {
-                        binding.content_canvas_guid = Some(guid.clone());
-                        binding.content_canvas_record_name = name.clone();
-                        binding.dashboard_view_index = Some(*view_idx);
-                        binding.dashboard_screen_slot = Some(*screen_slot);
-                        *used += 1;
-                    }
+                if let Some((guid, name)) = binding.helper_name.as_deref().and_then(|h| {
+                    let map = if binding.binding_kind == "mfd" {
+                        mfd_canvases_by_parent.get(&spec.parent_entity_name)
+                    } else {
+                        physical_screen_canvases_by_parent.get(&spec.parent_entity_name)
+                    }?;
+                    map.get(h)
+                }) {
+                    binding.content_canvas_guid = Some(guid.clone());
+                    binding.content_canvas_record_name = name.clone();
                 }
             }
             binding
@@ -815,53 +792,57 @@ fn find_entity_record_by_name<'a>(db: &'a Database<'a>, name: &str) -> Option<&'
     })
 }
 
-/// Find a `SCItemUIView_DashboardCanvasDef` record from a `dashboardCanvasConfig` value.
-///
-/// Collect non-null screen canvas entries from an inline `SCItemUIView_DashboardCanvasDef`
-/// `Value` (i.e. the materialized `dashboardCanvasConfig` field on the parent entity).
-///
-/// Screens may be stored as DataCore `Reference` fields, which `query_no_references` leaves
-/// as `Value::Guid` — handled by [`value_stringish`].  Returns
-/// `(view_index, screen_slot, canvas_guid, canvas_record_name)` tuples.
-fn collect_dashboard_screen_canvases_from_value(
+/// Collect per-physical-screen default content canvases from a dashboard entity
+/// that carries `SCItemSeatDashboardParams.PhysicalScreenParams.Screens`.
+/// Returns a map from geometry name (e.g. `"screen_flight_hud_left"`) to
+/// `(canvas_guid, canvas_record_name)`.
+fn collect_physical_screen_canvases(
     db: &Database,
-    config_val: &Value,
-) -> Vec<(u32, u32, String, Option<String>)> {
-    let views = match value_object(config_val, "views") {
-        Some(Value::Array(v)) => v,
-        _ => return Vec::new(),
+    dashboard_entity_record: &Record,
+) -> HashMap<String, (String, Option<String>)> {
+    let phys_params = match query_value_path(
+        db,
+        dashboard_entity_record,
+        "Components[SCItemSeatDashboardParams].PhysicalScreenParams",
+    ) {
+        Some(v) => v,
+        None => return HashMap::new(),
     };
-    let mut result = Vec::new();
-    for (view_idx, view) in views.iter().enumerate() {
-        let screens = match value_object(view, "screens") {
-            Some(Value::Array(s)) => s.iter().collect::<Vec<_>>(),
-            Some(other) => vec![other],
-            None => continue,
+
+    let screens = match value_object(&phys_params, "Screens") {
+        Some(Value::Array(v)) => v,
+        _ => return HashMap::new(),
+    };
+
+    let mut result = HashMap::new();
+    for screen in screens.iter() {
+        let geom_name = match value_object_string(screen, "geometryName") {
+            Some(n) if !n.is_empty() => n,
+            _ => continue,
         };
-        for (slot_idx, screen) in screens.iter().enumerate() {
-            // When screens are stored as DataCore References, query_no_references yields
-            // Value::Guid(record_id) containing the exact CigGuid.  Using it directly
-            // avoids a lossy string round-trip through the mixed-endian display format.
-            let canvas_record = match screen {
-                Value::Guid(g) if !g.is_empty() => db.record_by_id(g),
-                _ => {
-                    // Fall back to string extraction for file-path or GUID strings.
-                    let path = match value_stringish(screen) {
-                        Some(p) if !p.is_empty() && p != "null" && !is_zero_guid(&p) => p,
-                        _ => continue,
-                    };
-                    find_canvas_record_by_path_or_guid(db, &path)
-                }
-            };
-            let Some(canvas_record) = canvas_record else { continue };
-            if canvas_record.id.is_empty() { continue; }
-            let guid = canvas_record.id.to_string();
-            let name = {
-                let n = db.resolve_string2(canvas_record.name_offset).to_string();
-                if n.is_empty() { None } else { Some(n) }
-            };
-            result.push((view_idx as u32, slot_idx as u32, guid, name));
+
+        let canvas_record = match value_object(screen, "canvas") {
+            Some(Value::Guid(g)) if !g.is_empty() => db.record_by_id(g),
+            Some(other) => {
+                let path = match value_stringish(other) {
+                    Some(p) if !p.is_empty() && p != "null" && !is_zero_guid(&p) => p,
+                    _ => continue,
+                };
+                find_canvas_record_by_path_or_guid(db, &path)
+            }
+            _ => continue,
+        };
+
+        let Some(canvas_record) = canvas_record else { continue };
+        if canvas_record.id.is_empty() {
+            continue;
         }
+        let guid = canvas_record.id.to_string();
+        let name = {
+            let n = db.resolve_string2(canvas_record.name_offset).to_string();
+            if n.is_empty() { None } else { Some(n) }
+        };
+        result.insert(geom_name, (guid, name));
     }
     result
 }
@@ -914,9 +895,9 @@ fn build_mfd_view_canvas_map(db: &Database) -> HashMap<String, (String, Option<S
 /// (e.g. `"Screen_Left_Upper_RTT"`) to `(canvas_guid, canvas_record_name)`.
 ///
 /// The selection logic mirrors the game's runtime default:
-/// - `primaryMFD`          → `defaultConfiguration.primaryMFDScreenView`
+/// - `primaryMFD`          → `defaultConfiguration.leftCastView`
 /// - `defaultCommsCallMFD` → `defaultConfiguration.rightCastView`
-/// - remaining MFDs (in `MFDs[]` order) → `leftCastView`, then
+/// - remaining MFDs (in `MFDs[]` order) → `primaryMFDScreenView`, then
 ///   `secondaryMFDScreen1View` … `secondaryMFDScreen5View`
 pub(crate) fn collect_mfd_default_canvases(
     db: &Database,
@@ -981,13 +962,13 @@ pub(crate) fn collect_mfd_default_canvases(
     let view_canvas = build_mfd_view_canvas_map(db);
     let mut result = HashMap::new();
 
-    // Assign primary MFD.
-    if let (Some(name), Some(view)) = (&primary_name, &primary_view) {
+    // Assign primary MFD → leftCastView (e.g. SelfStatus).
+    if let (Some(name), Some(view)) = (&primary_name, &left_cast_view) {
         if let Some(canvas) = view_canvas.get(view) {
             result.insert(name.clone(), canvas.clone());
         }
     }
-    // Assign comms MFD.
+    // Assign comms MFD → rightCastView (e.g. TargetStatus).
     if let (Some(name), Some(view)) = (&comms_name, &right_cast_view) {
         if primary_name.as_deref() != Some(name.as_str()) {
             if let Some(canvas) = view_canvas.get(view) {
@@ -995,8 +976,8 @@ pub(crate) fn collect_mfd_default_canvases(
             }
         }
     }
-    // Assign remaining MFDs in order: leftCastView, secondaryMFDScreen1View, …
-    let remaining_views: Vec<&str> = std::iter::once(left_cast_view.as_deref())
+    // Assign remaining MFDs in order: primaryMFDScreenView, secondaryMFDScreen1View, …
+    let remaining_views: Vec<&str> = std::iter::once(primary_view.as_deref())
         .chain(secondary_views.iter().map(|v| v.as_deref()))
         .flatten()
         .collect();
