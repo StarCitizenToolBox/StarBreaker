@@ -281,6 +281,15 @@ fn resolve_value(v: &BbValue, primary_dim: f32, cross_dim: f32, canvas_scale: f3
                 // Cross-axis percent: width as % of parent height, or vice-versa.
                 "PercentOfY" if is_width => cross_dim * value,
                 "PercentOfX" if !is_width => cross_dim * value,
+                // "Auto": numeric value here is typically a content-fit hint
+                // baked at author time, but we do not yet have a proper
+                // content-measurement pass. Containers and text widgets both
+                // produced more reference-matching results when Auto falls
+                // back to "fill parent" — text is then free-positioned by
+                // its anchor/pivot/position inside a parent that owns the
+                // visible area. Children that needed tighter bounds will be
+                // revisited when content-measurement lands.
+                "Auto" => primary_dim,
                 other => {
                     warn!(
                         "bb_layout: unknown sizing behavior {:?} (value={}) — \

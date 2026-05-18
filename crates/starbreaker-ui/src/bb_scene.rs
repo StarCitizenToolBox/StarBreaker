@@ -582,7 +582,22 @@ fn parse_background(node: &serde_json::Value) -> Option<BbBackground> {
         return None;
     }
 
-    let fill_colour = bg.get("color").and_then(|c| parse_colour(Some(c)));
+    // Honour the BuildingBlocks `enable` flag: when an authored background has
+    // `enable: false`, the engine skips its fill_colour entirely and the panel
+    // contributes only via children. Some scenes carry a non-null `color`
+    // (often a debug yellow RGBA 255,255,0,255) gated behind `enable: false`;
+    // rendering that fill produces spurious opaque rectangles. The svgFill
+    // and segmentedFill sub-features are independent and remain available.
+    let bg_enable = bg
+        .get("enable")
+        .and_then(|e| e.as_bool())
+        .unwrap_or(true);
+
+    let fill_colour = if bg_enable {
+        bg.get("color").and_then(|c| parse_colour(Some(c)))
+    } else {
+        None
+    };
 
     let svg_fill_path = node
         .get("svgFill")

@@ -229,7 +229,13 @@ fn draw_node(
             }
         }
 
-        // Icon / image widgets: blit atlas or show a diamond placeholder.
+        // Icon / image widgets: blit atlas or render nothing.
+        // BB `WidgetIcon` / `WidgetImage` whose atlas cannot be resolved
+        // typically reference DDS textures we have not yet decoded (paint /
+        // brand glyph sheets) or runtime-rendered Flash content. Painting a
+        // placeholder diamond at full widget size produces large geometric
+        // outlines that do not exist in the in-game reference; rendering
+        // nothing is structurally honest until the asset can be resolved.
         BbNodeType::WidgetIcon | BbNodeType::WidgetImage => {
             if let Some(img) = atlas.resolve_for_node(node, iw, ih) {
                 let tint = node
@@ -245,32 +251,44 @@ fn draw_node(
                     tint,
                     alpha,
                 );
-            } else {
-                draw_diamond_ts(pixmap, tsk_rect, ctx, alpha);
             }
         }
 
         // Text widgets are rendered in a second RgbaImage pass after tiny-skia output.
         BbNodeType::WidgetTextField | BbNodeType::WidgetText => {}
 
-        // Custom shapes: blit atlas when available; otherwise tinted fill + border.
-        // Fill colour comes from the manufacturer primary tint at moderate opacity so
-        // the shapes are visible as structural elements even without polygon data.
-        // The border is drawn using the full primary tint for crisp edge definition.
+        // Custom shapes: blit atlas when available; otherwise emit nothing.
+        // BB `WidgetCustomShape` whose `svgPath` is empty AND `rendererType`
+        // is `Flash` carries no static geometry — the shape is drawn by the
+        // SWF renderer at runtime from the parent Flash movie. Painting a
+        // filled rect or diamond placeholder for these produces large opaque
+        // panels (e.g. the chevron / greeble / NoTargetBox rectangles that
+        // dominated Right_Upper output) that do not exist in the in-game
+        // reference. Only render when an atlas image is actually resolved,
+        // or when the node owns its own non-empty svgPath / authored fill.
         BbNodeType::WidgetCustomShape => {
             if let Some(img) = atlas.resolve_for_node(node, iw, ih) {
                 blit_atlas_image(pixmap, &img, rect.x as i32, rect.y as i32, alpha);
-            } else {
-                let pt = &ctx.style.primary_tint;
-                let fill = [
-                    pt.r as f32 / 255.0,
-                    pt.g as f32 / 255.0,
-                    pt.b as f32 / 255.0,
-                    0.60,
-                ];
-                fill_rect_ts(pixmap, tsk_rect, fill, alpha);
                 if let Some(border) = &node.border {
                     draw_border_ts(pixmap, tsk_rect, border, ctx, alpha, &node.raw);
+                }
+            } else {
+                // Fall through to authored fill / border only when one is
+                // present. Empty Flash-rendered shapes draw nothing.
+                let bg_fill = node_fill_rgba(node);
+                if bg_fill[3] > 0.005 {
+                    fill_rect_ts(pixmap, tsk_rect, bg_fill, alpha);
+                }
+                if let Some(border) = &node.border {
+                    let max_w = border
+                        .top
+                        .width
+                        .max(border.right.width)
+                        .max(border.bottom.width)
+                        .max(border.left.width);
+                    if max_w > 0.5 {
+                        draw_border_ts(pixmap, tsk_rect, border, ctx, alpha, &node.raw);
+                    }
                 }
             }
         }
