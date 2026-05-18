@@ -504,9 +504,17 @@ pub struct UiBinding {
     pub canvas_guid: Option<String>,
     pub canvas_record_name: Option<String>,
     pub canvas_record_path: Option<String>,
+    pub canvas_widget_canvas_path: Option<String>,
+    pub canvas_widget_url_postfix: Option<String>,
+    pub canvas_widget_url_optional: Option<String>,
+    pub canvas_variable_binding: Option<String>,
     pub owner_source_file: Option<String>,
     pub runtime_image_source: Option<String>,
     pub generated_image_path: Option<String>,
+    pub generated_context_manifest_path: Option<String>,
+    pub generated_resolved_source_path: Option<String>,
+    pub generated_backend: Option<String>,
+    pub generated_provenance: Option<String>,
 }
 
 pub struct EntityPayload {

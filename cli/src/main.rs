@@ -11,6 +11,7 @@ mod nmc;
 mod p4k;
 mod skin;
 mod socpak;
+mod ui;
 mod wwise;
 
 use clap::{Parser, Subcommand};
@@ -143,6 +144,11 @@ enum Command {
         #[command(subcommand)]
         command: nmc::NmcCommand,
     },
+    /// UI render replay helpers
+    Ui {
+        #[command(subcommand)]
+        command: ui::UiCommand,
+    },
 }
 
 fn main() {
@@ -175,6 +181,7 @@ fn main() {
         Command::Chf { command } => command.run(),
         Command::Wwise { command } => command.run(),
         Command::Nmc { command } => command.run(),
+        Command::Ui { command } => command.run(),
     };
 
     if let Err(e) = result {

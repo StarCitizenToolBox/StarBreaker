@@ -18,6 +18,7 @@ starbreaker-3d = { path = "../crates/starbreaker-3d" }
 starbreaker-blend = { path = "../crates/starbreaker-blend" }
 starbreaker-cryxml = { path = "../crates/starbreaker-cryxml" }
 starbreaker-dds = { path = "../crates/starbreaker-dds" }
+starbreaker-gfx = { path = "../crates/starbreaker-gfx" }
 
 clap = { version = "4", features = ["derive", "env"] }
 thiserror = "2"

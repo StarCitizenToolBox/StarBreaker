@@ -443,6 +443,44 @@ pub(crate) fn ui_binding_for_record(db: &Database, record: &Record) -> Option<Ui
     if let Some(canvas_guid) = query_stringish_path(
         db,
         record,
+        "Components[SCItemUIViewOwnerParams].dashboardCanvasConfig",
+    ) {
+        let (canvas_record_name, canvas_record_path) = resolve_record_metadata(db, &canvas_guid);
+        let (canvas_widget_canvas_path, canvas_widget_url_postfix, canvas_widget_url_optional, canvas_variable_binding) =
+            canvas_widget_context_for_guid(db, &canvas_guid);
+        if canvas_widget_canvas_path.is_some()
+            || canvas_widget_url_postfix.is_some()
+            || canvas_widget_url_optional.is_some()
+            || canvas_variable_binding.is_some()
+        {
+            return Some(UiBinding {
+                binding_kind: "physical".to_string(),
+                source_entity_name: String::new(),
+                helper_name: None,
+                default_view: None,
+                default_state_name: default_state_name.clone(),
+                default_light_color,
+                default_light_intensity_milli,
+                canvas_guid: Some(canvas_guid),
+                canvas_record_name,
+                canvas_record_path,
+                canvas_widget_canvas_path,
+                canvas_widget_url_postfix,
+                canvas_widget_url_optional,
+                canvas_variable_binding,
+                owner_source_file,
+                runtime_image_source,
+                generated_image_path: None,
+                generated_context_manifest_path: None,
+                generated_resolved_source_path: None,
+                generated_backend: None,
+                generated_provenance: None,
+            });
+        }
+    }
+    if let Some(canvas_guid) = query_stringish_path(
+        db,
+        record,
         "Components[UIMapEntityComponentParams].uiElementsCanvasGUID",
     )
     .or_else(|| {
@@ -453,6 +491,8 @@ pub(crate) fn ui_binding_for_record(db: &Database, record: &Record) -> Option<Ui
         )
     }) {
         let (canvas_record_name, canvas_record_path) = resolve_record_metadata(db, &canvas_guid);
+        let (canvas_widget_canvas_path, canvas_widget_url_postfix, canvas_widget_url_optional, canvas_variable_binding) =
+            canvas_widget_context_for_guid(db, &canvas_guid);
         return Some(UiBinding {
             binding_kind: "radar".to_string(),
             source_entity_name: String::new(),
@@ -464,9 +504,17 @@ pub(crate) fn ui_binding_for_record(db: &Database, record: &Record) -> Option<Ui
             canvas_guid: Some(canvas_guid),
             canvas_record_name,
             canvas_record_path,
+            canvas_widget_canvas_path,
+            canvas_widget_url_postfix,
+            canvas_widget_url_optional,
+            canvas_variable_binding,
             owner_source_file,
             runtime_image_source,
             generated_image_path: None,
+            generated_context_manifest_path: None,
+            generated_resolved_source_path: None,
+            generated_backend: None,
+            generated_provenance: None,
         });
     }
 
@@ -489,6 +537,11 @@ pub(crate) fn ui_binding_for_record(db: &Database, record: &Record) -> Option<Ui
         .as_deref()
         .map(|guid| resolve_record_metadata(db, guid))
         .unwrap_or((None, None));
+    let (canvas_widget_canvas_path, canvas_widget_url_postfix, canvas_widget_url_optional, canvas_variable_binding) =
+        canvas_guid
+            .as_deref()
+            .map(|guid| canvas_widget_context_for_guid(db, guid))
+            .unwrap_or((None, None, None, None));
     let binding_kind = match default_view.as_deref() {
         Some("_mfd") => "mfd",
         Some("_physicalScreen") => "physical",
@@ -505,10 +558,135 @@ pub(crate) fn ui_binding_for_record(db: &Database, record: &Record) -> Option<Ui
         canvas_guid,
         canvas_record_name,
         canvas_record_path,
+        canvas_widget_canvas_path,
+        canvas_widget_url_postfix,
+        canvas_widget_url_optional,
+        canvas_variable_binding,
         owner_source_file,
         runtime_image_source,
         generated_image_path: None,
+        generated_context_manifest_path: None,
+        generated_resolved_source_path: None,
+        generated_backend: None,
+        generated_provenance: None,
     })
+}
+
+fn canvas_widget_context_for_guid(
+    db: &Database,
+    canvas_guid: &str,
+) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
+    let Some(guid) = parse_guid(canvas_guid) else {
+        return (None, None, None, None);
+    };
+    let Some(record) = db.record_by_id(&guid) else {
+        return (None, None, None, None);
+    };
+    if let Some(Value::Array(views)) = query_value_path(db, record, "views") {
+        let mut fallback = (None, None, None, None);
+        for view in views {
+            let Some(screens) = value_object(&view, "screens") else {
+                continue;
+            };
+            let screens: Vec<&Value<'_>> = match screens {
+                Value::Array(values) => values.iter().collect(),
+                other => vec![other],
+            };
+            for screen in screens {
+                let Some(screen_guid) = value_stringish(screen) else {
+                    continue;
+                };
+                if is_zero_guid(&screen_guid) {
+                    continue;
+                }
+                let context = canvas_widget_context_for_guid(db, &screen_guid);
+                if context.0.is_some()
+                    || context.1.is_some()
+                    || context.2.is_some()
+                    || context.3.is_some()
+                {
+                    if context.3.is_some() || context.1.is_some() || context.2.is_some() {
+                        return context;
+                    }
+                    if fallback.0.is_none() {
+                        fallback = context;
+                    }
+                }
+            }
+        }
+        if fallback.0.is_some() || fallback.1.is_some() || fallback.2.is_some() || fallback.3.is_some() {
+            return fallback;
+        }
+    }
+    let scene = query_value_path(db, record, "scene");
+    let operations = query_value_path(db, record, "operations");
+
+    let mut canvas_path = None;
+    let mut url_postfix = None;
+    let mut url_optional = None;
+    if let Some(Value::Array(items)) = scene {
+        for item in items {
+            if value_object_string(&item, "_Type_").as_deref() != Some("BuildingBlocks_WidgetCanvas") {
+                continue;
+            }
+            canvas_path = value_object_string(&item, "canvas")
+                .filter(|value| !value.is_empty() && value != "null");
+            url_postfix = value_object_string(&item, "urlPostfix")
+                .filter(|value| !value.is_empty());
+            url_optional = value_object_string(&item, "urlOptional")
+                .filter(|value| !value.is_empty());
+            if canvas_path.is_some() || url_postfix.is_some() || url_optional.is_some() {
+                break;
+            }
+        }
+    }
+
+    let mut variable_binding = None;
+    if let Some(Value::Array(items)) = operations {
+        for item in items {
+            if value_object_string(&item, "_Type_").as_deref()
+                == Some("BuildingBlocks_BindingsIntegerVariable")
+            {
+                variable_binding = value_object_string(&item, "binding")
+                    .filter(|value| !value.is_empty());
+                if variable_binding.is_some() {
+                    break;
+                }
+            }
+        }
+    }
+
+    (canvas_path, url_postfix, url_optional, variable_binding)
+}
+
+fn value_stringish(value: &Value<'_>) -> Option<String> {
+    match value {
+        Value::String(text) => (!text.is_empty()).then_some((*text).to_string()),
+        Value::Guid(guid) => Some(guid.to_string()),
+        Value::Object { record_id: Some(guid), .. } => Some(guid.to_string()),
+        _ => None,
+    }
+}
+
+fn is_zero_guid(value: &str) -> bool {
+    value.trim().trim_matches('{').trim_matches('}').chars().all(|ch| ch == '0' || ch == '-')
+}
+
+fn parse_guid(value: &str) -> Option<CigGuid> {
+    let trimmed = value.trim().trim_matches('{').trim_matches('}');
+    let mut bytes = [0u8; 16];
+    let mut chars = trimmed.chars().filter(|ch| *ch != '-');
+    for byte in &mut bytes {
+        let hi = chars.next()?;
+        let lo = chars.next()?;
+        let hi = hi.to_digit(16)? as u8;
+        let lo = lo.to_digit(16)? as u8;
+        *byte = (hi << 4) | lo;
+    }
+    if chars.next().is_some() {
+        return None;
+    }
+    Some(CigGuid::from_bytes(bytes))
 }
 
 fn default_display_screen_state(
