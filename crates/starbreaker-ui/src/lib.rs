@@ -6,7 +6,7 @@
 //! `RgbaImage` outputs for ship screen textures.
 //!
 //! # Modules
-//! - [`canvas`]    — BuildingBlocks canvas record parser and widget tree resolver (stub).
+//! - [`canvas`]    — BuildingBlocks canvas record parser and widget tree resolver.
 //! - [`compose`]   — Canvas-to-image compositor via `tiny-skia` (stub).
 //! - [`defaults`]  — Default "switched on" state values for game-state-bound widgets (stub).
 //! - [`error`]     — Unified [`UiError`] type.
@@ -21,3 +21,9 @@ pub mod style;
 pub mod swf_assets;
 
 pub use error::UiError;
+
+// Re-export all public canvas types for convenience.
+pub use canvas::{
+    CanvasParser, CanvasRecord, CanvasView, CanvasWidgetTreeResolver, Operation, ResolvedCanvas,
+    RgbaColor, SceneItem, Transform2D, Value, ViewComponent,
+};
