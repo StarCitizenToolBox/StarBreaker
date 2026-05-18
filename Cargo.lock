@@ -5621,6 +5621,7 @@ dependencies = [
 name = "starbreaker-ui"
 version = "0.3.1"
 dependencies = [
+ "anyhow",
  "flate2",
  "image",
  "log",
@@ -5630,6 +5631,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "starbreaker-dds",
+ "starbreaker-p4k",
  "swf",
  "thiserror 2.0.18",
  "tiny-skia 0.11.4",
