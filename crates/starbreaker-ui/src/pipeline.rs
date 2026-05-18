@@ -554,12 +554,23 @@ fn canvas_has_flash_renderer(root_json: &serde_json::Value) -> bool {
 ///    - `{stem}Status.swf` (matches `TargetStatus.swf`, `OwnShipStatus.swf`, …)
 ///    - `{stem}.swf`        (fallback for SWFs without "Status" suffix)
 ///
+/// The generic `MC_S_*_Master` canvas family is manufacturer-independent and
+/// its Flash SWFs are canonically hosted under `RSI\SupportScreen16-9\`.
+/// When the primary brand-specific path does not exist (e.g. `DRA` ships that
+/// share these generic canvases without a ship-specific override), the RSI
+/// canonical path is appended as a structural fallback.
+///
 /// Returns the list in preference order; the caller tries each in turn.
 pub fn flash_swf_candidates(record_name: &str, manufacturer_id: &str) -> Vec<String> {
     // Strip optional DataCore prefix.
     let name = record_name
         .strip_prefix("BuildingBlocks_Canvas.")
         .unwrap_or(record_name);
+
+    // Detect whether this is a generic multi-ship canvas (MC_S_ prefix).  The
+    // generic canvases use Flash SWFs that live under RSI\SupportScreen16-9\
+    // regardless of which manufacturer's ship embeds them.
+    let is_generic_mc = name.starts_with("MC_S_") || name.starts_with("GEN_MC_S_");
 
     // Extract the stem: strip a leading "MC_S_" or "GEN_MC_S_" compound and
     // a trailing "_Master" or "_master" suffix, case-insensitively.
@@ -590,8 +601,19 @@ pub fn flash_swf_candidates(record_name: &str, manufacturer_id: &str) -> Vec<Str
         r"Data\UI\ShipInterface\assets\SWF\{brand}\SupportScreen16-9\"
     );
 
-    vec![
+    let mut candidates = vec![
         format!("{base}{stem}Status.swf"),
         format!("{base}{stem}.swf"),
-    ]
+    ];
+
+    // For generic MC_S_* canvases used by non-RSI ships, append the RSI
+    // SupportScreen16-9 canonical paths as structural fallbacks.  RSI is the
+    // primary host for these shared canvas SWFs in the P4K layout.
+    if is_generic_mc && brand != "RSI" {
+        let rsi_base = r"Data\UI\ShipInterface\assets\SWF\RSI\SupportScreen16-9\";
+        candidates.push(format!("{rsi_base}{stem}Status.swf"));
+        candidates.push(format!("{rsi_base}{stem}.swf"));
+    }
+
+    candidates
 }

@@ -109,9 +109,15 @@ pub fn render_bb_scene(
     // data — the runtime picks one via a BindingsBooleanField op. Without a
     // resolved binding we cannot know which alternate is canonical, so for
     // static export we render only the first sibling encountered at any given
-    // (parent, rect) key and drop the rest. This avoids the overlapping-text
+    // (x, y, w) position and drop the rest. This avoids the overlapping-text
     // smear seen in pre-A6 outputs.
-    let mut seen_text_rects: std::collections::HashSet<(i32, i32, i32, i32)> =
+    //
+    // Height is intentionally excluded from the dedup key: merged child canvases
+    // sometimes differ only in their computed height for the same widget (e.g.
+    // `text_Title` h=48 vs `text_Component` h=69 at the same x/y/w), which the
+    // (x, y, w, h) key would treat as distinct, leaving both texts rendered on
+    // top of each other.
+    let mut seen_text_rects: std::collections::HashSet<(i32, i32, i32)> =
         std::collections::HashSet::new();
     for &node_id in &layout.draw_order {
         let Some(node) = scene.nodes.get(&node_id) else {
@@ -130,7 +136,6 @@ pub fn render_bb_scene(
             rect.x.round() as i32,
             rect.y.round() as i32,
             rect.w.round() as i32,
-            rect.h.round() as i32,
         );
         if !seen_text_rects.insert(key) {
             continue;
