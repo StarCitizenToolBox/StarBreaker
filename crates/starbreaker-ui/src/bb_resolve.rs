@@ -4,51 +4,75 @@
 //!
 //! **Pass 1** — `defaultStyles` / `brandStyles` canvas-reference modifiers.
 //! Walks `defaultStyles.entries[]` (or a matching `brandStyles[]` entry) and
-//! fetches any `CanvasReferenceRecord`-typed modifier values.
+//! fetches any `CanvasReferenceRecord`-typed modifier values.  Each fetched
+//! child canvas is itself resolved recursively (up to `MAX_CANVAS_DEPTH`
+//! total levels), so deep hierarchies like
+//! `MC_S_Power_Master → GEN_MC_S_Power → gen_mc_s_powerlists → …` are fully
+//! expanded in one call.
 //!
 //! **Pass 2** — `WidgetCanvas.canvas` field.
 //! Some host canvases (e.g. `M_MFD_Screen`) have an empty `defaultStyles` and
 //! carry all their content via a `BuildingBlocks_WidgetCanvas` node whose
 //! `canvas` field is a `file://` URL pointing to the real content canvas.
-//! Pass 2 follows those references one level deep so the merged scene includes
-//! the content canvas nodes.  Recursion is capped at depth 1 to prevent cycles.
+//! Pass 2 follows those references recursively so the merged scene includes
+//! the full content hierarchy.  Both passes share the same depth counter and
+//! a global `visited` path set to guard against cycles.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::bb_scene::{BbNodeId, BbNodeType, BbScene, parse_bb_canvas};
 use crate::pipeline::extract_record_name;
 
-/// Maximum depth for `WidgetCanvas.canvas` recursion.
+/// Maximum total nesting depth across both passes.
 ///
-/// The real MFD hierarchy is three levels deep:
-/// `M_MFD_Screen` → `M_Eng_MFDContent` → `MC_S_Target_Master` → `GEN_MC_S_Target`.
-/// A cap of 4 gives headroom for one more nesting level before halting.
-const MAX_WIDGET_CANVAS_DEPTH: u8 = 4;
+/// The real MFD hierarchy has at least four levels:
+/// `M_MFD_Screen → MC_S_Power_Master → GEN_MC_S_Power → gen_mc_s_powerlists`.
+/// A cap of 8 provides ample headroom while still preventing runaway recursion.
+const MAX_CANVAS_DEPTH: u8 = 8;
 
-/// Parse `root_json`, fetch active style-referenced child canvases, and merge them.
+/// Parse `root_json`, recursively resolve all child canvases, and return a
+/// fully-merged [`BbScene`].
 ///
-/// `manufacturer_id` selects a matching `brandStyles[]` entry when present;
-/// otherwise, or when no brand matches, `defaultStyles.entries[]` are used.
-/// Individual child fetch or parse failures are logged and skipped so a partial
-/// scene can still be inspected.
+/// `manufacturer_id` selects a matching `brandStyles[]` entry (e.g. `"drak"`);
+/// when no brand matches, `defaultStyles.entries[]` are used at every level of
+/// the hierarchy.  Individual child fetch or parse failures are logged and
+/// skipped so a partial scene is still returned.
 pub fn resolve_canvas_graph(
     root_json: &serde_json::Value,
     manufacturer_id: Option<&str>,
     fetch_by_path: &dyn Fn(&str) -> Result<serde_json::Value, String>,
 ) -> Result<BbScene, String> {
-    resolve_canvas_graph_depth(root_json, manufacturer_id, fetch_by_path, 0)
+    let mut visited = HashSet::new();
+    // Seed visited with the root's own record name so cycles back to the root
+    // are caught without needing a separate check.
+    if let Some(name) = root_json.get("_RecordName_").and_then(|v| v.as_str()) {
+        visited.insert(name.to_ascii_lowercase());
+    }
+    resolve_canvas_graph_inner(root_json, manufacturer_id, fetch_by_path, 0, &mut visited)
 }
 
-fn resolve_canvas_graph_depth(
+/// Inner recursive resolver.  `visited` accumulates normalised record names
+/// (lower-cased basenames extracted from `file://` URLs or bare names) seen so
+/// far in the call chain; any path already in `visited` is skipped to break
+/// cycles.
+fn resolve_canvas_graph_inner(
     root_json: &serde_json::Value,
     manufacturer_id: Option<&str>,
     fetch_by_path: &dyn Fn(&str) -> Result<serde_json::Value, String>,
     depth: u8,
+    visited: &mut HashSet<String>,
 ) -> Result<BbScene, String> {
     let mut scene = parse_bb_canvas(root_json)?;
     let record_value = root_json.get("_RecordValue_").ok_or("missing _RecordValue_")?;
 
+    if depth >= MAX_CANVAS_DEPTH {
+        return Ok(scene);
+    }
+
     // Pass 1: follow defaultStyles / brandStyles canvas-reference modifiers.
+    //
+    // Each referenced child canvas is resolved recursively so multi-level
+    // hierarchies (master → gen → leaf) are fully expanded.
     for entry in pick_active_entries(record_value, manufacturer_id) {
         let match_to = entry.get("matchTo").and_then(|v| v.as_str()).unwrap_or("");
         let Some(modifiers) = entry.get("modifiers").and_then(|v| v.as_array()) else {
@@ -70,6 +94,13 @@ fn resolve_canvas_graph_depth(
                 continue;
             };
 
+            // Normalise path to a record name for cycle detection.
+            let norm = extract_record_name(path).to_ascii_lowercase();
+            if !visited.insert(norm) {
+                log::debug!("bb_resolve: skipping already-visited child canvas '{}'", path);
+                continue;
+            }
+
             let child_json = match fetch_by_path(path) {
                 Ok(json) => json,
                 Err(e) => {
@@ -77,10 +108,17 @@ fn resolve_canvas_graph_depth(
                     continue;
                 }
             };
-            let child_scene = match parse_bb_canvas(&child_json) {
+            // Recurse: resolve the child's own style-references and WidgetCanvas URLs.
+            let child_scene = match resolve_canvas_graph_inner(
+                &child_json,
+                manufacturer_id,
+                fetch_by_path,
+                depth + 1,
+                visited,
+            ) {
                 Ok(scene) => scene,
                 Err(e) => {
-                    log::warn!("bb_resolve: failed to parse child canvas '{}': {}", path, e);
+                    log::warn!("bb_resolve: failed to resolve child canvas '{}': {}", path, e);
                     continue;
                 }
             };
@@ -88,13 +126,14 @@ fn resolve_canvas_graph_depth(
         }
     }
 
-    // Pass 2: follow WidgetCanvas.canvas field references (depth-limited).
+    // Pass 2: follow WidgetCanvas.canvas field references.
     //
     // Host canvases such as M_MFD_Screen store their content canvas URL in the
     // `canvas` field of a `BuildingBlocks_WidgetCanvas` scene node rather than
     // in `defaultStyles.entries`.  We fetch and resolve each such URL so the
-    // merged scene captures the full content hierarchy.
-    if depth < MAX_WIDGET_CANVAS_DEPTH {
+    // merged scene captures the full content hierarchy.  The same `visited`
+    // set prevents cycles between canvas-field references and style-references.
+    {
         let canvas_urls: Vec<String> = scene
             .nodes
             .values()
@@ -104,9 +143,10 @@ fn resolve_canvas_graph_depth(
             .map(|url| url.to_owned())
             .collect();
 
-        let mut seen_urls: HashSet<String> = HashSet::new();
         for url in canvas_urls {
-            if !seen_urls.insert(url.clone()) {
+            let norm = extract_record_name(&url).to_ascii_lowercase();
+            if !visited.insert(norm) {
+                log::debug!("bb_resolve: skipping already-visited WidgetCanvas url '{}'", url);
                 continue;
             }
             let child_json = match fetch_by_path(&url) {
@@ -120,11 +160,12 @@ fn resolve_canvas_graph_depth(
                     continue;
                 }
             };
-            let child_scene = match resolve_canvas_graph_depth(
+            let child_scene = match resolve_canvas_graph_inner(
                 &child_json,
                 manufacturer_id,
                 fetch_by_path,
                 depth + 1,
+                visited,
             ) {
                 Ok(s) => s,
                 Err(e) => {
@@ -179,18 +220,33 @@ fn entries_from(value: &serde_json::Value) -> Vec<&serde_json::Value> {
 }
 
 fn merge_child_scene(parent_scene: &mut BbScene, child_scene: BbScene, match_to: &str) {
-    let offset = parent_scene
+    let BbScene { roots: child_roots, nodes: child_nodes, operations: child_ops, .. } = child_scene;
+
+    // Build a collision-free mapping from child original IDs to new IDs.
+    // We use a monotonic counter that wraps and skips any ID already present
+    // in the parent, so the merge is always safe regardless of the depth to
+    // which children have been recursively merged.
+    let mut next: BbNodeId = parent_scene
         .nodes
         .keys()
         .next_back()
         .copied()
         .unwrap_or(0)
-        .saturating_add(1);
+        .wrapping_add(1);
+    let mut id_map: HashMap<BbNodeId, BbNodeId> = HashMap::with_capacity(child_nodes.len());
+    for &orig_id in child_nodes.keys() {
+        // Advance past any ID already occupied in the parent or already
+        // assigned to another child node in this batch.
+        while parent_scene.nodes.contains_key(&next) || id_map.values().any(|&v| v == next) {
+            next = next.wrapping_add(1);
+        }
+        id_map.insert(orig_id, next);
+        next = next.wrapping_add(1);
+    }
 
-    let BbScene { roots: child_roots, nodes: child_nodes, operations: child_ops, .. } = child_scene;
     let child_roots_reided: Vec<BbNodeId> = child_roots
         .iter()
-        .map(|&id| id.saturating_add(offset))
+        .filter_map(|id| id_map.get(id).copied())
         .collect();
 
     let Some(host_parent_id) = find_host_parent(parent_scene, match_to) else {
@@ -199,31 +255,34 @@ fn merge_child_scene(parent_scene: &mut BbScene, child_scene: BbScene, match_to:
     };
 
     let mut inserted_child_roots = Vec::new();
-    for (_, mut node) in child_nodes {
-        let original_id = node.id;
-        node.id = node.id.saturating_add(offset);
-        node.parent = node.parent.map(|parent| parent.saturating_add(offset));
+    for (orig_id, mut node) in child_nodes {
+        let new_id = match id_map.get(&orig_id).copied() {
+            Some(id) => id,
+            None => {
+                log::warn!("bb_resolve: no id mapping for child node {orig_id}; skipping");
+                continue;
+            }
+        };
+        node.id = new_id;
+        node.parent = node.parent.and_then(|p| id_map.get(&p).copied());
         node.children = node
             .children
             .into_iter()
-            .map(|child| child.saturating_add(offset))
+            .filter_map(|c| id_map.get(&c).copied())
             .collect();
 
-        if child_roots.contains(&original_id) {
+        if child_roots.contains(&orig_id) {
             node.parent = Some(host_parent_id);
-            inserted_child_roots.push(node.id);
+            inserted_child_roots.push(new_id);
         }
 
-        if parent_scene.nodes.contains_key(&node.id) {
-            log::warn!("bb_resolve: skipping child node id collision at {}", node.id);
-            continue;
-        }
-        parent_scene.nodes.insert(node.id, node);
+        parent_scene.nodes.insert(new_id, node);
     }
 
+    // Remap ptr: / _PointsTo_:ptr: references in operations using id_map.
     let mut remapped_ops = child_ops;
     for op in &mut remapped_ops {
-        remap_ptrs_in_json(op, offset);
+        remap_ptrs_in_json_map(op, &id_map);
     }
     parent_scene.operations.extend(remapped_ops);
 
@@ -239,26 +298,30 @@ fn merge_child_scene(parent_scene: &mut BbScene, child_scene: BbScene, match_to:
     }
 }
 
-fn remap_ptrs_in_json(v: &mut serde_json::Value, offset: u32) {
+fn remap_ptrs_in_json_map(v: &mut serde_json::Value, id_map: &HashMap<BbNodeId, BbNodeId>) {
     match v {
         serde_json::Value::String(s) => {
-            if let Some(n) = s.strip_prefix("ptr:").and_then(|n| n.parse::<u32>().ok()) {
-                *s = format!("ptr:{}", n.saturating_add(offset));
+            if let Some(n) = s.strip_prefix("ptr:").and_then(|n| n.parse::<BbNodeId>().ok()) {
+                if let Some(&new_id) = id_map.get(&n) {
+                    *s = format!("ptr:{new_id}");
+                }
             } else if let Some(n) = s
                 .strip_prefix("_PointsTo_:ptr:")
-                .and_then(|n| n.parse::<u32>().ok())
+                .and_then(|n| n.parse::<BbNodeId>().ok())
             {
-                *s = format!("_PointsTo_:ptr:{}", n.saturating_add(offset));
+                if let Some(&new_id) = id_map.get(&n) {
+                    *s = format!("_PointsTo_:ptr:{new_id}");
+                }
             }
         }
         serde_json::Value::Array(arr) => {
             for item in arr {
-                remap_ptrs_in_json(item, offset);
+                remap_ptrs_in_json_map(item, id_map);
             }
         }
         serde_json::Value::Object(map) => {
             for value in map.values_mut() {
-                remap_ptrs_in_json(value, offset);
+                remap_ptrs_in_json_map(value, id_map);
             }
         }
         _ => {}
@@ -472,11 +535,10 @@ mod tests {
     #[test]
     fn resolve_follows_multiple_widget_canvas_levels() {
         // Verify that the resolver follows WidgetCanvas.canvas URLs at depth 1,
-        // 2, 3, and 4 (all within MAX_WIDGET_CANVAS_DEPTH = 4).
+        // 2, 3, and 4 (all within MAX_CANVAS_DEPTH = 8).
         //
-        // Chain: host → level1 → level2 → level3 → level4
-        // Each level has 1 root node + 1 WidgetCanvas child.
-        // Level4 has 1 root + 1 WidgetCanvas pointing to "level5" — must NOT fetch.
+        // Chain: host → level1 → level2 → level3 → level4 (leaf)
+        // Each level has 1 root node + 1 WidgetCanvas child (level4 is a leaf).
         fn make_canvas(name: &str, id: &str, child_url: Option<&str>) -> serde_json::Value {
             let scene_nodes: Vec<serde_json::Value> = {
                 let mut nodes = vec![serde_json::json!({
@@ -508,7 +570,8 @@ mod tests {
             })
         }
 
-        let level4 = make_canvas("level4", "00000000-0000-0000-0000-000000000004", Some("file://./level5.json"));
+        // level4 is a leaf — no child URL, so no fetch attempt for level5.
+        let level4 = make_canvas("level4", "00000000-0000-0000-0000-000000000004", None);
         let level3 = make_canvas("level3", "00000000-0000-0000-0000-000000000003", Some("file://./level4.json"));
         let level2 = make_canvas("level2", "00000000-0000-0000-0000-000000000002", Some("file://./level3.json"));
         let level1 = make_canvas("level1", "00000000-0000-0000-0000-000000000001", Some("file://./level2.json"));
@@ -528,21 +591,20 @@ mod tests {
         .expect("resolve failed");
 
         // Depth chain: host(depth=0)→level1(1)→level2(2)→level3(3)→level4(4)
-        // level5 is NOT fetched because depth=4 is the cap (4 < 4 is false).
+        // level4 is a leaf, so exactly 4 fetches occur.
         assert_eq!(fetch_count.get(), 4, "expected 4 fetches (levels 1–4), got {}", fetch_count.get());
 
-        // host(2) + level1(2) + level2(2) + level3(2) + level4(2) = 10 nodes
-        assert_eq!(scene.nodes.len(), 10, "expected 10 merged nodes, got {}", scene.nodes.len());
+        // host(2) + level1(2) + level2(2) + level3(2) + level4(1) = 9 nodes
+        assert_eq!(scene.nodes.len(), 9, "expected 9 merged nodes, got {}", scene.nodes.len());
     }
 
     #[test]
     fn resolve_does_not_follow_widget_canvas_url_beyond_depth_cap() {
-        // A content canvas at depth MAX_WIDGET_CANVAS_DEPTH that itself has a
-        // WidgetCanvas.canvas URL pointing deeper must NOT be followed.
+        // A chain that loops back to the same URL exercises cycle-detection.
+        // The visited set stops further traversal after the first fetch.
         //
-        // We build a chain of length MAX_WIDGET_CANVAS_DEPTH + 1 and verify
-        // that exactly MAX_WIDGET_CANVAS_DEPTH fetches occur (the cap canvas is
-        // fetched but its child canvas is not).
+        // The depth cap (MAX_CANVAS_DEPTH) is a separate backstop for long but
+        // non-cyclic chains.
         fn make_level_canvas(child_url: &str) -> serde_json::Value {
             serde_json::json!({
                 "_RecordName_": "level_n",
@@ -571,20 +633,18 @@ mod tests {
         let fetch_count = std::cell::Cell::new(0u32);
         let scene = resolve_canvas_graph(&host, None, &|_url| {
             fetch_count.set(fetch_count.get() + 1);
-            // Every level returns the same canvas pointing at "file://./level.json" again.
-            // The cycle-guard ensures each URL is only fetched once per sibling set,
-            // but the depth cap stops traversal after MAX_WIDGET_CANVAS_DEPTH fetches.
+            // Every fetch returns a canvas that points back to "file://./level.json".
+            // The global cycle-guard (visited set) catches this after the first fetch,
+            // so at most 1 fetch occurs regardless of depth cap.
             Ok(make_level_canvas("file://./level.json"))
         })
         .expect("resolve failed");
 
-        // Each fetch at depth d produces a WidgetCanvas.canvas URL for the same
-        // "level.json", but the seen_urls dedup means each level only fetches once.
-        // The important assertion: fetch_count <= MAX_WIDGET_CANVAS_DEPTH.
+        // Cycle detection: the same normalised URL "level" is only fetched once.
         assert!(
-            fetch_count.get() <= MAX_WIDGET_CANVAS_DEPTH as u32,
-            "fetched {} times, should be ≤ MAX_WIDGET_CANVAS_DEPTH={}",
-            fetch_count.get(), MAX_WIDGET_CANVAS_DEPTH,
+            fetch_count.get() <= super::MAX_CANVAS_DEPTH as u32,
+            "fetched {} times, should be ≤ MAX_CANVAS_DEPTH={}",
+            fetch_count.get(), super::MAX_CANVAS_DEPTH,
         );
 
         // There must be merged nodes from the fetched levels.
@@ -630,5 +690,82 @@ mod tests {
             target_scene.nodes.len(),
             self_scene.nodes.len(),
         );
+    }
+
+    /// Build a minimal canvas JSON that carries a single Pass 1 canvas-reference
+    /// modifier pointing to `child_url`.
+    fn canvas_with_style_ref(name: &str, child_url: &str) -> serde_json::Value {
+        serde_json::json!({
+            "_RecordName_": name,
+            "_RecordId_": "00000000-0000-0000-0000-0000000000aa",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "defaultStyles": {
+                    "_Type_": "BuildingBlocks_DefaultStyles",
+                    "sharedStyles": null,
+                    "entries": [{
+                        "matchTo": "",
+                        "modifiers": [{
+                            "field": {
+                                "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeCanvasReferenceRecord",
+                                "value": child_url
+                            }
+                        }]
+                    }]
+                },
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": format!("{name}_root")}
+                ]
+            }
+        })
+    }
+
+    #[test]
+    fn pass1_style_ref_child_is_resolved_recursively() {
+        // Phase B1 regression: Pass 1 canvas-reference children must themselves
+        // be recursively resolved, not just shallowly parsed.
+        //
+        // Hierarchy:
+        //   root  (1 root node, Pass 1 ref → child_canvas.json)
+        //     └── child  (1 node, Pass 1 ref → grandchild_canvas.json)
+        //           └── grandchild  (3 nodes, no refs)
+        //
+        // With the old shallow parse, grandchild nodes were never merged.
+        // With the recursive fix, the scene must contain root + child + grandchild.
+        let grandchild = serde_json::json!({
+            "_RecordName_": "grandchild",
+            "_RecordId_": "00000000-0000-0000-0000-0000000000cc",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "gc_root"},
+                    {"_Pointer_": "ptr:2", "_Type_": "BuildingBlocks_WidgetIcon", "name": "gc_icon1", "parent": "_PointsTo_:ptr:1"},
+                    {"_Pointer_": "ptr:3", "_Type_": "BuildingBlocks_WidgetIcon", "name": "gc_icon2", "parent": "_PointsTo_:ptr:1"}
+                ]
+            }
+        });
+        let child = canvas_with_style_ref("child", "file://./grandchild.json");
+        let root = canvas_with_style_ref("root", "file://./child.json");
+
+        let fetch_count = std::cell::Cell::new(0u32);
+        let scene = resolve_canvas_graph(&root, None, &|url| {
+            fetch_count.set(fetch_count.get() + 1);
+            Ok(match url {
+                "file://./child.json" => child.clone(),
+                "file://./grandchild.json" => grandchild.clone(),
+                _ => return Err(format!("unexpected fetch: {url}")),
+            })
+        })
+        .expect("resolve failed");
+
+        // Both child and grandchild must have been fetched.
+        assert_eq!(fetch_count.get(), 2, "expected 2 fetches (child + grandchild), got {}", fetch_count.get());
+        // root(1) + child(1) + grandchild(3) = 5 nodes
+        assert_eq!(scene.nodes.len(), 5, "expected 5 merged nodes (root+child+grandchild), got {}", scene.nodes.len());
     }
 }
