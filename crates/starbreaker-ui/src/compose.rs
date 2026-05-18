@@ -102,6 +102,16 @@ pub fn render_bb_scene(
     // drawing rusttype glyphs in a second pass.
     let mut img = pixmap_to_rgba_image(pixmap)?;
 
+    // Second pass: text widgets.  Alternate-state siblings sharing the same
+    // parent and rect (e.g. `text_BodyValueFaction` / `text_BodyValueVelocity`
+    // / `text_BodyValueLocation`) all carry `isActive=true` in the static BB
+    // data — the runtime picks one via a BindingsBooleanField op. Without a
+    // resolved binding we cannot know which alternate is canonical, so for
+    // static export we render only the first sibling encountered at any given
+    // (parent, rect) key and drop the rest. This avoids the overlapping-text
+    // smear seen in pre-A6 outputs.
+    let mut seen_text_rects: std::collections::HashSet<(i32, i32, i32, i32)> =
+        std::collections::HashSet::new();
     for &node_id in &layout.draw_order {
         let Some(node) = scene.nodes.get(&node_id) else {
             continue;
@@ -113,6 +123,15 @@ pub fn render_bb_scene(
             continue;
         };
         if rect.w < 0.5 || rect.h < 0.5 {
+            continue;
+        }
+        let key = (
+            rect.x.round() as i32,
+            rect.y.round() as i32,
+            rect.w.round() as i32,
+            rect.h.round() as i32,
+        );
+        if !seen_text_rects.insert(key) {
             continue;
         }
         draw_text_node(&mut img, node, rect, &text_renderer, &resolver, layout.canvas_scale, ctx);
