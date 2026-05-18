@@ -187,7 +187,7 @@ fn merge_child_scene(parent_scene: &mut BbScene, child_scene: BbScene, match_to:
         .unwrap_or(0)
         .saturating_add(1);
 
-    let BbScene { roots: child_roots, nodes: child_nodes, .. } = child_scene;
+    let BbScene { roots: child_roots, nodes: child_nodes, operations: child_ops, .. } = child_scene;
     let child_roots_reided: Vec<BbNodeId> = child_roots
         .iter()
         .map(|&id| id.saturating_add(offset))
@@ -221,6 +221,12 @@ fn merge_child_scene(parent_scene: &mut BbScene, child_scene: BbScene, match_to:
         parent_scene.nodes.insert(node.id, node);
     }
 
+    let mut remapped_ops = child_ops;
+    for op in &mut remapped_ops {
+        remap_ptrs_in_json(op, offset);
+    }
+    parent_scene.operations.extend(remapped_ops);
+
     if let Some(host) = parent_scene.nodes.get_mut(&host_parent_id) {
         let roots_to_add = if inserted_child_roots.is_empty() {
             child_roots_reided
@@ -230,6 +236,32 @@ fn merge_child_scene(parent_scene: &mut BbScene, child_scene: BbScene, match_to:
         host.children.extend(roots_to_add);
         host.children.sort_unstable();
         host.children.dedup();
+    }
+}
+
+fn remap_ptrs_in_json(v: &mut serde_json::Value, offset: u32) {
+    match v {
+        serde_json::Value::String(s) => {
+            if let Some(n) = s.strip_prefix("ptr:").and_then(|n| n.parse::<u32>().ok()) {
+                *s = format!("ptr:{}", n.saturating_add(offset));
+            } else if let Some(n) = s
+                .strip_prefix("_PointsTo_:ptr:")
+                .and_then(|n| n.parse::<u32>().ok())
+            {
+                *s = format!("_PointsTo_:ptr:{}", n.saturating_add(offset));
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                remap_ptrs_in_json(item, offset);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for value in map.values_mut() {
+                remap_ptrs_in_json(value, offset);
+            }
+        }
+        _ => {}
     }
 }
 

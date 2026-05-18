@@ -7,7 +7,7 @@
 //! 2. Fills each node's background colour (from `node.background.fill_colour`).
 //! 3. Blits atlas bitmap / SVG images via [`AtlasLibrary`].
 //! 4. Draws borders and placeholder shapes using `tiny-skia` 0.12.
-//! 5. Draws placeholder bars where text nodes will appear (Phase A4).
+//! 5. Draws text nodes with bundled DejaVu glyphs.
 //!
 //! Post-process (tint / scanlines / vignette) is disabled until Phase A5.
 //!
@@ -24,14 +24,16 @@ use tiny_skia::{
 };
 
 use crate::bb_atlas::AtlasLibrary;
+use crate::bb_bindings::BindingResolver;
 use crate::bb_layout::{self, Rect};
-use crate::bb_scene::{BbBorder, BbNode, BbNodeType, BbScene};
+use crate::bb_scene::{BbBorder, BbNode, BbNodeType, BbScene, BbValue};
 use crate::canvas::ResolvedCanvas;
 use crate::defaults::DefaultValueRegistry;
 use crate::error::UiError;
 use crate::postprocess::PostProcessOptions;
 use crate::style::ManufacturerStyle;
 use crate::swf_assets::SwfAssetLibrary;
+use crate::text::{FontKind, TextAlign, TextRenderer};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public types
@@ -72,6 +74,8 @@ pub fn render_bb_scene(
     }
 
     let layout = bb_layout::layout(scene, target.width, target.height);
+    let text_renderer = TextRenderer::new();
+    let resolver = BindingResolver::from_operations(&scene.operations);
 
     let mut pixmap = Pixmap::new(target.width, target.height)
         .ok_or_else(|| UiError::RenderError("pixmap allocation failed".into()))?;
@@ -94,8 +98,27 @@ pub fn render_bb_scene(
         draw_node(node, rect, ctx, atlas, &mut pixmap);
     }
 
-    // Convert premultiplied tiny-skia pixmap → straight-alpha RgbaImage.
-    pixmap_to_rgba_image(pixmap)
+    // Convert premultiplied tiny-skia pixmap → straight-alpha RgbaImage before
+    // drawing rusttype glyphs in a second pass.
+    let mut img = pixmap_to_rgba_image(pixmap)?;
+
+    for &node_id in &layout.draw_order {
+        let Some(node) = scene.nodes.get(&node_id) else {
+            continue;
+        };
+        if !matches!(node.ty, BbNodeType::WidgetTextField | BbNodeType::WidgetText) {
+            continue;
+        }
+        let Some(&rect) = layout.rects.get(&node_id) else {
+            continue;
+        };
+        if rect.w < 0.5 || rect.h < 0.5 {
+            continue;
+        }
+        draw_text_node(&mut img, node, rect, &text_renderer, &resolver, layout.canvas_scale, ctx);
+    }
+
+    Ok(img)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -227,10 +250,8 @@ fn draw_node(
             }
         }
 
-        // Text widgets: placeholder bar until Phase A4 renders glyphs.
-        BbNodeType::WidgetTextField | BbNodeType::WidgetText => {
-            draw_text_placeholder_ts(pixmap, rect, ctx, alpha);
-        }
+        // Text widgets are rendered in a second RgbaImage pass after tiny-skia output.
+        BbNodeType::WidgetTextField | BbNodeType::WidgetText => {}
 
         // Custom shapes: blit atlas when available; otherwise tinted fill + border.
         // Fill colour comes from the manufacturer primary tint at moderate opacity so
@@ -421,27 +442,48 @@ fn draw_diamond_ts(pixmap: &mut Pixmap, rect: TskRect, ctx: &ComposeContext<'_>,
     }
 }
 
-fn draw_text_placeholder_ts(
-    pixmap: &mut Pixmap,
+fn draw_text_node(
+    img: &mut RgbaImage,
+    node: &BbNode,
     rect: Rect,
+    renderer: &TextRenderer,
+    resolver: &BindingResolver,
+    canvas_scale: f32,
     ctx: &ComposeContext<'_>,
-    alpha: f32,
 ) {
-    let bar_w = (rect.w * 0.7).max(4.0);
-    let bar_h = rect.h.min(16.0).max(3.0);
-    let bar_x = rect.x + (rect.w - bar_w) * 0.5;
-    let bar_y = rect.y + (rect.h - bar_h) * 0.5;
-
-    if let Some(r) = TskRect::from_xywh(bar_x, bar_y, bar_w, bar_h) {
-        let pt = &ctx.style.primary_tint;
-        let color = [
-            pt.r as f32 / 255.0,
-            pt.g as f32 / 255.0,
-            pt.b as f32 / 255.0,
-            0.6,
-        ];
-        fill_rect_ts(pixmap, r, color, alpha);
+    let text = resolver.resolve_text(node.id, &node.raw, ctx.defaults);
+    if text.is_empty() {
+        return;
     }
+
+    let size_px = match node.text.as_ref().map(|t| &t.font_size) {
+        Some(BbValue::Fixed(px)) => *px * canvas_scale,
+        _ => 12.0 * canvas_scale,
+    };
+    let align = node
+        .text
+        .as_ref()
+        .map(|t| TextAlign::from_bb_str(&t.alignment))
+        .unwrap_or(TextAlign::Left);
+
+    let mut colour = if let Some(c) = node.text.as_ref().and_then(|t| t.colour) {
+        [
+            colour_component_to_u8(c[0]),
+            colour_component_to_u8(c[1]),
+            colour_component_to_u8(c[2]),
+            colour_component_to_u8(c[3]),
+        ]
+    } else {
+        let pt = &ctx.style.primary_tint;
+        [pt.r, pt.g, pt.b, pt.a]
+    };
+    colour[3] = ((colour[3] as f32) * node.alpha.clamp(0.0, 1.0)).clamp(0.0, 255.0) as u8;
+
+    renderer.draw(img, &text, rect, FontKind::Sans, size_px, colour, align);
+}
+
+fn colour_component_to_u8(v: f32) -> u8 {
+    (v.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -590,6 +632,7 @@ mod tests {
             canvas_size: (512.0, 256.0),
             roots: vec![],
             nodes: BTreeMap::new(),
+            operations: vec![],
         }
     }
 

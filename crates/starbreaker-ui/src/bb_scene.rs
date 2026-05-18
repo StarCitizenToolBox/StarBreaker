@@ -50,6 +50,8 @@ pub struct BbScene {
     pub roots: Vec<BbNodeId>,
     /// All nodes keyed by their pointer ID, in stable insertion order.
     pub nodes: BTreeMap<BbNodeId, BbNode>,
+    /// Raw BuildingBlocks operations array used for runtime bindings.
+    pub operations: Vec<serde_json::Value>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -312,6 +314,11 @@ pub fn parse_bb_canvas(json: &serde_json::Value) -> Result<BbScene, String> {
         .get("scene")
         .and_then(|v| v.as_array())
         .ok_or("missing or non-array _RecordValue_.scene")?;
+    let operations = record_value
+        .get("operations")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
 
     // ── First pass: parse each node (without children populated yet). ────────
     // Nodes without a `_Pointer_` field get a synthetic ID derived from their
@@ -375,7 +382,7 @@ pub fn parse_bb_canvas(json: &serde_json::Value) -> Result<BbScene, String> {
         .collect();
     roots.sort_unstable();
 
-    Ok(BbScene { canvas_size: (canvas_w, canvas_h), roots, nodes })
+    Ok(BbScene { canvas_size: (canvas_w, canvas_h), roots, nodes, operations })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

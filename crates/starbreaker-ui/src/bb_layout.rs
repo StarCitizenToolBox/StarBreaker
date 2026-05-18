@@ -102,6 +102,8 @@ pub struct LayoutResult {
     /// their geometry may affect parent layout — but they are absent from
     /// [`draw_order`].
     pub rects: BTreeMap<BbNodeId, Rect>,
+    /// Uniform authoring-canvas-to-target scale applied to fixed measurements.
+    pub canvas_scale: f32,
     /// Render order.
     ///
     /// DFS from each root, parent before children.  Siblings are sorted by
@@ -175,7 +177,7 @@ pub fn layout(scene: &BbScene, target_w: u32, target_h: u32) -> LayoutResult {
         );
     }
 
-    LayoutResult { canvas, rects, draw_order }
+    LayoutResult { canvas, rects, draw_order, canvas_scale }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -595,7 +597,7 @@ mod tests {
 
         let mut nodes = BTreeMap::new();
         nodes.insert(1, node);
-        let scene = BbScene { canvas_size: (1920.0, 1080.0), roots: vec![1], nodes };
+        let scene = BbScene { canvas_size: (1920.0, 1080.0), roots: vec![1], nodes, operations: vec![] };
 
         // Must not panic.
         let result = layout(&scene, 1600, 900);
@@ -646,7 +648,7 @@ mod tests {
 
         let mut nodes = BTreeMap::new();
         nodes.insert(1, node);
-        let scene = BbScene { canvas_size: (800.0, 600.0), roots: vec![1], nodes };
+        let scene = BbScene { canvas_size: (800.0, 600.0), roots: vec![1], nodes, operations: vec![] };
 
         let result = layout(&scene, 1600, 900);
         let rect = result.rects[&1];
