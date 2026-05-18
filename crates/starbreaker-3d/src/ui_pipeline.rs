@@ -124,7 +124,12 @@ pub fn render_ui_binding_png(
         swf_fetcher: &P4kSwfFetcher { p4k },
         style_fetcher: &ManufacturerStyleFetcher,
         target_size,
-        apply_postprocess: true,
+        // Phase 11: postprocess is disabled while compose.rs is the magenta-grid
+        // placeholder.  The tint/scanline/vignette passes assume *lit* pixels
+        // come from a real canvas render; running them over the placeholder
+        // would mask the "not yet rendered" signal.  Re-enable in Phase 13
+        // once the paint engine produces real content.
+        apply_postprocess: false,
     };
     let _ = texture_mip; // size is fixed per binding_kind; mip is applied at texture level
     starbreaker_ui::pipeline::render_for_binding(&inputs).map_err(|e| e.to_string())

@@ -224,29 +224,38 @@ impl StyleLoader {
     /// Non-authoritative Drake amber fallback used when no DataCore record is
     /// available (e.g. in unit tests or during early development).
     ///
-    /// Values:
-    /// - `primary_tint`: ~#FFB04C (warm amber) — approximated from Phase 1
-    ///   reference-image observation of the Drake Clipper MFD screens.
+    /// Values (re-derived in Phase 11 from `reference/in-game/Clipper/*.png`
+    /// using PIL 4-bit quantised top-colour sampling — see
+    /// `docs/ui-plan2.md` Phase 11):
+    /// - `primary_tint`: `#F0A868` (RGB 240,168,104) — the dominant bright
+    ///   amber stroke / fill / text colour, observed in
+    ///   `Screen_Annunciator_L.png` (`#F0A050` at 9.4% area) and
+    ///   `Screen_Left_Lower_RTT.png` (`#F0B070` at 2.2% area).
+    /// - `background`: `#302010` (RGB 48,32,16) — the dominant dark warm
+    ///   brown CRT background, observed at 19–26 % area across every
+    ///   curved-screen reference image.  Phases 6–10 used the wrong value
+    ///   `#0A0A0A` (near-black), causing every multiplicative tint pass to
+    ///   produce near-zero output.
     /// - `backlight`: SRGBA8(r:102, g:214, b:255, a:255) — directly from
     ///   Phase 1 DataCore research:
     ///   `SCItemDisplayScreenComponentParams.screenStates[Normal].color`.
-    /// - `background`: near-black (#0A0A0A) — the dark CRT screen background.
+    ///   This is the screen-frame emissive accent (own-ship triangle on
+    ///   radar, "COOL" label etc.) — **not** the bulk UI colour.
     ///
     /// Production code must prefer `parse_record` with a real DataCore record.
     pub fn drake_amber_fallback(&self) -> ManufacturerStyle {
         ManufacturerStyle {
             name: self.manufacturer.clone(),
 
-            // Warm amber ~#FFB04C — Phase 1 reference-image observation.
-            // Drake CRT material shader produces this tint on the SWF content.
-            primary_tint: RgbaColor { r: 255, g: 176, b: 76, a: 255 },
+            // Bright amber #F0A868 — reference-sampled (Phase 11).
+            primary_tint: RgbaColor { r: 240, g: 168, b: 104, a: 255 },
 
             secondary_tint: None,
 
-            // Near-black CRT screen background.
-            background: RgbaColor { r: 10, g: 10, b: 10, a: 255 },
+            // Dark warm brown #302010 — reference-sampled (Phase 11).
+            background: RgbaColor { r: 48, g: 32, b: 16, a: 255 },
 
-            // Cyan screen-frame backlight.
+            // Cyan screen-frame emissive accent.
             // Source: Phase 1 — SCItemDisplayScreenComponentParams
             //   .screenStates[Normal].color = SRGBA8(r:102,g:214,b:255,a:255)
             backlight: RgbaColor { r: 102, g: 214, b: 255, a: 255 },
