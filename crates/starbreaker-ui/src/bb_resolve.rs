@@ -786,6 +786,7 @@ fn inject_param_overrides(
 }
 
 
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::pipeline::extract_record_name;

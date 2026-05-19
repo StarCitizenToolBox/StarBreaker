@@ -1930,6 +1930,7 @@ fn ui_binding_json(binding: &UiBinding) -> serde_json::Value {
         "source_entity_name": binding.source_entity_name,
         "helper_name": binding.helper_name,
         "default_view": binding.default_view,
+        "default_state_is_off": binding.default_state_is_off,
         "default_state_name": binding.default_state_name,
         "default_light_color": binding.default_light_color,
         "default_light_intensity_milli": binding.default_light_intensity_milli,

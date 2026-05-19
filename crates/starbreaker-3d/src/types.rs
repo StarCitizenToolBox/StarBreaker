@@ -498,6 +498,12 @@ pub struct UiBinding {
     pub source_entity_name: String,
     pub helper_name: Option<String>,
     pub default_view: Option<String>,
+    /// `true` when the originally-resolved `defaultView` had no concrete content
+    /// (null/zero canvas, or a shell canvas whose content is selected at
+    /// runtime). The exporter still renders an "on" image by falling through to
+    /// the first non-shell view, but consumers (e.g. Blender) can use this flag
+    /// to know the entity's *true* default state is off and gate visibility.
+    pub default_state_is_off: bool,
     pub default_state_name: Option<String>,
     pub default_light_color: Option<[u8; 4]>,
     pub default_light_intensity_milli: Option<u16>,

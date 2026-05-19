@@ -158,7 +158,7 @@ fn substitute_printf_params(
     let patterns = ["%ls", "%s", "%d", "%u"];
 
     for pattern in &patterns {
-        while let Some(pos) = result.find(pattern) {
+        while let Some(_pos) = result.find(pattern) {
             if param_idx >= param_names.len() {
                 // No more parameters to substitute; leave pattern as-is.
                 log::debug!(

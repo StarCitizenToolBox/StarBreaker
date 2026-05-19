@@ -12,7 +12,7 @@
 
 use crate::bb_brand_style::BrandStyle;
 use crate::bb_loc::LocFetcher;
-use crate::bb_scene::{BbBorder, BbBorderSide, BbNode, BbScene, BbValue};
+use crate::bb_scene::{BbBorder, BbNode, BbScene, BbValue};
 
 /// Apply brand-style modifiers to a scene.
 ///

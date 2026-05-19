@@ -44,6 +44,7 @@ from ..constants import (
     PROP_SOURCE_NODE_NAME,
     PROP_SUBMATERIAL_JSON,
     PROP_TEMPLATE_PATH,
+    PROP_UI_DEFAULT_STATE_IS_OFF,
     TEMPLATE_COLLECTION_NAME,
 )
 from ..package_ops import (
@@ -663,6 +664,10 @@ class OrchestrationMixin:
             if isinstance(ui_binding, dict) and isinstance(ui_binding.get("generated_image_path"), str)
             else None
         )
+        if isinstance(ui_binding, dict) and bool(ui_binding.get("default_state_is_off")):
+            obj[PROP_UI_DEFAULT_STATE_IS_OFF] = True
+        elif PROP_UI_DEFAULT_STATE_IS_OFF in obj:
+            del obj[PROP_UI_DEFAULT_STATE_IS_OFF]
         if slot_mapping is not None:
             if mesh_materials is not None:
                 while len(mesh_materials) < len(slot_mapping):

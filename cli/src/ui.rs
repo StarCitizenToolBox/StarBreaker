@@ -211,6 +211,10 @@ fn parse_ui_binding(v: &Value) -> Option<UiBinding> {
         source_entity_name: str_field("source_entity_name")?,
         helper_name: opt_str("helper_name"),
         default_view: opt_str("default_view"),
+        default_state_is_off: obj
+            .get("default_state_is_off")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         default_state_name: opt_str("default_state_name"),
         default_light_color,
         default_light_intensity_milli: opt_u16("default_light_intensity_milli"),

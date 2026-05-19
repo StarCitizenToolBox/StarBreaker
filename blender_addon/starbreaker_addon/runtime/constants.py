@@ -53,6 +53,12 @@ PROP_HAS_POM = "starbreaker_has_pom"
 PROP_LIGHT_STATES_JSON = "starbreaker_light_states"
 PROP_LIGHT_ACTIVE_STATE = "starbreaker_light_active_state"
 PROP_LIGHT_SEMANTIC_KIND = "starbreaker_light_semantic_kind"
+# True when the entity's authored default state is "off" (e.g. an
+# `SCItemDisplayScreen` whose `defaultView` resolved to a view with no
+# concrete canvas content). The exporter still renders a "switched on" image
+# so the texture is non-blank, but downstream tools can use this flag to gate
+# initial visibility of the UI surface.
+PROP_UI_DEFAULT_STATE_IS_OFF = "starbreaker_ui_default_state_is_off"
 PROP_ENGINE_GLOW_CONTROL_JSON = "starbreaker_engine_glow_control"
 PROP_ENGINE_GLOW_STRENGTH = "starbreaker_engine_glow_strength"
 PROP_SHARED_GLOW_CONTROL_JSON = "starbreaker_shared_glow_control"

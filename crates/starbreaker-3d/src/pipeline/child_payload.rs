@@ -510,6 +510,7 @@ pub(crate) fn ui_binding_for_record(db: &Database, record: &Record) -> Option<Ui
                 source_entity_name: String::new(),
                 helper_name: None,
                 default_view: None,
+                default_state_is_off: false,
                 default_state_name: default_state_name.clone(),
                 default_light_color,
                 default_light_intensity_milli,
@@ -554,6 +555,7 @@ pub(crate) fn ui_binding_for_record(db: &Database, record: &Record) -> Option<Ui
             source_entity_name: String::new(),
             helper_name: None,
             default_view: None,
+            default_state_is_off: false,
             default_state_name: default_state_name.clone(),
             default_light_color,
             default_light_intensity_milli,
@@ -680,11 +682,17 @@ pub(crate) fn ui_binding_for_record(db: &Database, record: &Record) -> Option<Ui
         Some("_physicalScreen") => "physical",
         _ => "physical",
     };
+    // The originally-resolved defaultView had no concrete content if either
+    // its canvas was null/zero OR was a shell. When that's the case, the
+    // entity's true default state is "off"; we fall through to a concrete
+    // view only to be able to render a non-blank "switched on" image.
+    let default_state_is_off = need_fallback;
     Some(UiBinding {
         binding_kind: binding_kind.to_string(),
         source_entity_name: String::new(),
         helper_name: None,
         default_view,
+        default_state_is_off,
         default_state_name,
         default_light_color,
         default_light_intensity_milli,
