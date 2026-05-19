@@ -353,6 +353,12 @@ pub fn render_for_binding(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiErro
             defaults.set_localization(loc_map);
         }
     }
+    // Re-apply sentinel suppressions after any live global.ini load.
+    // The game uses @LOC_PLACEHOLDER and @LOC_EMPTY as developer placeholders
+    // that should never appear in static renders, even when global.ini defines
+    // them as non-empty strings (e.g. LOC_PLACEHOLDER="<= PLACEHOLDER =>").
+    defaults.insert_localization("loc_placeholder", String::new());
+    defaults.insert_localization("loc_empty", String::new());
 
     // ── 6. Rasterise ───────────────────────────────────────────────────────
     //

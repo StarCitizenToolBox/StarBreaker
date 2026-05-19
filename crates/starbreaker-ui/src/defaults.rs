@@ -216,6 +216,14 @@ impl DefaultValueRegistry {
         self.localization = map;
     }
 
+    /// Force-insert a single localization key with `value`, overriding any
+    /// existing entry (including values loaded from global.ini).
+    ///
+    /// `key` must be lowercase and must **not** carry a leading `@`.
+    pub fn insert_localization(&mut self, key: &str, value: String) {
+        self.localization.insert(key.to_owned(), value);
+    }
+
     /// Look up a localization key.
     ///
     /// `key` may start with `@` (it is stripped automatically before lookup).
