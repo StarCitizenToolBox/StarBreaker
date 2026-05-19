@@ -106,35 +106,51 @@ impl BindingResolver {
         if let Some(lit) = node_raw.get("text").and_then(|v| v.as_str()) {
             let lit = lit.trim();
             if !lit.is_empty() {
+                // A literal text field starting with '@' is itself a
+                // localization key — look it up before using as-is.
+                if lit.starts_with('@') {
+                    if let Some(resolved) = defaults.lookup_localization(lit) {
+                        return ResolvedText { text: resolved.to_owned(), is_name_derived: false };
+                    }
+                }
                 return ResolvedText { text: lit.to_owned(), is_name_derived: false };
+            }
+        }
+
+        // `labelProperties.label` carries a localization key such as
+        // `@hud_NoTarget`.  Resolve it before falling back to the binding path.
+        if let Some(loc_key) = node_raw
+            .get("labelProperties")
+            .and_then(|lp| lp.get("label"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            if let Some(resolved) = defaults.lookup_localization(loc_key) {
+                return ResolvedText { text: resolved.to_owned(), is_name_derived: false };
             }
         }
 
         if let Some(path) = self.widget_to_path.get(&node_id) {
             if let Some(val) = defaults.lookup_path(path) {
+                let s = value_to_string(val);
                 return ResolvedText {
-                    text: value_to_string(val),
+                    text: s,
                     is_name_derived: false,
                 };
             }
         }
 
-        // Fallback: derive a human-readable label from the widget name itself.
-        if let Some(name) = node_raw.get("name").and_then(|v| v.as_str()) {
-            let derived = derive_label_from_name(name);
-            if !derived.is_empty() {
-                return ResolvedText {
-                    text: derived.to_uppercase(),
-                    is_name_derived: true,
-                };
-            }
-        }
-
+        // Name-derived labels are widget implementation names, not game content.
+        // They must not appear in static renders (they would show internal
+        // identifiers like "GIMBAL", "GROUP", "GUNS" instead of real data).
         ResolvedText { text: String::new(), is_name_derived: false }
     }
 }
 
 /// Strip common widget prefixes and split camelCase / snake_case into spaced words.
+///
+/// Reserved for future localisation lookup.  Not called in production renders
+/// because widget names are implementation identifiers, not display text.
 ///
 /// Examples:
 /// - `text_NoTarget` → `No Target`
@@ -142,6 +158,7 @@ impl BindingResolver {
 /// - `MachineTypeNameText` → `Machine Type Name`
 /// - `txt_PresetName` → `Preset Name`
 /// - `lbl_HeaderValue` → `Header Value`
+#[allow(dead_code)]
 fn derive_label_from_name(name: &str) -> String {
     let trimmed = name.trim();
     // Strip leading prefix segments that are pure widget-role tags.
@@ -177,6 +194,7 @@ fn derive_label_from_name(name: &str) -> String {
     out.trim().to_owned()
 }
 
+#[allow(dead_code)]
 fn strip_widget_prefix(s: &str) -> &str {
     const PREFIXES: &[&str] = &["text_", "txt_", "lbl_", "label_", "Text_", "Label_"];
     for p in PREFIXES {
@@ -187,6 +205,7 @@ fn strip_widget_prefix(s: &str) -> &str {
     s
 }
 
+#[allow(dead_code)]
 fn strip_widget_suffix(s: &str) -> &str {
     const SUFFIXES: &[&str] = &["Text", "Label"];
     for sfx in SUFFIXES {

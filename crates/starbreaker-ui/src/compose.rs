@@ -466,6 +466,7 @@ fn draw_border_ts(
     }
 }
 
+#[allow(dead_code)]
 fn draw_diamond_ts(pixmap: &mut Pixmap, rect: TskRect, ctx: &ComposeContext<'_>, alpha: f32) {
     let cx = rect.x() + rect.width() * 0.5;
     let cy = rect.y() + rect.height() * 0.5;

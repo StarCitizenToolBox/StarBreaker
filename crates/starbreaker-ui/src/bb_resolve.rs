@@ -3,10 +3,23 @@
 //! Two-pass drill-down from a root `BuildingBlocks_Canvas` JSON record:
 //!
 //! **Pass 1** — `defaultStyles` / `brandStyles` canvas-reference modifiers.
-//! Walks `defaultStyles.entries[]` (or a matching `brandStyles[]` entry) and
-//! fetches any `CanvasReferenceRecord`-typed modifier values.  Each fetched
-//! child canvas is itself resolved recursively (up to `MAX_CANVAS_DEPTH`
-//! total levels), so deep hierarchies like
+//! Selects the *default-state* entry from `defaultStyles.entries[]` (or a
+//! matching `brandStyles[]` entry) and fetches its
+//! `CanvasReferenceRecord`-typed modifier value.  The default-state entry is:
+//! 1. The first entry whose `conditionsList` is absent or empty
+//!    (unconditional — always active regardless of game state).
+//! 2. Failing that, the entry whose condition tag matches the scene node with
+//!    the highest style-tag count ("most-tagged node" heuristic — the primary
+//!    content slot carries more tags than sub-component slots).
+//! 3. Last resort: the first entry overall (used when no scene-node heuristic
+//!    applies, e.g. `MC_S_Target_Master` which has exactly one conditional
+//!    entry that is effectively the default).
+//!
+//! Selecting a single entry prevents runtime mode-switching canvases (e.g.
+//! `GunsMode`, `NavMode`, `TurretMode` on `MC_S_Self_Master`) from all being
+//! merged into the static render at once.  Each fetched child canvas is
+//! itself resolved recursively (up to `MAX_CANVAS_DEPTH` total levels), so
+//! deep hierarchies like
 //! `MC_S_Power_Master → GEN_MC_S_Power → gen_mc_s_powerlists → …` are fully
 //! expanded in one call.
 //!
@@ -17,6 +30,14 @@
 //! Pass 2 follows those references recursively so the merged scene includes
 //! the full content hierarchy.  Both passes share the same depth counter and
 //! a global `visited` path set to guard against cycles.
+//!
+//! **Mode-switch guard** — `conditional_canvas_norms`.
+//! All canvas URLs referenced by *any* conditional entry (regardless of which
+//! entry Pass 1 selected) are collected into `conditional_canvas_norms`.
+//! Pass 2 skips any URL in this set that was not visited by Pass 1, preventing
+//! WidgetCanvas nodes that serve as mode-switchable slots (e.g. `canvas_NavMode`
+//! pointing to `gen_mc_s_nav.json`) from being followed when a different mode
+//! was selected in Pass 1.
 
 use std::collections::{HashMap, HashSet};
 
@@ -89,78 +110,77 @@ fn resolve_canvas_graph_inner(
 
     let debug_trace = std::env::var("STARBREAKER_UI_DEBUG").as_deref() == Ok("1");
 
-    // Pass 1: follow defaultStyles / brandStyles canvas-reference modifiers.
+    // Pass 1: follow the default-state canvas-reference modifier.
     //
-    // Each referenced child canvas is resolved recursively so multi-level
+    // Only ONE style entry is selected (see `pick_default_entry`) to prevent
+    // mode-switching canvases (e.g. GunsMode / NavMode / TurretMode on
+    // MC_S_Self_Master) from all being merged together into the static render.
+    //
+    // The selected child canvas is resolved recursively so multi-level
     // hierarchies (master → gen → leaf) are fully expanded.
-    //
-    // Style entries may be unconditional (always active) or conditional
-    // (mode-specific, e.g. GunsMode vs NavMode vs TurretMode on a self-status
-    // canvas).  All entries are followed in the static render — conditional
-    // entries represent mode-specific content slots, and the exported scene
-    // captures every possible state of the screen.  Pass 2's
-    // `conditional_canvas_norms` check prevents double-following any canvas
-    // that Pass 1 already visited.
-    for entry in pick_active_entries(record_value, manufacturer_id) {
+    if let Some(entry) = pick_default_entry(record_value, manufacturer_id) {
         let entry_name = entry.get("name").and_then(|v| v.as_str()).unwrap_or("?");
         let match_to = entry.get("matchTo").and_then(|v| v.as_str()).unwrap_or("");
-        let Some(modifiers) = entry.get("modifiers").and_then(|v| v.as_array()) else {
-            continue;
-        };
 
-        for modifier in modifiers {
-            let Some(field) = modifier.get("field") else {
-                continue;
-            };
-            let is_canvas_ref = field
-                .get("_Type_")
-                .and_then(|v| v.as_str())
-                == Some("BuildingBlocks_FieldModifierRecordRefTypeCanvasReferenceRecord");
-            if !is_canvas_ref {
-                continue;
-            }
-            let Some(path) = field.get("value").and_then(|v| v.as_str()) else {
-                continue;
-            };
-
-            // Normalise path to a record name for cycle detection.
-            let norm = extract_record_name(path).to_ascii_lowercase();
-            if !visited.insert(norm.clone()) {
-                log::debug!("bb_resolve: skipping already-visited child canvas '{}'", path);
-                continue;
-            }
-
-            if debug_trace {
-                log::info!(
-                    "bb_resolve[depth={}]: Pass1 following entry {:?} -> {}",
-                    depth,
-                    entry_name,
-                    norm,
-                );
-            }
-
-            let child_json = match fetch_by_path(path) {
-                Ok(json) => json,
-                Err(e) => {
-                    log::warn!("bb_resolve: failed to fetch child canvas '{}': {}", path, e);
+        if let Some(modifiers) = entry.get("modifiers").and_then(|v| v.as_array()) {
+            for modifier in modifiers {
+                let Some(field) = modifier.get("field") else {
+                    continue;
+                };
+                let is_canvas_ref = field
+                    .get("_Type_")
+                    .and_then(|v| v.as_str())
+                    == Some("BuildingBlocks_FieldModifierRecordRefTypeCanvasReferenceRecord");
+                if !is_canvas_ref {
                     continue;
                 }
-            };
-            // Recurse: resolve the child's own style-references and WidgetCanvas URLs.
-            let child_scene = match resolve_canvas_graph_inner(
-                &child_json,
-                manufacturer_id,
-                fetch_by_path,
-                depth + 1,
-                visited,
-            ) {
-                Ok(scene) => scene,
-                Err(e) => {
-                    log::warn!("bb_resolve: failed to resolve child canvas '{}': {}", path, e);
+                let Some(path) = field.get("value").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+
+                // Normalise path to a record name for cycle detection.
+                let norm = extract_record_name(path).to_ascii_lowercase();
+                if !visited.insert(norm.clone()) {
+                    log::debug!("bb_resolve: skipping already-visited child canvas '{}'", path);
                     continue;
                 }
-            };
-            merge_child_scene(&mut scene, child_scene, match_to);
+
+                if debug_trace {
+                    log::info!(
+                        "bb_resolve[depth={}]: Pass1 following entry {:?} -> {}",
+                        depth,
+                        entry_name,
+                        norm,
+                    );
+                }
+
+                let child_json = match fetch_by_path(path) {
+                    Ok(json) => json,
+                    Err(e) => {
+                        log::warn!("bb_resolve: failed to fetch child canvas '{}': {}", path, e);
+                        continue;
+                    }
+                };
+                // Recurse: resolve the child's own style-references and WidgetCanvas URLs.
+                let child_scene = match resolve_canvas_graph_inner(
+                    &child_json,
+                    manufacturer_id,
+                    fetch_by_path,
+                    depth + 1,
+                    visited,
+                ) {
+                    Ok(scene) => scene,
+                    Err(e) => {
+                        log::warn!(
+                            "bb_resolve: failed to resolve child canvas '{}': {}",
+                            path,
+                            e
+                        );
+                        continue;
+                    }
+                };
+                merge_child_scene(&mut scene, child_scene, match_to);
+            }
         }
     }
 
@@ -303,6 +323,136 @@ fn pick_active_entries<'a>(
         .get("defaultStyles")
         .map(entries_from)
         .unwrap_or_default()
+}
+
+/// Return the single default-state entry to follow in Pass 1.
+///
+/// Prefers the first entry whose `conditionsList` is absent or empty
+/// (unconditional — always active).  Falls back to the entry that targets
+/// the scene node with the highest style-tag count when all entries are
+/// conditional (the "most-tagged" node heuristic selects the primary content
+/// slot over sub-component slots — e.g. `canvas_GunsMode` with 2 tags wins
+/// over `canvas_AmmoNumbers` with 1 tag on `MC_S_Self_Master`).  Falls back
+/// to the first entry overall as a last resort.
+fn pick_default_entry<'a>(
+    record_value: &'a serde_json::Value,
+    manufacturer_id: Option<&str>,
+) -> Option<&'a serde_json::Value> {
+    let entries = pick_active_entries(record_value, manufacturer_id);
+    // Prefer first unconditional (empty/absent conditionsList).
+    if let Some(entry) = entries.iter().copied().find(|e| {
+        e.get("conditionsList")
+            .and_then(|v| v.as_array())
+            .map(|a| a.is_empty())
+            .unwrap_or(true)
+    }) {
+        return Some(entry);
+    }
+
+    // When all entries are conditional, use style-tag count on the matched
+    // scene node as a tiebreaker.  Entries that target scene nodes with MORE
+    // tags are more specifically annotated (e.g. the primary weapon-info slot
+    // carries both a system tag and a content-type tag), so they are preferred.
+    if entries.len() > 1 {
+        let scene = record_value
+            .get("scene")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]);
+
+        // Build a map from tag RecordId → number of style tags on the scene
+        // node that carries that tag.
+        let mut tag_to_node_tag_count: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
+        for node in scene {
+            let style_tags = node
+                .get("styleTags")
+                .and_then(|v| v.as_array())
+                .map(|a| a.as_slice())
+                .unwrap_or(&[]);
+            let count = style_tags.len();
+            for tag in style_tags {
+                if let Some(rid) = tag.get("_RecordId_").and_then(|v| v.as_str()) {
+                    // Prefer the higher count if a tag appears on multiple nodes.
+                    let e = tag_to_node_tag_count.entry(rid).or_insert(0);
+                    if count > *e {
+                        *e = count;
+                    }
+                }
+            }
+        }
+
+        // Score each entry by the max style-tag count of its condition's tag.
+        let mut best_entry = entries[0];
+        let mut best_score = 0usize;
+        for entry in &entries {
+            let score = condition_tag_score(entry, &tag_to_node_tag_count);
+            if score > best_score {
+                best_score = score;
+                best_entry = entry;
+            }
+        }
+        if best_score > 0 {
+            return Some(best_entry);
+        }
+    }
+
+    // Last resort: first entry (structural default when all entries are
+    // conditional and no scene-node heuristic applies, e.g. MC_S_Target_Master
+    // which has exactly one entry used at runtime despite being tagged
+    // conditional in the data).
+    entries.into_iter().next()
+}
+
+/// Extract the maximum style-tag count of any scene node matched by an
+/// entry's `conditionsList` tag conditions.
+///
+/// Returns 0 when the entry has no recognisable tag conditions or none of its
+/// tags appear in `tag_to_count`.
+fn condition_tag_score(
+    entry: &serde_json::Value,
+    tag_to_count: &std::collections::HashMap<&str, usize>,
+) -> usize {
+    let cond_lists = match entry.get("conditionsList").and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => return 0,
+    };
+    let mut max = 0usize;
+    for cond_list in cond_lists {
+        let conditions = cond_list
+            .get("conditions")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]);
+        for cond in conditions {
+            max = max.max(score_condition_node(cond, tag_to_count));
+        }
+    }
+    max
+}
+
+/// Recursively walk a condition node to find tag RecordIds and return the
+/// maximum style-tag count found in `tag_to_count`.
+fn score_condition_node(
+    cond: &serde_json::Value,
+    tag_to_count: &std::collections::HashMap<&str, usize>,
+) -> usize {
+    // Direct tag condition: {"_Type_": "…ConditionTag", "tag": {"_RecordId_": "…"}}
+    if let Some(tag_id) = cond
+        .get("tag")
+        .and_then(|t| t.get("_RecordId_"))
+        .and_then(|v| v.as_str())
+    {
+        return tag_to_count.get(tag_id).copied().unwrap_or(0);
+    }
+    // Compound (AllOf/AnyOf): recurse into "conditions" children.
+    let mut max = 0usize;
+    if let Some(children) = cond.get("conditions").and_then(|v| v.as_array()) {
+        for child in children {
+            max = max.max(score_condition_node(child, tag_to_count));
+        }
+    }
+    max
 }
 
 fn entries_from(value: &serde_json::Value) -> Vec<&serde_json::Value> {
@@ -1036,14 +1186,13 @@ mod tests {
     }
 
     #[test]
-    fn pass1_follows_all_conditional_entries_not_just_first() {
-        // Regression test for B7.2: Pass 1 must follow ALL conditional entries,
-        // not just the first.  Previously `conditional_entry_seen` caused only
-        // the first conditional entry to be followed; subsequent entries
-        // (e.g. GunsMode Canvas after AmmoNumbers Canvas) were silently skipped.
+    fn pass1_follows_only_first_conditional_as_default() {
+        // B7.2b: Pass 1 must follow only the FIRST (default-state) entry when
+        // all entries are conditional.  Previously all 3 were followed, which
+        // caused mode-mixing (GunsMode + NavMode + TurretMode merged together).
         //
-        // Scenario: root has 3 conditional entries pointing to child_a, child_b,
-        // child_c.  Each child has 2 nodes.  All three must be merged.
+        // Scenario: root has 3 conditional entries → child_a, child_b, child_c.
+        // Each child has 2 nodes.  Only child_a (first entry) must be merged.
         let child_a = serde_json::json!({
             "_RecordName_": "child_a",
             "_RecordId_": "00000000-0000-0000-0000-000000000031",
@@ -1105,18 +1254,287 @@ mod tests {
         })
         .expect("resolve failed");
 
-        // All 3 conditional entries must be fetched.
-        assert_eq!(fetch_count.get(), 3, "expected 3 fetches (all conditional entries), got {}", fetch_count.get());
+        // Only the first conditional entry (child_a) must be fetched.
+        assert_eq!(
+            fetch_count.get(),
+            1,
+            "expected 1 fetch (first-entry fallback only), got {}",
+            fetch_count.get()
+        );
 
-        // root(1) + child_a(2) + child_b(2) + child_c(2) = 7 nodes
-        assert_eq!(scene.nodes.len(), 7, "expected 7 merged nodes (root + 3 × 2 child nodes), got {}", scene.nodes.len());
+        // root(1) + child_a(2) = 3 nodes total.
+        assert_eq!(
+            scene.nodes.len(),
+            3,
+            "expected 3 merged nodes (root + child_a(2)), got {}",
+            scene.nodes.len()
+        );
 
-        // All three child root node names must appear in the merged scene.
-        let names: std::collections::HashSet<&str> = scene.nodes.values().filter_map(|n| {
-            if n.name.is_empty() { None } else { Some(n.name.as_str()) }
-        }).collect();
+        let names: std::collections::HashSet<&str> = scene
+            .nodes
+            .values()
+            .filter_map(|n| if n.name.is_empty() { None } else { Some(n.name.as_str()) })
+            .collect();
         assert!(names.contains("a_root"), "a_root not found in merged scene");
-        assert!(names.contains("b_root"), "b_root not found in merged scene");
-        assert!(names.contains("c_root"), "c_root not found in merged scene");
+        assert!(!names.contains("b_root"), "b_root must NOT appear (conditional entry skipped)");
+        assert!(!names.contains("c_root"), "c_root must NOT appear (conditional entry skipped)");
+    }
+
+    #[test]
+    fn pass1_prefers_unconditional_over_first_conditional() {
+        // B7.2b: when entries have a mix of conditional and unconditional,
+        // Pass 1 must prefer the first UNCONDITIONAL entry over the first
+        // overall.
+        //
+        // Scenario: root has [conditional→child_a, unconditional→child_b].
+        // Only child_b must be merged.
+        let child_a = serde_json::json!({
+            "_RecordName_": "child_a",
+            "_RecordId_": "00000000-0000-0000-0000-000000000041",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "a_root"},
+                    {"_Pointer_": "ptr:2", "_Type_": "BuildingBlocks_WidgetTextField", "name": "text_A", "parent": "_PointsTo_:ptr:1"}
+                ]
+            }
+        });
+        let child_b = serde_json::json!({
+            "_RecordName_": "child_b",
+            "_RecordId_": "00000000-0000-0000-0000-000000000042",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "b_root"},
+                    {"_Pointer_": "ptr:2", "_Type_": "BuildingBlocks_WidgetTextField", "name": "text_B", "parent": "_PointsTo_:ptr:1"}
+                ]
+            }
+        });
+
+        // Build a root canvas with two entries: [0] conditional, [1] unconditional.
+        let root = serde_json::json!({
+            "_RecordName_": "mixed_root",
+            "_RecordId_": "00000000-0000-0000-0000-000000000040",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "defaultStyles": {
+                    "_Type_": "BuildingBlocks_DefaultStyles",
+                    "sharedStyles": null,
+                    "entries": [
+                        // Conditional entry (has conditionsList with one condition).
+                        {
+                            "_Type_": "BuildingBlocks_StyleEntry",
+                            "name": "ConditionalEntry",
+                            "conditionsList": [{"_Type_": "BuildingBlocks_StyleConditionList", "name": "cond", "conditions": [{"key": "mode", "value": "guns"}]}],
+                            "matchTo": "",
+                            "modifiers": [{
+                                "_Type_": "BuildingBlocks_StyleModifier",
+                                "field": {
+                                    "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeCanvasReferenceRecord",
+                                    "value": "file://./child_a.json"
+                                }
+                            }]
+                        },
+                        // Unconditional entry (empty conditionsList).
+                        {
+                            "_Type_": "BuildingBlocks_StyleEntry",
+                            "name": "UnconditionalEntry",
+                            "conditionsList": [],
+                            "matchTo": "",
+                            "modifiers": [{
+                                "_Type_": "BuildingBlocks_StyleModifier",
+                                "field": {
+                                    "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeCanvasReferenceRecord",
+                                    "value": "file://./child_b.json"
+                                }
+                            }]
+                        }
+                    ]
+                },
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "root"}
+                ]
+            }
+        });
+
+        let fetch_count = std::cell::Cell::new(0u32);
+        let scene = resolve_canvas_graph(&root, None, &|url| {
+            fetch_count.set(fetch_count.get() + 1);
+            Ok(match url {
+                "file://./child_a.json" => child_a.clone(),
+                "file://./child_b.json" => child_b.clone(),
+                _ => return Err(format!("unexpected fetch: {url}")),
+            })
+        })
+        .expect("resolve failed");
+
+        // Only child_b (unconditional) must be fetched.
+        assert_eq!(
+            fetch_count.get(),
+            1,
+            "expected 1 fetch (unconditional entry preferred), got {}",
+            fetch_count.get()
+        );
+
+        let names: std::collections::HashSet<&str> = scene
+            .nodes
+            .values()
+            .filter_map(|n| if n.name.is_empty() { None } else { Some(n.name.as_str()) })
+            .collect();
+        assert!(names.contains("b_root"), "b_root (unconditional) must be in merged scene");
+        assert!(!names.contains("a_root"), "a_root (conditional) must NOT appear");
+    }
+
+    /// When every entry in `defaultStyles.entries` is conditional, the
+    /// most-tagged-node heuristic must select the entry whose condition tag
+    /// appears on the scene node that carries the highest number of style tags.
+    ///
+    /// This mirrors the `MC_S_Self_Master` case where `canvas_GunsMode` has 2
+    /// style tags while all other canvas nodes have 1, so the GunsMode entry
+    /// (→ `gen_mc_s_weaponinfo`) must win over the first entry (→ `gen_mc_s_ammolists`).
+    #[test]
+    fn pick_default_entry_most_tagged_node_wins() {
+        // Child canvases with a single content node each.
+        let child_ammo = serde_json::json!({
+            "_RecordName_": "ammo",
+            "_RecordId_": "00000000-0000-0000-0000-000000000010",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "ammo_root"}
+                ]
+            }
+        });
+        let child_guns = serde_json::json!({
+            "_RecordName_": "guns",
+            "_RecordId_": "00000000-0000-0000-0000-000000000020",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "guns_root"}
+                ]
+            }
+        });
+
+        // Root: two conditional entries.
+        // Scene has a DisplayWidget root (ptr:1) with two WidgetCanvas children
+        // (ptr:2 = AmmoNumbers with 1 tag, ptr:3 = GunsMode with 2 tags).
+        let root = serde_json::json!({
+            "_RecordName_": "self_master",
+            "_RecordId_": "00000000-0000-0000-0000-000000000001",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 1920.0, "y": 1080.0, "z": 0.0},
+                "defaultStyles": {
+                    "_Type_": "BuildingBlocks_DefaultStyles",
+                    "sharedStyles": null,
+                    "entries": [
+                        // Entry 0 — condition tag matches canvas_AmmoNumbers (1 style tag).
+                        {
+                            "_Type_": "BuildingBlocks_StyleEntry",
+                            "name": "AmmoNumbers Canvas",
+                            "conditionsList": [{
+                                "_Type_": "BuildingBlocks_StyleConditionList",
+                                "conditions": [{
+                                    "_Type_": "BuildingBlocks_StyleSelectorConditionTag",
+                                    "tag": {"_RecordId_": "tag_ammo"}
+                                }]
+                            }],
+                            "matchTo": "",
+                            "modifiers": [{
+                                "_Type_": "BuildingBlocks_StyleModifier",
+                                "field": {
+                                    "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeCanvasReferenceRecord",
+                                    "value": "file://./ammo.json"
+                                }
+                            }]
+                        },
+                        // Entry 1 — condition tag matches canvas_GunsMode (2 style tags).
+                        {
+                            "_Type_": "BuildingBlocks_StyleEntry",
+                            "name": "GunsMode Canvas",
+                            "conditionsList": [{
+                                "_Type_": "BuildingBlocks_StyleConditionList",
+                                "conditions": [{
+                                    "_Type_": "BuildingBlocks_StyleSelectorConditionTag",
+                                    "tag": {"_RecordId_": "tag_guns_mode"}
+                                }]
+                            }],
+                            "matchTo": "",
+                            "modifiers": [{
+                                "_Type_": "BuildingBlocks_StyleModifier",
+                                "field": {
+                                    "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeCanvasReferenceRecord",
+                                    "value": "file://./guns.json"
+                                }
+                            }]
+                        }
+                    ]
+                },
+                "brandStyles": [],
+                "scene": [
+                    // Root DisplayWidget (ptr:1).
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "self_master_root"},
+                    // canvas_AmmoNumbers: 1 style tag.
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetCanvas",
+                        "name": "canvas_AmmoNumbers",
+                        "parent": "_PointsTo_:ptr:1",
+                        "styleTags": [{"_RecordId_": "tag_ammo"}]
+                    },
+                    // canvas_GunsMode: 2 style tags — the "most-tagged" node.
+                    {
+                        "_Pointer_": "ptr:3",
+                        "_Type_": "BuildingBlocks_WidgetCanvas",
+                        "name": "canvas_GunsMode",
+                        "parent": "_PointsTo_:ptr:1",
+                        "styleTags": [
+                            {"_RecordId_": "tag_guns_mode"},
+                            {"_RecordId_": "tag_extra"}
+                        ]
+                    }
+                ]
+            }
+        });
+
+        let chosen = std::cell::Cell::new(None::<&'static str>);
+        let scene = resolve_canvas_graph(&root, None, &|url| {
+            let label: &'static str = if url.contains("guns") { "guns" } else { "ammo" };
+            chosen.set(Some(label));
+            Ok(match url {
+                "file://./ammo.json" => child_ammo.clone(),
+                "file://./guns.json" => child_guns.clone(),
+                _ => return Err(format!("unexpected fetch: {url}")),
+            })
+        })
+        .expect("resolve failed");
+
+        assert_eq!(
+            chosen.get(),
+            Some("guns"),
+            "most-tagged-node heuristic must pick GunsMode entry"
+        );
+        let names: std::collections::HashSet<&str> = scene
+            .nodes
+            .values()
+            .filter_map(|n| if n.name.is_empty() { None } else { Some(n.name.as_str()) })
+            .collect();
+        assert!(names.contains("guns_root"), "guns_root must be in merged scene");
+        assert!(!names.contains("ammo_root"), "ammo_root must NOT appear");
     }
 }

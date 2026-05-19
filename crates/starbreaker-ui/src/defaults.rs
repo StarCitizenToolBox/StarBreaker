@@ -21,12 +21,14 @@ use crate::canvas::{RgbaColor, Value};
 /// A registry of default values used to populate state-bound widgets when no
 /// live game data is available ("switched on, no live data" state).
 ///
-/// Three tables are maintained:
+/// Four tables are maintained:
 /// 1. **`paths`** — binding-path → [`Value`] for text/numeric defaults.
 /// 2. **`mfd_slot_defaults`** — `(view_index, slot_index)` → content-canvas
 ///    GUID for MFD page selection.
 /// 3. **`screen_state_colors`** — state-name → backlight [`RgbaColor`] from
 ///    `SCItemDisplayScreenComponentParams.screenStates[]`.
+/// 4. **`localization`** — lowercase localization key → display string from
+///    `global.ini` (e.g. `"hud_notarget"` → `"NO TARGET"`).
 #[derive(Debug, Default, Clone)]
 pub struct DefaultValueRegistry {
     /// Binding-path → default [`Value`].
@@ -48,6 +50,13 @@ pub struct DefaultValueRegistry {
     /// Note: this is the *backlight glow* color (e.g. cyan for Drake screens),
     /// **not** the amber UI-content tint which comes from the CRT shader.
     screen_state_colors: HashMap<String, RgbaColor>,
+
+    /// Localization key (lowercase, without leading `@`) → display string.
+    ///
+    /// Populated from `Data\Localization\english\global.ini` when P4K access
+    /// is available.  Used to resolve `labelProperties.label` fields on
+    /// `WidgetTextField` nodes (e.g. `@hud_NoTarget` → `"NO TARGET"`).
+    localization: HashMap<String, String>,
 }
 
 impl DefaultValueRegistry {
@@ -99,6 +108,33 @@ impl DefaultValueRegistry {
         // /vehicle/gungroup — Self Status MFD top-right label.
         // (Phase 1 contract: "GUNS (ALL)" gun-group runtime default)
         reg.insert_path("/vehicle/gungroup", Value::Str("(ALL)".into()));
+
+        // ── Static localization fallback ─────────────────────────────────────
+        //
+        // `Data\Localization\english\global.ini` is NOT present in the SC 4.x
+        // P4K.  These built-in translations cover the keys used by the MFD BB
+        // canvases so that `WidgetTextField` labels resolve to display text.
+        //
+        // Keys are lowercase (the format `lookup_localization` expects).
+        // Values are the canonical English UI strings visible in-game.
+        // If a live `global.ini` is ever loaded via `set_localization`, those
+        // values take precedence (set_localization replaces the whole table).
+        let mut loc: HashMap<String, String> = HashMap::new();
+        // Target-status screen labels (gen_mc_s_target)
+        loc.insert("hud_notarget".into(), "NO TARGET".into());
+        loc.insert("dfm_ui_target".into(), "TARGET".into());
+        loc.insert("hud_label_velocity".into(), "VELOCITY".into());
+        loc.insert("scan_data_faction".into(), "FACTION".into());
+        loc.insert("ui_nodata".into(), "—".into());
+        loc.insert("innerthought_hail".into(), "HAIL".into());
+        loc.insert("panel_call".into(), "CALL".into());
+        // Weapon-info screen labels (gen_mc_s_weaponinfo)
+        loc.insert("hud_gimbalmode".into(), "GIMBAL MODE".into());
+        loc.insert("hud_activegroup".into(), "ACTIVE GROUP".into());
+        // Intentionally empty / placeholder keys
+        loc.insert("loc_empty".into(), String::new());
+        loc.insert("loc_placeholder".into(), String::new());
+        reg.set_localization(loc);
 
         reg
     }
@@ -170,6 +206,25 @@ impl DefaultValueRegistry {
     /// Return the backlight color registered for a screen state name, if any.
     pub fn screen_state_color(&self, state_name: &str) -> Option<RgbaColor> {
         self.screen_state_colors.get(state_name).copied()
+    }
+
+    /// Replace the localization table with `map`.
+    ///
+    /// Keys must be lowercase and must **not** carry a leading `@`.  This is
+    /// the format produced by `palette::load_localization_map`.
+    pub fn set_localization(&mut self, map: HashMap<String, String>) {
+        self.localization = map;
+    }
+
+    /// Look up a localization key.
+    ///
+    /// `key` may start with `@` (it is stripped automatically before lookup).
+    /// The remainder is lowercased for a case-insensitive match.
+    ///
+    /// Returns `None` when the key is absent from the table.
+    pub fn lookup_localization(&self, key: &str) -> Option<&str> {
+        let bare = key.strip_prefix('@').unwrap_or(key);
+        self.localization.get(&bare.to_lowercase()).map(String::as_str)
     }
 }
 
@@ -303,5 +358,41 @@ mod tests {
         let mut reg = DefaultValueRegistry::new();
         reg.ingest_screen_states(&serde_json::json!("not an array"));
         assert_eq!(reg.path_count(), 0);
+    }
+
+    #[test]
+    fn localization_lookup_with_at_prefix() {
+        let mut reg = DefaultValueRegistry::new();
+        let mut map = HashMap::new();
+        map.insert("hud_notarget".to_owned(), "NO TARGET".to_owned());
+        map.insert("dfm_ui_target".to_owned(), "TARGET".to_owned());
+        reg.set_localization(map);
+
+        // Key with '@' prefix, canonical uppercase source key.
+        assert_eq!(reg.lookup_localization("@hud_NoTarget"), Some("NO TARGET"));
+        // Key with '@' prefix, lowercase.
+        assert_eq!(reg.lookup_localization("@hud_notarget"), Some("NO TARGET"));
+        // Key without '@' prefix.
+        assert_eq!(reg.lookup_localization("dfm_ui_target"), Some("TARGET"));
+        // Missing key returns None.
+        assert_eq!(reg.lookup_localization("@nonexistent"), None);
+    }
+
+    #[test]
+    fn localization_lookup_empty_table_returns_none() {
+        // new() creates a registry with no localization entries.
+        let reg = DefaultValueRegistry::new();
+        assert_eq!(reg.lookup_localization("@hud_NoTarget"), None);
+    }
+
+    #[test]
+    fn well_known_defaults_has_localization_fallbacks() {
+        // with_well_known_path_defaults() must include the static HUD strings.
+        let reg = DefaultValueRegistry::with_well_known_path_defaults();
+        assert_eq!(reg.lookup_localization("@hud_NoTarget"), Some("NO TARGET"));
+        assert_eq!(reg.lookup_localization("@hud_GimbalMode"), Some("GIMBAL MODE"));
+        assert_eq!(reg.lookup_localization("@hud_ActiveGroup"), Some("ACTIVE GROUP"));
+        assert_eq!(reg.lookup_localization("@LOC_EMPTY"), Some(""));
+        assert_eq!(reg.lookup_localization("@nonexistent"), None);
     }
 }

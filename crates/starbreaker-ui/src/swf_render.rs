@@ -222,12 +222,15 @@ pub fn draw_swf_stage_rgba(
 /// `__Packages.` — those are AVM1 ActionScript class registrations with no
 /// renderable geometry.  Each remaining export (e.g. `TargetSelection_Borders`,
 /// `TargetSelection_NoTargetPlaceholder`) is placed at the SWF stage origin with
-/// an identity matrix and rendered by [`draw_stage_character`].
+/// Render all visual exports from a Flash SWF, plus any shapes placed on the
+/// main stage timeline (frame 0) that are not already covered by a named
+/// export.
 ///
-/// This is the correct rendering path for Flash-backed BB canvases whose main
-/// timeline is empty (shapes are placed via ActionScript at runtime). The
-/// exported symbols carry their own internal `DefineSprite` first-frame display
-/// lists with the actual shape geometry, positioned in stage coordinate space.
+/// Named exports are rendered at the origin using the identity transform; stage
+/// frame items are rendered using their actual PlaceObject matrices so they
+/// appear at the correct position within the SWF stage bounds.  This ensures
+/// shapes/sprites placed directly on the stage without being exported by name
+/// are still rendered (e.g. chrome overlays and dashed lines in TargetStatus).
 ///
 /// Returns `true` if at least one shape was drawn.
 pub fn draw_swf_visual_exports(
@@ -247,7 +250,8 @@ pub fn draw_swf_visual_exports(
     let sy = dest.height() / sh;
 
     let mut drew_any = false;
-    // Deduplicate by character id — a symbol may be exported under multiple names.
+    // Deduplicate by character id — a symbol may be exported under multiple
+    // names, or appear both as a named export and in the stage frame list.
     let mut seen: std::collections::HashSet<swf::CharacterId> = std::collections::HashSet::new();
     // Collect first to avoid borrow conflict with `assets` inside the loop.
     let char_ids: Vec<swf::CharacterId> = assets.visual_exports().collect();
@@ -264,6 +268,19 @@ pub fn draw_swf_visual_exports(
             name: None,
         };
         if draw_stage_character(pixmap, assets, &place, sw, sh, sx, sy, dest, tint, alpha) {
+            drew_any = true;
+        }
+    }
+
+    // Also render stage frame 0 — catches shapes/sprites placed on the main
+    // timeline that have no named export (e.g. chrome overlays, dashed lines).
+    let stage_places = assets.stage_frame(0);
+    for place in &stage_places {
+        if !seen.insert(place.character_id) {
+            continue;
+        }
+        let ct_tint = color_transform_tint(tint, place.color_transform.as_ref());
+        if draw_stage_character(pixmap, assets, place, sw, sh, sx, sy, dest, ct_tint, alpha) {
             drew_any = true;
         }
     }
@@ -345,7 +362,8 @@ pub fn draw_swf_visual_exports_rgba(
 }
 
 
-/// Render one character from a stage or sprite display list.
+/// Render one character from a stage or sprite display list, with recursive
+/// sprite expansion up to `MAX_SPRITE_DEPTH` levels deep.
 ///
 /// `sw` / `sh` — parent viewport size in SWF pixels.
 /// `sx` / `sy` — parent viewport → pixmap scale (pixels per SWF pixel).
@@ -362,36 +380,49 @@ fn draw_stage_character(
     tint: Color,
     alpha: f32,
 ) -> bool {
+    const MAX_SPRITE_DEPTH: u8 = 4;
+    draw_stage_character_depth(pixmap, assets, place, sw, sh, sx, sy, origin, tint, alpha, MAX_SPRITE_DEPTH)
+}
+
+fn draw_stage_character_depth(
+    pixmap: &mut Pixmap,
+    assets: &SwfAssetLibrary,
+    place: &PlaceRecord,
+    sw: f32,
+    sh: f32,
+    sx: f32,
+    sy: f32,
+    origin: TskRect,
+    tint: Color,
+    alpha: f32,
+    max_depth: u8,
+) -> bool {
     let char_id = place.character_id;
 
     if let Some(shape) = assets.get_shape(char_id) {
         let shape_dest = matrix_to_dest(shape, &place.matrix, sw, sh, sx, sy, origin);
         draw_shape(pixmap, shape, shape_dest, tint, alpha)
-    } else {
-        // Try as a sprite — draw its first frame without further recursion.
+    } else if max_depth > 0 {
+        // Try as a sprite — draw its first frame, recursing into nested sprites.
         let sprite_places = assets.extract_sprite_first_frame(char_id);
         if sprite_places.is_empty() {
             return false;
         }
+        let sprite_origin = sprite_origin_in_dest(&place.matrix, sw, sh, sx, sy, origin);
         let mut drew_any = false;
         for sp_place in &sprite_places {
             let sp_tint = color_transform_tint(tint, sp_place.color_transform.as_ref());
-            // Compose sprite placement with parent: sprite's origin in parent
-            // coords is given by `place.matrix`; within the sprite the child
-            // place records are in the sprite's own coord space.
-            let sprite_origin = sprite_origin_in_dest(&place.matrix, sw, sh, sx, sy, origin);
-            if let Some(sp_shape) = assets.get_shape(sp_place.character_id) {
-                // The sprite's own stage is bounded by the placed shape's
-                // bounds; we use the sprite_origin as the new viewport top-left
-                // and preserve the same sx/sy scale (sprites share the stage
-                // coordinate space).
-                let sp_dest = matrix_to_dest(sp_shape, &sp_place.matrix, sw, sh, sx, sy, sprite_origin);
-                if draw_shape(pixmap, sp_shape, sp_dest, sp_tint, alpha) {
-                    drew_any = true;
-                }
+            if draw_stage_character_depth(
+                pixmap, assets, sp_place,
+                sw, sh, sx, sy, sprite_origin,
+                sp_tint, alpha, max_depth - 1,
+            ) {
+                drew_any = true;
             }
         }
         drew_any
+    } else {
+        false
     }
 }
 

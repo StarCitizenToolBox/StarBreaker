@@ -125,6 +125,12 @@ pub struct PipelineInputs<'a> {
     pub target_size: (u32, u32),
     /// Apply manufacturer post-process (tint, scanlines, vignette) after rasterisation.
     pub apply_postprocess: bool,
+    /// Localization table loaded from `global.ini` (key → display string).
+    ///
+    /// When `Some`, `labelProperties.label` keys (e.g. `@hud_NoTarget`) are
+    /// resolved to their display strings.  When `None`, label fields are
+    /// silently skipped and no localized text is emitted.
+    pub localization_map: Option<std::collections::HashMap<String, String>>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -338,7 +344,15 @@ pub fn render_for_binding(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiErro
 
     // ── 5. Defaults registry ────────────────────────────────────────────────
 
-    let defaults = DefaultValueRegistry::with_well_known_path_defaults();
+    let mut defaults = DefaultValueRegistry::with_well_known_path_defaults();
+    // Only override the built-in fallback table when the P4K map is non-empty.
+    // global.ini is absent from the SC 4.x P4K, so the live map is usually
+    // empty and the static fallback should remain in effect.
+    if let Some(loc_map) = inputs.localization_map.clone() {
+        if !loc_map.is_empty() {
+            defaults.set_localization(loc_map);
+        }
+    }
 
     // ── 6. Rasterise ───────────────────────────────────────────────────────
     //

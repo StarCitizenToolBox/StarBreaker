@@ -238,6 +238,7 @@ pub fn render_ui_binding_png(
         default_screen_slot: binding.dashboard_screen_slot,
     };
     let target_size = binding_target_size(&binding.binding_kind);
+    let localization_map = crate::pipeline::load_localization_map(p4k);
     let inputs = PipelineInputs {
         binding: &view,
         canvas_fetcher: &DatacoreCanvasFetcher { db },
@@ -251,6 +252,7 @@ pub fn render_ui_binding_png(
         // would mask the "not yet rendered" signal.  Re-enable in Phase 13
         // once the paint engine produces real content.
         apply_postprocess: false,
+        localization_map: Some(localization_map),
     };
     let _ = texture_mip; // size is fixed per binding_kind; mip is applied at texture level
     starbreaker_ui::pipeline::render_for_binding(&inputs).map_err(|e| e.to_string())
