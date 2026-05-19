@@ -499,10 +499,11 @@ pub(crate) fn ui_binding_for_record(db: &Database, record: &Record) -> Option<Ui
         let (canvas_record_name, canvas_record_path) = resolve_record_metadata(db, &canvas_guid);
         let (canvas_widget_canvas_path, canvas_widget_url_postfix, canvas_widget_url_optional, canvas_variable_binding) =
             canvas_widget_context_for_guid(db, &canvas_guid);
-        if canvas_widget_canvas_path.is_some()
+        if (canvas_widget_canvas_path.is_some()
             || canvas_widget_url_postfix.is_some()
             || canvas_widget_url_optional.is_some()
-            || canvas_variable_binding.is_some()
+            || canvas_variable_binding.is_some())
+            && !is_shell_canvas_guid(db, &canvas_guid)
         {
             return Some(UiBinding {
                 binding_kind: "physical".to_string(),
@@ -604,8 +605,21 @@ pub(crate) fn ui_binding_for_record(db: &Database, record: &Record) -> Option<Ui
         .as_deref()
         .map(|g| g.is_empty() || g == "null" || is_zero_guid(g))
         .unwrap_or(true);
+    // A "shell" canvas is one whose content is selected at runtime via a
+    // `BindingsStringField` operation targeting `CanvasReferenceRecord` (e.g.
+    // `DigitalSignageCanvas` driven by the `MainCanvasOverride` variable).
+    // Such canvases have no concrete widget tree of their own; if a view's
+    // `defaultView` points at one, we must fall through to another view that
+    // carries a real renderable canvas. This is a structural rule derived from
+    // the canvas record schema — see `docs/StarBreaker/ui-screen16x9-investigation.md`.
+    let canvas_guid_is_shell = !canvas_guid_is_absent
+        && canvas_guid
+            .as_deref()
+            .map(|g| is_shell_canvas_guid(db, g))
+            .unwrap_or(false);
+    let need_fallback = canvas_guid_is_absent || canvas_guid_is_shell;
     let (fallback_guid, fallback_canvas_path): (Option<String>, Option<String>) =
-        if canvas_guid_is_absent {
+        if need_fallback {
             let views_val = value_object(&first_layer, "views");
             let found = views_val
                 .and_then(|v| if let Value::Array(a) = v { Some(a) } else { None })
@@ -615,6 +629,7 @@ pub(crate) fn ui_binding_for_record(db: &Database, record: &Record) -> Option<Ui
                         value_object(view, "component")
                             .and_then(|c| value_object_string(c, "canvas"))
                             .filter(|s| !s.is_empty() && s != "null" && !is_zero_guid(s))
+                            .filter(|s| !is_shell_canvas_guid(db, s))
                             .map(|s| (view_name, s))
                     })
                 });
@@ -639,9 +654,9 @@ pub(crate) fn ui_binding_for_record(db: &Database, record: &Record) -> Option<Ui
 
     // Effective canvas GUID: primary (from defaultView) or fallback (from views[]).
     // Note: canvas_guid may be Some(zero-GUID) which Option::or treats as Some;
-    // gate on `canvas_guid_is_absent` so a present-but-zero GUID is replaced.
-    let effective_canvas_guid = if canvas_guid_is_absent {
-        fallback_guid
+    // gate on `need_fallback` so a present-but-zero-or-shell GUID is replaced.
+    let effective_canvas_guid = if need_fallback {
+        fallback_guid.or(canvas_guid)
     } else {
         canvas_guid
     };
@@ -691,6 +706,37 @@ pub(crate) fn ui_binding_for_record(db: &Database, record: &Record) -> Option<Ui
         generated_resolved_source_path: None,
         generated_backend: None,
         generated_provenance: None,
+    })
+}
+
+/// Return `true` when the canvas at `canvas_guid` is a *shell* — i.e. its
+/// content is selected at runtime via a `BindingsStringField` operation on
+/// `CanvasReferenceRecord`. Such canvases (e.g. `DigitalSignageCanvas`) have
+/// no concrete widget tree and would render blank if used directly.
+///
+/// Structural rule (not name-based):
+///   - The canvas record exists in DataCore.
+///   - Its `operations[]` contains a `BuildingBlocks_BindingsStringField`
+///     whose `field` equals `"CanvasReferenceRecord"`.
+fn is_shell_canvas_guid(db: &Database, canvas_guid: &str) -> bool {
+    let Some(guid) = parse_guid(canvas_guid) else {
+        return false;
+    };
+    let Some(record) = db.record_by_id(&guid) else {
+        return false;
+    };
+    let q = query_value_path(db, record, "operations[BuildingBlocks_BindingsStringField]");
+    let ops: Vec<Value> = match q {
+        Some(Value::Array(a)) => a,
+        Some(v @ Value::Object { .. }) => vec![v],
+        _ => return false,
+    };
+    // A canvas is a "shell" when one of its operations binds the
+    // `CanvasReferenceRecord` field at runtime (e.g. via a
+    // `BindingsStringVariable` pointing at `MainCanvasOverride` or
+    // `/Screen/CanvasGUID`). The field is stored as an Enum value.
+    ops.iter().any(|op| {
+        value_object_enum(op, "field").as_deref() == Some("CanvasReferenceRecord")
     })
 }
 
@@ -1117,6 +1163,14 @@ fn query_value_path<'a>(db: &'a Database<'a>, record: &'a Record, path: &str) ->
 fn value_object<'a>(value: &'a Value<'a>, key: &str) -> Option<&'a Value<'a>> {
     match value {
         Value::Object { fields, .. } => fields.iter().find(|(name, _)| *name == key).map(|(_, value)| value),
+        _ => None,
+    }
+}
+
+fn value_object_enum(value: &Value<'_>, key: &str) -> Option<String> {
+    match value_object(value, key) {
+        Some(Value::Enum(text)) if !text.is_empty() => Some((*text).to_string()),
+        Some(Value::String(text)) if !text.is_empty() => Some((*text).to_string()),
         _ => None,
     }
 }
