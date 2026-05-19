@@ -595,38 +595,68 @@ pub(crate) fn ui_binding_for_record(db: &Database, record: &Record) -> Option<Ui
 
     // When the defaultView has no canvas (e.g. the entity's default is an "Off"
     // view), search the layer's views[] array for the first entry that does carry
-    // a non-null canvas.  The path is stored in canvas_widget_canvas_path so it
-    // is visible in the exported scene.json; the rendering pipeline does not yet
-    // support P4K file-path canvases, so no image is generated for these.
+    // a non-null canvas value.  The found value can be either a GUID or a P4K
+    // path string; they must be routed differently:
+    //   - GUID  → assign into canvas_guid so it flows through resolve_record_metadata
+    //             and canvas_widget_context_for_guid exactly like the primary path.
+    //   - Path  → store in canvas_widget_canvas_path as before.
     let canvas_guid_is_absent = canvas_guid
         .as_deref()
         .map(|g| g.is_empty() || g == "null" || is_zero_guid(g))
         .unwrap_or(true);
-    let fallback_canvas_path: Option<String> = if canvas_guid_is_absent {
-        let views_val = value_object(&first_layer, "views");
-        views_val
-            .and_then(|v| if let Value::Array(a) = v { Some(a) } else { None })
-            .and_then(|views| {
-                views.iter().find_map(|view| {
-                    value_object(view, "component")
-                        .and_then(|c| value_object_string(c, "canvas"))
-                        .filter(|s| !s.is_empty() && s != "null" && !is_zero_guid(s))
-                })
-            })
+    let (fallback_guid, fallback_canvas_path): (Option<String>, Option<String>) =
+        if canvas_guid_is_absent {
+            let views_val = value_object(&first_layer, "views");
+            let found = views_val
+                .and_then(|v| if let Value::Array(a) = v { Some(a) } else { None })
+                .and_then(|views| {
+                    views.iter().find_map(|view| {
+                        let view_name = value_object_string(view, "name");
+                        value_object(view, "component")
+                            .and_then(|c| value_object_string(c, "canvas"))
+                            .filter(|s| !s.is_empty() && s != "null" && !is_zero_guid(s))
+                            .map(|s| (view_name, s))
+                    })
+                });
+            match found {
+                Some((view_name, val)) => {
+                    let (fg, fp) = classify_canvas_fallback_value(val);
+                    if fg.is_some() {
+                        log::debug!(
+                            "ui_binding: defaultView canvas absent; using fallback GUID {:?} from \
+                             view {:?} (entity record source_entity_name=<unknown>)",
+                            fg,
+                            view_name,
+                        );
+                    }
+                    (fg, fp)
+                }
+                None => (None, None),
+            }
+        } else {
+            (None, None)
+        };
+
+    // Effective canvas GUID: primary (from defaultView) or fallback (from views[]).
+    // Note: canvas_guid may be Some(zero-GUID) which Option::or treats as Some;
+    // gate on `canvas_guid_is_absent` so a present-but-zero GUID is replaced.
+    let effective_canvas_guid = if canvas_guid_is_absent {
+        fallback_guid
     } else {
-        None
+        canvas_guid
     };
-    let (canvas_record_name, canvas_record_path) = canvas_guid
+
+    let (canvas_record_name, canvas_record_path) = effective_canvas_guid
         .as_deref()
         .map(|guid| resolve_record_metadata(db, guid))
         .unwrap_or((None, None));
     let (mut canvas_widget_canvas_path, canvas_widget_url_postfix, canvas_widget_url_optional, canvas_variable_binding) =
-        canvas_guid
+        effective_canvas_guid
             .as_deref()
             .map(|guid| canvas_widget_context_for_guid(db, guid))
             .unwrap_or((None, None, None, None));
     // When the canvas_guid resolution yielded no widget-canvas path but we found
-    // a fallback path from views[], record it so it appears in the exported scene.
+    // a fallback P4K path from views[], record it so it appears in the exported scene.
     if canvas_widget_canvas_path.is_none() {
         canvas_widget_canvas_path = fallback_canvas_path;
     }
@@ -643,7 +673,7 @@ pub(crate) fn ui_binding_for_record(db: &Database, record: &Record) -> Option<Ui
         default_state_name,
         default_light_color,
         default_light_intensity_milli,
-        canvas_guid,
+        canvas_guid: effective_canvas_guid,
         canvas_record_name,
         canvas_record_path,
         canvas_widget_canvas_path,
@@ -1154,4 +1184,57 @@ fn resolve_record_metadata(db: &Database, guid: &str) -> (Option<String>, Option
     let path = Some(db.resolve_string(record.file_name_offset).replace('\\', "/"))
         .filter(|value| !value.is_empty());
     (name, path)
+}
+
+/// Determine whether a canvas value string is a GUID or a P4K path.
+///
+/// Returns `(Some(guid), None)` when `value` parses as a valid non-zero UUID.
+/// Returns `(None, Some(path))` otherwise (treat as a P4K file-path string).
+///
+/// Used by the views[] fallback scan to correctly route the found canvas value:
+/// GUIDs flow through the normal `canvas_guid` pipeline while P4K paths are
+/// stored in `canvas_widget_canvas_path`.
+fn classify_canvas_fallback_value(value: String) -> (Option<String>, Option<String>) {
+    if parse_guid(&value).is_some() && !is_zero_guid(&value) {
+        (Some(value), None)
+    } else {
+        (None, Some(value))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_real_guid_returns_guid_slot() {
+        let guid = "abcdef01-1234-5678-9abc-def012345678".to_string();
+        let (g, p) = classify_canvas_fallback_value(guid.clone());
+        assert_eq!(g, Some(guid));
+        assert_eq!(p, None);
+    }
+
+    #[test]
+    fn classify_zero_guid_returns_path_slot() {
+        let zero = "00000000-0000-0000-0000-000000000000".to_string();
+        let (g, p) = classify_canvas_fallback_value(zero.clone());
+        assert_eq!(g, None);
+        assert_eq!(p, Some(zero));
+    }
+
+    #[test]
+    fn classify_p4k_path_returns_path_slot() {
+        let path = "Data/UI/Canvas/radar_screen.json".to_string();
+        let (g, p) = classify_canvas_fallback_value(path.clone());
+        assert_eq!(g, None);
+        assert_eq!(p, Some(path));
+    }
+
+    #[test]
+    fn classify_file_url_returns_path_slot() {
+        let url = "file://UI/Canvas/gen_mc_s_target.json".to_string();
+        let (g, p) = classify_canvas_fallback_value(url.clone());
+        assert_eq!(g, None);
+        assert_eq!(p, Some(url));
+    }
 }

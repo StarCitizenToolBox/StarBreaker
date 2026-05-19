@@ -115,6 +115,21 @@ impl<'a> AtlasLibrary<'a> {
         None
     }
 
+    /// Fetch raw bytes for `raw_path` from the archive.
+    ///
+    /// The path is canonicalised and manufacturer MFD fallback is applied identically
+    /// to [`Self::resolve`].  Returns `None` when the asset is not found.
+    ///
+    /// Use this when the caller needs to post-process the raw bytes (e.g. SVG
+    /// rasterisation with a fill-colour override) rather than receiving a decoded image.
+    pub fn fetch_raw(&self, raw_path: &str) -> Option<Vec<u8>> {
+        let canonical = canonicalise_path(raw_path);
+        if canonical.is_empty() {
+            return None;
+        }
+        self.fetch_with_mfd_fallback(&canonical)
+    }
+
     fn fetch_and_decode(&self, canonical: &str, target_w: u32, target_h: u32) -> Option<RgbaImage> {
         let ext = extension_of(canonical);
         let bytes = self.fetch_with_mfd_fallback(canonical)?;

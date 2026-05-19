@@ -41,7 +41,9 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::bb_loc::LocFetcher;
 use crate::bb_scene::{BbNodeId, BbNodeType, BbScene, parse_bb_canvas};
+use crate::bb_brand_style;
 use crate::pipeline::extract_record_name;
 
 /// Maximum total nesting depth across both passes.
@@ -58,10 +60,26 @@ const MAX_CANVAS_DEPTH: u8 = 8;
 /// when no brand matches, `defaultStyles.entries[]` are used at every level of
 /// the hierarchy.  Individual child fetch or parse failures are logged and
 /// skipped so a partial scene is still returned.
+///
+/// This is a backwards-compatible wrapper around [`resolve_canvas_graph_with_loc`]
+/// that passes `None` for the localization fetcher.
 pub fn resolve_canvas_graph(
     root_json: &serde_json::Value,
     manufacturer_id: Option<&str>,
     fetch_by_path: &dyn Fn(&str) -> Result<serde_json::Value, String>,
+) -> Result<BbScene, String> {
+    resolve_canvas_graph_with_loc(root_json, manufacturer_id, fetch_by_path, None)
+}
+
+/// Like [`resolve_canvas_graph`] but accepts an optional localization fetcher.
+///
+/// When `loc_fetcher` is `Some`, brand-applied string modifier values that start
+/// with `@` are resolved through the fetcher before being written to nodes.
+pub fn resolve_canvas_graph_with_loc(
+    root_json: &serde_json::Value,
+    manufacturer_id: Option<&str>,
+    fetch_by_path: &dyn Fn(&str) -> Result<serde_json::Value, String>,
+    loc_fetcher: Option<&dyn LocFetcher>,
 ) -> Result<BbScene, String> {
     let mut visited = HashSet::new();
     // Seed visited with the root's own record name so cycles back to the root
@@ -69,7 +87,7 @@ pub fn resolve_canvas_graph(
     if let Some(name) = root_json.get("_RecordName_").and_then(|v| v.as_str()) {
         visited.insert(name.to_ascii_lowercase());
     }
-    resolve_canvas_graph_inner(root_json, manufacturer_id, fetch_by_path, 0, &mut visited)
+    resolve_canvas_graph_inner(root_json, manufacturer_id, fetch_by_path, loc_fetcher, 0, &mut visited)
 }
 
 /// Inner recursive resolver.  `visited` accumulates normalised record names
@@ -80,6 +98,7 @@ fn resolve_canvas_graph_inner(
     root_json: &serde_json::Value,
     manufacturer_id: Option<&str>,
     fetch_by_path: &dyn Fn(&str) -> Result<serde_json::Value, String>,
+    loc_fetcher: Option<&dyn LocFetcher>,
     depth: u8,
     visited: &mut HashSet<String>,
 ) -> Result<BbScene, String> {
@@ -178,6 +197,7 @@ fn resolve_canvas_graph_inner(
                     &child_json,
                     manufacturer_id,
                     fetch_by_path,
+                    loc_fetcher,
                     depth + 1,
                     visited,
                 ) {
@@ -309,6 +329,7 @@ fn resolve_canvas_graph_inner(
                 &child_json,
                 manufacturer_id,
                 fetch_by_path,
+                loc_fetcher,
                 depth + 1,
                 visited,
             ) {
@@ -327,6 +348,12 @@ fn resolve_canvas_graph_inner(
         }
     }
 
+    // Apply brand modifiers after scene resolution is complete.
+    // This is the R2 phase — mutate node fields based on brand-style modifiers.
+    if let Some(brand_style) = bb_brand_style::resolve_brand_style(record_value, manufacturer_id) {
+        crate::bb_brand_apply::apply_brand_modifiers(&mut scene, &brand_style, loc_fetcher);
+    }
+
     Ok(scene)
 }
 
@@ -334,23 +361,12 @@ fn pick_active_entries<'a>(
     record_value: &'a serde_json::Value,
     manufacturer_id: Option<&str>,
 ) -> Vec<&'a serde_json::Value> {
-    if let Some(mfr) = manufacturer_id {
-        let prefix = format!("s_{}_", mfr.to_ascii_lowercase());
-        if let Some(brand_styles) = record_value.get("brandStyles").and_then(|v| v.as_array()) {
-            for brand in brand_styles {
-                let brand_base = brand
-                    .get("brandIdentifier")
-                    .and_then(|v| v.as_str())
-                    .map(extract_record_name)
-                    .unwrap_or_default()
-                    .to_ascii_lowercase();
-                if brand_base.starts_with(&prefix) {
-                    return entries_from(brand);
-                }
-            }
-        }
+    // Use new brand-style resolver (R1 phase) which handles IC_* per-canvas override + generic fallback
+    if let Some(brand_style) = bb_brand_style::resolve_brand_style(record_value, manufacturer_id) {
+        return brand_style.entries.iter().collect();
     }
 
+    // Fall back to defaultStyles when no brand match
     record_value
         .get("defaultStyles")
         .map(entries_from)

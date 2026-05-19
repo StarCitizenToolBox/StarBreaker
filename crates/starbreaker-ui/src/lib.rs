@@ -14,11 +14,17 @@
 //! - [`style`]       — Manufacturer style (tint, CRT params) loader.
 //! - [`swf_assets`]  — SWF static-atom extractor and [`SwfAssetLibrary`].
 
+pub mod bb_assets;
 pub mod bb_atlas;
 pub mod bb_bindings;
+pub mod bb_brand_apply;
+pub mod bb_brand_style;
 pub mod bb_layout;
+pub mod bb_loc;
+pub mod bb_loc_p4k;
 pub mod bb_resolve;
 pub mod bb_scene;
+pub mod bb_svg;
 pub mod canvas;
 pub mod compose;
 pub mod defaults;

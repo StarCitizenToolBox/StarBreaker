@@ -24,6 +24,7 @@ use tiny_skia::{
 };
 
 use crate::bb_atlas::AtlasLibrary;
+use crate::bb_assets::UiAssetResolver;
 use crate::bb_bindings::BindingResolver;
 use crate::bb_layout::{self, Rect};
 use crate::bb_scene::{BbBorder, BbNode, BbNodeType, BbScene, BbValue};
@@ -289,8 +290,10 @@ fn draw_node(
             if fill[3] > 0.005 {
                 fill_rect_ts(pixmap, tsk_rect, fill, alpha);
             }
-            if let Some(img) = atlas.resolve_for_node(node, iw, ih) {
-                blit_atlas_image(pixmap, &img, rect.x as i32, rect.y as i32, alpha);
+            if !draw_raw_asset(node, rect, atlas, pixmap, alpha) {
+                if let Some(img) = atlas.resolve_for_node(node, iw, ih) {
+                    blit_atlas_image(pixmap, &img, rect.x as i32, rect.y as i32, alpha);
+                }
             }
             if let Some(border) = &node.border {
                 draw_border_ts(pixmap, tsk_rect, border, ctx, alpha, &node.raw);
@@ -305,7 +308,9 @@ fn draw_node(
         // outlines that do not exist in the in-game reference; rendering
         // nothing is structurally honest until the asset can be resolved.
         BbNodeType::WidgetIcon | BbNodeType::WidgetImage => {
-            if let Some(img) = atlas.resolve_for_node(node, iw, ih) {
+            if draw_raw_asset(node, rect, atlas, pixmap, alpha) {
+                // Raw-path asset was found and attempted; skip atlas fallback.
+            } else if let Some(img) = atlas.resolve_for_node(node, iw, ih) {
                 let tint = node
                     .icon
                     .as_ref()
@@ -334,7 +339,13 @@ fn draw_node(
         // `draw_swf_symbol` here is a no-op for Flash-backed shapes (returns
         // false when the name is not found in the SWF exports).
         BbNodeType::WidgetCustomShape => {
-            if let Some(img) = atlas.resolve_for_node(node, iw, ih) {
+            let drew_raw = draw_raw_asset(node, rect, atlas, pixmap, alpha);
+            if drew_raw {
+                // Raw-path asset was rendered; still apply any authored border.
+                if let Some(border) = &node.border {
+                    draw_border_ts(pixmap, tsk_rect, border, ctx, alpha, &node.raw);
+                }
+            } else if let Some(img) = atlas.resolve_for_node(node, iw, ih) {
                 blit_atlas_image(pixmap, &img, rect.x as i32, rect.y as i32, alpha);
                 if let Some(border) = &node.border {
                     draw_border_ts(pixmap, tsk_rect, border, ctx, alpha, &node.raw);
@@ -394,6 +405,83 @@ fn draw_node(
                 .stroke_path(&path, &paint, &stroke, Transform::identity(), None);
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Brand-modifier raw-asset rendering (R3)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Attempt to render a brand-modifier asset from `node.raw["SvgPath"]` or
+/// `node.raw["ImagePath"]`.
+///
+/// Returns `true` when either key is present in `node.raw`, indicating to the
+/// caller that a raw-path render was attempted and the atlas fallback should be
+/// suppressed.  Returns `false` when neither key is present.
+///
+/// Reference-overlay paths (`_references` hierarchy) are silently skipped —
+/// `true` is still returned so the caller does not fall through to an
+/// unrelated fallback draw.
+fn draw_raw_asset(
+    node: &BbNode,
+    rect: Rect,
+    atlas: &AtlasLibrary<'_>,
+    pixmap: &mut Pixmap,
+    alpha: f32,
+) -> bool {
+    let svg_path_raw = node.raw.get("SvgPath").and_then(|v| v.as_str());
+    let img_path_raw = node.raw.get("ImagePath").and_then(|v| v.as_str());
+
+    if svg_path_raw.is_none() && img_path_raw.is_none() {
+        return false;
+    }
+
+    let iw = rect.w.round().max(1.0) as u32;
+    let ih = rect.h.round().max(1.0) as u32;
+
+    if let Some(raw_path) = svg_path_raw {
+        let norm = UiAssetResolver::normalise_path(raw_path);
+        if !UiAssetResolver::is_reference_overlay(&norm) {
+            let fill_override = node_fill_override(node);
+            if let Some(svg_bytes) = atlas.fetch_raw(&norm) {
+                if let Some(img) = crate::bb_svg::rasterize_svg(&svg_bytes, iw, ih, fill_override)
+                {
+                    blit_atlas_image(pixmap, &img, rect.x as i32, rect.y as i32, alpha);
+                }
+            }
+        }
+        return true;
+    }
+
+    if let Some(raw_path) = img_path_raw {
+        let norm = UiAssetResolver::normalise_path(raw_path);
+        if !UiAssetResolver::is_reference_overlay(&norm) {
+            if let Some(img) = atlas.resolve(&norm, iw, ih) {
+                blit_atlas_image(pixmap, &img, rect.x as i32, rect.y as i32, alpha);
+            }
+        }
+        return true;
+    }
+
+    false
+}
+
+/// Extract a fill-colour override for SVG tinting from a node.
+///
+/// Checks `node.background.fill_colour` first, then `node.raw["FillColor"]`
+/// as a `{r, g, b, a}` object in `0.0..=1.0` component range.
+fn node_fill_override(node: &BbNode) -> Option<[f32; 4]> {
+    if let Some(bg) = &node.background {
+        if let Some(c) = bg.fill_colour {
+            return Some(c);
+        }
+    }
+
+    let obj = node.raw.get("FillColor")?.as_object()?;
+    let r = obj.get("r").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let g = obj.get("g").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let b = obj.get("b").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let a = obj.get("a").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+    Some([r, g, b, a])
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

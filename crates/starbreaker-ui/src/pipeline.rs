@@ -131,6 +131,12 @@ pub struct PipelineInputs<'a> {
     /// resolved to their display strings.  When `None`, label fields are
     /// silently skipped and no localized text is emitted.
     pub localization_map: Option<std::collections::HashMap<String, String>>,
+    /// Optional localization fetcher for brand-applied `@KEY` string resolution.
+    ///
+    /// When `Some`, string modifier values that start with `@` in brand-style
+    /// modifiers are resolved to their display strings during scene construction.
+    /// When `None`, `@KEY` strings are passed through as-is.
+    pub loc_fetcher: Option<&'a dyn crate::bb_loc::LocFetcher>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -167,12 +173,12 @@ pub fn render_for_binding(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiErro
 
     let bb_scene_opt: Option<crate::bb_scene::BbScene> =
         raw_root_json.as_ref().and_then(|root_json| {
-            crate::bb_resolve::resolve_canvas_graph(root_json, b.manufacturer_id, &|p| {
+            crate::bb_resolve::resolve_canvas_graph_with_loc(root_json, b.manufacturer_id, &|p| {
                 inputs
                     .canvas_fetcher
                     .fetch_canvas_by_path(p)
                     .map_err(|e| e.to_string())
-            })
+            }, inputs.loc_fetcher)
             .map_err(|e| {
                 log::warn!(
                     "bb_scene resolve failed for helper {:?} canvas {}: {}",
