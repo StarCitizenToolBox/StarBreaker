@@ -96,32 +96,13 @@ fn resolve_canvas_graph_inner(
     //
     // Style entries may be unconditional (always active) or conditional
     // (mode-specific, e.g. GunsMode vs NavMode vs TurretMode on a self-status
-    // canvas).  Following *all* conditional entries in a static render merges
-    // every sub-view at the canvas origin and produces overlapping text.
-    // To avoid this, only the first conditional entry is followed; subsequent
-    // ones are skipped.  Unconditional entries (empty `conditionsList`) are
-    // always followed since they represent always-visible content.
-    let mut conditional_entry_seen = false;
+    // canvas).  All entries are followed in the static render — conditional
+    // entries represent mode-specific content slots, and the exported scene
+    // captures every possible state of the screen.  Pass 2's
+    // `conditional_canvas_norms` check prevents double-following any canvas
+    // that Pass 1 already visited.
     for entry in pick_active_entries(record_value, manufacturer_id) {
         let entry_name = entry.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-        let has_conditions = entry
-            .get("conditionsList")
-            .and_then(|v| v.as_array())
-            .map(|arr| !arr.is_empty())
-            .unwrap_or(false);
-        if has_conditions {
-            if conditional_entry_seen {
-                if debug_trace {
-                    log::info!(
-                        "bb_resolve[depth={}]: skipping conditional entry {:?} (already saw one)",
-                        depth,
-                        entry_name,
-                    );
-                }
-                continue;
-            }
-            conditional_entry_seen = true;
-        }
         let match_to = entry.get("matchTo").and_then(|v| v.as_str()).unwrap_or("");
         let Some(modifiers) = entry.get("modifiers").and_then(|v| v.as_array()) else {
             continue;
@@ -194,14 +175,12 @@ fn resolve_canvas_graph_inner(
     // Only the URLs collected from the root canvas's own nodes (before Pass 1)
     // are followed here — see the comment above.
     //
-    // Some WidgetCanvas nodes serve as mode-switchable content slots: their
-    // DEFAULT canvas is the NavMode view, but conditional style entries
-    // REPLACE that canvas with mode-specific content (guns, missiles, …).
-    // In a static render, if a conditional entry was already followed in Pass 1,
-    // the slot's default canvas must NOT also be followed — it was replaced.
-    // We detect this by collecting every canvas norm referenced by any conditional
-    // entry and skipping Pass-2 URLs that appear in that set but were NOT already
-    // added to `visited` by Pass 1.
+    // Some WidgetCanvas nodes serve as mode-switchable content slots whose
+    // DEFAULT canvas matches a canvas already followed by Pass 1.  To prevent
+    // Pass 2 from fetching those canvases again, we collect every canvas norm
+    // referenced by a conditional Pass-1 entry.  If the norm is already in
+    // `visited` (Pass 1 followed it) or in this set but not visited (Pass 1
+    // fetch failed), Pass 2 skips it — `!visited.insert()` is the final guard.
     let conditional_canvas_norms: std::collections::HashSet<String> = {
         let mut set = std::collections::HashSet::new();
         for entry in pick_active_entries(record_value, manufacturer_id) {
@@ -248,7 +227,7 @@ fn resolve_canvas_graph_inner(
             if conditional_canvas_norms.contains(&norm) && !visited.contains(&norm) {
                 if debug_trace {
                     log::info!(
-                        "bb_resolve[depth={}]: Pass2 skipping {} (conditional mode canvas, not selected in Pass1)",
+                        "bb_resolve[depth={}]: Pass2 skipping {} (already handled by Pass1 or Pass1 fetch failed)",
                         depth, norm,
                     );
                 }
@@ -1016,5 +995,128 @@ mod tests {
             "fetcher must not be called for canvas=\"null\" WidgetCanvas nodes"
         );
         assert_eq!(scene.nodes.len(), 2, "expected 2 original nodes, got {}", scene.nodes.len());
+    }
+
+    /// Build a canvas with multiple conditional style entries, each pointing to
+    /// a different child canvas URL.
+    fn canvas_with_multi_conditional_refs(urls: &[(&str, &str)]) -> serde_json::Value {
+        let entries: Vec<serde_json::Value> = urls
+            .iter()
+            .map(|(name, url)| {
+                serde_json::json!({
+                    "name": name,
+                    "matchTo": "",
+                    "conditionsList": [{"_Type_": "BuildingBlocks_StyleConditionList", "conditions": [{"_Type_": "BuildingBlocks_StyleSelectorConditionType", "type": "Canvas"}]}],
+                    "modifiers": [{
+                        "field": {
+                            "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeCanvasReferenceRecord",
+                            "value": url
+                        }
+                    }]
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "_RecordName_": "multi_cond_root",
+            "_RecordId_": "00000000-0000-0000-0000-000000000030",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "defaultStyles": {
+                    "_Type_": "BuildingBlocks_DefaultStyles",
+                    "sharedStyles": null,
+                    "entries": entries
+                },
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "root"}
+                ]
+            }
+        })
+    }
+
+    #[test]
+    fn pass1_follows_all_conditional_entries_not_just_first() {
+        // Regression test for B7.2: Pass 1 must follow ALL conditional entries,
+        // not just the first.  Previously `conditional_entry_seen` caused only
+        // the first conditional entry to be followed; subsequent entries
+        // (e.g. GunsMode Canvas after AmmoNumbers Canvas) were silently skipped.
+        //
+        // Scenario: root has 3 conditional entries pointing to child_a, child_b,
+        // child_c.  Each child has 2 nodes.  All three must be merged.
+        let child_a = serde_json::json!({
+            "_RecordName_": "child_a",
+            "_RecordId_": "00000000-0000-0000-0000-000000000031",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "a_root"},
+                    {"_Pointer_": "ptr:2", "_Type_": "BuildingBlocks_WidgetTextField", "name": "text_A", "parent": "_PointsTo_:ptr:1"}
+                ]
+            }
+        });
+        let child_b = serde_json::json!({
+            "_RecordName_": "child_b",
+            "_RecordId_": "00000000-0000-0000-0000-000000000032",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "b_root"},
+                    {"_Pointer_": "ptr:2", "_Type_": "BuildingBlocks_WidgetTextField", "name": "text_B", "parent": "_PointsTo_:ptr:1"}
+                ]
+            }
+        });
+        let child_c = serde_json::json!({
+            "_RecordName_": "child_c",
+            "_RecordId_": "00000000-0000-0000-0000-000000000033",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "c_root"},
+                    {"_Pointer_": "ptr:2", "_Type_": "BuildingBlocks_WidgetTextField", "name": "text_C", "parent": "_PointsTo_:ptr:1"}
+                ]
+            }
+        });
+
+        let root = canvas_with_multi_conditional_refs(&[
+            ("Entry A", "file://./child_a.json"),
+            ("Entry B", "file://./child_b.json"),
+            ("Entry C", "file://./child_c.json"),
+        ]);
+
+        let fetch_count = std::cell::Cell::new(0u32);
+        let scene = resolve_canvas_graph(&root, None, &|url| {
+            fetch_count.set(fetch_count.get() + 1);
+            Ok(match url {
+                "file://./child_a.json" => child_a.clone(),
+                "file://./child_b.json" => child_b.clone(),
+                "file://./child_c.json" => child_c.clone(),
+                _ => return Err(format!("unexpected fetch: {url}")),
+            })
+        })
+        .expect("resolve failed");
+
+        // All 3 conditional entries must be fetched.
+        assert_eq!(fetch_count.get(), 3, "expected 3 fetches (all conditional entries), got {}", fetch_count.get());
+
+        // root(1) + child_a(2) + child_b(2) + child_c(2) = 7 nodes
+        assert_eq!(scene.nodes.len(), 7, "expected 7 merged nodes (root + 3 × 2 child nodes), got {}", scene.nodes.len());
+
+        // All three child root node names must appear in the merged scene.
+        let names: std::collections::HashSet<&str> = scene.nodes.values().filter_map(|n| {
+            if n.name.is_empty() { None } else { Some(n.name.as_str()) }
+        }).collect();
+        assert!(names.contains("a_root"), "a_root not found in merged scene");
+        assert!(names.contains("b_root"), "b_root not found in merged scene");
+        assert!(names.contains("c_root"), "c_root not found in merged scene");
     }
 }
