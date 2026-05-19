@@ -2,18 +2,23 @@
 //!
 //! When a BB canvas hosts multiple `BuildingBlocks_WidgetCanvas` children that
 //! each represent one UI *state* (e.g. Attract, LogIn, MainMenu, Admin), each
-//! child's `Instantiated` field is bound to a runtime boolean variable via an
+//! child's visibility field is bound to a runtime boolean variable via an
 //! `operations[]` entry.  At runtime exactly one child is active at a time.
+//!
+//! Visibility-controlling fields observed in real canvases:
+//! - `Instantiated` — widget is created only when true.
+//! - `IsActive` — widget is enabled/visible only when true.
+//! - `Visible` / `Enabled` — common widget visibility shorthands.
 //!
 //! During a static export there is no runtime; instead the canvas record may
 //! carry a `staticVariables[]` array that declares which variables are `true`
 //! by default.  All other variables default to `false`.
 //!
 //! This module evaluates the boolean expression graph for every
-//! `BuildingBlocks_BindingsBooleanField` operation that targets the
-//! `"Instantiated"` field and returns the set of WidgetCanvas pointer IDs
-//! whose `Instantiated` evaluates to `false`, so the caller can skip following
-//! those canvas URLs in Pass 2 of the resolver.
+//! `BuildingBlocks_BindingsBooleanField` operation that targets one of the
+//! visibility fields and returns the set of widget pointer IDs whose
+//! visibility evaluates to `false`, so the caller can skip following those
+//! canvas URLs in Pass 2 of the resolver.
 //!
 //! # Naming convention
 //!
@@ -56,7 +61,12 @@ pub fn instantiated_false_widgets(record_value: &serde_json::Value) -> HashSet<B
             continue;
         }
         let field = op.get("field").and_then(|v| v.as_str()).unwrap_or("");
-        if field != "Instantiated" {
+        // Generalized visibility fields. `Instantiated` is the canonical state
+        // switcher on `WidgetCanvas`.  `IsActive` is the equivalent for many
+        // composed canvases (e.g. `I_Med_MedicalEndOfBed_A`).  `Visible` and
+        // `Enabled` cover ad-hoc widget hiding (e.g. "View Patient" only when
+        // ActorIsInBed is true).
+        if !matches!(field, "Instantiated" | "IsActive" | "Visible" | "Enabled") {
             continue;
         }
         let Some(widget) = op
@@ -369,6 +379,67 @@ mod tests {
         assert!(
             !result.contains(&5),
             "NOT(false) canvas (ptr:5) must not be filtered"
+        );
+    }
+
+    #[test]
+    fn is_active_false_widget_is_filtered() {
+        // `IsActive` is treated as a visibility field just like `Instantiated`.
+        // Variable `state.Foo` has no static default → false → widget ptr:5 hidden.
+        let rv = make_record_value(
+            vec![],
+            vec![
+                variable_op(3, "state.Foo"),
+                json!({
+                    "_Type_": "BuildingBlocks_BindingsBooleanField",
+                    "widget": "_PointsTo_:ptr:5",
+                    "field": "IsActive",
+                    "input": "_PointsTo_:ptr:3"
+                }),
+            ],
+        );
+        let result = instantiated_false_widgets(&rv);
+        assert!(result.contains(&5), "IsActive=false widget (ptr:5) must be filtered");
+    }
+
+    #[test]
+    fn visible_false_widget_is_filtered() {
+        let rv = make_record_value(
+            vec![],
+            vec![
+                variable_op(3, "state.ActorIsInBed"),
+                json!({
+                    "_Type_": "BuildingBlocks_BindingsBooleanField",
+                    "widget": "_PointsTo_:ptr:7",
+                    "field": "Visible",
+                    "input": "_PointsTo_:ptr:3"
+                }),
+            ],
+        );
+        let result = instantiated_false_widgets(&rv);
+        assert!(result.contains(&7), "Visible=false widget (ptr:7) must be filtered");
+    }
+
+    #[test]
+    fn unknown_field_is_not_filtered() {
+        // Bindings to non-visibility fields (e.g. `Text`, `Color`) must not
+        // cause widget filtering.
+        let rv = make_record_value(
+            vec![],
+            vec![
+                variable_op(3, "state.SomeFlag"),
+                json!({
+                    "_Type_": "BuildingBlocks_BindingsBooleanField",
+                    "widget": "_PointsTo_:ptr:9",
+                    "field": "Text",
+                    "input": "_PointsTo_:ptr:3"
+                }),
+            ],
+        );
+        let result = instantiated_false_widgets(&rv);
+        assert!(
+            !result.contains(&9),
+            "Bindings to non-visibility fields must not filter the widget"
         );
     }
 }
