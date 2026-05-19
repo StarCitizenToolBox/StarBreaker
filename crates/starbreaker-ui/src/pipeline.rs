@@ -350,7 +350,11 @@ pub fn render_for_binding(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiErro
     // empty and the static fallback should remain in effect.
     if let Some(loc_map) = inputs.localization_map.clone() {
         if !loc_map.is_empty() {
-            defaults.set_localization(loc_map);
+            // Merge live global.ini keys on top of the well-known fallback
+            // table.  This preserves fallbacks for keys the live file omits
+            // (e.g. @hud_Cool absent from partial global.ini extracts) while
+            // still letting live data take precedence where it exists.
+            defaults.merge_localization(loc_map);
         }
     }
     // Re-apply sentinel suppressions after any live global.ini load.
@@ -369,9 +373,57 @@ pub fn render_for_binding(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiErro
     let ctx = ComposeContext { style: &style, defaults: &defaults, assets: &assets };
     let target = ComposeTarget { width: inputs.target_size.0, height: inputs.target_size.1 };
 
+    // ── 6. Rasterise ───────────────────────────────────────────────────────
+    //
+    // When a SWF overlay will be applied, split the BB render into two passes
+    // so text labels appear on top of Flash shapes:
+    //   Pass 1: background fill + non-text nodes
+    //   SWF overlay (composited between passes)
+    //   Pass 2: text nodes
+    //
+    // When no SWF overlay is needed, `render_bb_scene` runs both passes in one
+    // call (unchanged behaviour for purely-BB canvases).
+
+    let has_flash_shapes = bb_scene_opt.as_ref().map_or(false, |scene| {
+        scene
+            .nodes
+            .values()
+            .any(|n| n.ty == crate::bb_scene::BbNodeType::WidgetCustomShape)
+    });
+
+    // Also overlay when the root canvas declares `rendererType: "Flash"` on
+    // ALL its items (i.e. the canvas is entirely Flash-driven, not mixed BB+Flash).
+    // In that case `has_flash_shapes` may be false (no WidgetCustomShape nodes
+    // were parsed) yet the SWF is the sole source of visual content.
+    let is_fully_flash_canvas = raw_root_json
+        .as_ref()
+        .map_or(false, |j| canvas_has_flash_renderer(j));
+
+    let needs_swf_overlay = (has_flash_shapes || is_fully_flash_canvas)
+        && flash_swf_opt.is_some();
+
     let mut img = if let Some(ref scene) = bb_scene_opt {
         let atlas = crate::bb_atlas::AtlasLibrary::new(inputs.asset_fetcher, b.manufacturer_id);
-        crate::compose::render_bb_scene(scene, &ctx, &atlas, target)?
+        if needs_swf_overlay {
+            // Split render: shapes → SWF → text so BB labels appear on top.
+            let mut state =
+                crate::compose::render_bb_scene_pass1(scene, &ctx, &atlas, target)?;
+            if let Some(ref flash_swf) = flash_swf_opt {
+                let pt = &style.primary_tint;
+                let tint = tiny_skia::Color::from_rgba8(pt.r, pt.g, pt.b, pt.a);
+                let drew = crate::swf_render::draw_swf_visual_exports_rgba(
+                    &mut state.img, flash_swf, tint, 1.0,
+                );
+                log::debug!(
+                    "flash_overlay[{}]: drew={drew} (flash_shapes={has_flash_shapes} fully_flash={is_fully_flash_canvas})",
+                    b.helper_name.unwrap_or("?"),
+                );
+            }
+            crate::compose::render_bb_scene_pass2(&mut state, scene, &ctx);
+            state.img
+        } else {
+            crate::compose::render_bb_scene(scene, &ctx, &atlas, target)?
+        }
     } else {
         // BbScene resolution failed — fall back to magenta placeholder.
         let opts = PostProcessOptions::default();
@@ -401,23 +453,10 @@ pub fn render_for_binding(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiErro
     // `rsi_mc_s_target.json`) may replace all Flash shapes with WidgetCard /
     // WidgetTextField nodes; in that case the SWF overlay would paint over
     // already-correct BB content.
-
-    let has_flash_shapes = bb_scene_opt.as_ref().map_or(false, |scene| {
-        scene
-            .nodes
-            .values()
-            .any(|n| n.ty == crate::bb_scene::BbNodeType::WidgetCustomShape)
-    });
-
-    // Also overlay when the root canvas declares `rendererType: "Flash"` on
-    // ALL its items (i.e. the canvas is entirely Flash-driven, not mixed BB+Flash).
-    // In that case `has_flash_shapes` may be false (no WidgetCustomShape nodes
-    // were parsed) yet the SWF is the sole source of visual content.
-    let is_fully_flash_canvas = raw_root_json
-        .as_ref()
-        .map_or(false, |j| canvas_has_flash_renderer(j));
-
-    if has_flash_shapes || is_fully_flash_canvas {
+    //
+    // When `needs_swf_overlay` is true the overlay was already applied above
+    // (inside the BB scene split-pass path) so we skip it here.
+    if !needs_swf_overlay && (has_flash_shapes || is_fully_flash_canvas) {
         if let Some(ref flash_swf) = flash_swf_opt {
             let pt = &style.primary_tint;
             let tint = tiny_skia::Color::from_rgba8(pt.r, pt.g, pt.b, pt.a);

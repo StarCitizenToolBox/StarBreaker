@@ -131,6 +131,30 @@ impl DefaultValueRegistry {
         // Weapon-info screen labels (gen_mc_s_weaponinfo)
         loc.insert("hud_gimbalmode".into(), "GIMBAL MODE".into());
         loc.insert("hud_activegroup".into(), "ACTIVE GROUP".into());
+        // Annunciator chiclet labels (h_eng_annunciator + paramInputValues)
+        loc.insert("hud_pwr".into(), "PWR".into());
+        loc.insert("flighthud_label_wpn".into(), "WPN".into());
+        loc.insert("hud_thr".into(), "THR".into());
+        loc.insert("hud_shld".into(), "SHLD".into());
+        loc.insert("hud_cool".into(), "COOL".into());
+        // Self-status / target-status screen headers
+        loc.insert("hud_selfstatus".into(), "SELF STATUS".into());
+        loc.insert("hud_targetstatus".into(), "TARGET STATUS".into());
+        // Emissions screen labels (gen_mc_s_emissions)
+        loc.insert("hud_label_ir".into(), "IR".into());
+        loc.insert("hud_label_em".into(), "EM".into());
+        loc.insert("hud_label_cs".into(), "CS".into());
+        loc.insert("hud_ir".into(), "IR:".into());
+        loc.insert("hud_em".into(), "EM:".into());
+        loc.insert("hud_cs".into(), "CS:".into());
+        // Power output screen labels (gen_mc_s_poweroutputinfo)
+        loc.insert("engineering_ui_item_output".into(), "OUTPUT".into());
+        loc.insert("item_typebattery".into(), "BATTERY".into());
+        loc.insert("hud_mode".into(), "MODE".into());
+        loc.insert("hud_label_max".into(), "MAX".into());
+        // Misc HUD strings
+        loc.insert("rn_offline".into(), "OFFLINE".into());
+        loc.insert("rn_celsiussymbol".into(), "°C".into());
         // Intentionally empty / placeholder keys
         loc.insert("loc_empty".into(), String::new());
         loc.insert("loc_placeholder".into(), String::new());
@@ -214,6 +238,18 @@ impl DefaultValueRegistry {
     /// the format produced by `palette::load_localization_map`.
     pub fn set_localization(&mut self, map: HashMap<String, String>) {
         self.localization = map;
+    }
+
+    /// Overlay `map` on top of the current localization table.
+    ///
+    /// Existing keys that are absent from `map` (e.g. the well-known
+    /// fallbacks) are preserved.  Keys present in `map` override the
+    /// current value.  This is the correct merge strategy when loading a
+    /// partial `global.ini`: live data takes precedence, but every
+    /// well-known fallback remains available for keys that the live file
+    /// does not define.
+    pub fn merge_localization(&mut self, map: HashMap<String, String>) {
+        self.localization.extend(map);
     }
 
     /// Force-insert a single localization key with `value`, overriding any

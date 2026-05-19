@@ -14,13 +14,19 @@ use crate::defaults::DefaultValueRegistry;
 ///
 /// Resolution chain:
 /// 1. Literal `text` field on the node's raw JSON → returned as-is.
-/// 2. Binding path resolved via `operations[]` → looked up in
+/// 2. Localized component parameter resolved via `_SynthLocalizedParam_` ops
+///    (injected by `bb_resolve::inject_param_overrides`) + `BuildingBlocks_BindingsLocalizedField`
+///    → looked up in [`DefaultValueRegistry`] via `lookup_localization`.
+/// 3. Binding path resolved via `operations[]` → looked up in
 ///    [`DefaultValueRegistry`] → returned as string.
-/// 3. Binding path found but no default → `"[<path>]"`.
-/// 4. No binding → `""`.
+/// 4. Binding path found but no default → `"[<path>]"`.
+/// 5. No binding → `""`.
 pub struct BindingResolver {
     /// widget_node_id → binding path (e.g. "/vehicle/targetname")
     widget_to_path: HashMap<BbNodeId, String>,
+    /// widget_node_id → localization key (e.g. "@hud_Pwr") resolved from
+    /// `BuildingBlocks_BindingsLocalizedField` + `_SynthLocalizedParam_` ops.
+    widget_to_loc_key: HashMap<BbNodeId, String>,
 }
 
 impl BindingResolver {
@@ -50,8 +56,34 @@ impl BindingResolver {
             }
         }
 
+        // Pass 1b: _SynthLocalizedParam_ ops → ptr → localization key.
+        // These are injected by bb_resolve::inject_param_overrides when a
+        // WidgetCanvas node carries paramInputValues with localized parameter
+        // overrides (e.g. annunciator chiclet labels).
+        let mut ptr_to_loc_key: HashMap<BbNodeId, String> = HashMap::new();
+        for op in operations {
+            let type_str = op.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
+            if type_str == "_SynthLocalizedParam_" {
+                let ptr = op
+                    .get("_Pointer_")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_ptr);
+                let loc_key = op
+                    .get("resolvedLocKey")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_owned());
+                if let (Some(ptr), Some(key)) = (ptr, loc_key) {
+                    if !key.is_empty() {
+                        ptr_to_loc_key.insert(ptr, key);
+                    }
+                }
+            }
+        }
+
         // Pass 2: field ops → widget ptr → input ptr.
         let mut widget_to_path: HashMap<BbNodeId, String> = HashMap::new();
+        // Also collect localized-field ops → widget ptr → loc key.
+        let mut widget_to_loc_key: HashMap<BbNodeId, String> = HashMap::new();
         for op in operations {
             let type_str = op.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
             if type_str.contains("Field") {
@@ -67,11 +99,14 @@ impl BindingResolver {
                     if let Some(path) = ptr_to_path.get(&inp) {
                         widget_to_path.insert(w, path.clone());
                     }
+                    if let Some(key) = ptr_to_loc_key.get(&inp) {
+                        widget_to_loc_key.insert(w, key.clone());
+                    }
                 }
             }
         }
 
-        Self { widget_to_path }
+        Self { widget_to_path, widget_to_loc_key }
     }
 
 }
@@ -137,6 +172,19 @@ impl BindingResolver {
                     text: s,
                     is_name_derived: false,
                 };
+            }
+        }
+
+        // Localized component parameter (e.g. annunciator chiclet labels).
+        // Injected by bb_resolve::inject_param_overrides from paramInputValues.
+        if let Some(loc_key) = self.widget_to_loc_key.get(&node_id) {
+            if let Some(resolved) = defaults.lookup_localization(loc_key) {
+                return ResolvedText { text: resolved.to_owned(), is_name_derived: false };
+            }
+            // loc_key not found in registry → render it raw so the label is visible.
+            let bare = loc_key.strip_prefix('@').unwrap_or(loc_key);
+            if !bare.is_empty() {
+                return ResolvedText { text: bare.to_ascii_uppercase(), is_name_derived: false };
             }
         }
 

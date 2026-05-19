@@ -99,13 +99,25 @@ fn resolve_canvas_graph_inner(
     // Pass 1 below may still add new WidgetCanvas nodes via child canvas merges,
     // but those children are responsible for following their own WidgetCanvas
     // URLs in their own recursive resolve calls — not in ours.
-    let root_canvas_urls: Vec<String> = scene
+    // Also capture paramInputValues so child scenes can inherit localized-param
+    // overrides (e.g. annunciator chiclet labels PWR/WPN/THR/SHLD/COOL).
+    let root_canvas_urls: Vec<(String, Vec<serde_json::Value>)> = scene
         .nodes
         .values()
         .filter(|n| n.ty == BbNodeType::WidgetCanvas)
-        .filter_map(|n| n.raw.get("canvas").and_then(|v| v.as_str()))
-        .filter(|url| !url.is_empty() && *url != "null")
-        .map(|url| url.to_owned())
+        .filter_map(|n| {
+            let url = n.raw.get("canvas").and_then(|v| v.as_str())?;
+            if url.is_empty() || url == "null" {
+                return None;
+            }
+            let param_inputs: Vec<serde_json::Value> = n
+                .raw
+                .get("paramInputValues")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            Some((url.to_owned(), param_inputs))
+        })
         .collect();
 
     let debug_trace = std::env::var("STARBREAKER_UI_DEBUG").as_deref() == Ok("1");
@@ -238,7 +250,7 @@ fn resolve_canvas_graph_inner(
     {
         let canvas_urls = root_canvas_urls;
 
-        for url in canvas_urls {
+        for (url, param_inputs) in canvas_urls {
             let norm = extract_record_name(&url).to_ascii_lowercase();
             // If this canvas URL appears in ANY conditional entry but was NOT
             // selected in Pass 1 (not yet in `visited`), skip it.  It is the
@@ -274,7 +286,7 @@ fn resolve_canvas_graph_inner(
                     continue;
                 }
             };
-            let child_scene = match resolve_canvas_graph_inner(
+            let mut child_scene = match resolve_canvas_graph_inner(
                 &child_json,
                 manufacturer_id,
                 fetch_by_path,
@@ -291,6 +303,7 @@ fn resolve_canvas_graph_inner(
                     continue;
                 }
             };
+            inject_param_overrides(&param_inputs, &mut child_scene);
             merge_child_scene(&mut scene, child_scene, "");
         }
     }
@@ -592,7 +605,89 @@ fn find_host_parent(parent_scene: &BbScene, match_to: &str) -> Option<BbNodeId> 
     parent_scene.roots.first().copied()
 }
 
-#[cfg(test)]
+/// Synthesize `_SynthLocalizedParam_` operations from a parent `WidgetCanvas`
+/// node's `paramInputValues` array into the child scene's operations.
+///
+/// When a `WidgetCanvas` node declares `paramInputValues` entries of type
+/// `BuildingBlocks_ComponentParameterInputLocalization`, those entries override
+/// the `defaultValue` of the matching `BuildingBlocks_BindingsLocalizedComponentParameter`
+/// operations inside the child canvas.  This function injects a synthetic
+/// `_SynthLocalizedParam_` operation for each such override so that
+/// `BindingResolver` can map widget pointers to localization keys without
+/// requiring ActionScript execution.
+///
+/// Synthetic ops have the same `_Pointer_` value as the matching
+/// `BuildingBlocks_BindingsLocalizedComponentParameter` op; they are remapped
+/// by `merge_child_scene` together with the rest of the child's operations.
+fn inject_param_overrides(
+    param_inputs: &[serde_json::Value],
+    child_scene: &mut crate::bb_scene::BbScene,
+) {
+    if param_inputs.is_empty() {
+        return;
+    }
+
+    // Build param_name → loc_key map from parent paramInputValues.
+    let mut param_to_loc: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for entry in param_inputs {
+        let is_localization = entry
+            .get("_Type_")
+            .and_then(|v| v.as_str())
+            .map(|t| t.eq_ignore_ascii_case("BuildingBlocks_ComponentParameterInputLocalization"))
+            .unwrap_or(false);
+        if !is_localization {
+            continue;
+        }
+        let Some(param) = entry.get("parameter").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(value) = entry.get("value").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if !param.is_empty() && !value.is_empty() {
+            param_to_loc.insert(param.to_ascii_lowercase(), value.to_owned());
+        }
+    }
+    if param_to_loc.is_empty() {
+        return;
+    }
+
+    // Scan existing ops for BuildingBlocks_BindingsLocalizedComponentParameter
+    // entries and inject a synthetic _SynthLocalizedParam_ op for each match.
+    let mut synthetics: Vec<serde_json::Value> = Vec::new();
+    for op in &child_scene.operations {
+        let is_local_param = op
+            .get("_Type_")
+            .and_then(|v| v.as_str())
+            .map(|t| t.eq_ignore_ascii_case("BuildingBlocks_BindingsLocalizedComponentParameter"))
+            .unwrap_or(false);
+        if !is_local_param {
+            continue;
+        }
+        let param_name_lc = op
+            .get("parameter")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
+        let Some(loc_key) = param_to_loc.get(&param_name_lc) else {
+            continue;
+        };
+        let Some(ptr_str) = op.get("_Pointer_").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        synthetics.push(serde_json::json!({
+            "_Type_": "_SynthLocalizedParam_",
+            "_Pointer_": ptr_str,
+            "resolvedLocKey": loc_key,
+        }));
+    }
+
+    if !synthetics.is_empty() {
+        child_scene.operations.extend(synthetics);
+    }
+}
+
+
 mod tests {
     use super::*;
     use crate::pipeline::extract_record_name;

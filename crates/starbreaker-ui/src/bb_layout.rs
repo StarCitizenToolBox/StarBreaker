@@ -195,15 +195,6 @@ fn layout_node(
 ) {
     let Some(node) = scene.nodes.get(&node_id) else { return };
 
-    // Warn on flex containers but fall back to overlay.
-    if matches!(&node.ty, BbNodeType::Other(s) if s.contains("FlexContainer")) {
-        warn!(
-            "bb_layout: node {:?} ({}) is FlexContainer — flex layout deferred to Phase A6, \
-             using overlay fallback",
-            node.name, node_id,
-        );
-    }
-
     // ── 1. Resolve outer dimensions ─────────────────────────────────────────
 
     let outer_w = resolve_value(&node.sizing.width, parent_inner.w, parent_inner.h, csx, true);
@@ -237,6 +228,23 @@ fn layout_node(
 
     let outer_rect = Rect { x: outer_x, y: outer_y, w: outer_w, h: outer_h };
 
+    layout_node_with_rect(node_id, outer_rect, scene, csx, csy, rects, draw_order);
+}
+
+/// Register `outer_rect` for `node_id` and recurse into children, bypassing
+/// sizing and positioning.  Used by `layout_flex_children` so that flex items
+/// fill their allocated slot rather than their intrinsic `sizing` value.
+fn layout_node_with_rect(
+    node_id: BbNodeId,
+    outer_rect: Rect,
+    scene: &BbScene,
+    csx: f32,
+    csy: f32,
+    rects: &mut BTreeMap<BbNodeId, Rect>,
+    draw_order: &mut Vec<BbNodeId>,
+) {
+    let Some(node) = scene.nodes.get(&node_id) else { return };
+
     // ── 4. Inner rect = outer rect inset by padding ──────────────────────────
     let inner_rect = outer_rect.inset(
         node.padding.top * csy,
@@ -260,12 +268,139 @@ fn layout_node(
         (layer, child_id)
     });
 
-    for child_id in children {
-        layout_node(child_id, inner_rect, scene, csx, csy, rects, draw_order);
+    // Detect FlexContainer layout policy — if present, use flex layout instead
+    // of overlay for child positioning.
+    let flex_policy = node.raw.get("layoutPolicy").filter(|v| {
+        v.get("_Type_")
+            .and_then(|t| t.as_str())
+            .map(|t| t.contains("FlexContainer"))
+            .unwrap_or(false)
+    });
+
+    if let Some(flex) = flex_policy {
+        layout_flex_children(
+            &children,
+            inner_rect,
+            flex,
+            scene,
+            csx,
+            csy,
+            rects,
+            draw_order,
+        );
+    } else {
+        for child_id in children {
+            layout_node(child_id, inner_rect, scene, csx, csy, rects, draw_order);
+        }
     }
 }
 
-/// Resolve a `BbValue` to pixels.
+/// Lay out `children` inside `container` according to a `BuildingBlocks_FlexContainer`
+/// policy.
+///
+/// Supports Row and Column directions with `growProportion`-based main-axis
+/// sizing and Stretch cross-axis alignment (matches the BB default).
+/// Children that lack a `BuildingBlocks_FlexItem` policy are laid out with
+/// their own sizing rules as overlay children (non-flex fallback).
+fn layout_flex_children(
+    children: &[BbNodeId],
+    container: Rect,
+    flex: &serde_json::Value,
+    scene: &BbScene,
+    csx: f32,
+    csy: f32,
+    rects: &mut BTreeMap<BbNodeId, Rect>,
+    draw_order: &mut Vec<BbNodeId>,
+) {
+    let direction = flex
+        .get("direction")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Row");
+    let is_row = !direction.eq_ignore_ascii_case("Column");
+
+    // Spacing between items (columnSpacing for Row, rowSpacing for Column).
+    let item_spacing = if is_row {
+        flex.get("columnSpacing")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0) as f32
+            * csx
+    } else {
+        flex.get("rowSpacing")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0) as f32
+            * csy
+    };
+
+    // Separate flex children (with growProportion) from non-flex children.
+    struct FlexChild {
+        id: BbNodeId,
+        grow: f32,
+    }
+    let mut flex_children: Vec<FlexChild> = Vec::new();
+    let mut non_flex: Vec<BbNodeId> = Vec::new();
+
+    for &child_id in children {
+        let Some(child_node) = scene.nodes.get(&child_id) else { continue };
+        let grow = child_node
+            .raw
+            .get("layoutPolicyItem")
+            .and_then(|lpi| lpi.get("growProportion"))
+            .and_then(|v| v.as_f64())
+            .map(|g| g as f32)
+            .unwrap_or(0.0);
+        if grow > 0.0 {
+            flex_children.push(FlexChild { id: child_id, grow });
+        } else {
+            non_flex.push(child_id);
+        }
+    }
+
+    // Lay out non-flex children with overlay fallback.
+    for child_id in non_flex {
+        layout_node(child_id, container, scene, csx, csy, rects, draw_order);
+    }
+
+    if flex_children.is_empty() {
+        return;
+    }
+
+    let n = flex_children.len();
+    let total_spacing = item_spacing * (n as f32 - 1.0).max(0.0);
+    let total_grow: f32 = flex_children.iter().map(|c| c.grow).sum();
+
+    // Main axis: available space divided by grow proportions.
+    let main_available = if is_row {
+        (container.w - total_spacing).max(0.0)
+    } else {
+        (container.h - total_spacing).max(0.0)
+    };
+
+    let mut cursor = if is_row { container.x } else { container.y };
+
+    for FlexChild { id, grow } in &flex_children {
+        let main_size = (grow / total_grow) * main_available;
+        // Cross axis: stretch to fill container (BB default: itemAlignment=Stretch).
+        let child_rect = if is_row {
+            Rect {
+                x: cursor,
+                y: container.y,
+                w: main_size,
+                h: container.h,
+            }
+        } else {
+            Rect {
+                x: container.x,
+                y: cursor,
+                w: container.w,
+                h: main_size,
+            }
+        };
+        cursor += main_size + item_spacing;
+        layout_node_with_rect(*id, child_rect, scene, csx, csy, rects, draw_order);
+    }
+}
+
+
 ///
 /// - `Fixed(v)` → `v * canvas_scale`  
 /// - `Percent(p)` → `primary_dim * p` (p is a fraction 0–1; value `1.0` = 100 %)

@@ -57,6 +57,20 @@ pub struct ComposeTarget {
 // A3 real compositor
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Intermediate render state produced by [`render_bb_scene_pass1`].
+///
+/// Holds the rasterised background+shapes image together with the layout and
+/// binding state needed to draw text in [`render_bb_scene_pass2`].  This
+/// allows callers (e.g. `pipeline.rs`) to interleave a Flash SWF overlay
+/// between the shape pass and the text pass so that BB-derived labels always
+/// appear on top.
+pub struct BbRenderState {
+    pub img: RgbaImage,
+    layout: bb_layout::LayoutResult,
+    resolver: BindingResolver,
+    renderer: TextRenderer,
+}
+
 /// Rasterise a merged [`BbScene`] to RGBA using the Phase A3 compositor.
 ///
 /// Called directly from `pipeline.rs` when BbScene resolution succeeds;
@@ -67,6 +81,23 @@ pub fn render_bb_scene(
     atlas: &AtlasLibrary<'_>,
     target: ComposeTarget,
 ) -> Result<RgbaImage, UiError> {
+    let mut state = render_bb_scene_pass1(scene, ctx, atlas, target)?;
+    render_bb_scene_pass2(&mut state, scene, ctx);
+    Ok(state.img)
+}
+
+/// Pass 1: fill background, draw non-text nodes.
+///
+/// Returns a [`BbRenderState`] containing the partially-rendered image and the
+/// layout/resolver/renderer state required for the text pass.  The caller may
+/// composite additional content (e.g. a SWF overlay) onto `state.img` before
+/// calling [`render_bb_scene_pass2`].
+pub fn render_bb_scene_pass1(
+    scene: &BbScene,
+    ctx: &ComposeContext<'_>,
+    atlas: &AtlasLibrary<'_>,
+    target: ComposeTarget,
+) -> Result<BbRenderState, UiError> {
     if target.width == 0 || target.height == 0 {
         return Err(UiError::RenderError(format!(
             "invalid target size {}×{}",
@@ -99,39 +130,45 @@ pub fn render_bb_scene(
         draw_node(node, rect, ctx, atlas, &mut pixmap);
     }
 
-    // Convert premultiplied tiny-skia pixmap → straight-alpha RgbaImage before
-    // drawing rusttype glyphs in a second pass.
-    let mut img = pixmap_to_rgba_image(pixmap)?;
+    // Convert premultiplied tiny-skia pixmap → straight-alpha RgbaImage.
+    let img = pixmap_to_rgba_image(pixmap)?;
+    Ok(BbRenderState { img, layout, resolver, renderer: text_renderer })
+}
 
-    // Second pass: text widgets.  Alternate-state siblings sharing the same
-    // parent and rect (e.g. `text_BodyValueFaction` / `text_BodyValueVelocity`
-    // / `text_BodyValueLocation`) all carry `isActive=true` in the static BB
-    // data — the runtime picks one via a BindingsBooleanField op. Without a
-    // resolved binding we cannot know which alternate is canonical, so for
-    // static export we render only the first sibling encountered at any given
-    // (x, y, w) position and drop the rest. This avoids the overlapping-text
-    // smear seen in pre-A6 outputs.
-    //
-    // Height is intentionally excluded from the dedup key: merged child canvases
-    // sometimes differ only in their computed height for the same widget (e.g.
-    // `text_Title` h=48 vs `text_Component` h=69 at the same x/y/w), which the
-    // (x, y, w, h) key would treat as distinct, leaving both texts rendered on
-    // top of each other.
+/// Pass 2: draw text nodes onto a [`BbRenderState`] image.
+///
+/// Should be called after any overlay (e.g. SWF) has been composited onto
+/// `state.img` so that BB-derived text labels appear on top.
+///
+/// Alternate-state siblings sharing the same parent and rect (e.g.
+/// `text_BodyValueFaction` / `text_BodyValueVelocity`) all carry
+/// `isActive=true` in the static BB data.  We render only the first sibling
+/// at any (x, y, w) position to avoid overlapping-text smear.
+pub fn render_bb_scene_pass2(
+    state: &mut BbRenderState,
+    scene: &BbScene,
+    ctx: &ComposeContext<'_>,
+) {
     let mut seen_text_rects: std::collections::HashSet<(i32, i32, i32)> =
         std::collections::HashSet::new();
-    for &node_id in &layout.draw_order {
+    for &node_id in &state.layout.draw_order {
         let Some(node) = scene.nodes.get(&node_id) else {
             continue;
         };
         if !matches!(node.ty, BbNodeType::WidgetTextField | BbNodeType::WidgetText) {
             continue;
         }
-        let Some(&rect) = layout.rects.get(&node_id) else {
+        let Some(&rect) = state.layout.rects.get(&node_id) else {
             continue;
         };
         if rect.w < 0.5 || rect.h < 0.5 {
             continue;
         }
+        // Height is intentionally excluded from the dedup key: merged child canvases
+        // sometimes differ only in their computed height for the same widget (e.g.
+        // `text_Title` h=48 vs `text_Component` h=69 at the same x/y/w), which the
+        // (x, y, w, h) key would treat as distinct, leaving both texts rendered on
+        // top of each other.
         let key = (
             rect.x.round() as i32,
             rect.y.round() as i32,
@@ -140,10 +177,16 @@ pub fn render_bb_scene(
         if !seen_text_rects.insert(key) {
             continue;
         }
-        draw_text_node(&mut img, node, rect, &text_renderer, &resolver, layout.canvas_scale, ctx);
+        draw_text_node(
+            &mut state.img,
+            node,
+            rect,
+            &state.renderer,
+            &state.resolver,
+            state.layout.canvas_scale,
+            ctx,
+        );
     }
-
-    Ok(img)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
