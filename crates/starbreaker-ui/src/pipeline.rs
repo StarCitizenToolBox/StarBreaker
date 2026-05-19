@@ -409,14 +409,22 @@ pub fn render_for_binding(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiErro
             .any(|n| n.ty == crate::bb_scene::BbNodeType::WidgetCustomShape)
     });
 
-    if has_flash_shapes {
+    // Also overlay when the root canvas declares `rendererType: "Flash"` on
+    // ALL its items (i.e. the canvas is entirely Flash-driven, not mixed BB+Flash).
+    // In that case `has_flash_shapes` may be false (no WidgetCustomShape nodes
+    // were parsed) yet the SWF is the sole source of visual content.
+    let is_fully_flash_canvas = raw_root_json
+        .as_ref()
+        .map_or(false, |j| canvas_has_flash_renderer(j));
+
+    if has_flash_shapes || is_fully_flash_canvas {
         if let Some(ref flash_swf) = flash_swf_opt {
             let pt = &style.primary_tint;
             let tint = tiny_skia::Color::from_rgba8(pt.r, pt.g, pt.b, pt.a);
             let drew =
                 crate::swf_render::draw_swf_visual_exports_rgba(&mut img, flash_swf, tint, 1.0);
             log::debug!(
-                "flash_overlay[{}]: drew={drew}",
+                "flash_overlay[{}]: drew={drew} (flash_shapes={has_flash_shapes} fully_flash={is_fully_flash_canvas})",
                 b.helper_name.unwrap_or("?"),
             );
         }
@@ -574,6 +582,12 @@ fn canvas_has_flash_renderer(root_json: &serde_json::Value) -> bool {
 ///    - `{stem}Status.swf` (matches `TargetStatus.swf`, `OwnShipStatus.swf`, …)
 ///    - `{stem}.swf`        (fallback for SWFs without "Status" suffix)
 ///
+/// **Annunciator screens** use a completely different layout:
+/// `{BRAND}\{SHIP}\AnnunciatorScreen\AnnunciatorHalve{N}.swf`.
+/// When a ship has no dedicated Annunciator SWF (e.g. DRAK_Clipper), the
+/// renderer falls back to a brand-representative ship's SWFs, following the
+/// same structural principle used for the RSI SupportScreen16-9 fallback.
+///
 /// The generic `MC_S_*_Master` canvas family is manufacturer-independent and
 /// its Flash SWFs are canonically hosted under `RSI\SupportScreen16-9\`.
 /// When the primary brand-specific path does not exist (e.g. `DRA` ships that
@@ -586,6 +600,25 @@ pub fn flash_swf_candidates(record_name: &str, manufacturer_id: &str) -> Vec<Str
     let name = record_name
         .strip_prefix("BuildingBlocks_Canvas.")
         .unwrap_or(record_name);
+
+    // Brand code: first ≤3 chars of manufacturer_id, upper-cased.
+    let brand: String = manufacturer_id
+        .chars()
+        .take(3)
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    if brand.is_empty() {
+        return vec![];
+    }
+
+    // ── Annunciator screens ────────────────────────────────────────────────
+    // Canvas names of the form `H_Eng_Annunciator_Master_Left` /
+    // `H_Eng_Annunciator_Master_Right` map to dedicated SWF halves.
+    // These live under `{BRAND}\{optional_ship}\AnnunciatorScreen\AnnunciatorHalve{N}.swf`
+    // rather than under `SupportScreen16-9\`.
+    if name.to_ascii_lowercase().contains("annunciator") {
+        return annunciator_swf_candidates(name, &brand);
+    }
 
     // Detect whether this is a generic multi-ship canvas (MC_S_ prefix).  The
     // generic canvases use Flash SWFs that live under RSI\SupportScreen16-9\
@@ -607,16 +640,6 @@ pub fn flash_swf_candidates(record_name: &str, manufacturer_id: &str) -> Vec<Str
         return vec![];
     }
 
-    // Brand code: first ≤3 chars of manufacturer_id, upper-cased.
-    let brand: String = manufacturer_id
-        .chars()
-        .take(3)
-        .map(|c| c.to_ascii_uppercase())
-        .collect();
-    if brand.is_empty() {
-        return vec![];
-    }
-
     let base = format!(
         r"Data\UI\ShipInterface\assets\SWF\{brand}\SupportScreen16-9\"
     );
@@ -633,6 +656,62 @@ pub fn flash_swf_candidates(record_name: &str, manufacturer_id: &str) -> Vec<Str
         let rsi_base = r"Data\UI\ShipInterface\assets\SWF\RSI\SupportScreen16-9\";
         candidates.push(format!("{rsi_base}{stem}Status.swf"));
         candidates.push(format!("{rsi_base}{stem}.swf"));
+    }
+
+    candidates
+}
+
+/// Build candidate P4K paths for an annunciator canvas.
+///
+/// Annunciator SWFs live under:
+/// `Data\UI\ShipInterface\assets\SWF\{BRAND}\{optional_ship}\AnnunciatorScreen\AnnunciatorHalve{N}.swf`
+///
+/// The halve number is derived from the canvas name:
+/// - names containing `_Left`  → Halve1
+/// - names containing `_Right` → Halve2
+///
+/// When a brand has no direct `{BRAND}\AnnunciatorScreen\` path, the
+/// candidates include brand-representative ships known from the P4K layout.
+/// This is a content-addressing lookup table — the same ships serve as the
+/// canonical SWF source for all ships of that brand that lack their own
+/// Annunciator SWF (structural fallback, analogous to the RSI
+/// SupportScreen16-9 fallback for generic MC_S_* canvases).
+fn annunciator_swf_candidates(canvas_name: &str, brand: &str) -> Vec<String> {
+    let name_lower = canvas_name.to_ascii_lowercase();
+
+    // Determine which halve from Left/Right suffix.
+    let halve = if name_lower.contains("_left") {
+        1u8
+    } else if name_lower.contains("_right") {
+        2u8
+    } else {
+        1u8 // default to Halve1 when indeterminate
+    };
+
+    let halve_file = format!("AnnunciatorHalve{halve}.swf");
+    let swf_root = r"Data\UI\ShipInterface\assets\SWF\";
+
+    let mut candidates = Vec::new();
+
+    // Brand-level direct path — present for some brands (e.g. AEG).
+    candidates.push(format!(
+        r"{swf_root}{brand}\AnnunciatorScreen\{halve_file}"
+    ));
+
+    // Brand-representative ships for brands that host Annunciator SWFs under
+    // a ship subdirectory.  These are structural representatives observed in
+    // the P4K layout; all ships of the same brand that lack their own SWF
+    // fall back to these.
+    let ship_fallbacks: &[&str] = match brand {
+        "DRA" => &["DRAK_Buccaneer", "DRAK_Dragonfly"],
+        "ORI" => &["ORIG_85X"],
+        "MIS" => &["MISC_Freelancer_Base"],
+        _ => &[],
+    };
+    for ship in ship_fallbacks {
+        candidates.push(format!(
+            r"{swf_root}{brand}\{ship}\AnnunciatorScreen\{halve_file}"
+        ));
     }
 
     candidates
