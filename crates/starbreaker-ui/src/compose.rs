@@ -252,10 +252,28 @@ fn draw_node(
     let ih = rect.h.round().max(1.0) as u32;
 
     match &node.ty {
-        // Layout-only nodes: DisplayWidget contributes no pixel output.
-        // WidgetBodyBackground marks the physical screen area — render a faint
-        // backlight fill so the body bounds are visible as a structural cue.
-        BbNodeType::DisplayWidget => {}
+        // DisplayWidget is documented as a layout container, but BB authors
+        // routinely attach background fill, raw SVG paths, atlas-backed
+        // images, and borders directly to DisplayWidget nodes (e.g. brand
+        // logos, header borders, status backgrounds on interactive door /
+        // panel canvases).  Render the same fill + raw-asset + atlas-image
+        // + border stack as WidgetCanvas/WidgetCard so those visuals are
+        // not silently dropped.  Nodes with none of those attributes stay
+        // a no-op (no pixels drawn).
+        BbNodeType::DisplayWidget => {
+            let fill = node_fill_rgba(node);
+            if fill[3] > 0.005 {
+                fill_rect_ts(pixmap, tsk_rect, fill, alpha);
+            }
+            if !draw_raw_asset(node, rect, atlas, pixmap, alpha) {
+                if let Some(img) = atlas.resolve_for_node(node, iw, ih) {
+                    blit_atlas_image(pixmap, &img, rect.x as i32, rect.y as i32, alpha);
+                }
+            }
+            if let Some(border) = &node.border {
+                draw_border_ts(pixmap, tsk_rect, border, ctx, alpha, &node.raw);
+            }
+        }
         BbNodeType::WidgetBodyBackground => {
             let bl = &ctx.style.backlight;
             let fill = [
