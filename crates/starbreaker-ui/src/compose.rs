@@ -403,24 +403,28 @@ fn draw_node(
             }
         }
 
-        // Unknown widget types: ghost outline for debugging.
+        // Unknown widget types: render the same fill + raw-asset +
+        // atlas-image + border stack used by DisplayWidget/WidgetCanvas.
+        // BB authoring frequently attaches visual data to widget types
+        // the renderer does not yet specialize (e.g. WidgetContainer,
+        // WidgetList, WidgetSeparator, WidgetLine, WidgetCircle,
+        // WidgetLinearProgressMeter, WidgetClone, WidgetManufacturerLogo).
+        // Drawing the structural attributes makes those nodes contribute
+        // their content instead of a debug outline; nodes carrying none
+        // of those attributes simply produce no pixels.
         BbNodeType::Other(_) => {
-            let pt = &ctx.style.primary_tint;
-            let color = [
-                pt.r as f32 / 255.0,
-                pt.g as f32 / 255.0,
-                pt.b as f32 / 255.0,
-                0.3,
-            ];
-            let mut paint = Paint::default();
-            paint.set_color(to_skia_color(color, alpha));
-            paint.anti_alias = false;
-            let path = PathBuilder::from_rect(tsk_rect);
-            let mut stroke = Stroke::default();
-            stroke.width = 1.0;
-            pixmap
-                .as_mut()
-                .stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+            let fill = node_fill_rgba(node);
+            if fill[3] > 0.005 {
+                fill_rect_ts(pixmap, tsk_rect, fill, alpha);
+            }
+            if !draw_raw_asset(node, rect, atlas, pixmap, alpha) {
+                if let Some(img) = atlas.resolve_for_node(node, iw, ih) {
+                    blit_atlas_image(pixmap, &img, rect.x as i32, rect.y as i32, alpha);
+                }
+            }
+            if let Some(border) = &node.border {
+                draw_border_ts(pixmap, tsk_rect, border, ctx, alpha, &node.raw);
+            }
         }
     }
 }
