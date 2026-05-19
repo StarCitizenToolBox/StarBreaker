@@ -201,8 +201,7 @@ fn resolve_canvas_graph_inner(
     // Host canvases such as M_MFD_Screen store their content canvas URL in the
     // `canvas` field of a `BuildingBlocks_WidgetCanvas` scene node rather than
     // in `defaultStyles.entries`.  We fetch and resolve each such URL so the
-    // merged scene captures the full content hierarchy.  The same `visited`
-    // set prevents cycles between canvas-field references and style-references.
+    // merged scene captures the full content hierarchy.
     //
     // Only the URLs collected from the root canvas's own nodes (before Pass 1)
     // are followed here — see the comment above.
@@ -210,9 +209,16 @@ fn resolve_canvas_graph_inner(
     // Some WidgetCanvas nodes serve as mode-switchable content slots whose
     // DEFAULT canvas matches a canvas already followed by Pass 1.  To prevent
     // Pass 2 from fetching those canvases again, we collect every canvas norm
-    // referenced by a conditional Pass-1 entry.  If the norm is already in
-    // `visited` (Pass 1 followed it) or in this set but not visited (Pass 1
-    // fetch failed), Pass 2 skips it — `!visited.insert()` is the final guard.
+    // referenced by a conditional Pass-1 entry.
+    //
+    // **Snapshot semantics**: we capture `visited` immediately after Pass 1 so
+    // we can distinguish "already merged by Pass 1" from "first time seen in
+    // Pass 2".  The outer Pass 2 loop does NOT insert into `visited`, which
+    // allows the same template URL to appear multiple times in `root_canvas_urls`
+    // with different `paramInputValues` (e.g. the 5 chiclet slots in the
+    // annunciator screen all share one `h_eng_annunciator` template canvas).
+    // Cycle protection is provided by the MAX_CANVAS_DEPTH depth limit on
+    // recursive `resolve_canvas_graph_inner` calls — no cycle can run forever.
     let conditional_canvas_norms: std::collections::HashSet<String> = {
         let mut set = std::collections::HashSet::new();
         for entry in pick_active_entries(record_value, manufacturer_id) {
@@ -250,23 +256,36 @@ fn resolve_canvas_graph_inner(
     {
         let canvas_urls = root_canvas_urls;
 
+        // Snapshot the visited set as it stands right after Pass 1.  Used
+        // below to test "was this canvas already merged by Pass 1?" without
+        // modifying the set (so the same URL may appear multiple times in the
+        // loop with different paramInputValues and each instance is processed).
+        let post_pass1_visited: std::collections::HashSet<String> = visited.clone();
+
         for (url, param_inputs) in canvas_urls {
             let norm = extract_record_name(&url).to_ascii_lowercase();
             // If this canvas URL appears in ANY conditional entry but was NOT
-            // selected in Pass 1 (not yet in `visited`), skip it.  It is the
-            // default canvas for a mode-switchable slot, and the selected mode's
-            // canvas has already replaced it.
-            if conditional_canvas_norms.contains(&norm) && !visited.contains(&norm) {
+            // selected in Pass 1 (not present in the post-Pass-1 snapshot),
+            // skip it.  It is the default canvas for a mode-switchable slot,
+            // and the selected mode's canvas has already replaced it.
+            if conditional_canvas_norms.contains(&norm) && !post_pass1_visited.contains(&norm) {
                 if debug_trace {
                     log::info!(
-                        "bb_resolve[depth={}]: Pass2 skipping {} (already handled by Pass1 or Pass1 fetch failed)",
+                        "bb_resolve[depth={}]: Pass2 skipping {} (not selected by Pass1 conditional)",
                         depth, norm,
                     );
                 }
                 continue;
             }
-            if !visited.insert(norm.clone()) {
-                log::debug!("bb_resolve: skipping already-visited WidgetCanvas url '{}'", url);
+            // Skip canvases that were already merged by Pass 1.  We do NOT
+            // insert into `visited` here so that multiple WidgetCanvas nodes
+            // referencing the same template URL (e.g. chiclet slots all sharing
+            // `h_eng_annunciator`) are each resolved independently.
+            if post_pass1_visited.contains(&norm) {
+                log::debug!(
+                    "bb_resolve: skipping already-pass1-merged WidgetCanvas url '{}'",
+                    url
+                );
                 continue;
             }
             if debug_trace {
@@ -940,10 +959,11 @@ mod tests {
     #[test]
     fn resolve_does_not_follow_widget_canvas_url_beyond_depth_cap() {
         // A chain that loops back to the same URL exercises cycle-detection.
-        // The visited set stops further traversal after the first fetch.
         //
-        // The depth cap (MAX_CANVAS_DEPTH) is a separate backstop for long but
-        // non-cyclic chains.
+        // Since the Pass 2 outer loop no longer deduplicates by URL (to allow
+        // intentional multi-instantiation of template canvases), cycles are
+        // now bounded purely by MAX_CANVAS_DEPTH.  Each recursive level fetches
+        // the canvas once, so the total fetch count equals MAX_CANVAS_DEPTH.
         fn make_level_canvas(child_url: &str) -> serde_json::Value {
             serde_json::json!({
                 "_RecordName_": "level_n",
@@ -973,8 +993,7 @@ mod tests {
         let scene = resolve_canvas_graph(&host, None, &|_url| {
             fetch_count.set(fetch_count.get() + 1);
             // Every fetch returns a canvas that points back to "file://./level.json".
-            // The global cycle-guard (visited set) catches this after the first fetch,
-            // so at most 1 fetch occurs regardless of depth cap.
+            // The depth cap terminates traversal at MAX_CANVAS_DEPTH levels.
             Ok(make_level_canvas("file://./level.json"))
         })
         .expect("resolve failed");
@@ -988,6 +1007,78 @@ mod tests {
 
         // There must be merged nodes from the fetched levels.
         assert!(scene.nodes.len() >= 2, "must have at least 2 merged nodes, got {}", scene.nodes.len());
+    }
+
+    #[test]
+    fn pass2_instantiates_same_template_url_multiple_times() {
+        // Regression test for B11: when multiple WidgetCanvas nodes in the
+        // root canvas all reference the same template URL with different
+        // paramInputValues (e.g. the 5 chiclet slots in the annunciator screen
+        // all use `h_eng_annunciator`), each slot must produce an independent
+        // set of merged nodes.
+        //
+        // Before the fix, the Pass 2 outer loop deduped by URL — only the first
+        // slot was resolved and the other 4 produced no nodes.
+        let template = serde_json::json!({
+            "_RecordName_": "chiclet_template",
+            "_RecordId_": "00000000-0000-0000-0000-000000000090",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "chiclet_root"},
+                    {"_Pointer_": "ptr:2", "_Type_": "BuildingBlocks_WidgetText", "name": "chiclet_label",
+                     "parent": "_PointsTo_:ptr:1"}
+                ]
+            }
+        });
+
+        // Host canvas has 3 WidgetCanvas nodes all pointing to the same template.
+        let host = serde_json::json!({
+            "_RecordName_": "annunciator_host",
+            "_RecordId_": "00000000-0000-0000-0000-000000000091",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 1920.0, "y": 1080.0, "z": 0.0},
+                "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "host_root"},
+                    {"_Pointer_": "ptr:2", "_Type_": "BuildingBlocks_WidgetCanvas", "name": "slot_a",
+                     "parent": "_PointsTo_:ptr:1", "canvas": "file://./chiclet_template.json"},
+                    {"_Pointer_": "ptr:3", "_Type_": "BuildingBlocks_WidgetCanvas", "name": "slot_b",
+                     "parent": "_PointsTo_:ptr:1", "canvas": "file://./chiclet_template.json"},
+                    {"_Pointer_": "ptr:4", "_Type_": "BuildingBlocks_WidgetCanvas", "name": "slot_c",
+                     "parent": "_PointsTo_:ptr:1", "canvas": "file://./chiclet_template.json"}
+                ]
+            }
+        });
+
+        let fetch_count = std::cell::Cell::new(0u32);
+        let scene = resolve_canvas_graph(&host, None, &|url| {
+            assert_eq!(url, "file://./chiclet_template.json", "unexpected url: {url}");
+            fetch_count.set(fetch_count.get() + 1);
+            Ok(template.clone())
+        })
+        .expect("resolve failed");
+
+        // The template must be fetched once per slot (3 slots → 3 fetches).
+        assert_eq!(
+            fetch_count.get(),
+            3,
+            "expected 3 fetches (one per template slot), got {}",
+            fetch_count.get()
+        );
+
+        // host(4) + 3 × template(2) = 10 nodes.
+        assert_eq!(
+            scene.nodes.len(),
+            10,
+            "expected 10 merged nodes (4 host + 3×2 template), got {}",
+            scene.nodes.len()
+        );
     }
 
     #[test]

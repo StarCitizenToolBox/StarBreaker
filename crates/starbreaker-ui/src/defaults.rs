@@ -152,6 +152,9 @@ impl DefaultValueRegistry {
         loc.insert("item_typebattery".into(), "BATTERY".into());
         loc.insert("hud_mode".into(), "MODE".into());
         loc.insert("hud_label_max".into(), "MAX".into());
+        // Weapon-info label (gen_mc_s_weaponinfo — key present only as plural ,P form
+        // in global.ini, so must also be in the static table for P4K-absent builds).
+        loc.insert("hud_label_weapon".into(), "Weapon".into());
         // Misc HUD strings
         loc.insert("rn_offline".into(), "OFFLINE".into());
         loc.insert("rn_celsiussymbol".into(), "°C".into());

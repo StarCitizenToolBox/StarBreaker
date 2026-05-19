@@ -667,8 +667,17 @@ fn parse_localization(data: &[u8]) -> HashMap<String, String> {
         if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
             continue;
         }
-        if let Some((key, value)) = line.split_once('=') {
-            map.insert(key.trim().to_lowercase(), value.trim().to_string());
+        if let Some((raw_key, value)) = line.split_once('=') {
+            let key = raw_key.trim().to_lowercase();
+            let value = value.trim().to_string();
+            // If the key ends with ",p" (plural-form suffix used by Star Citizen's
+            // localization format), also insert it under the bare key so lookups
+            // using the base form resolve correctly.  The live key with the suffix
+            // is inserted too, so explicit plural lookups still work.
+            if let Some(base) = key.strip_suffix(",p") {
+                map.entry(base.to_string()).or_insert_with(|| value.clone());
+            }
+            map.insert(key, value);
         }
     }
     map

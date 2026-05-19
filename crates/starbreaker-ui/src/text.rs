@@ -115,7 +115,6 @@ impl TextRenderer {
             };
 
             let origin: Point<f32> = point(start_x, baseline_y);
-            let mut n_pixels = 0u32;
             for g in font.layout(line, scale, origin) {
                 if let Some(bb) = g.pixel_bounding_box() {
                     g.draw(|gx, gy, coverage| {
@@ -133,7 +132,6 @@ impl TextRenderer {
                         {
                             return;
                         }
-                        n_pixels += 1;
                         let pixel = img.get_pixel_mut(px as u32, py as u32);
                         let src_a = coverage * colour[3] as f32 / 255.0;
                         let inv = 1.0 - src_a;

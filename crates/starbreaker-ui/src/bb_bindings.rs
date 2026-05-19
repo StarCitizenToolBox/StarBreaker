@@ -80,6 +80,8 @@ impl BindingResolver {
             }
         }
 
+        log::debug!("bb_bindings::build: ptr_to_loc_key len={} ptr_to_path len={}", ptr_to_loc_key.len(), ptr_to_path.len());
+
         // Pass 2: field ops → widget ptr → input ptr.
         let mut widget_to_path: HashMap<BbNodeId, String> = HashMap::new();
         // Also collect localized-field ops → widget ptr → loc key.
@@ -105,7 +107,6 @@ impl BindingResolver {
                 }
             }
         }
-
         Self { widget_to_path, widget_to_loc_key }
     }
 
@@ -163,6 +164,8 @@ impl BindingResolver {
             if let Some(resolved) = defaults.lookup_localization(loc_key) {
                 return ResolvedText { text: resolved.to_owned(), is_name_derived: false };
             }
+            // Log every miss so B11 static-label sweep can collect new keys.
+            log::debug!("bb_bindings: unresolved labelProperties.label key={loc_key:?}");
         }
 
         if let Some(path) = self.widget_to_path.get(&node_id) {
@@ -179,11 +182,13 @@ impl BindingResolver {
         // Injected by bb_resolve::inject_param_overrides from paramInputValues.
         if let Some(loc_key) = self.widget_to_loc_key.get(&node_id) {
             if let Some(resolved) = defaults.lookup_localization(loc_key) {
+                log::trace!("compose pass2: node={node_id} loc_key={loc_key:?} → {resolved:?}");
                 return ResolvedText { text: resolved.to_owned(), is_name_derived: false };
             }
             // loc_key not found in registry → render it raw so the label is visible.
             let bare = loc_key.strip_prefix('@').unwrap_or(loc_key);
             if !bare.is_empty() {
+                log::trace!("compose pass2: node={node_id} loc_key={loc_key:?} → bare fallback");
                 return ResolvedText { text: bare.to_ascii_uppercase(), is_name_derived: false };
             }
         }
