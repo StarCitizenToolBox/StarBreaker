@@ -87,6 +87,8 @@ fn resolve_canvas_graph_inner(
         .map(|url| url.to_owned())
         .collect();
 
+    let debug_trace = std::env::var("STARBREAKER_UI_DEBUG").as_deref() == Ok("1");
+
     // Pass 1: follow defaultStyles / brandStyles canvas-reference modifiers.
     //
     // Each referenced child canvas is resolved recursively so multi-level
@@ -101,6 +103,7 @@ fn resolve_canvas_graph_inner(
     // always followed since they represent always-visible content.
     let mut conditional_entry_seen = false;
     for entry in pick_active_entries(record_value, manufacturer_id) {
+        let entry_name = entry.get("name").and_then(|v| v.as_str()).unwrap_or("?");
         let has_conditions = entry
             .get("conditionsList")
             .and_then(|v| v.as_array())
@@ -108,6 +111,13 @@ fn resolve_canvas_graph_inner(
             .unwrap_or(false);
         if has_conditions {
             if conditional_entry_seen {
+                if debug_trace {
+                    log::info!(
+                        "bb_resolve[depth={}]: skipping conditional entry {:?} (already saw one)",
+                        depth,
+                        entry_name,
+                    );
+                }
                 continue;
             }
             conditional_entry_seen = true;
@@ -134,9 +144,18 @@ fn resolve_canvas_graph_inner(
 
             // Normalise path to a record name for cycle detection.
             let norm = extract_record_name(path).to_ascii_lowercase();
-            if !visited.insert(norm) {
+            if !visited.insert(norm.clone()) {
                 log::debug!("bb_resolve: skipping already-visited child canvas '{}'", path);
                 continue;
+            }
+
+            if debug_trace {
+                log::info!(
+                    "bb_resolve[depth={}]: Pass1 following entry {:?} -> {}",
+                    depth,
+                    entry_name,
+                    norm,
+                );
             }
 
             let child_json = match fetch_by_path(path) {
@@ -174,14 +193,76 @@ fn resolve_canvas_graph_inner(
     //
     // Only the URLs collected from the root canvas's own nodes (before Pass 1)
     // are followed here — see the comment above.
+    //
+    // Some WidgetCanvas nodes serve as mode-switchable content slots: their
+    // DEFAULT canvas is the NavMode view, but conditional style entries
+    // REPLACE that canvas with mode-specific content (guns, missiles, …).
+    // In a static render, if a conditional entry was already followed in Pass 1,
+    // the slot's default canvas must NOT also be followed — it was replaced.
+    // We detect this by collecting every canvas norm referenced by any conditional
+    // entry and skipping Pass-2 URLs that appear in that set but were NOT already
+    // added to `visited` by Pass 1.
+    let conditional_canvas_norms: std::collections::HashSet<String> = {
+        let mut set = std::collections::HashSet::new();
+        for entry in pick_active_entries(record_value, manufacturer_id) {
+            let has_conditions = entry
+                .get("conditionsList")
+                .and_then(|v| v.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false);
+            if !has_conditions {
+                continue;
+            }
+            let Some(mods) = entry.get("modifiers").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            for modifier in mods {
+                let Some(field) = modifier.get("field") else {
+                    continue;
+                };
+                let is_canvas_ref = field
+                    .get("_Type_")
+                    .and_then(|v| v.as_str())
+                    == Some("BuildingBlocks_FieldModifierRecordRefTypeCanvasReferenceRecord");
+                if !is_canvas_ref {
+                    continue;
+                }
+                if let Some(path) = field.get("value").and_then(|v| v.as_str()) {
+                    let norm = extract_record_name(path).to_ascii_lowercase();
+                    set.insert(norm);
+                }
+            }
+        }
+        set
+    };
+
     {
         let canvas_urls = root_canvas_urls;
 
         for url in canvas_urls {
             let norm = extract_record_name(&url).to_ascii_lowercase();
-            if !visited.insert(norm) {
+            // If this canvas URL appears in ANY conditional entry but was NOT
+            // selected in Pass 1 (not yet in `visited`), skip it.  It is the
+            // default canvas for a mode-switchable slot, and the selected mode's
+            // canvas has already replaced it.
+            if conditional_canvas_norms.contains(&norm) && !visited.contains(&norm) {
+                if debug_trace {
+                    log::info!(
+                        "bb_resolve[depth={}]: Pass2 skipping {} (conditional mode canvas, not selected in Pass1)",
+                        depth, norm,
+                    );
+                }
+                continue;
+            }
+            if !visited.insert(norm.clone()) {
                 log::debug!("bb_resolve: skipping already-visited WidgetCanvas url '{}'", url);
                 continue;
+            }
+            if debug_trace {
+                log::info!(
+                    "bb_resolve[depth={}]: Pass2 following WidgetCanvas.canvas -> {}",
+                    depth, norm,
+                );
             }
             let child_json = match fetch_by_path(&url) {
                 Ok(json) => json,
