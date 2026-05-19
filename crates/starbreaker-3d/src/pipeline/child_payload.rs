@@ -20,6 +20,62 @@ use crate::types::{MaterialTextures, UiBinding};
 
 use super::*;
 
+/// Derive a "screen" helper-node name from a prop's NMC + materials by structural
+/// inspection only — never hardcoded by ship or asset.
+///
+/// Rule (BuildingBlocks vocabulary, not asset-specific):
+/// 1. If exactly one NMC node has a name containing the token "rtt"
+///    (case-insensitive), return that node name. CryEngine convention: helper
+///    nodes named `rtt_*` mark "render-to-texture" surfaces.
+/// 2. Otherwise, if the prop's MTL has materials whose names contain "rtt",
+///    locate the mesh nodes wired to those materials via `material_indices`
+///    (parallel to `nodes[]`). If exactly one node is wired to an RTT
+///    material, return that node name.
+/// 3. Otherwise return None.
+pub(crate) fn derive_screen_helper_name(
+    nmc: Option<&nmc::NodeMeshCombo>,
+    materials: Option<&mtl::MtlFile>,
+) -> Option<String> {
+    let nmc = nmc?;
+    const TOKEN: &str = "rtt";
+    let name_matches: Vec<&str> = nmc
+        .nodes
+        .iter()
+        .filter(|n| n.name.to_ascii_lowercase().contains(TOKEN))
+        .map(|n| n.name.as_str())
+        .collect();
+    if name_matches.len() == 1 {
+        return Some(name_matches[0].to_string());
+    }
+    let mtl = materials?;
+    let rtt_material_indices: HashSet<usize> = mtl
+        .materials
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.name.to_ascii_lowercase().contains(TOKEN))
+        .map(|(i, _)| i)
+        .collect();
+    if rtt_material_indices.is_empty() {
+        return None;
+    }
+    let node_matches: Vec<&str> = nmc
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| {
+            nmc.material_indices
+                .get(*i)
+                .is_some_and(|mi| rtt_material_indices.contains(&(*mi as usize)))
+        })
+        .map(|(_, n)| n.name.as_str())
+        .collect();
+    if node_matches.len() == 1 {
+        Some(node_matches[0].to_string())
+    } else {
+        None
+    }
+}
+
 /// Try loading an entity's mesh data from its resolved geometry/material paths,
 /// falling back to DataCore record lookup.
 pub(crate) fn load_child_mesh(
@@ -345,10 +401,17 @@ pub(crate) fn load_child_payloads(
             binding
         });
         if let Some(binding) = binding.clone() {
-            ui_bindings_by_parent
-                .entry(spec.parent_entity_name.clone())
-                .or_default()
-                .push(binding);
+            // Only fan binding out to the parent's aggregate map if THIS child
+            // has no geometry of its own.  When the child has its own CGA, the
+            // binding renders on the child object directly; propagating it to
+            // the parent would smear the same PNG onto the parent's body via
+            // the Blender importer's helper-less fallback.
+            if !spec.child.has_geometry {
+                ui_bindings_by_parent
+                    .entry(spec.parent_entity_name.clone())
+                    .or_default()
+                    .push(binding);
+            }
         }
         direct_ui_bindings.push(binding);
     }
@@ -412,6 +475,39 @@ pub(crate) fn load_child_payloads(
             if child.has_geometry {
                 let asset_index = spec_asset_indices[spec_index]?;
                 let loaded = loaded_assets.get(asset_index)?.as_ref()?;
+                if ui_bindings.iter().any(|b| {
+                    b.helper_name.is_none()
+                        && matches!(b.binding_kind.as_str(), "physical" | "mfd")
+                }) {
+                    if let Some(name) = derive_screen_helper_name(
+                        loaded.nmc.as_ref(),
+                        loaded.materials.as_ref(),
+                    ) {
+                        for b in ui_bindings.iter_mut() {
+                            if b.helper_name.is_none()
+                                && matches!(b.binding_kind.as_str(), "physical" | "mfd")
+                            {
+                                b.helper_name = Some(name.clone());
+                            }
+                        }
+                    }
+                }
+                // Drop inherited bindings whose helper_name doesn't resolve to a
+                // node inside the host's own NMC.  This prevents a child-entity
+                // binding (e.g. the door control panel's UI) from being smeared
+                // onto its geometry-bearing parent (the door ramp) by the
+                // helper-less fallback in the Blender importer.
+                if let Some(nmc) = loaded.nmc.as_ref() {
+                    let node_names: HashSet<String> = nmc
+                        .nodes
+                        .iter()
+                        .map(|n| n.name.to_ascii_lowercase())
+                        .collect();
+                    ui_bindings.retain(|b| match b.helper_name.as_deref() {
+                        None => true,
+                        Some(h) => node_names.contains(&h.to_ascii_lowercase()),
+                    });
+                }
                 Some(crate::types::EntityPayload {
                     mesh: loaded.mesh.clone(),
                     materials: loaded.materials.clone(),
