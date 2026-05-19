@@ -370,8 +370,51 @@ fn resolve_canvas_graph_inner(
 
     // Apply brand modifiers after scene resolution is complete.
     // This is the R2 phase — mutate node fields based on brand-style modifiers.
+    //
+    // Resolution order:
+    //   1. `brandStyles[]` on the canvas (per-brand override for MC_*, single-entry
+    //      for IC_*). Resolved by `resolve_brand_style`.
+    //   2. Canvas-level `style` field (a file:// URL pointing to a
+    //      `BuildingBlocks_Style` record — e.g. `s_bioc` on medical canvases).
+    //      The linked Style record has the same `entries[]` (StyleEntry) shape
+    //      as a brandStyles entry, so we can apply it identically.
+    let _linked_style_value: Option<serde_json::Value>;
     if let Some(brand_style) = bb_brand_style::resolve_brand_style(record_value, manufacturer_id) {
         crate::bb_brand_apply::apply_brand_modifiers(&mut scene, &brand_style, loc_fetcher);
+        _linked_style_value = None;
+    } else if let Some(style_url) = record_value
+        .get("style")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        match fetch_by_path(style_url) {
+            Ok(style_json) => {
+                let style_value = style_json
+                    .get("_RecordValue_")
+                    .cloned()
+                    .unwrap_or(style_json);
+                if let Some(entries) = style_value.get("entries").and_then(|v| v.as_array()) {
+                    let identifier = crate::pipeline::extract_record_name(style_url);
+                    let brand = bb_brand_style::BrandStyle {
+                        identifier,
+                        entries: entries.as_slice(),
+                        raw: &style_value,
+                    };
+                    crate::bb_brand_apply::apply_brand_modifiers(&mut scene, &brand, loc_fetcher);
+                }
+                _linked_style_value = Some(style_value);
+            }
+            Err(e) => {
+                log::warn!(
+                    "bb_resolve: failed to fetch canvas-level style record '{}': {}",
+                    style_url,
+                    e
+                );
+                _linked_style_value = None;
+            }
+        }
+    } else {
+        _linked_style_value = None;
     }
 
     Ok(scene)

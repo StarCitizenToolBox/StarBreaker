@@ -345,8 +345,47 @@ pub fn render_for_binding(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiErro
     let assets = flash_swf_opt.as_ref().unwrap_or(&fallback_assets);
 
     // ── 4. Manufacturer style ───────────────────────────────────────────────
-
-    let style = load_style(b.manufacturer_id, inputs.style_fetcher);
+    //
+    // The default is the ship manufacturer's style. A canvas may carry its
+    // own `style` file-URL (e.g. medical canvases point to `s_bioc.json`) —
+    // when present, that overrides the ship's style for this binding. The
+    // canvas fetcher accepts BuildingBlocks_Style records via the same
+    // by-name lookup, so the basename of the URL is enough.
+    let mut style = load_style(b.manufacturer_id, inputs.style_fetcher);
+    if let Some(style_url) = raw_root_json
+        .as_ref()
+        .and_then(|j| j.get("_RecordValue_"))
+        .and_then(|rv| rv.get("style"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        let style_name = crate::pipeline::extract_record_name(style_url);
+        match inputs.canvas_fetcher.fetch_canvas_by_name(&style_name) {
+            Ok(style_record) => {
+                let loader = StyleLoader::for_manufacturer(b.manufacturer_id.unwrap_or("drak"));
+                match loader.parse_buildingblocks_style_record(&style_record) {
+                    Ok(override_style) => {
+                        log::info!(
+                            "pipeline: canvas-level style '{}' overrides manufacturer style for binding {}",
+                            style_name,
+                            b.helper_name.unwrap_or("?"),
+                        );
+                        style = override_style;
+                    }
+                    Err(e) => log::warn!(
+                        "pipeline: failed to parse canvas-level style record '{}': {}",
+                        style_name,
+                        e
+                    ),
+                }
+            }
+            Err(e) => log::warn!(
+                "pipeline: failed to fetch canvas-level style record '{}': {}",
+                style_name,
+                e
+            ),
+        }
+    }
 
     // ── 5. Defaults registry ────────────────────────────────────────────────
 

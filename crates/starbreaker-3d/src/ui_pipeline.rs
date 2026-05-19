@@ -55,23 +55,50 @@ impl<'a> CanvasFetcher for DatacoreCanvasFetcher<'a> {
             })
             .collect();
 
-        let Some(record) = matches.first().copied() else {
-            return Err(UiError::FetchFailed {
-                guid: record_name.to_string(),
-                source: format!("BuildingBlocks_Canvas record not found by name: {record_name}")
-                    .into(),
-            });
-        };
-
-        if matches.len() > 1 {
-            warn!(
-                "ui_pipeline: found {} BuildingBlocks_Canvas records named '{}'; using first",
-                matches.len(),
-                record_name
-            );
+        if let Some(record) = matches.first().copied() {
+            if matches.len() > 1 {
+                warn!(
+                    "ui_pipeline: found {} BuildingBlocks_Canvas records named '{}'; using first",
+                    matches.len(),
+                    record_name
+                );
+            }
+            return export_canvas_record(self.db, record, record_name);
         }
 
-        export_canvas_record(self.db, record, record_name)
+        // Fallback: BuildingBlocks_Style records share the same StyleEntry shape
+        // as brandStyles entries, so a canvas-level `style` file-URL can be
+        // resolved through this same lookup.  This keeps brand resolution
+        // structural (canvas → linked Style record) without a separate fetcher.
+        let style_matches: Vec<_> = self
+            .db
+            .records_by_type_name("BuildingBlocks_Style")
+            .filter(|record| {
+                let full_name = self.db.resolve_string2(record.name_offset);
+                let stem = full_name.rsplit('.').next().unwrap_or(full_name);
+                stem.eq_ignore_ascii_case(record_name)
+                    || full_name.eq_ignore_ascii_case(record_name)
+            })
+            .collect();
+
+        if let Some(record) = style_matches.first().copied() {
+            if style_matches.len() > 1 {
+                warn!(
+                    "ui_pipeline: found {} BuildingBlocks_Style records named '{}'; using first",
+                    style_matches.len(),
+                    record_name
+                );
+            }
+            return export_canvas_record(self.db, record, record_name);
+        }
+
+        Err(UiError::FetchFailed {
+            guid: record_name.to_string(),
+            source: format!(
+                "no BuildingBlocks_Canvas or BuildingBlocks_Style record found by name: {record_name}"
+            )
+            .into(),
+        })
     }
 }
 
