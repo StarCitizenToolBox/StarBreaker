@@ -120,7 +120,7 @@ fn resolve_canvas_graph_inner(
     // URLs in their own recursive resolve calls — not in ours.
     // Also capture paramInputValues so child scenes can inherit localized-param
     // overrides (e.g. annunciator chiclet labels PWR/WPN/THR/SHLD/COOL).
-    let root_canvas_urls: Vec<(String, Vec<serde_json::Value>)> = scene
+    let root_canvas_urls: Vec<(BbNodeId, String, Vec<serde_json::Value>)> = scene
         .nodes
         .values()
         .filter(|n| n.ty == BbNodeType::WidgetCanvas)
@@ -135,7 +135,7 @@ fn resolve_canvas_graph_inner(
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
-            Some((url.to_owned(), param_inputs))
+            Some((n.id, url.to_owned(), param_inputs))
         })
         .collect();
 
@@ -276,13 +276,33 @@ fn resolve_canvas_graph_inner(
     {
         let canvas_urls = root_canvas_urls;
 
+        // Compute the set of WidgetCanvas node pointers whose `Instantiated`
+        // field binding evaluates to `false` under static defaults.  These
+        // canvases are inactive at startup and must not be followed in Pass 2.
+        // For canvases without any `Instantiated` bindings (e.g. MFD screens)
+        // the set is empty and all WidgetCanvas URLs are followed normally.
+        let instantiated_false =
+            crate::bb_state_filter::instantiated_false_widgets(record_value);
+
         // Snapshot the visited set as it stands right after Pass 1.  Used
         // below to test "was this canvas already merged by Pass 1?" without
         // modifying the set (so the same URL may appear multiple times in the
         // loop with different paramInputValues and each instance is processed).
         let post_pass1_visited: std::collections::HashSet<String> = visited.clone();
 
-        for (url, param_inputs) in canvas_urls {
+        for (node_id, url, param_inputs) in canvas_urls {
+            // Skip WidgetCanvas nodes whose Instantiated binding is false.
+            // This prevents inactive state sub-canvases (e.g. Attract, LogIn,
+            // MainMenu on a medical kiosk) from being merged into the static render.
+            if instantiated_false.contains(&node_id) {
+                if debug_trace {
+                    log::info!(
+                        "bb_resolve[depth={}]: Pass2 skipping ptr:{} {} (Instantiated=false)",
+                        depth, node_id, url,
+                    );
+                }
+                continue;
+            }
             let norm = extract_record_name(&url).to_ascii_lowercase();
             // If this canvas URL appears in ANY conditional entry but was NOT
             // selected in Pass 1 (not present in the post-Pass-1 snapshot),

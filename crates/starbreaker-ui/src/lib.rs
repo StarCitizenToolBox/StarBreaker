@@ -24,6 +24,7 @@ pub mod bb_loc;
 pub mod bb_loc_p4k;
 pub mod bb_resolve;
 pub mod bb_scene;
+pub mod bb_state_filter;
 pub mod bb_svg;
 pub mod canvas;
 pub mod compose;
