@@ -467,7 +467,7 @@ class GroupsMixin:
     def _ensure_runtime_layer_surface_group(self) -> bpy.types.ShaderNodeTree:
         self._invalidate_runtime_group_if_unexpected(
             "StarBreaker Runtime LayerSurface",
-            "layer_surface_v4",
+            "layer_surface_v6",
             {
                 "NodeGroupInput": 1,
                 "NodeGroupOutput": 1,
@@ -476,7 +476,7 @@ class GroupsMixin:
         )
         group_tree, group_input, group_output = self._begin_runtime_shared_group(
             "StarBreaker Runtime LayerSurface",
-            signature="layer_surface_v4",
+            signature="layer_surface_v6",
             inputs=[
                 ("Base Color", "NodeSocketColor"),
                 ("Base Alpha", "NodeSocketFloat"),
@@ -490,7 +490,6 @@ class GroupsMixin:
                 ("Detail Bump Strength", "NodeSocketFloat"),
                 ("Normal Color", "NodeSocketColor"),
                 ("Roughness Source", "NodeSocketFloat"),
-                ("Roughness Source Is Smoothness", "NodeSocketBool"),
                 ("Palette Glossiness", "NodeSocketFloat"),
                 ("Specular Value", "NodeSocketFloat"),
                 ("Palette Specular", "NodeSocketFloat"),
@@ -506,7 +505,7 @@ class GroupsMixin:
                 ("Metallic", "NodeSocketFloat"),
             ],
         )
-        if group_tree.get("starbreaker_runtime_built_signature") == "layer_surface_v4":
+        if group_tree.get("starbreaker_runtime_built_signature") == "layer_surface_v6":
             return group_tree
         nodes = group_tree.nodes
         links = group_tree.links
@@ -547,34 +546,23 @@ class GroupsMixin:
         links.new(palette_mix.outputs[0], final_color.inputs[1])
         links.new(detail_mix.outputs[0], final_color.inputs[2])
 
-        roughness_invert = nodes.new("ShaderNodeMath")
-        roughness_invert.location = (-720, -300)
-        roughness_invert.operation = "SUBTRACT"
-        roughness_invert.inputs[0].default_value = 1.0
-        links.new(_output_socket(group_input, "Roughness Source"), roughness_invert.inputs[1])
+        combined_gloss = nodes.new("ShaderNodeMix")
+        combined_gloss.location = (-560, -300)
+        if hasattr(combined_gloss, "data_type"):
+            combined_gloss.data_type = "FLOAT"
+        links.new(_output_socket(group_input, "Palette Glossiness"), combined_gloss.inputs[0])
+        links.new(_output_socket(group_input, "Roughness Source"), combined_gloss.inputs[2])
+        combined_gloss.inputs[3].default_value = 1.0
 
-        roughness_source = nodes.new("ShaderNodeMix")
-        roughness_source.location = (-520, -300)
-        if hasattr(roughness_source, "data_type"):
-            roughness_source.data_type = "FLOAT"
-        links.new(_output_socket(group_input, "Roughness Source Is Smoothness"), roughness_source.inputs[0])
-        links.new(_output_socket(group_input, "Roughness Source"), roughness_source.inputs[2])
-        links.new(roughness_invert.outputs[0], roughness_source.inputs[3])
-
-        palette_gloss_factor = nodes.new("ShaderNodeMath")
-        palette_gloss_factor.location = (-720, -180)
-        palette_gloss_factor.operation = "SUBTRACT"
-        palette_gloss_factor.inputs[0].default_value = 1.0
-        links.new(_output_socket(group_input, "Palette Glossiness"), palette_gloss_factor.inputs[1])
-
-        roughness_base = nodes.new("ShaderNodeMath")
-        roughness_base.location = (-320, -240)
-        roughness_base.operation = "MULTIPLY"
-        links.new(roughness_source.outputs[0], roughness_base.inputs[0])
-        links.new(palette_gloss_factor.outputs[0], roughness_base.inputs[1])
+        ddna_roughness = nodes.new("ShaderNodeGroup")
+        ddna_roughness.node_tree = self._ensure_runtime_ddna_roughness_group()
+        _refresh_group_node_sockets(ddna_roughness)
+        ddna_roughness.location = (-360, -300)
+        ddna_roughness.label = "StarBreaker DDNA Roughness"
+        links.new(combined_gloss.outputs[0], ddna_roughness.inputs["Smoothness"])
 
         detail_gloss = nodes.new("ShaderNodeMix")
-        detail_gloss.location = (-120, -240)
+        detail_gloss.location = (80, -240)
         if hasattr(detail_gloss, "data_type"):
             detail_gloss.data_type = "FLOAT"
         links.new(_output_socket(group_input, "Detail Gloss Strength"), detail_gloss.inputs[0])
@@ -582,9 +570,9 @@ class GroupsMixin:
         links.new(_output_socket(group_input, "Detail Gloss Mask"), detail_gloss.inputs[3])
 
         roughness = nodes.new("ShaderNodeMath")
-        roughness.location = (80, -240)
+        roughness.location = (280, -240)
         roughness.operation = "MULTIPLY"
-        links.new(roughness_base.outputs[0], roughness.inputs[0])
+        links.new(ddna_roughness.outputs["Roughness"], roughness.inputs[0])
         links.new(detail_gloss.outputs[0], roughness.inputs[1])
 
         specular = nodes.new("ShaderNodeMath")
@@ -617,7 +605,7 @@ class GroupsMixin:
         links.new(specular.outputs[0], group_output.inputs["Specular"])
         links.new(bump.outputs[0], group_output.inputs["Normal"])
         links.new(_output_socket(group_input, "Metallic"), group_output.inputs["Metallic"])
-        group_tree["starbreaker_runtime_built_signature"] = "layer_surface_v4"
+        group_tree["starbreaker_runtime_built_signature"] = "layer_surface_v6"
         return group_tree
 
     def _ensure_runtime_hard_surface_group(self) -> bpy.types.ShaderNodeTree:
@@ -2143,6 +2131,52 @@ class GroupsMixin:
         group_tree["starbreaker_runtime_built_signature"] = "smoothness_roughness_v1"
         return group_tree
 
+    def _ensure_runtime_ddna_roughness_group(self) -> bpy.types.ShaderNodeTree:
+        """Map DDNA-authored smoothness into roughness inside shared runtime groups."""
+
+        self._invalidate_runtime_group_if_unexpected(
+            "StarBreaker Runtime DDNA Roughness",
+            "ddna_roughness_v2",
+            {
+                "NodeGroupInput": 1,
+                "NodeGroupOutput": 1,
+                "ShaderNodeMath": 2,
+            },
+        )
+        group_tree, group_input, group_output = self._begin_runtime_shared_group(
+            "StarBreaker Runtime DDNA Roughness",
+            signature="ddna_roughness_v2",
+            inputs=[
+                ("Smoothness", "NodeSocketFloat"),
+            ],
+            outputs=[
+                ("Roughness", "NodeSocketFloat"),
+            ],
+        )
+        if group_tree.get("starbreaker_runtime_built_signature") == "ddna_roughness_v2":
+            return group_tree
+        nodes = group_tree.nodes
+        links = group_tree.links
+
+        _set_group_input_default(group_input, "Smoothness", 0.5)
+
+        invert_node = nodes.new("ShaderNodeMath")
+        invert_node.location = (-200, 0)
+        invert_node.operation = "SUBTRACT"
+        invert_node.use_clamp = True
+        invert_node.inputs[0].default_value = 1.0
+        links.new(_output_socket(group_input, "Smoothness"), invert_node.inputs[1])
+
+        sqrt_node = nodes.new("ShaderNodeMath")
+        sqrt_node.location = (0, 0)
+        sqrt_node.operation = "SQRT"
+        sqrt_node.use_clamp = True
+        links.new(invert_node.outputs[0], sqrt_node.inputs[0])
+        links.new(sqrt_node.outputs[0], group_output.inputs["Roughness"])
+
+        group_tree["starbreaker_runtime_built_signature"] = "ddna_roughness_v2"
+        return group_tree
+
     def _ensure_runtime_color_to_luma_group(self) -> bpy.types.ShaderNodeTree:
         """Wrap a single ShaderNodeRGBToBW (color → grayscale) into a group.
 
@@ -2369,6 +2403,7 @@ class GroupsMixin:
     def _ensure_runtime_parallax_group(
         self,
         height_image: bpy.types.Image | None = None,
+        sampler_extension: str = "CLIP",
     ) -> bpy.types.ShaderNodeTree | None:
         """Phase 12 (POM plan, Phase 1 — revised): return a per-height-image
         copy of the production-quality POM pipeline authored in
@@ -2387,10 +2422,11 @@ class GroupsMixin:
 
         This helper appends the bundled ``POM_Vector`` + dependencies
         from ``starbreaker_addon/resources/pom_library.blend`` once per
-        *height image*, renames the appended chain with a stable
-        ``StarBreaker POM …`` prefix that encodes the image name, and
-        patches the embedded ``HeightMap`` / ``POM_disp`` tex samplers
-        to point at that image. Subsequent calls with the same image
+        *(height image, wrap mode)* pair, renames the appended chain
+        with a stable ``StarBreaker POM …`` prefix that encodes the
+        image name plus sampler extension, and patches the embedded
+        ``HeightMap`` / ``POM_disp`` tex samplers to point at that
+        image. Subsequent calls with the same image and wrap mode
         return the cached copy.
 
         Returns ``None`` when no height image is supplied (single-sample
@@ -2400,19 +2436,20 @@ class GroupsMixin:
         if height_image is None:
             return None
         image_key = height_image.name
-        cached_name = f"StarBreaker POM [{image_key}]"
+        sampler_extension = "REPEAT" if str(sampler_extension).upper() == "REPEAT" else "CLIP"
+        cached_name = f"StarBreaker POM [{image_key}] [{sampler_extension}]"
         cached = bpy.data.node_groups.get(cached_name)
         current_mode = self._current_pom_detail_mode()
         _configure_runtime_pom_detail_group(current_mode)
 
         def _configure_pom_sampler_nodes(root_tree: bpy.types.ShaderNodeTree) -> None:
-            """Bind the cached height image and enforce repeat wrap mode.
+            """Bind the cached height image and mirror the authored wrap mode.
 
             The authored POM library ships with CLIP extension on its internal
-            height samplers. CLIP clamps UVs to [0,1], which makes parallax
-            appear only on islands that stay in-range while the material's
-            surface samplers are repeating. We mirror surface-sampler behavior by
-            forcing REPEAT on all POM-internal image samplers.
+            height samplers. Materials with explicit surface tiling need REPEAT
+            so their parallax walk samples the same repeated field as the color
+            samplers; atlas-backed materials must stay on CLIP so glancing rays
+            cannot wrap into neighbouring atlas islands.
             """
 
             seen: set[int] = set()
@@ -2426,7 +2463,7 @@ class GroupsMixin:
                 for node in tree.nodes:
                     if node.bl_idname == "ShaderNodeTexImage":
                         node.image = height_image
-                        node.extension = "REPEAT"
+                        node.extension = sampler_extension
                     elif node.bl_idname == "ShaderNodeGroup" and node.node_tree is not None:
                         stack.append(node.node_tree)
 

@@ -1,33 +1,19 @@
 target/
-
 exports/
 *.glb
 *.dcb
-
 .cargo/config.toml
 .mcp.json
 mcp/starbreaker-mcp.exe
-
+mcp/starbreaker-mcp
 research/
-
 scripts/
-
 docs-local/
-
 .claude/
-
-# Asset exports (decomposed mesh packages, textures, materials) — DO NOT COMMIT
 ships/
-
 .vscode/
-
 __pycache__/
 *.py[cod]
-
 .DS_Store
 Thumbs.db
-
 blender_addon/starbreaker_addon/resources/material_templates.blend1
-
-# Asset exports (decomposed mesh packages, textures, materials) — DO NOT COMMIT
-ships/

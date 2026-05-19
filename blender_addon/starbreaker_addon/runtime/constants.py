@@ -17,6 +17,8 @@ PROP_SCENE_PATH = "starbreaker_scene_path"
 PROP_EXPORT_ROOT = "starbreaker_export_root"
 PROP_PACKAGE_NAME = "starbreaker_package_name"
 PROP_ENTITY_NAME = "starbreaker_entity_name"
+PROP_DECAL_OFFSET_EXTERNAL = "starbreaker_decal_offset_external"
+PROP_DECAL_OFFSET_INTERNAL = "starbreaker_decal_offset_internal"
 PROP_INSTANCE_JSON = "starbreaker_instance_json"
 PROP_MESH_ASSET = "starbreaker_mesh_asset"
 PROP_MATERIAL_SIDECAR = "starbreaker_material_sidecar"
@@ -37,6 +39,8 @@ PROP_PAINT_VARIANT_SIDECAR = "starbreaker_paint_variant_sidecar"
 PROP_SOURCE_NODE_NAME = "starbreaker_source_node_name"
 PROP_MISSING_ASSET = "starbreaker_missing_asset"
 PROP_SURFACE_SHADER_MODE = "starbreaker_surface_shader_mode"
+PROP_DECAL_HOST_CHANNEL = "starbreaker_decal_host_channel"
+PROP_DECAL_HOST_RGB = "starbreaker_decal_host_rgb"
 # True when the source submaterial's StringGenMask decoded to
 # ``has_parallax_occlusion_mapping``. Used by the MeshDecal host-tint
 # rebinder to keep host tint on POM decals only (phases 10+11).
@@ -51,11 +55,17 @@ PROP_LIGHT_ACTIVE_STATE = "starbreaker_light_active_state"
 PROP_LIGHT_SEMANTIC_KIND = "starbreaker_light_semantic_kind"
 PROP_ENGINE_GLOW_CONTROL_JSON = "starbreaker_engine_glow_control"
 PROP_ENGINE_GLOW_STRENGTH = "starbreaker_engine_glow_strength"
+PROP_SHARED_GLOW_CONTROL_JSON = "starbreaker_shared_glow_control"
+PROP_SHARED_GLOW_STRENGTH = "starbreaker_shared_glow_strength"
 SCENE_POM_DETAIL_PROP = "starbreaker_pom_detail"
 SCENE_WEAR_STRENGTH_PROP = "starbreaker_wear_strength"
 SCENE_ENGINE_GLOW_PROP = "starbreaker_engine_glow_strength"
+SCENE_SHARED_GLOW_PROP = "starbreaker_shared_glow_strength"
 SURFACE_SHADER_MODE_PRINCIPLED = "principled_first"
 SURFACE_SHADER_MODE_GLASS = "glass_bsdf"
+DECAL_OFFSET_MODIFIER_NAME = "StarBreaker Decal Offset"
+DECAL_OFFSET_EXTERNAL_DEFAULT = 0.005
+DECAL_OFFSET_INTERNAL_DEFAULT = 0.001
 
 POM_DETAIL_DEFAULT = "MEDIUM"
 POM_DETAIL_ITEMS = (

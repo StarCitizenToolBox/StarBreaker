@@ -8,6 +8,9 @@ stable public surface consumed by ``ui.py`` and tests.
 from __future__ import annotations
 
 from .constants import (
+    DECAL_OFFSET_EXTERNAL_DEFAULT,
+    DECAL_OFFSET_INTERNAL_DEFAULT,
+    DECAL_OFFSET_MODIFIER_NAME,
     GLTF_LIGHT_BASIS_CORRECTION,
     GLTF_PBR_WATTS_TO_LUMENS,
     LIGHT_CANDELA_TO_WATT,
@@ -19,7 +22,11 @@ from .constants import (
     POM_DETAIL_ITEMS,
     PROP_ENGINE_GLOW_CONTROL_JSON,
     PROP_ENGINE_GLOW_STRENGTH,
+    PROP_SHARED_GLOW_CONTROL_JSON,
+    PROP_SHARED_GLOW_STRENGTH,
     PROP_ENTITY_NAME,
+    PROP_DECAL_OFFSET_EXTERNAL,
+    PROP_DECAL_OFFSET_INTERNAL,
     PROP_EXPORT_ROOT,
     PROP_IMPORTED_SLOT_MAP,
     PROP_INSTANCE_JSON,
@@ -47,6 +54,7 @@ from .constants import (
     SCENE_AXIS_CONVERSION,
     SCENE_AXIS_CONVERSION_INV,
     SCENE_ENGINE_GLOW_PROP,
+    SCENE_SHARED_GLOW_PROP,
     SCENE_WEAR_STRENGTH_PROP,
     SURFACE_SHADER_MODE_GLASS,
     SURFACE_SHADER_MODE_PRINCIPLED,
@@ -56,9 +64,11 @@ from .constants import (
 from .importer import PackageImporter
 from .importer.groups import apply_pom_detail_mode
 from .package_ops import (
+    apply_decal_offsets_to_package_root,
     animation_overlap_warnings,
     apply_animation_mode_to_package_root,
     apply_engine_glow_to_package_root,
+    apply_shared_glow_to_package_root,
     apply_light_state,
     apply_livery_to_package_root,
     apply_livery_to_selected_package,
@@ -72,7 +82,11 @@ from .package_ops import (
     available_light_state_names,
     engine_glow_control_enabled,
     engine_glow_strength,
+    shared_glow_control_enabled,
+    shared_glow_strength,
+    decal_offset_control_enabled,
     delete_animation_instance,
+    dirty_package_material_objects,
     dump_selected_metadata,
     exterior_palette_ids,
     find_package_root,

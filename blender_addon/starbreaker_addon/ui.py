@@ -18,8 +18,12 @@ from .manifest import PackageBundle
 from .palette import resolved_palette_id
 from .palette import paint_list_canonical_id
 from .runtime import (
+    DECAL_OFFSET_EXTERNAL_DEFAULT,
+    DECAL_OFFSET_INTERNAL_DEFAULT,
     POM_DETAIL_DEFAULT,
     POM_DETAIL_ITEMS,
+    PROP_DECAL_OFFSET_EXTERNAL,
+    PROP_DECAL_OFFSET_INTERNAL,
     PROP_ENTITY_NAME,
     PROP_MATERIAL_SIDECAR,
     PROP_PACKAGE_NAME,
@@ -31,13 +35,15 @@ from .runtime import (
     PROP_TEMPLATE_KEY,
     SCENE_POM_DETAIL_PROP,
     SCENE_ENGINE_GLOW_PROP,
+    SCENE_SHARED_GLOW_PROP,
     TEMPLATE_COLLECTION_NAME,
-    MaterialRefreshSession,
     apply_pom_detail_mode,
     SCENE_WEAR_STRENGTH_PROP,
     animation_overlap_warnings,
     apply_animation_mode_to_package_root,
+    apply_decal_offsets_to_package_root,
     apply_engine_glow_to_package_root,
+    apply_shared_glow_to_package_root,
     apply_light_state,
     apply_livery_to_selected_package,
     apply_paint_to_selected_package,
@@ -47,6 +53,10 @@ from .runtime import (
     available_light_state_names,
     engine_glow_control_enabled,
     engine_glow_strength,
+    shared_glow_control_enabled,
+    shared_glow_strength,
+    decal_offset_control_enabled,
+    dirty_package_material_objects,
     dump_selected_metadata,
     exterior_palette_ids,
     find_package_root,
@@ -56,7 +66,6 @@ from .runtime import (
     solo_animation_instance,
     package_animation_instances,
     package_animation_mode_map,
-    package_root_needs_material_refresh,
     refresh_materials_for_package_root,
     resolve_package_scene_path,
     update_animation_instance_start_frame,
@@ -92,10 +101,12 @@ _SCENE_ANIMATION_FPS_POLICY_PROP = "starbreaker_animation_fps_policy"
 _IMPORT_PROGRESS_ACTIVE_PROP = "starbreaker_import_progress_active"
 _IMPORT_PROGRESS_VALUE_PROP = "starbreaker_import_progress_value"
 _IMPORT_PROGRESS_DESCRIPTION_PROP = "starbreaker_import_progress_description"
+_IMPORT_PROGRESS_INDETERMINATE_PROP = "starbreaker_import_progress_indeterminate"
+_IMPORT_PROGRESS_TEXT_ONLY_PROP = "starbreaker_import_progress_text_only"
 _IMPORT_PROGRESS_LAST_UPDATE = 0.0
 _IMPORT_PROGRESS_DRAW_HANDLER = None
-_AUTO_MATERIAL_REFRESH_SESSION: MaterialRefreshSession | None = None
 _AUTO_MATERIAL_REFRESH_TOKEN = 0
+_CONTROL_PROP_SYNCING = False
 
 
 def _progress_fraction(value: float) -> float:
@@ -136,6 +147,112 @@ def _set_active_object(context: bpy.types.Context, obj: bpy.types.Object | None)
     view_layer = getattr(context, "view_layer", None)
     if view_layer is not None and obj is not None:
         view_layer.objects.active = obj
+
+
+def _object_parent_depth(obj: object) -> int:
+    depth = 0
+    parent = getattr(obj, "parent", None)
+    while parent is not None:
+        depth += 1
+        parent = getattr(parent, "parent", None)
+    return depth
+
+
+def _loaded_package_roots(
+    objects: object,
+    *,
+    max_depth: int = 2,
+) -> list[bpy.types.Object]:
+    roots: list[bpy.types.Object] = []
+    for obj in objects:
+        get_prop = getattr(obj, "get", None)
+        if not callable(get_prop) or not bool(get_prop(PROP_PACKAGE_ROOT)):
+            continue
+        if _object_parent_depth(obj) > max_depth:
+            continue
+        roots.append(obj)
+    roots.sort(key=lambda candidate: (_object_parent_depth(candidate), getattr(candidate, "name", "")))
+    return roots
+
+
+def _open_view3d_sidebar(context: bpy.types.Context) -> None:
+    window = getattr(context, "window", None)
+    screen = getattr(window, "screen", None)
+    if screen is None:
+        return
+    for area in screen.areas:
+        if area.type != "VIEW_3D":
+            continue
+        spaces = getattr(area, "spaces", None)
+        active_space = spaces.active if spaces is not None else None
+        if active_space is not None and hasattr(active_space, "show_region_ui"):
+            active_space.show_region_ui = True
+        ui_region = next((region for region in area.regions if region.type == "UI"), None)
+        if ui_region is not None and hasattr(ui_region, "active_panel_category"):
+            try:
+                ui_region.active_panel_category = "StarBreaker"
+            except Exception:
+                pass
+        area.tag_redraw()
+
+
+def _focus_loaded_package_root(context: bpy.types.Context, package_root: bpy.types.Object) -> None:
+    for obj in getattr(context, "selected_objects", []):
+        try:
+            obj.select_set(False)
+        except Exception:
+            pass
+    try:
+        package_root.select_set(True)
+    except Exception:
+        pass
+    _set_active_object(context, package_root)
+    _sync_scene_package_controls(context, package_root)
+    _open_view3d_sidebar(context)
+    _tag_view3d_redraws(context)
+
+
+def _view3d_sidebar_categories(context: bpy.types.Context) -> list[str | None]:
+    categories: list[str | None] = []
+    window = getattr(context, "window", None)
+    screen = getattr(window, "screen", None)
+    if screen is None:
+        return categories
+    for area in screen.areas:
+        if area.type != "VIEW_3D":
+            continue
+        ui_region = next((region for region in area.regions if region.type == "UI"), None)
+        categories.append(getattr(ui_region, "active_panel_category", None) if ui_region is not None else None)
+    return categories
+
+
+def _deferred_focus_loaded_package_root(
+    package_root_name: str,
+    retries_remaining: int = 5,
+) -> None:
+    package_root = bpy.data.objects.get(package_root_name)
+    if package_root is None:
+        return None
+    get_prop = getattr(package_root, "get", None)
+    if not callable(get_prop) or not bool(get_prop(PROP_PACKAGE_ROOT)):
+        return None
+    context = bpy.context
+    _focus_loaded_package_root(context, package_root)
+    categories = _view3d_sidebar_categories(context)
+    if categories and any(category != "StarBreaker" for category in categories):
+        if retries_remaining > 0:
+            try:
+                bpy.app.timers.register(
+                    lambda root_name=package_root_name, retries=retries_remaining - 1: _deferred_focus_loaded_package_root(
+                        root_name,
+                        retries,
+                    ),
+                    first_interval=0.5,
+                    persistent=False,
+                )
+            except Exception:
+                pass
+    return None
 
 
 def _collapse_template_cache_outliner(context: bpy.types.Context) -> None:
@@ -371,7 +488,32 @@ def _update_pom_detail(_: bpy.types.ID, context: bpy.types.Context) -> None:
     _tag_view3d_redraws(context)
 
 
+def _sync_scene_package_controls(context: bpy.types.Context, package_root: bpy.types.Object) -> None:
+    global _CONTROL_PROP_SYNCING
+    scene = getattr(context, "scene", None)
+    if scene is None:
+        return
+    updates: list[tuple[str, float]] = []
+    if engine_glow_control_enabled(package_root):
+        updates.append((SCENE_ENGINE_GLOW_PROP, engine_glow_strength(package_root)))
+    if shared_glow_control_enabled(package_root):
+        updates.append((SCENE_SHARED_GLOW_PROP, shared_glow_strength(package_root)))
+    if not updates:
+        return
+    _CONTROL_PROP_SYNCING = True
+    try:
+        for prop_name, value in updates:
+            try:
+                setattr(scene, prop_name, float(value))
+            except Exception:
+                continue
+    finally:
+        _CONTROL_PROP_SYNCING = False
+
+
 def _update_engine_glow(_: bpy.types.ID, context: bpy.types.Context) -> None:
+    if _CONTROL_PROP_SYNCING:
+        return
     scene = getattr(context, "scene", None)
     if scene is None:
         return
@@ -380,6 +522,36 @@ def _update_engine_glow(_: bpy.types.ID, context: bpy.types.Context) -> None:
         return
     try:
         apply_engine_glow_to_package_root(package_root, float(getattr(scene, SCENE_ENGINE_GLOW_PROP, 3.0)))
+    except Exception:
+        return
+    _tag_view3d_redraws(context)
+
+
+def _update_shared_glow(_: bpy.types.ID, context: bpy.types.Context) -> None:
+    if _CONTROL_PROP_SYNCING:
+        return
+    scene = getattr(context, "scene", None)
+    if scene is None:
+        return
+    package_root = _package_root_from_context(context)
+    if package_root is None or not shared_glow_control_enabled(package_root):
+        return
+    try:
+        apply_shared_glow_to_package_root(package_root, float(getattr(scene, SCENE_SHARED_GLOW_PROP, 0.0)))
+    except Exception:
+        return
+    _tag_view3d_redraws(context)
+
+
+def _update_decal_offset(root: bpy.types.ID, context: bpy.types.Context) -> None:
+    if not bool(getattr(root, "get", lambda _key: False)(PROP_PACKAGE_ROOT)):
+        return
+    try:
+        apply_decal_offsets_to_package_root(
+            root,
+            float(getattr(root, PROP_DECAL_OFFSET_EXTERNAL, DECAL_OFFSET_EXTERNAL_DEFAULT)),
+            float(getattr(root, PROP_DECAL_OFFSET_INTERNAL, DECAL_OFFSET_INTERNAL_DEFAULT)),
+        )
     except Exception:
         return
     _tag_view3d_redraws(context)
@@ -396,9 +568,11 @@ def _draw_import_progress_overlay() -> None:
 
     fraction = _progress_fraction(getattr(window_manager, _IMPORT_PROGRESS_VALUE_PROP, 0.0))
     description = getattr(window_manager, _IMPORT_PROGRESS_DESCRIPTION_PROP, "Preparing import")
+    indeterminate = bool(getattr(window_manager, _IMPORT_PROGRESS_INDETERMINATE_PROP, False))
+    text_only = bool(getattr(window_manager, _IMPORT_PROGRESS_TEXT_ONLY_PROP, False))
 
     panel_width = min(480.0, max(region.width - 80.0, 320.0))
-    panel_height = 96.0
+    panel_height = 64.0 if text_only else 96.0
     panel_x = (region.width - panel_width) * 0.5
     panel_y = region.height * 0.12
     padding = 16.0
@@ -420,25 +594,28 @@ def _draw_import_progress_overlay() -> None:
     gpu.state.blend_set("ALPHA")
     draw_rect(panel_x, panel_y, panel_width, panel_height, (0.05, 0.07, 0.09, 0.88))
     draw_rect(panel_x + 1.0, panel_y + 1.0, panel_width - 2.0, panel_height - 2.0, (0.10, 0.12, 0.15, 0.92))
-    draw_rect(bar_x, bar_y, bar_width, bar_height, (0.18, 0.21, 0.25, 1.0))
-    if fraction > 0.0:
-        draw_rect(bar_x, bar_y, bar_width * fraction, bar_height, (0.23, 0.62, 0.86, 1.0))
+    if not text_only:
+        draw_rect(bar_x, bar_y, bar_width, bar_height, (0.18, 0.21, 0.25, 1.0))
+        if not indeterminate and fraction > 0.0:
+            draw_rect(bar_x, bar_y, bar_width * fraction, bar_height, (0.23, 0.62, 0.86, 1.0))
     gpu.state.blend_set("NONE")
 
     font_id = 0
-    try:
-        blf.size(font_id, 14.0)
-    except TypeError:
-        blf.size(font_id, 14, 72)
     blf.color(font_id, 0.96, 0.97, 0.98, 1.0)
-    blf.position(font_id, bar_x + bar_width + 16.0, bar_y + 4.0, 0)
-    blf.draw(font_id, f"{int(round(fraction * 100.0))}%")
+    if not text_only:
+        try:
+            blf.size(font_id, 14.0)
+        except TypeError:
+            blf.size(font_id, 14, 72)
+        blf.position(font_id, bar_x + bar_width + 16.0, bar_y + 4.0, 0)
+        blf.draw(font_id, "..." if indeterminate else f"{int(round(fraction * 100.0))}%")
 
     try:
         blf.size(font_id, 13.0)
     except TypeError:
         blf.size(font_id, 13, 72)
-    blf.position(font_id, bar_x, panel_y + padding, 0)
+    description_y = panel_y + padding if not text_only else panel_y + ((panel_height - 13.0) * 0.5)
+    blf.position(font_id, bar_x, description_y, 0)
     blf.draw(font_id, description)
 
 
@@ -462,12 +639,20 @@ def _remove_import_progress_overlay() -> None:
     _IMPORT_PROGRESS_DRAW_HANDLER = None
 
 
-def _begin_import_progress(context: bpy.types.Context, description: str) -> None:
+def _begin_import_progress(
+    context: bpy.types.Context,
+    description: str,
+    *,
+    indeterminate: bool = False,
+    text_only: bool = False,
+) -> None:
     global _IMPORT_PROGRESS_LAST_UPDATE
     window_manager = context.window_manager
     setattr(window_manager, _IMPORT_PROGRESS_ACTIVE_PROP, True)
     setattr(window_manager, _IMPORT_PROGRESS_VALUE_PROP, 0.0)
     setattr(window_manager, _IMPORT_PROGRESS_DESCRIPTION_PROP, description)
+    setattr(window_manager, _IMPORT_PROGRESS_INDETERMINATE_PROP, indeterminate)
+    setattr(window_manager, _IMPORT_PROGRESS_TEXT_ONLY_PROP, text_only)
     _IMPORT_PROGRESS_LAST_UPDATE = 0.0
     _ensure_import_progress_overlay()
     _tag_view3d_redraws(context)
@@ -493,6 +678,7 @@ def _update_import_progress(
     clamped = _progress_fraction(fraction)
     setattr(window_manager, _IMPORT_PROGRESS_VALUE_PROP, clamped)
     setattr(window_manager, _IMPORT_PROGRESS_DESCRIPTION_PROP, description)
+    setattr(window_manager, _IMPORT_PROGRESS_INDETERMINATE_PROP, False)
     _IMPORT_PROGRESS_LAST_UPDATE = now
     try:
         window_manager.progress_update(int(round(clamped * 100.0)))
@@ -510,6 +696,8 @@ def _end_import_progress(context: bpy.types.Context, description: str) -> None:
     window_manager = context.window_manager
     _update_import_progress(context, 1.0, description, force=True)
     setattr(window_manager, _IMPORT_PROGRESS_ACTIVE_PROP, False)
+    setattr(window_manager, _IMPORT_PROGRESS_INDETERMINATE_PROP, False)
+    setattr(window_manager, _IMPORT_PROGRESS_TEXT_ONLY_PROP, False)
     _tag_view3d_redraws(context)
     try:
         window_manager.progress_end()
@@ -566,6 +754,80 @@ def _package_root_from_context(context: bpy.types.Context) -> bpy.types.Object |
         if package_root is not None:
             return package_root
     return None
+
+
+def _collection_instance_objects(package_root: bpy.types.Object) -> list[bpy.types.Object]:
+    candidates = [package_root, *list(getattr(package_root, "children_recursive", ()))]
+    return [
+        obj
+        for obj in candidates
+        if getattr(obj, "instance_collection", None) is not None
+    ]
+
+
+def _linked_object_data_objects(package_root: bpy.types.Object) -> list[bpy.types.Object]:
+    candidates = [package_root, *list(getattr(package_root, "children_recursive", ()))]
+    return [
+        obj
+        for obj in candidates
+        if getattr(getattr(obj, "data", None), "library", None) is not None
+    ]
+
+
+def _make_package_collection_instances_real(
+    context: bpy.types.Context,
+    package_root: bpy.types.Object,
+    *,
+    chunk_size: int = 100,
+) -> int:
+    total_processed = 0
+    while True:
+        current_instances = _collection_instance_objects(package_root)
+        if not current_instances:
+            return total_processed
+
+        batch_size = len(current_instances)
+        for chunk_start in range(0, batch_size, chunk_size):
+            chunk = current_instances[chunk_start : chunk_start + chunk_size]
+            if not chunk:
+                continue
+            bpy.ops.object.select_all(action="DESELECT")
+            first_instance = None
+            for obj in chunk:
+                obj.select_set(True)
+                if first_instance is None:
+                    first_instance = obj
+            if first_instance is None:
+                continue
+
+            view_layer = getattr(context, "view_layer", None)
+            objects = getattr(view_layer, "objects", None)
+            if objects is not None:
+                objects.active = first_instance
+
+            bpy.ops.object.duplicates_make_real(use_base_parent=True, use_hierarchy=True)
+            for obj in chunk:
+                obj.instance_type = "NONE"
+                obj.instance_collection = None
+
+        total_processed += batch_size
+
+
+def _make_package_linked_object_data_local(package_root: bpy.types.Object) -> int:
+    localized_data: dict[int, bpy.types.ID] = {}
+    localized_count = 0
+    for obj in _linked_object_data_objects(package_root):
+        data = getattr(obj, "data", None)
+        if data is None:
+            continue
+        pointer = data.as_pointer() if hasattr(data, "as_pointer") else id(data)
+        local_data = localized_data.get(pointer)
+        if local_data is None:
+            local_data = data.copy()
+            localized_data[pointer] = local_data
+            localized_count += 1
+        obj.data = local_data
+    return localized_count
 
 
 def _selected_package(context: bpy.types.Context) -> PackageBundle | None:
@@ -824,6 +1086,11 @@ class STARBREAKER_OT_import_progress_popup(Operator):
         window_manager = context.window_manager
         fraction = _progress_fraction(getattr(window_manager, _IMPORT_PROGRESS_VALUE_PROP, 0.0))
         description = getattr(window_manager, _IMPORT_PROGRESS_DESCRIPTION_PROP, "Preparing import")
+        text_only = bool(getattr(window_manager, _IMPORT_PROGRESS_TEXT_ONLY_PROP, False))
+
+        if text_only:
+            layout.label(text=description)
+            return
 
         row = layout.row(align=True)
         bar = row.row()
@@ -1015,6 +1282,46 @@ class STARBREAKER_OT_dump_metadata(Operator):
             self.report({"WARNING"}, "No StarBreaker metadata found on the current selection")
             return {"CANCELLED"}
         self.report({"INFO"}, f"Created {len(text_names)} text datablocks")
+        return {"FINISHED"}
+
+
+class STARBREAKER_OT_make_instances_real(Operator):
+    bl_idname = "starbreaker.make_instances_real"
+    bl_label = "Make Instances Real"
+    bl_options = {"REGISTER", "UNDO"}
+    bl_description = "Makes instances real, useful for 3d printing or exporting"
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return _package_root_from_context(context) is not None
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        if getattr(context, "mode", "OBJECT") != "OBJECT":
+            self.report({"ERROR"}, "Switch to Object Mode before making instances real")
+            return {"CANCELLED"}
+
+        package_root = _package_root_from_context(context)
+        if package_root is None:
+            self.report({"ERROR"}, "Select an imported StarBreaker object first")
+            return {"CANCELLED"}
+
+        realized_instances = _make_package_collection_instances_real(context, package_root)
+        localized_data = _make_package_linked_object_data_local(package_root)
+        if realized_instances == 0 and localized_data == 0:
+            self.report(
+                {"INFO"},
+                "No collection instances or linked object data found under the selected StarBreaker package",
+            )
+            return {"FINISHED"}
+
+        _focus_loaded_package_root(context, package_root)
+        self.report(
+            {"INFO"},
+            (
+                f"Made {realized_instances} instance container(s) real and "
+                f"localized {localized_data} linked datablock(s)"
+            ),
+        )
         return {"FINISHED"}
 
 
@@ -1308,7 +1615,11 @@ class STARBREAKER_PT_tools(Panel):
         obj = context.active_object
         package_root = _package_root_from_context(context)
         if package_root is None:
+            layout.label(text="Open scene.blend or other")
+            layout.label(text="StarBreaker exported .blend file")
+            layout.label(text="for more options")
             return
+        _sync_scene_package_controls(context, package_root)
 
         package = _selected_package(context)
         info = layout.box()
@@ -1329,6 +1640,10 @@ class STARBREAKER_PT_tools(Panel):
         tuning.prop(context.scene, SCENE_POM_DETAIL_PROP, text="POM Detail")
         tuning.label(text="Layered Wear")
         tuning.prop(context.scene, SCENE_WEAR_STRENGTH_PROP, slider=True)
+        if decal_offset_control_enabled(package_root):
+            tuning.label(text="Decal Offset")
+            tuning.prop(package_root, PROP_DECAL_OFFSET_EXTERNAL, text="Exterior")
+            tuning.prop(package_root, PROP_DECAL_OFFSET_INTERNAL, text="Interior")
 
         if obj is not None and obj.active_material is not None:
             material = obj.active_material
@@ -1340,46 +1655,58 @@ class STARBREAKER_PT_tools(Panel):
         # Phase 28: light state switcher. Show a row of buttons when the
         # current .blend has any imported lights with authored states.
         state_names = available_light_state_names()
-        if state_names:
+        if state_names or engine_glow_control_enabled(package_root) or shared_glow_control_enabled(package_root):
             light_box = layout.box()
-            light_box.label(text="Light States")
-            _SHORT = {
-                "defaultState": "Default",
-                "auxiliaryState": "Auxiliary",
-                "emergencyState": "Emergency",
-                "cinematicState": "Cinematic",
-                "offState": "Off",
-            }
-            _ICONS = {
-                "defaultState": "CHECKMARK",
-                "auxiliaryState": "LIGHT",
-                "emergencyState": "ERROR",
-                "cinematicState": "RESTRICT_RENDER_OFF",
-                "offState": "HIDE_ON",
-                "emergencyState_strobe": "LIGHT_SUN",
-            }
-            button_specs: list[tuple[str, str, bool, str]] = []
-            for name in state_names:
-                if name == "emergencyState":
-                    button_specs.append(("Emergency", name, False, _ICONS["emergencyState"]))
-                    button_specs.append(("Emergency + Strobe", name, True, _ICONS["emergencyState_strobe"]))
-                else:
-                    button_specs.append((_SHORT.get(name, name), name, True, _ICONS.get(name, "NONE")))
+            if state_names:
+                light_box.label(text="Lighting Panel")
+                _SHORT = {
+                    "defaultState": "Default",
+                    "auxiliaryState": "Auxiliary",
+                    "emergencyState": "Emergency",
+                    "cinematicState": "Cinematic",
+                    "offState": "Off",
+                }
+                _ICONS = {
+                    "defaultState": "CHECKMARK",
+                    "auxiliaryState": "LIGHT",
+                    "emergencyState": "ERROR",
+                    "cinematicState": "RESTRICT_RENDER_OFF",
+                    "offState": "HIDE_ON",
+                    "emergencyState_strobe": "LIGHT_SUN",
+                }
+                button_specs: list[tuple[str, str, bool, str]] = []
+                for name in state_names:
+                    if name == "emergencyState":
+                        button_specs.append(("Emergency", name, False, _ICONS["emergencyState"]))
+                        button_specs.append(("Emergency + Strobe", name, True, _ICONS["emergencyState_strobe"]))
+                    else:
+                        button_specs.append((_SHORT.get(name, name), name, True, _ICONS.get(name, "NONE")))
 
-            split = (len(button_specs) + 1) // 2
-            top_row = light_box.row(align=True)
-            bottom_row = light_box.row(align=True)
-            for index, (label, state_name, include_strobe, icon_name) in enumerate(button_specs):
-                row = top_row if index < split else bottom_row
-                kwargs = {"text": label}
-                if icon_name != "NONE":
-                    kwargs["icon"] = icon_name
-                op = row.operator(STARBREAKER_OT_switch_light_state.bl_idname, **kwargs)
-                op.state_name = state_name
-                op.include_strobe = include_strobe
+                split = (len(button_specs) + 1) // 2
+                top_row = light_box.row(align=True)
+                bottom_row = light_box.row(align=True)
+                for index, (label, state_name, include_strobe, icon_name) in enumerate(button_specs):
+                    row = top_row if index < split else bottom_row
+                    kwargs = {"text": label}
+                    if icon_name != "NONE":
+                        kwargs["icon"] = icon_name
+                    op = row.operator(STARBREAKER_OT_switch_light_state.bl_idname, **kwargs)
+                    op.state_name = state_name
+                    op.include_strobe = include_strobe
+            elif engine_glow_control_enabled(package_root) or shared_glow_control_enabled(package_root):
+                light_box.label(text="Lighting Panel")
             if engine_glow_control_enabled(package_root):
-                light_box.label(text=f"Current Engine Glow Strength: {engine_glow_strength(package_root):.1f}")
                 light_box.prop(context.scene, SCENE_ENGINE_GLOW_PROP, text="Engine Glow Strength", slider=True)
+            if shared_glow_control_enabled(package_root):
+                light_box.prop(context.scene, SCENE_SHARED_GLOW_PROP, text="Shared Glow", slider=True)
+
+        tools_box = layout.box()
+        tools_box.label(text="Tools")
+        tools_box.operator(
+            STARBREAKER_OT_make_instances_real.bl_idname,
+            text="Make Instances Real",
+            icon="OUTLINER_OB_EMPTY",
+        )
 
         if package is not None:
             animation_items = available_package_animation_items(package)
@@ -1558,60 +1885,77 @@ def _should_auto_refresh_package_root(obj: object, needs_material_refresh: objec
 
 
 def _material_refresh_prompt_timer(token: int | None = None) -> float | None:
-    global _AUTO_MATERIAL_REFRESH_SESSION
     if token is not None and token != _AUTO_MATERIAL_REFRESH_TOKEN:
         return None
     context = bpy.context
     prefs = _get_prefs()
-    if _AUTO_MATERIAL_REFRESH_SESSION is not None:
-        session = _AUTO_MATERIAL_REFRESH_SESSION
-        done = session.step(budget_seconds=0.04, min_objects=2)
-        package_name = session.package_root.get(PROP_PACKAGE_NAME, session.package.package_name)
-        _update_import_progress(
-            context,
-            session.progress,
-            f"Refreshing materials for {package_name}",
-            force=done,
-            redraw=False,
-        )
-        if done:
-            _end_import_progress(
-                context,
-                f"Refreshed {session.applied} material slots for {package_name}",
-            )
-            _AUTO_MATERIAL_REFRESH_SESSION = None
-            return None
-        return 0.01
 
     if not _should_auto_refresh_unloaded_materials_on_load(prefs):
         return None
 
-    for obj in bpy.data.objects:
-        if not _should_auto_refresh_package_root(obj, package_root_needs_material_refresh):
+    package_roots = _loaded_package_roots(bpy.data.objects, max_depth=2)
+    if package_roots:
+        _focus_loaded_package_root(context, package_roots[0])
+        try:
+            bpy.app.timers.register(
+                lambda root_name=package_roots[0].name: _deferred_focus_loaded_package_root(root_name),
+                first_interval=0.25,
+                persistent=False,
+            )
+        except Exception:
+            pass
+
+    for obj in package_roots:
+        get_prop = getattr(obj, "get", None)
+        if not callable(get_prop) or not bool(get_prop(PROP_PACKAGE_ROOT)):
+            continue
+        dirty_objects = dirty_package_material_objects(obj)
+        if not dirty_objects:
             continue
         palette_id = obj.get(PROP_PALETTE_ID, "")
-        _AUTO_MATERIAL_REFRESH_SESSION = MaterialRefreshSession(
+        package_name = obj.get(PROP_PACKAGE_NAME, obj.name)
+        _begin_import_progress(
+            context,
+            "Loading materials, please wait",
+            indeterminate=True,
+            text_only=True,
+        )
+        try:
+            bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=1)
+        except Exception:
+            pass
+        progress_callback = lambda fraction, description: _update_import_progress(
+            context,
+            fraction,
+            "Loading materials, please wait",
+            force=True,
+            redraw=False,
+        )
+        applied = refresh_materials_for_package_root(
             context,
             obj,
             palette_id if isinstance(palette_id, str) and palette_id else None,
+            only_unloaded=True,
+            target_objects=dirty_objects,
+            progress_callback=progress_callback,
+            progress_interval_seconds=5.0,
         )
-        _begin_import_progress(
+        _end_import_progress(
             context,
-            f"Refreshing materials for {obj.get(PROP_PACKAGE_NAME, obj.name)}",
+            f"Refreshed {applied} material slots for {package_name}",
         )
-        return 0.01
+        return None
     return None
 
 
 @persistent
 def _starbreaker_load_post(_dummy: object) -> None:
-    global _AUTO_MATERIAL_REFRESH_SESSION, _AUTO_MATERIAL_REFRESH_TOKEN
-    _AUTO_MATERIAL_REFRESH_SESSION = None
+    global _AUTO_MATERIAL_REFRESH_TOKEN
     _AUTO_MATERIAL_REFRESH_TOKEN += 1
     token = _AUTO_MATERIAL_REFRESH_TOKEN
     bpy.app.timers.register(
         lambda: _material_refresh_prompt_timer(token),
-        first_interval=0.5,
+        first_interval=0.05,
         persistent=False,
     )
 
@@ -1624,6 +1968,7 @@ CLASSES = [
     STARBREAKER_OT_apply_livery,
     STARBREAKER_OT_switch_light_state,
     STARBREAKER_OT_dump_metadata,
+    STARBREAKER_OT_make_instances_real,
     STARBREAKER_OT_apply_animation_mode,
     STARBREAKER_OT_edit_animation_instance,
     STARBREAKER_OT_delete_animation_instance,
@@ -1654,6 +1999,16 @@ def register() -> None:
         bpy.types.WindowManager,
         _IMPORT_PROGRESS_DESCRIPTION_PROP,
         StringProperty(name="StarBreaker Import Progress Description", default=""),
+    )
+    setattr(
+        bpy.types.WindowManager,
+        _IMPORT_PROGRESS_INDETERMINATE_PROP,
+        BoolProperty(name="StarBreaker Import Progress Indeterminate", default=False),
+    )
+    setattr(
+        bpy.types.WindowManager,
+        _IMPORT_PROGRESS_TEXT_ONLY_PROP,
+        BoolProperty(name="StarBreaker Import Progress Text Only", default=False),
     )
     setattr(
         bpy.types.Scene,
@@ -1708,6 +2063,54 @@ def register() -> None:
     )
     setattr(
         bpy.types.Scene,
+        SCENE_SHARED_GLOW_PROP,
+        FloatProperty(
+            name="Shared Glow",
+            description=(
+                "Additional emission strength added to imported glow-style MeshDecal materials."
+            ),
+            default=0.0,
+            min=0.0,
+            max=10.0,
+            soft_min=0.0,
+            soft_max=10.0,
+            update=_update_shared_glow,
+        ),
+    )
+    setattr(
+        bpy.types.Object,
+        PROP_DECAL_OFFSET_EXTERNAL,
+        FloatProperty(
+            name="Exterior Decal Offset",
+            description=(
+                "Offset strength for imported StarBreaker decal displacement modifiers "
+                "on exterior ship-hull objects in the selected package root."
+            ),
+            default=DECAL_OFFSET_EXTERNAL_DEFAULT,
+            min=0.0,
+            soft_max=0.02,
+            precision=4,
+            update=_update_decal_offset,
+        ),
+    )
+    setattr(
+        bpy.types.Object,
+        PROP_DECAL_OFFSET_INTERNAL,
+        FloatProperty(
+            name="Interior Decal Offset",
+            description=(
+                "Offset strength for imported StarBreaker decal displacement modifiers "
+                "on interior and loadout objects in the selected package root."
+            ),
+            default=DECAL_OFFSET_INTERNAL_DEFAULT,
+            min=0.0,
+            soft_max=0.02,
+            precision=4,
+            update=_update_decal_offset,
+        ),
+    )
+    setattr(
+        bpy.types.Scene,
         _SCENE_ANIMATION_FPS_POLICY_PROP,
         EnumProperty(
             name="Animation FPS",
@@ -1745,12 +2148,20 @@ def unregister() -> None:
         delattr(bpy.types.Scene, SCENE_WEAR_STRENGTH_PROP)
     if hasattr(bpy.types.Scene, SCENE_ENGINE_GLOW_PROP):
         delattr(bpy.types.Scene, SCENE_ENGINE_GLOW_PROP)
+    if hasattr(bpy.types.Scene, SCENE_SHARED_GLOW_PROP):
+        delattr(bpy.types.Scene, SCENE_SHARED_GLOW_PROP)
+    if hasattr(bpy.types.Object, PROP_DECAL_OFFSET_EXTERNAL):
+        delattr(bpy.types.Object, PROP_DECAL_OFFSET_EXTERNAL)
+    if hasattr(bpy.types.Object, PROP_DECAL_OFFSET_INTERNAL):
+        delattr(bpy.types.Object, PROP_DECAL_OFFSET_INTERNAL)
     if hasattr(bpy.types.Scene, _SCENE_ANIMATION_FPS_POLICY_PROP):
         delattr(bpy.types.Scene, _SCENE_ANIMATION_FPS_POLICY_PROP)
     for prop_name in (
         _IMPORT_PROGRESS_ACTIVE_PROP,
         _IMPORT_PROGRESS_VALUE_PROP,
         _IMPORT_PROGRESS_DESCRIPTION_PROP,
+        _IMPORT_PROGRESS_INDETERMINATE_PROP,
+        _IMPORT_PROGRESS_TEXT_ONLY_PROP,
     ):
         if hasattr(bpy.types.WindowManager, prop_name):
             delattr(bpy.types.WindowManager, prop_name)

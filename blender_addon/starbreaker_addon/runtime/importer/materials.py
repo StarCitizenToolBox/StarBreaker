@@ -827,8 +827,8 @@ class MaterialsMixin:
     def _invert_value_socket(self, nodes: bpy.types.Nodes, source_socket: Any, *, x: int, y: int) -> Any:
         group_node = nodes.new("ShaderNodeGroup")
         group_node.location = (x, y)
-        group_node.node_tree = self._ensure_runtime_smoothness_roughness_group()
-        group_node.label = "StarBreaker Smoothness To Roughness"
+        group_node.node_tree = self._ensure_runtime_ddna_roughness_group()
+        group_node.label = "StarBreaker DDNA Roughness"
         group_node.id_data.links.new(source_socket, group_node.inputs["Smoothness"])
         return group_node.outputs["Roughness"]
 

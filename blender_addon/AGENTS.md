@@ -15,6 +15,8 @@ prefer a one-liner or a compact code block over prose.
 - Load-post material auto-refresh must treat local placeholder materials with no
   node tree as "needs refresh"; saved refreshed materials are local too, so
   checking only for linked materials is insufficient.
+- VIEW_3D `Region.active_panel_category` may revert during load-post; reapply
+  the `StarBreaker` tab from a short deferred timer after the first load callback.
 
 ## Target Blender
 

@@ -54,7 +54,7 @@ if "bpy" not in sys.modules:
     bpy.data = types.SimpleNamespace(node_groups=[], images=[])
     sys.modules["bpy"] = bpy
 
-from starbreaker_addon.manifest import PackageBundle
+from starbreaker_addon.manifest import PackageBundle, PaletteRecord
 from starbreaker_addon.palette import (
     available_livery_ids,
     available_palette_ids,
@@ -63,6 +63,7 @@ from starbreaker_addon.palette import (
     paint_list_canonical_id,
     palette_color,
     palette_finish_glossiness,
+    palette_finish_glossiness_factor,
     palette_finish_specular,
     palette_for_id,
     palette_id_for_livery_instance,
@@ -70,6 +71,7 @@ from starbreaker_addon.palette import (
     resolved_palette_id,
 )
 from starbreaker_addon.runtime.constants import PROP_PALETTE_ID
+from starbreaker_addon.runtime.importer.palette import _palette_output_color
 from starbreaker_addon.runtime.importer.orchestration import OrchestrationMixin
 from starbreaker_addon.runtime.palette_utils import (
     _hard_surface_palette_iridescence_channel,
@@ -98,6 +100,10 @@ AURORA_SCENE = _existing_scene(
     "ships/Packages/RSI Aurora Mk2/scene.json",
     "ships/Packages/RSI Aurora Mk2_LOD0_TEX0/scene.json",
 )
+PITBULL_SCENE = _existing_scene(
+    "ships/Packages/DRAK Pitbull_LOD0_TEX0/scene.json",
+    "ships/Packages/ship/DRAK Pitbull_LOD0_TEX0/scene.json",
+)
 
 
 @unittest.skipUnless(
@@ -105,6 +111,12 @@ AURORA_SCENE = _existing_scene(
     f"ARGO MOLE fixture not present at {ARGO_SCENE}; skipping palette tests",
 )
 class PaletteTests(unittest.TestCase):
+    def test_palette_output_color_preserves_glass_values(self) -> None:
+        self.assertEqual(
+            _palette_output_color("glass", (0.5, 0.5, 0.5)),
+            (0.5, 0.5, 0.5),
+        )
+
     def test_available_ids_are_loaded_from_fixture_manifests(self) -> None:
         package = PackageBundle.load(ARGO_SCENE)
         self.assertIn("palette/argo_mole", available_palette_ids(package))
@@ -152,6 +164,24 @@ class PaletteTests(unittest.TestCase):
             (0.04373502731323242, 0.04373502731323242, 0.04373502731323242),
         )
         self.assertIsNone(palette_finish_glossiness(palette, "primary"))
+
+    def test_palette_finish_glossiness_factor_normalizes_raw_datacore_scale(self) -> None:
+        palette = PaletteRecord.from_value(
+            {
+                "id": "palette/test",
+                "primary": [1.0, 1.0, 1.0],
+                "secondary": [1.0, 1.0, 1.0],
+                "tertiary": [1.0, 1.0, 1.0],
+                "glass": [1.0, 1.0, 1.0],
+                "finish": {
+                    "primary": {"glossiness": 136.0, "specular": [0.0, 0.0, 0.0]},
+                },
+            }
+        )
+        self.assertAlmostEqual(
+            palette_finish_glossiness_factor(palette, "primary"),
+            136.0 / 255.0,
+        )
 
     def test_null_child_palette_inherits_package_root_palette(self) -> None:
         package = PackageBundle.load(ARGO_SCENE)
@@ -288,6 +318,21 @@ class AuroraPaletteTests(unittest.TestCase):
             ),
             "tertiary",
         )
+
+
+@unittest.skipUnless(
+    PITBULL_SCENE.is_file(),
+    f"DRAK Pitbull fixture not present at {PITBULL_SCENE}; skipping Pitbull palette tests",
+)
+class PitbullPaletteTests(unittest.TestCase):
+    def test_root_palette_preserves_real_glass_color(self) -> None:
+        package = PackageBundle.load(PITBULL_SCENE)
+        palette = palette_for_id(package, "palette/drak_pitbull")
+        self.assertIsNotNone(palette)
+        assert palette is not None
+        self.assertAlmostEqual(palette.glass[0], 1.0, places=6)
+        self.assertAlmostEqual(palette.glass[1], 0.11443537, places=6)
+        self.assertAlmostEqual(palette.glass[2], 0.00560539, places=6)
 
 
 class PaletteOverrideImporterUnderTest(OrchestrationMixin):

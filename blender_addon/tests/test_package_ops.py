@@ -20,6 +20,7 @@ class FakeObject(dict):
         self.children: list[FakeObject] = []
         self.type = "EMPTY"
         self.material_slots = []
+        self.modifiers = []
 
     @property
     def children_recursive(self) -> list[FakeObject]:
@@ -59,6 +60,13 @@ class FakeMaterial(dict):
 class FakeSlot:
     def __init__(self, material=None):
         self.material = material
+
+
+class FakeModifier:
+    def __init__(self, name: str, type: str, strength: float = 0.0):  # noqa: A002 - matches bpy API
+        self.name = name
+        self.type = type
+        self.strength = strength
 
 
 class FakeSocket:
@@ -432,6 +440,68 @@ class PackageOpsTests(unittest.TestCase):
             [("rebuild", "wing", "palette/test"), ("rebuild", "hull", "palette/test")],
         )
 
+    def test_decal_offset_control_enabled_detects_modifier_in_root_tree(self) -> None:
+        package_root = FakeObject("StarBreaker RSI Aurora", starbreaker_package_root=True)
+        child = FakeObject(
+            "hull",
+            starbreaker_material_sidecar="Data/Objects/Spaceships/Ships/RSI/aurora/exterior/aurora_ext_TEX0.materials.json",
+        )
+        child.modifiers = [FakeModifier("StarBreaker Decal Offset", "DISPLACE", 0.005)]
+        child.parent = package_root
+        package_root.children.append(child)
+
+        self.assertTrue(self.package_ops.decal_offset_control_enabled(package_root))
+
+    def test_apply_decal_offsets_to_package_root_updates_only_selected_root(self) -> None:
+        package_root = FakeObject("StarBreaker RSI Aurora", starbreaker_package_root=True)
+        exterior = FakeObject(
+            "hull",
+            starbreaker_material_sidecar="Data/Objects/Spaceships/Ships/RSI/aurora/exterior/aurora_ext_TEX0.materials.json",
+        )
+        exterior.modifiers = [FakeModifier("StarBreaker Decal Offset", "DISPLACE", 0.005)]
+        interior = FakeObject(
+            "cooler",
+            starbreaker_material_sidecar="Data/Objects/Spaceships/Coolers/small_component/lplt/cool_lplt_s01_pl03_TEX0.materials.json",
+        )
+        interior.modifiers = [FakeModifier("StarBreaker Decal Offset", "DISPLACE", 0.001)]
+        other_root = FakeObject("StarBreaker MISC Razor", starbreaker_package_root=True)
+        other = FakeObject(
+            "other_hull",
+            starbreaker_material_sidecar="Data/Objects/Spaceships/Ships/MISC/razor/exterior/razor_ext_TEX0.materials.json",
+        )
+        other.modifiers = [FakeModifier("StarBreaker Decal Offset", "DISPLACE", 0.005)]
+        exterior.parent = package_root
+        interior.parent = package_root
+        other.parent = other_root
+        package_root.children.extend([exterior, interior])
+        other_root.children.append(other)
+
+        updated = self.package_ops.apply_decal_offsets_to_package_root(package_root, 0.0075, 0.0025)
+
+        self.assertEqual(updated, 2)
+        self.assertAlmostEqual(exterior.modifiers[0].strength, 0.0075)
+        self.assertAlmostEqual(interior.modifiers[0].strength, 0.0025)
+        self.assertAlmostEqual(other.modifiers[0].strength, 0.005)
+
+    def test_apply_decal_offsets_uses_instance_sidecar_when_object_prop_missing(self) -> None:
+        package_root = FakeObject("StarBreaker RSI Aurora", starbreaker_package_root=True)
+        child = FakeObject(
+            "weapon",
+            starbreaker_instance_json=json.dumps(
+                {
+                    "material_sidecar": "Data/Objects/Spaceships/Weapons/KLWE/KLWE_las_rep_s1-3_TEX0.materials.json",
+                }
+            ),
+        )
+        child.modifiers = [FakeModifier("StarBreaker Decal Offset", "DISPLACE", 0.001)]
+        child.parent = package_root
+        package_root.children.append(child)
+
+        updated = self.package_ops.apply_decal_offsets_to_package_root(package_root, 0.009, 0.003)
+
+        self.assertEqual(updated, 1)
+        self.assertAlmostEqual(child.modifiers[0].strength, 0.003)
+
     def test_material_refresh_session_splits_orphan_cleanup_across_steps(self) -> None:
         @contextmanager
         def _no_suspend(_context):
@@ -705,11 +775,11 @@ class PackageOpsTests(unittest.TestCase):
             self.assertTrue(self.package_ops.package_root_needs_material_refresh(package_root))
 
             mesh.material_slots = [
-                FakeSlot(FakeMaterial("linked", library=object(), starbreaker_material_identity="id"))
+                FakeSlot(FakeMaterial("mesh_mtl_local_00", library=object(), starbreaker_material_identity="id"))
             ]
             self.assertTrue(self.package_ops.package_root_needs_material_refresh(package_root))
 
-            mesh.material_slots = [FakeSlot(FakeMaterial("local_placeholder"))]
+            mesh.material_slots = [FakeSlot(FakeMaterial("mesh_mtl_local_00"))]
             self.assertTrue(self.package_ops.package_root_needs_material_refresh(package_root))
 
             local_built = FakeMaterial("local_built")
@@ -723,6 +793,148 @@ class PackageOpsTests(unittest.TestCase):
             self.assertFalse(self.package_ops.package_root_needs_material_refresh(package_root))
         finally:
             self.package_ops._load_package_from_root = original_load
+
+    def test_package_root_needs_material_refresh_ignores_unmappable_placeholder(self) -> None:
+        package_root = FakeObject("Root", starbreaker_package_root=True)
+        mesh = FakeObject("mesh", starbreaker_material_sidecar="mesh.materials.json")
+        mesh.type = "MESH"
+        mesh.parent = package_root
+        package_root.children.append(mesh)
+        mesh.material_slots = [FakeSlot(FakeMaterial("mesh_mtl_material_0_00"))]
+        sidecar = types.SimpleNamespace(
+            submaterials=[types.SimpleNamespace(index=0, submaterial_name="ActualMaterial")]
+        )
+        package = types.SimpleNamespace(load_material_sidecar=lambda _path: sidecar)
+        original_load = self.package_ops._load_package_from_root
+        try:
+            self.package_ops._load_package_from_root = lambda _root: package
+            self.assertFalse(self.package_ops.package_root_needs_material_refresh(package_root))
+        finally:
+            self.package_ops._load_package_from_root = original_load
+
+    def test_refresh_materials_for_package_root_only_unloaded_skips_built_meshes(self) -> None:
+        @contextmanager
+        def _no_suspend(_context):
+            yield
+
+        @contextmanager
+        def _no_mode(_context):
+            yield
+
+        package_root = FakeObject(
+            "StarBreaker Test",
+            starbreaker_package_root=True,
+            starbreaker_scene_path="/tmp/test/scene.json",
+        )
+        dirty_mesh = FakeObject("dirty", starbreaker_material_sidecar="mesh.materials.json")
+        dirty_mesh.type = "MESH"
+        dirty_mesh.data = FakeMeshData(FakeUVLayers(["UVMap"]))
+        dirty_mesh.parent = package_root
+        dirty_mesh.material_slots = [FakeSlot(FakeMaterial("mesh_mtl_Mat_A_00"))]
+        package_root.children.append(dirty_mesh)
+
+        built_mesh = FakeObject("built", starbreaker_material_sidecar="mesh.materials.json")
+        built_mesh.type = "MESH"
+        built_mesh.data = FakeMeshData(FakeUVLayers(["UVMap"]))
+        built_mesh.parent = package_root
+        built_material = FakeMaterial("mesh_mtl_Mat_A_00")
+        built_material.node_tree = FakeNodeTree(1.0)
+        built_mesh.material_slots = [FakeSlot(built_material)]
+        package_root.children.append(built_mesh)
+
+        sidecar = types.SimpleNamespace(
+            submaterials=[types.SimpleNamespace(index=0, submaterial_name="Mat_A")]
+        )
+        package = types.SimpleNamespace(
+            scene_path=Path("/tmp/test/scene.json"),
+            package_name="Test Package",
+            load_material_sidecar=lambda _path: sidecar,
+        )
+        importer_stub = sys.modules["sb_pkg_test_runtime.importer"]
+        importer_stub.events = []
+        original_load = self.package_ops._load_package_from_root
+        original_suspend = self.package_ops._suspend_heavy_viewports
+        original_mode = self.package_ops._temporary_object_mode
+        try:
+            self.package_ops._load_package_from_root = lambda _root: package
+            self.package_ops._suspend_heavy_viewports = _no_suspend
+            self.package_ops._temporary_object_mode = _no_mode
+            applied = self.package_ops.refresh_materials_for_package_root(
+                types.SimpleNamespace(view_layer=FakeViewLayer()),
+                package_root,
+                only_unloaded=True,
+            )
+        finally:
+            self.package_ops._load_package_from_root = original_load
+            self.package_ops._suspend_heavy_viewports = original_suspend
+            self.package_ops._temporary_object_mode = original_mode
+
+        self.assertEqual(applied, 1)
+        self.assertEqual(importer_stub.events, [("rebuild", "dirty", None)])
+
+    def test_refresh_materials_for_package_root_reports_coarse_progress(self) -> None:
+        @contextmanager
+        def _no_suspend(_context):
+            yield
+
+        @contextmanager
+        def _no_mode(_context):
+            yield
+
+        package_root = FakeObject(
+            "StarBreaker Test",
+            starbreaker_package_root=True,
+            starbreaker_scene_path="/tmp/test/scene.json",
+        )
+        meshes = []
+        for name in ("mesh_a", "mesh_b", "mesh_c"):
+            mesh = FakeObject(name, starbreaker_material_sidecar=f"{name}.materials.json")
+            mesh.type = "MESH"
+            mesh.data = FakeMeshData(FakeUVLayers(["UVMap"]))
+            mesh.parent = package_root
+            package_root.children.append(mesh)
+            meshes.append(mesh)
+
+        package = types.SimpleNamespace(
+            scene_path=Path("/tmp/test/scene.json"),
+            package_name="Test Package",
+            load_material_sidecar=lambda path: types.SimpleNamespace(submaterials=[types.SimpleNamespace(index=0, submaterial_name=path)]),
+        )
+        importer_stub = sys.modules["sb_pkg_test_runtime.importer"]
+        importer_stub.events = []
+        progress_updates: list[tuple[float, str]] = []
+        clock_values = iter([0.0, 1.0, 2.0, 6.0, 7.0, 8.0, 9.0, 10.0])
+        original_load = self.package_ops._load_package_from_root
+        original_suspend = self.package_ops._suspend_heavy_viewports
+        original_mode = self.package_ops._temporary_object_mode
+        original_monotonic = self.package_ops.time.monotonic
+        try:
+            self.package_ops._load_package_from_root = lambda _root: package
+            self.package_ops._suspend_heavy_viewports = _no_suspend
+            self.package_ops._temporary_object_mode = _no_mode
+            self.package_ops.time.monotonic = lambda: next(clock_values)
+            applied = self.package_ops.refresh_materials_for_package_root(
+                types.SimpleNamespace(view_layer=FakeViewLayer()),
+                package_root,
+                progress_callback=lambda fraction, description: progress_updates.append((fraction, description)),
+                progress_interval_seconds=5.0,
+            )
+        finally:
+            self.package_ops._load_package_from_root = original_load
+            self.package_ops._suspend_heavy_viewports = original_suspend
+            self.package_ops._temporary_object_mode = original_mode
+            self.package_ops.time.monotonic = original_monotonic
+
+        self.assertEqual(applied, 3)
+        self.assertEqual(
+            [description for _, description in progress_updates],
+            [
+                "Refreshing 0/3 objects",
+                "Refreshing 3/3 objects",
+                "Cleaning up...",
+                "Done",
+            ],
+        )
 
     def test_apply_engine_glow_to_package_root_updates_targeted_materials(self) -> None:
         package_root = FakeObject(
@@ -808,6 +1020,220 @@ class PackageOpsTests(unittest.TestCase):
             mesh.material_slots[0].material.node_tree.nodes[0].inputs["Emission Color"].default_value,
             (0.25, 0.5, 0.75, 1.0),
         )
+
+    def test_shared_glow_control_enabled_discovers_mesh_decal_glow_targets(self) -> None:
+        package_root = FakeObject("Root", starbreaker_package_root=True)
+        mesh = FakeObject(
+            "mesh",
+            starbreaker_material_sidecar="Data/Objects/Ships/Test/root.materials.json",
+        )
+        mesh.type = "MESH"
+        mesh.parent = package_root
+        package_root.children.append(mesh)
+        sidecar = types.SimpleNamespace(
+            submaterials=[
+                types.SimpleNamespace(
+                    index=31,
+                    submaterial_name="Decal_Glow_Linked",
+                    blender_material_name="test:Decal_Glow_Linked",
+                    shader_family="MeshDecal",
+                    decoded_feature_flags=types.SimpleNamespace(
+                        has_parallax_occlusion_mapping=False,
+                        has_stencil_map=False,
+                    ),
+                    texture_slots=[
+                        types.SimpleNamespace(
+                            slot="TexSlot1",
+                            export_path="Data/Textures/Ships/Test/Glows/glow_diff.png",
+                        )
+                    ],
+                ),
+                types.SimpleNamespace(
+                    index=53,
+                    submaterial_name="Glow_Thrusters",
+                    blender_material_name="test:Glow_Thrusters",
+                    shader_family="HardSurface",
+                    decoded_feature_flags=types.SimpleNamespace(
+                        has_parallax_occlusion_mapping=True,
+                        has_stencil_map=False,
+                    ),
+                    texture_slots=[],
+                ),
+            ]
+        )
+        package = types.SimpleNamespace(load_material_sidecar=lambda _path: sidecar)
+
+        original_load = self.package_ops._load_package_from_root
+        try:
+            self.package_ops._load_package_from_root = lambda _root: package
+            enabled = self.package_ops.shared_glow_control_enabled(package_root)
+        finally:
+            self.package_ops._load_package_from_root = original_load
+
+        self.assertTrue(enabled)
+        payload = json.loads(package_root["starbreaker_shared_glow_control"])
+        self.assertEqual(payload["default_strength"], 0.0)
+        self.assertEqual(payload["targets"], [
+            {
+                "blender_material_name": "test:Decal_Glow_Linked",
+                "material_sidecar": "Data/Objects/Ships/Test/root.materials.json",
+                "source_material_index": 31,
+                "submaterial_name": "Decal_Glow_Linked",
+            }
+        ])
+
+    def test_apply_shared_glow_to_package_root_updates_only_shared_glow_decals(self) -> None:
+        package_root = FakeObject("Root", starbreaker_package_root=True)
+        target_material = FakeMaterial("drak_pitbull_ext:Decal_Glow_Unlinked#cf6835ab")
+        target_material.node_tree = FakeNodeTree(0.16)
+        thruster_material = FakeMaterial("drak_pitbull_ext:Glow_Thrusters__engine_glow")
+        thruster_material.node_tree = FakeNodeTree(0.0)
+
+        mesh = FakeObject(
+            "mesh",
+            starbreaker_material_sidecar="Data/Objects/Ships/Test/root.materials.json",
+        )
+        mesh.type = "MESH"
+        mesh.parent = package_root
+        mesh.material_slots = [FakeSlot(target_material)]
+        package_root.children.append(mesh)
+
+        mesh_2 = FakeObject(
+            "mesh_2",
+            starbreaker_material_sidecar="Data/Objects/Ships/Test/root.materials.json",
+        )
+        mesh_2.type = "MESH"
+        mesh_2.parent = package_root
+        mesh_2.material_slots = [FakeSlot(target_material)]
+        package_root.children.append(mesh_2)
+
+        thruster_mesh = FakeObject(
+            "thruster_mesh",
+            starbreaker_material_sidecar="Data/Objects/Ships/Test/root.materials.json",
+        )
+        thruster_mesh.type = "MESH"
+        thruster_mesh.parent = package_root
+        thruster_mesh.material_slots = [FakeSlot(thruster_material)]
+        package_root.children.append(thruster_mesh)
+
+        sidecar = types.SimpleNamespace(
+            submaterials=[
+                types.SimpleNamespace(
+                    index=32,
+                    submaterial_name="Decal_Glow_Unlinked",
+                    blender_material_name="test:Decal_Glow_Unlinked",
+                    shader_family="MeshDecal",
+                    decoded_feature_flags=types.SimpleNamespace(
+                        has_parallax_occlusion_mapping=False,
+                        has_stencil_map=False,
+                    ),
+                    texture_slots=[
+                        types.SimpleNamespace(
+                            slot="TexSlot1",
+                            export_path="Data/Textures/Ships/Test/Glows/glow_diff.png",
+                        )
+                    ],
+                    raw={"authored_attributes": [{"name": "Glow", "value": "0.16"}]},
+                ),
+                types.SimpleNamespace(
+                    index=53,
+                    submaterial_name="Glow_Thrusters",
+                    blender_material_name="test:Glow_Thrusters",
+                    shader_family="HardSurface",
+                    decoded_feature_flags=types.SimpleNamespace(
+                        has_parallax_occlusion_mapping=True,
+                        has_stencil_map=False,
+                    ),
+                    texture_slots=[],
+                    raw={"authored_attributes": []},
+                ),
+            ]
+        )
+        package = types.SimpleNamespace(load_material_sidecar=lambda _path: sidecar)
+
+        original_load = self.package_ops._load_package_from_root
+        try:
+            self.package_ops._load_package_from_root = lambda _root: package
+            updated = self.package_ops.apply_shared_glow_to_package_root(package_root, 2.0)
+        finally:
+            self.package_ops._load_package_from_root = original_load
+
+        self.assertEqual(updated, 1)
+        self.assertIsNot(mesh.material_slots[0].material, target_material)
+        self.assertIs(mesh.material_slots[0].material, mesh_2.material_slots[0].material)
+        self.assertIs(thruster_mesh.material_slots[0].material, thruster_material)
+        self.assertAlmostEqual(
+            mesh.material_slots[0].material.node_tree.nodes[0].inputs["Emission Strength"].default_value,
+            2.16,
+        )
+        self.assertAlmostEqual(
+            thruster_mesh.material_slots[0].material.node_tree.nodes[0].inputs["Emission Strength"].default_value,
+            0.0,
+        )
+        self.assertAlmostEqual(float(package_root.get("starbreaker_shared_glow_strength")), 2.0)
+
+    def test_refresh_materials_for_package_root_reapplies_shared_glow(self) -> None:
+        @contextmanager
+        def _no_suspend(_context):
+            yield
+
+        @contextmanager
+        def _no_mode(_context):
+            yield
+
+        package_root = FakeObject(
+            "Root",
+            starbreaker_package_root=True,
+            starbreaker_material_sidecar="Data/Objects/Ships/Test/root.materials.json",
+        )
+        mesh = FakeObject(
+            "mesh",
+            starbreaker_material_sidecar="Data/Objects/Ships/Test/root.materials.json",
+        )
+        mesh.type = "MESH"
+        mesh.parent = package_root
+        mesh.material_slots = [FakeSlot(FakeMaterial("mat"))]
+        package_root.children.append(mesh)
+        package = types.SimpleNamespace(
+            scene_path=Path("/tmp/test_scene.json"),
+            package_name="Test Package",
+            load_material_sidecar=lambda path: types.SimpleNamespace(submaterials=[types.SimpleNamespace(index=0, submaterial_name=path)]),
+        )
+        importer_stub = sys.modules["sb_pkg_test_runtime.importer"]
+        importer_stub.events = []
+        shared_glow_calls: list[tuple[object, float]] = []
+
+        original_load = self.package_ops._load_package_from_root
+        original_suspend = self.package_ops._suspend_heavy_viewports
+        original_mode = self.package_ops._temporary_object_mode
+        original_engine_enabled = self.package_ops.engine_glow_control_enabled
+        original_shared_enabled = self.package_ops.shared_glow_control_enabled
+        original_shared_strength = self.package_ops.shared_glow_strength
+        original_apply_shared = self.package_ops.apply_shared_glow_to_package_root
+        try:
+            self.package_ops._load_package_from_root = lambda _root: package
+            self.package_ops._suspend_heavy_viewports = _no_suspend
+            self.package_ops._temporary_object_mode = _no_mode
+            self.package_ops.engine_glow_control_enabled = lambda _root: False
+            self.package_ops.shared_glow_control_enabled = lambda _root: True
+            self.package_ops.shared_glow_strength = lambda _root: 2.5
+            self.package_ops.apply_shared_glow_to_package_root = (
+                lambda root, value: shared_glow_calls.append((root, value)) or 1
+            )
+            self.package_ops.refresh_materials_for_package_root(
+                types.SimpleNamespace(view_layer=FakeViewLayer()),
+                package_root,
+            )
+        finally:
+            self.package_ops._load_package_from_root = original_load
+            self.package_ops._suspend_heavy_viewports = original_suspend
+            self.package_ops._temporary_object_mode = original_mode
+            self.package_ops.engine_glow_control_enabled = original_engine_enabled
+            self.package_ops.shared_glow_control_enabled = original_shared_enabled
+            self.package_ops.shared_glow_strength = original_shared_strength
+            self.package_ops.apply_shared_glow_to_package_root = original_apply_shared
+
+        self.assertEqual(shared_glow_calls, [(package_root, 2.5)])
 
     def test_resolve_package_relative_scene_path_from_opened_blend_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

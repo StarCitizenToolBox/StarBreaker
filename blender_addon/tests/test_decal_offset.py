@@ -67,6 +67,8 @@ if "bpy" not in sys.modules:
 
 
 from starbreaker_addon.runtime.constants import (
+    PROP_DECAL_HOST_CHANNEL,
+    PROP_DECAL_HOST_RGB,
     PROP_HAS_POM,
     PROP_MATERIAL_IDENTITY,
     PROP_MATERIAL_SIDECAR,
@@ -75,11 +77,16 @@ from starbreaker_addon.runtime.constants import (
     PROP_TEMPLATE_KEY,
 )
 from starbreaker_addon.manifest import MaterialSidecar, SubmaterialRecord
-from starbreaker_addon.runtime.importer.builders import BuildersMixin
+from starbreaker_addon.runtime.importer.builders import (
+    BuildersMixin,
+    _mesh_decal_neutral_breakup_default,
+    _parallax_height_sampler_extension,
+)
 from starbreaker_addon.runtime.importer.decals import DecalsMixin
 from starbreaker_addon.runtime.importer.materials import MaterialsMixin
 from starbreaker_addon.runtime.importer.materials import _material_datablock_is_valid
 from starbreaker_addon.runtime.importer.orchestration import OrchestrationMixin
+from starbreaker_addon.material_contract import ContractInput, ShaderGroupContract
 from starbreaker_addon.runtime.importer.utils import (
     _canonical_material_sidecar_path,
     _material_identity,
@@ -181,6 +188,12 @@ class ImporterUnderTest(BuildersMixin):
         return FakeMaterial(f"{material.name}__host_rgb", **dict(material))
 
 
+class HostRoutingImporterUnderTest(BuildersMixin):
+    def __init__(self):
+        self.host_channel_cache = {}
+        self.host_rgb_cache = {}
+
+
 class FakePackage:
     def __init__(self, has_decal_texture: bool):
         self.has_decal_texture = has_decal_texture
@@ -280,6 +293,118 @@ class FakeSubmaterial:
         self.submaterial_name = name
 
 
+class TestMeshDecalNeutralBreakupDefault(unittest.TestCase):
+    def test_returns_white_for_stencil_mesh_decal_without_breakup_texture(self) -> None:
+        submaterial = SubmaterialRecord.from_value(
+            {
+                "shader_family": "MeshDecal",
+                "decoded_feature_flags": {"has_stencil_map": True, "tokens": ["STENCIL_MAP"]},
+            }
+        )
+        group_contract = ShaderGroupContract(
+            name="SB_MeshDecal_v1",
+            shader_families=["MeshDecal"],
+            version=1,
+            shader_output="Shader",
+            inputs=[],
+            metadata={},
+            raw={},
+        )
+        contract_input = ContractInput(
+            name="TexSlot8_GrimeBreakup",
+            socket_type="NodeSocketColor",
+            semantic="grime_breakup",
+            source_slot="TexSlot8",
+            required=False,
+            default_value=None,
+            raw={},
+        )
+
+        self.assertEqual(
+            _mesh_decal_neutral_breakup_default(
+                group_contract,
+                submaterial,
+                contract_input,
+                source_socket=None,
+            ),
+            (1.0, 1.0, 1.0, 1.0),
+        )
+
+    def test_returns_white_for_pom_mesh_decal_without_breakup_texture(self) -> None:
+        submaterial = SubmaterialRecord.from_value(
+            {
+                "shader_family": "MeshDecal",
+                "decoded_feature_flags": {
+                    "has_parallax_occlusion_mapping": True,
+                    "tokens": ["PARALLAX_OCCLUSION_MAPPING"],
+                },
+            }
+        )
+        group_contract = ShaderGroupContract(
+            name="SB_MeshDecal_v1",
+            shader_families=["MeshDecal"],
+            version=1,
+            shader_output="Shader",
+            inputs=[],
+            metadata={},
+            raw={},
+        )
+        contract_input = ContractInput(
+            name="TexSlot8_GrimeBreakup",
+            socket_type="NodeSocketColor",
+            semantic="grime_breakup",
+            source_slot="TexSlot8",
+            required=False,
+            default_value=None,
+            raw={},
+        )
+
+        self.assertEqual(
+            _mesh_decal_neutral_breakup_default(
+                group_contract,
+                submaterial,
+                contract_input,
+                source_socket=None,
+            ),
+            (1.0, 1.0, 1.0, 1.0),
+        )
+
+    def test_returns_none_when_breakup_texture_is_present(self) -> None:
+        submaterial = SubmaterialRecord.from_value(
+            {
+                "shader_family": "MeshDecal",
+                "decoded_feature_flags": {"has_stencil_map": True, "tokens": ["STENCIL_MAP"]},
+            }
+        )
+        group_contract = ShaderGroupContract(
+            name="SB_MeshDecal_v1",
+            shader_families=["MeshDecal"],
+            version=1,
+            shader_output="Shader",
+            inputs=[],
+            metadata={},
+            raw={},
+        )
+        contract_input = ContractInput(
+            name="TexSlot8_GrimeBreakup",
+            socket_type="NodeSocketColor",
+            semantic="grime_breakup",
+            source_slot="TexSlot8",
+            required=False,
+            default_value=None,
+            raw={},
+        )
+
+        self.assertIsNone(
+            _mesh_decal_neutral_breakup_default(
+                group_contract,
+                submaterial,
+                contract_input,
+                source_socket=object(),
+            )
+        )
+
+
 class FakePackageWithSidecars:
     def __init__(self, sidecar):
         self.sidecar = sidecar
@@ -290,13 +415,14 @@ class FakePackageWithSidecars:
         return self.sidecar
 
 
-class OrchestrationImporterUnderTest(OrchestrationMixin):
+class OrchestrationImporterUnderTest(OrchestrationMixin, BuildersMixin):
     def __init__(self, sidecar):
         self.package = FakePackageWithSidecars(sidecar)
         self.package_root = None
         self.import_palette_override = None
         self.import_paint_variant_sidecar = None
         self.exterior_material_sidecars = None
+        self.mesh_polygon_counts_cache = {}
         self.slot_mapping_cache = {}
         self.sidecar_submaterials_by_index = {}
         self.sidecar_submaterials_by_name = {}
@@ -314,7 +440,7 @@ class OrchestrationImporterUnderTest(OrchestrationMixin):
     def _remove_replaced_slot_material(self, material) -> None:
         return None
 
-    def _rebind_mesh_decal_for_host(self, obj, palette) -> int:
+    def _rebind_mesh_decal_for_host(self, obj, palette, **_kwargs) -> int:
         return 0
 
 
@@ -490,6 +616,98 @@ class DecalOffsetTests(unittest.TestCase):
 
         self.assertEqual(importer._scan_slots_for_host_channel(obj), "tertiary")
 
+    def test_mesh_decal_host_channel_prefers_precomputed_object_property(self) -> None:
+        obj = FakeObject(
+            material_slots=[],
+            mesh=FakeMesh(polygons=[], vertex_count=0),
+            **{PROP_DECAL_HOST_CHANNEL: "glass"},
+        )
+        importer = HostRoutingImporterUnderTest()
+
+        self.assertEqual(importer._mesh_decal_host_channel_for_object(obj), "glass")
+
+    def test_mesh_decal_host_channel_falls_back_to_parent_precomputed_property(self) -> None:
+        parent = FakeObject(
+            material_slots=[],
+            mesh=FakeMesh(polygons=[], vertex_count=0),
+            **{PROP_DECAL_HOST_CHANNEL: "secondary"},
+        )
+        obj = FakeObject(
+            material_slots=[],
+            mesh=FakeMesh(polygons=[], vertex_count=0),
+        )
+        obj.parent = parent
+        importer = HostRoutingImporterUnderTest()
+
+        self.assertEqual(importer._mesh_decal_host_channel_for_object(obj), "secondary")
+
+    def test_mesh_decal_host_rgb_prefers_precomputed_object_property(self) -> None:
+        obj = FakeObject(
+            material_slots=[],
+            mesh=FakeMesh(polygons=[], vertex_count=0),
+            **{PROP_DECAL_HOST_RGB: [0.2, 0.4, 0.6]},
+        )
+        importer = HostRoutingImporterUnderTest()
+
+        self.assertEqual(importer._mesh_decal_host_rgb_for_object(obj), (0.2, 0.4, 0.6))
+
+    def test_derive_decal_host_route_from_submaterials_uses_polygon_weight(self) -> None:
+        obj = FakeObject(
+            material_slots=[],
+            mesh=FakeMesh(
+                polygons=[
+                    FakePolygon(0, [0, 1, 2]),
+                    FakePolygon(1, [3, 4, 5]),
+                    FakePolygon(1, [6, 7, 8]),
+                ],
+                vertex_count=9,
+            ),
+        )
+        importer = HostRoutingImporterUnderTest()
+        slot_submaterials = [
+            SubmaterialRecord.from_value(
+                {
+                    "shader_family": "HardSurface",
+                    "palette_routing": {"material_channel": {"name": "primary"}},
+                }
+            ),
+            SubmaterialRecord.from_value(
+                {
+                    "shader_family": "HardSurface",
+                    "palette_routing": {"material_channel": {"name": "tertiary"}},
+                }
+            ),
+        ]
+
+        channel, rgb = importer._derive_decal_host_route_from_submaterials(obj, slot_submaterials)
+
+        self.assertEqual(channel, "tertiary")
+        self.assertIsNone(rgb)
+
+    def test_derive_decal_host_route_from_submaterials_falls_back_to_authored_tint(self) -> None:
+        obj = FakeObject(
+            material_slots=[],
+            mesh=FakeMesh(polygons=[FakePolygon(0, [0, 1, 2])], vertex_count=3),
+        )
+        importer = HostRoutingImporterUnderTest()
+        slot_submaterials = [
+            SubmaterialRecord.from_value(
+                {
+                    "shader_family": "HardSurface",
+                    "layer_manifest": [
+                        {
+                            "tint_color": [0.2, 0.4, 0.6],
+                        }
+                    ],
+                }
+            )
+        ]
+
+        channel, rgb = importer._derive_decal_host_route_from_submaterials(obj, slot_submaterials)
+
+        self.assertIsNone(channel)
+        self.assertEqual(rgb, (0.2, 0.4, 0.6))
+
     def test_parallax_bias_value_prefers_authored_height_bias(self) -> None:
         importer = ImporterUnderTest()
         submaterial = SubmaterialRecord.from_value(
@@ -502,6 +720,13 @@ class DecalOffsetTests(unittest.TestCase):
         )
 
         self.assertAlmostEqual(importer._parallax_bias_value(submaterial), 0.75)
+
+    def test_parallax_height_sampler_extension_clips_default_uv_range(self) -> None:
+        self.assertEqual(_parallax_height_sampler_extension(1.0), "CLIP")
+        self.assertEqual(_parallax_height_sampler_extension(0.75), "CLIP")
+
+    def test_parallax_height_sampler_extension_repeats_explicit_tiling(self) -> None:
+        self.assertEqual(_parallax_height_sampler_extension(3.0), "REPEAT")
 
     def test_missing_mesh_decal_texture_defaults_alpha_to_zero(self) -> None:
         submaterial = SubmaterialRecord.from_value({"shader_family": "MeshDecal"})

@@ -12,7 +12,8 @@
 //! Phase 5D (decal material assignment) — vertex group material assignment
 #![allow(dead_code)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
@@ -284,6 +285,88 @@ fn unique_scene_object_name(base: &str, used: &mut HashMap<String, usize>) -> St
     };
     *count += 1;
     name
+}
+
+fn blend_library_basename(blend_path: &str) -> &str {
+    blend_path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(blend_path)
+}
+
+fn blend_library_path_components(blend_path: &str) -> Vec<&str> {
+    blend_path
+        .split(['/', '\\'])
+        .filter(|component| !component.is_empty())
+        .collect()
+}
+
+fn hashed_library_name(blend_path: &str, basename: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    blend_path.hash(&mut hasher);
+    format!("{basename}__{:016x}", hasher.finish())
+}
+
+fn unique_library_names(blend_paths: &[String]) -> HashMap<String, String> {
+    let mut paths_by_basename: HashMap<&str, Vec<&String>> = HashMap::new();
+    for blend_path in blend_paths {
+        paths_by_basename
+            .entry(blend_library_basename(blend_path))
+            .or_default()
+            .push(blend_path);
+    }
+
+    let mut names = HashMap::new();
+    for (basename, paths) in paths_by_basename {
+        if paths.len() == 1 {
+            names.insert(paths[0].clone(), basename.to_string());
+            continue;
+        }
+
+        let component_lists: Vec<Vec<&str>> = paths
+            .iter()
+            .map(|path| blend_library_path_components(path))
+            .collect();
+        let max_depth = component_lists
+            .iter()
+            .map(Vec::len)
+            .max()
+            .unwrap_or(1);
+
+        let mut resolved = None;
+        for depth in 2..=max_depth {
+            let candidates: Vec<String> = component_lists
+                .iter()
+                .map(|components| {
+                    let start = components.len().saturating_sub(depth);
+                    components[start..].join("__")
+                })
+                .collect();
+
+            let unique: HashSet<&String> = candidates.iter().collect();
+            if unique.len() == candidates.len() {
+                resolved = Some(candidates);
+                break;
+            }
+        }
+
+        let resolved = resolved.unwrap_or_else(|| {
+            paths.iter()
+                .map(|path| hashed_library_name(path, basename))
+                .collect()
+        });
+
+        for (path, candidate) in paths.iter().zip(resolved) {
+            let final_name = if candidate.len() <= 255 {
+                candidate
+            } else {
+                hashed_library_name(path, basename)
+            };
+            names.insert((*path).clone(), final_name);
+        }
+    }
+
+    names
 }
 
 fn lookup_named_ptr(map: &HashMap<String, u64>, name: &str) -> Option<u64> {
@@ -687,12 +770,13 @@ fn decal_face_indices_for_mesh(mesh: &Mesh, mesh_with_decals: &MeshWithDecals) -
         .collect::<HashSet<_>>();
     let mut decal_face_indices = Vec::new();
     for submesh in &mesh.submeshes {
-        let material_id = submesh.source_material_id.unwrap_or(submesh.material_id) as usize;
-        let material_name_matches = submesh
-            .material_name
-            .as_deref()
-            .is_some_and(|name| decal_material_names.contains(name));
-        if decal_material_indices.contains(&material_id) || material_name_matches {
+        let include_submesh = if let Some(name) = submesh.material_name.as_deref() {
+            decal_material_names.contains(name)
+        } else {
+            let material_id = submesh.source_material_id.unwrap_or(submesh.material_id) as usize;
+            decal_material_indices.contains(&material_id)
+        };
+        if include_submesh {
             let start_face = submesh.first_index / 3;
             let num_faces = submesh.num_indices / 3;
             decal_face_indices.extend((start_face..start_face + num_faces).map(|face| face as usize));
@@ -907,8 +991,17 @@ pub fn write_decomposed_export_blend(
     let mut mesh_materials = Vec::new();
     for (mesh_key, entry) in &mesh_data_map {
         if let Some(ref mtl) = entry.materials {
-            let material_list: Vec<(String, String, String)> = mtl.materials.iter()
-                .map(|sub| (sub.name.clone(), sub.shader.clone(), sub.string_gen_mask.clone()))
+            let material_list: Vec<DecalMaterialSource> = mtl
+                .materials
+                .iter()
+                .map(|sub| {
+                    (
+                        sub.name.clone(),
+                        sub.shader.clone(),
+                        sub.string_gen_mask.clone(),
+                        sub.public_params.iter().map(|param| param.name.clone()).collect(),
+                    )
+                })
                 .collect();
             mesh_materials.push((mesh_key.clone(), material_list));
         }
@@ -2257,16 +2350,16 @@ fn build_native_blend_asset(
     mesh_vertex_groups: &HashMap<String, Vec<VertexGroup>>,
     existing_asset_loader: Option<&(dyn Fn(&str) -> Option<Vec<u8>> + Sync)>,
 ) -> Result<BuiltBlendAsset, Error> {
-    if let Some(reusable) = reusable_native_blend_asset(job, existing_asset_loader)? {
-        return Ok(reusable);
+    if let Some(existing) = reusable_native_blend_asset(job, existing_asset_loader)? {
+        return Ok(existing);
     }
 
-    let mesh_entry = mesh_data_map.get(&job.blend_key).ok_or_else(|| {
-        Error::Other(format!(
+    let Some(mesh_entry) = mesh_data_map.get(&job.blend_key) else {
+        return Err(Error::Other(format!(
             "native Blend export has no mesh payload for generated asset '{}'",
             job.blend_path
-        ))
-    })?;
+        )));
+    };
     let mut placement_mesh;
     let placement_name;
     let (mesh_name, mesh, nmc) = if mesh_entry.interior_placement_space {
@@ -4101,12 +4194,18 @@ fn create_scene_blend_package_with_instances_and_decal_offsets(
     // Build linked object ID stubs and their library blocks.
     let mut linked_mesh_id_data = Vec::new();
     let mut mesh_library_data = Vec::new();
+    let library_names = unique_library_names(
+        &library_ptrs
+            .iter()
+            .map(|(blend_path, _)| blend_path.clone())
+            .collect::<Vec<_>>(),
+    );
     
     for (blend_path, library_ptr) in &library_ptrs {
-        let lib_name = blend_path
-            .rsplit('/')
-            .next()
-            .unwrap_or(blend_path.as_str());
+        let lib_name = library_names
+            .get(blend_path)
+            .map(String::as_str)
+            .unwrap_or_else(|| blend_library_basename(blend_path));
         let lib_data = build_library_block(lib_name, blend_path);
         mesh_library_data.push((*library_ptr, lib_data));
     }
@@ -5614,28 +5713,65 @@ pub struct MeshWithDecals {
     pub decal_face_indices: Vec<usize>,
 }
 
-/// Identify whether a material is decal or POM based on StringGenMask flags.
-///
-/// Checks the actual material data flags for:
-/// - `%DECAL` — indicates decal/stencil material
-/// - `%PARALLAX` or `%POM` — indicates parallax occlusion mapping
-///
-/// Returns (is_decal, is_pom).
-pub fn identify_decal_material_flags(shader: &str, string_gen_mask: &str) -> (bool, bool) {
-    let upper_mask = string_gen_mask.to_ascii_uppercase();
-    let tokens = string_gen_mask
+type DecalMaterialSource = (String, String, String, Vec<String>);
+
+fn string_gen_mask_tokens(string_gen_mask: &str) -> HashSet<String> {
+    string_gen_mask
         .split('%')
         .filter(|token| !token.is_empty())
         .map(|token| token.trim().to_ascii_uppercase())
-        .collect::<HashSet<_>>();
-    let is_decal = tokens.contains("DECAL")
-        || upper_mask.contains("%DECAL")
-        || shader.eq_ignore_ascii_case("MeshDecal");
-    let is_pom = tokens.contains("PARALLAX")
+        .collect()
+}
+
+fn has_decal_stencil_public_param(public_param_names: &[String]) -> bool {
+    public_param_names
+        .iter()
+        .any(|name| name.starts_with("Decal") || name.starts_with("Stencil"))
+}
+
+fn has_mesh_decal_offset_signal(tokens: &HashSet<String>) -> bool {
+    tokens.contains("VERTDATA")
+        || tokens.contains("DECAL")
+        || tokens.contains("STENCIL_MAP")
+        || tokens.contains("PARALLAX")
+        || tokens.contains("POM")
+        || tokens.contains("PARALLAX_OCCLUSION_MAPPING")
+}
+
+/// Identify whether a material is decal/stencil-style and whether it also uses POM.
+///
+/// Checks the actual material data flags for:
+/// - decal/stencil signals (`MeshDecal`, `%DECAL`, `%STENCIL_MAP`, or
+///   authored `Decal*`/`Stencil*` public params)
+/// - `%PARALLAX` / `%POM` only after a decal/stencil signal is present
+///
+/// Returns (is_decal, is_pom).
+pub fn identify_decal_material_flags(
+    shader: &str,
+    string_gen_mask: &str,
+    public_param_names: &[String],
+) -> (bool, bool) {
+    let upper_mask = string_gen_mask.to_ascii_uppercase();
+    let tokens = string_gen_mask_tokens(string_gen_mask);
+    let is_mesh_decal = shader.eq_ignore_ascii_case("MeshDecal");
+    let is_glass_shader = shader.eq_ignore_ascii_case("GlassPBR");
+    let is_decal = if is_glass_shader {
+        false
+    } else if is_mesh_decal {
+        has_mesh_decal_offset_signal(&tokens)
+    } else {
+        tokens.contains("DECAL")
+            || upper_mask.contains("%DECAL")
+            || tokens.contains("STENCIL_MAP")
+            || upper_mask.contains("%STENCIL_MAP")
+            || has_decal_stencil_public_param(public_param_names)
+    };
+    let has_pom = tokens.contains("PARALLAX")
         || tokens.contains("POM")
         || tokens.contains("PARALLAX_OCCLUSION_MAPPING")
         || upper_mask.contains("%PARALLAX")
         || upper_mask.contains("%POM");
+    let is_pom = is_decal && has_pom;
     (is_decal, is_pom)
 }
 
@@ -5646,15 +5782,16 @@ pub fn identify_decal_material_flags(shader: &str, string_gen_mask: &str) -> (bo
 ///
 /// Returns list of meshes that have decal materials and need vertex groups.
 pub fn identify_meshes_with_decals(
-    mesh_materials: &[(String, Vec<(String, String, String)>)],  // (mesh_path, [(material_name, shader, string_gen_mask)])
+    mesh_materials: &[(String, Vec<DecalMaterialSource>)],  // (mesh_path, [(material_name, shader, string_gen_mask, public_param_names)])
 ) -> Result<Vec<MeshWithDecals>, String> {
     let mut result = Vec::new();
     
     for (mesh_path, materials) in mesh_materials {
         let mut decal_materials = Vec::new();
         
-        for (mat_idx, (material_name, shader, string_gen_mask)) in materials.iter().enumerate() {
-            let (is_decal, is_pom) = identify_decal_material_flags(shader, string_gen_mask);
+        for (mat_idx, (material_name, shader, string_gen_mask, public_param_names)) in materials.iter().enumerate() {
+            let (is_decal, is_pom) =
+                identify_decal_material_flags(shader, string_gen_mask, public_param_names);
             
             if is_decal || is_pom {
                 decal_materials.push(DecalMaterial {
@@ -5846,8 +5983,17 @@ pub fn assign_decal_materials_to_vertex_groups(input: &DecomposedInput) -> Resul
     
     // Add root mesh materials
     if let Some(ref mtl) = input.root_materials {
-        let material_list: Vec<(String, String, String)> = mtl.materials.iter()
-            .map(|sub| (sub.name.clone(), sub.shader.clone(), sub.string_gen_mask.clone()))
+        let material_list: Vec<DecalMaterialSource> = mtl
+            .materials
+            .iter()
+            .map(|sub| {
+                (
+                    sub.name.clone(),
+                    sub.shader.clone(),
+                    sub.string_gen_mask.clone(),
+                    sub.public_params.iter().map(|param| param.name.clone()).collect(),
+                )
+            })
             .collect();
         mesh_materials.push(("__root__".to_string(), material_list));
     }
@@ -5855,8 +6001,17 @@ pub fn assign_decal_materials_to_vertex_groups(input: &DecomposedInput) -> Resul
     // Add child mesh materials
     for child in &input.children {
         if let Some(ref mtl) = child.materials {
-            let material_list: Vec<(String, String, String)> = mtl.materials.iter()
-                .map(|sub| (sub.name.clone(), sub.shader.clone(), sub.string_gen_mask.clone()))
+            let material_list: Vec<DecalMaterialSource> = mtl
+                .materials
+                .iter()
+                .map(|sub| {
+                    (
+                        sub.name.clone(),
+                        sub.shader.clone(),
+                        sub.string_gen_mask.clone(),
+                        sub.public_params.iter().map(|param| param.name.clone()).collect(),
+                    )
+                })
                 .collect();
             mesh_materials.push((child.entity_name.clone(), material_list));
         }

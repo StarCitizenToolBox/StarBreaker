@@ -508,7 +508,61 @@ fn interior_placement_assets_flatten_source_hierarchy() {
 }
 
 #[test]
-fn existing_native_blend_asset_is_reused_for_scene_link_metadata() {
+fn existing_native_blend_asset_is_reused_when_present() {
+    let mesh = Mesh {
+        positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        indices: vec![0, 1, 2],
+        uvs: None,
+        secondary_uvs: None,
+        normals: None,
+        tangents: None,
+        colors: None,
+        submeshes: vec![test_submesh(0, "mat", 0)],
+        model_min: [0.0, 0.0, 0.0],
+        model_max: [1.0, 1.0, 0.0],
+        scaling_min: [0.0, 0.0, 0.0],
+        scaling_max: [1.0, 1.0, 0.0],
+    };
+    let existing_bytes = starbreaker_blend::compress_blend_bytes(&mesh_to_blend(
+        "existing_asset",
+        &mesh,
+        &None,
+        None,
+        None,
+    ));
+    let job = BlendAssetJob {
+        blend_path: "Data/Objects/existing_asset_LOD0.blend".to_string(),
+        mesh_name: "existing_asset_LOD0".to_string(),
+        blend_key: "data/objects/existing_asset_lod0.blend".to_string(),
+    };
+    let loader = |relative_path: &str| {
+        (relative_path == "Data/Objects/existing_asset_LOD0.blend").then(|| existing_bytes.clone())
+    };
+    let mut mesh_data_map = HashMap::new();
+    mesh_data_map.insert(
+        "data/objects/existing_asset_lod0.blend".to_string(),
+        MeshDataEntry {
+            mesh,
+            materials: None,
+            nmc: None,
+            interior_placement_space: false,
+        },
+    );
+
+    let built = build_native_blend_asset(&job, &mesh_data_map, &HashMap::new(), Some(&loader)).unwrap();
+
+    assert!(
+        built.file.is_none(),
+        "skip-existing mode should reuse the on-disk native mesh asset when it is already available"
+    );
+    assert_eq!(built.relative_path, "Data/Objects/existing_asset_LOD0.blend");
+    assert_eq!(built.linked_mesh_refs.len(), 1);
+    assert_eq!(built.linked_mesh_refs[0].object_name, "existing_asset");
+    assert_eq!(built.linked_mesh_refs[0].mesh_name, "existing_asset");
+}
+
+#[test]
+fn missing_mesh_payload_reuses_existing_native_blend_asset() {
     let mesh = Mesh {
         positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
         indices: vec![0, 1, 2],
@@ -541,7 +595,10 @@ fn existing_native_blend_asset_is_reused_for_scene_link_metadata() {
 
     let built = build_native_blend_asset(&job, &HashMap::new(), &HashMap::new(), Some(&loader)).unwrap();
 
-    assert!(built.file.is_none(), "reused assets should not be queued for rewriting");
+    assert!(
+        built.file.is_none(),
+        "reused native mesh assets should not be rebuilt when no fresh mesh payload is available"
+    );
     assert_eq!(built.relative_path, "Data/Objects/existing_asset_LOD0.blend");
     assert_eq!(built.linked_mesh_refs.len(), 1);
     assert_eq!(built.linked_mesh_refs[0].object_name, "existing_asset");
@@ -978,6 +1035,99 @@ fn test_create_scene_blend_links_object_ids_instead_of_empty_mesh_stubs() {
                 .starts_with(b"MErsi_aurora_mk2_airlock_door_LOD0")
     });
     assert!(local_empty_mesh_stub.is_none(), "scene.blend must not replace linked objects with empty local mesh stubs");
+}
+
+#[test]
+fn test_create_scene_blend_disambiguates_duplicate_library_basenames() {
+    let first = LinkedMeshInstance {
+        scene_instance_id: 0,
+        entity_name: "idris_screen".to_string(),
+        parent_entity_name: None,
+        parent_empty_name: None,
+        parent_empty_parent_entity_name: None,
+        parent_empty_parent_node_name: None,
+        parent_empty_loc: [0.0, 0.0, 0.0],
+        parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+        parent_empty_scale: [1.0, 1.0, 1.0],
+        is_interior: false,
+        source_object_name: "idris_screen".to_string(),
+        name: "idris_screen".to_string(),
+        mesh_name: "idris_screen_mesh".to_string(),
+        material_names: Vec::new(),
+        material_sidecar: None,
+        palette_id: None,
+        source_nodes: Vec::new(),
+        source_ancestors: Vec::new(),
+        source_loc: [0.0, 0.0, 0.0],
+        source_quat: [1.0, 0.0, 0.0, 0.0],
+        source_scale: [1.0, 1.0, 1.0],
+        source_parent_name: None,
+        parent_node_name: None,
+        blend_path: "//../../Data/Objects/Spaceships/Ships/AEGS/Idris_Frigate/interior/ui/ui_screen_4x3_a_LOD0.blend".to_string(),
+        mesh_asset: "Data/Objects/Spaceships/Ships/AEGS/Idris_Frigate/interior/ui/ui_screen_4x3_a_LOD0.blend".to_string(),
+        position: [0.0, 0.0, 0.0],
+        rotation: [1.0, 0.0, 0.0, 0.0],
+        scale: [1.0, 1.0, 1.0],
+        hidden: false,
+    };
+    let second = LinkedMeshInstance {
+        scene_instance_id: 1,
+        entity_name: "s42_screen".to_string(),
+        parent_entity_name: None,
+        parent_empty_name: None,
+        parent_empty_parent_entity_name: None,
+        parent_empty_parent_node_name: None,
+        parent_empty_loc: [0.0, 0.0, 0.0],
+        parent_empty_quat: [1.0, 0.0, 0.0, 0.0],
+        parent_empty_scale: [1.0, 1.0, 1.0],
+        is_interior: false,
+        source_object_name: "s42_screen".to_string(),
+        name: "s42_screen".to_string(),
+        mesh_name: "s42_screen_mesh".to_string(),
+        material_names: Vec::new(),
+        material_sidecar: None,
+        palette_id: None,
+        source_nodes: Vec::new(),
+        source_ancestors: Vec::new(),
+        source_loc: [0.0, 0.0, 0.0],
+        source_quat: [1.0, 0.0, 0.0, 0.0],
+        source_scale: [1.0, 1.0, 1.0],
+        source_parent_name: None,
+        parent_node_name: None,
+        blend_path: "//../../Data/Objects/Squadron42/universal/ui/ui_screen_4x3_a_LOD0.blend".to_string(),
+        mesh_asset: "Data/Objects/Squadron42/universal/ui/ui_screen_4x3_a_LOD0.blend".to_string(),
+        position: [0.0, 0.0, 0.0],
+        rotation: [1.0, 0.0, 0.0, 0.0],
+        scale: [1.0, 1.0, 1.0],
+        hidden: false,
+    };
+
+    let blend_bytes =
+        create_scene_blend_with_instances("LibraryNameTest", &[first, second], &[]).unwrap();
+    let blocks = parse_blend_blocks(&blend_bytes);
+    let library_names = id_block_names(&blocks, b"LI\0\0");
+
+    assert_eq!(library_names.len(), 2);
+    assert_eq!(
+        library_names
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        2,
+        "duplicate library basenames must be disambiguated in scene.blend"
+    );
+    assert!(
+        library_names
+            .iter()
+            .all(|name| name.ends_with("ui_screen_4x3_a_LOD0.blend")),
+        "disambiguated library names should stay path-derived and readable: {library_names:?}"
+    );
+    assert!(
+        library_names
+            .iter()
+            .all(|name| name != "ui_screen_4x3_a_LOD0.blend"),
+        "colliding basenames must not be emitted unchanged: {library_names:?}"
+    );
 }
 
 #[test]

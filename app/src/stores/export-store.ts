@@ -33,7 +33,6 @@ interface ExportState {
   includeInterior: boolean;
   includeLights: boolean;
   overwriteExistingAssets: boolean;
-  includeNodraw: boolean;
   includeAnimations: boolean;
   includeObjectTypeDirectory: boolean;
   threads: number;
@@ -46,7 +45,6 @@ interface ExportState {
   setIncludeInterior: (v: boolean) => void;
   setIncludeLights: (v: boolean) => void;
   setOverwriteExistingAssets: (v: boolean) => void;
-  setIncludeNodraw: (v: boolean) => void;
   setIncludeAnimations: (v: boolean) => void;
   setIncludeObjectTypeDirectory: (v: boolean) => void;
   setThreads: (v: number) => void;
@@ -78,7 +76,6 @@ type PersistedExportState = Pick<
   | "includeInterior"
   | "includeLights"
   | "overwriteExistingAssets"
-  | "includeNodraw"
   | "includeAnimations"
   | "includeObjectTypeDirectory"
   | "threads"
@@ -124,13 +121,12 @@ export const useExportStore = create<ExportState>()(
 
   lod: 1,
   mip: 2,
-  exportKind: "bundled",
+  exportKind: "decomposed",
   materialMode: "textures",
   includeAttachments: true,
   includeInterior: true,
   includeLights: true,
   overwriteExistingAssets: true,
-  includeNodraw: false,
   includeAnimations: true,
   includeObjectTypeDirectory: false,
   threads: 0,
@@ -143,7 +139,6 @@ export const useExportStore = create<ExportState>()(
   setIncludeInterior: (v) => set({ includeInterior: v }),
   setIncludeLights: (v) => set({ includeLights: v }),
   setOverwriteExistingAssets: (v) => set({ overwriteExistingAssets: v }),
-  setIncludeNodraw: (v) => set({ includeNodraw: v }),
   setIncludeAnimations: (v) => set({ includeAnimations: v }),
   setIncludeObjectTypeDirectory: (v) => set({ includeObjectTypeDirectory: v }),
   setThreads: (v) => set({ threads: v }),
@@ -220,7 +215,6 @@ export const useExportStore = create<ExportState>()(
         includeInterior: s.includeInterior,
         includeLights: s.includeLights,
         overwriteExistingAssets: s.overwriteExistingAssets,
-        includeNodraw: s.includeNodraw,
         includeAnimations: s.includeAnimations,
         includeObjectTypeDirectory: s.includeObjectTypeDirectory,
         threads: s.threads,

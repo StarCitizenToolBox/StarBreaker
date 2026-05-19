@@ -26,6 +26,8 @@ from ..constants import (
     MATERIAL_IDENTITY_SCHEMA,
     NON_COLOR_INPUT_KEYWORDS,
     POM_DETAIL_DEFAULT,
+    PROP_DECAL_HOST_CHANNEL,
+    PROP_DECAL_HOST_RGB,
     PROP_MATERIAL_IDENTITY,
     PROP_MATERIAL_SIDECAR,
     PROP_PALETTE_ID,
@@ -70,7 +72,11 @@ from ...material_contract import (
     bundled_template_library_path,
     load_bundled_template_contract,
 )
-from ...palette import palette_color, palette_finish_glossiness, palette_finish_specular
+from ...palette import (
+    palette_color,
+    palette_finish_glossiness_factor,
+    palette_finish_specular,
+)
 from ...templates import has_virtual_input, material_palette_channels, representative_textures, template_plan_for_submaterial
 from ..palette_utils import _hard_surface_palette_iridescence_channel
 from .types import LayerSurfaceSockets
@@ -124,6 +130,19 @@ def _clamp_unit_float(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
 
+def _parallax_height_sampler_extension(uv_tile: float) -> str:
+    """Mirror authored repeat intent for runtime POM height samplers.
+
+    POM materials only need sampler wrap mode ``REPEAT`` when the authored
+    material explicitly tiles the underlying surface beyond the base 0-1 UV
+    range. The exported layer manifest preserves that as ``uv_tiling``; every
+    other case should stay on ``CLIP`` to avoid sampling neighboring atlas
+    islands at glancing angles.
+    """
+
+    return "REPEAT" if float(uv_tile) > 1.0 + 1e-4 else "CLIP"
+
+
 def _layered_wear_metallic_values(
     base_layer: LayerManifestEntry | None,
     wear_layer: LayerManifestEntry | None,
@@ -139,6 +158,23 @@ def _layered_wear_metallic_values(
     if base_metallic is None or wear_metallic is None:
         return None
     return _clamp_unit_float(base_metallic), _clamp_unit_float(wear_metallic)
+
+
+def _mesh_decal_neutral_breakup_default(
+    group_contract: ShaderGroupContract,
+    submaterial: SubmaterialRecord,
+    contract_input: ContractInput,
+    source_socket: Any,
+) -> tuple[float, float, float, float] | None:
+    if source_socket is not None:
+        return None
+    if group_contract.name != "SB_MeshDecal_v1":
+        return None
+    if contract_input.name != "TexSlot8_GrimeBreakup":
+        return None
+    if template_plan_for_submaterial(submaterial).template_key != "decal_stencil":
+        return None
+    return (1.0, 1.0, 1.0, 1.0)
 
 
 class BuildersMixin:
@@ -265,13 +301,15 @@ class BuildersMixin:
         but authored height-bias overrides are preserved when available.
 
         ``uv_tile`` is the layer's UVTiling factor (default 1.0 = no
-        tiling).  The POM group incorporates the scale internally via its
+        tiling). The POM group incorporates the scale internally via its
         ``UV Scale X`` / ``UV Scale Y`` inputs so that both the starting
-        UV and the ray-march delta are scaled consistently.  Callers must
-        NOT also call ``_apply_uv_tiling`` on the same target nodes; any
-        pre-existing Mapping chain on a target's Vector socket is removed
-        before POM wiring so the orphaned nodes can be swept later by
-        ``_sweep_unreachable_nodes``.
+        UV and the ray-march delta are scaled consistently. Height-sampler
+        wrap mode also mirrors this authored repeat intent: explicit tiling
+        uses ``REPEAT`` while default UVs stay on ``CLIP`` to avoid atlas
+        bleed. Callers must NOT also call ``_apply_uv_tiling`` on the same
+        target nodes; any pre-existing Mapping chain on a target's Vector
+        socket is removed before POM wiring so the orphaned nodes can be
+        swept later by ``_sweep_unreachable_nodes``.
         """
         node_tree = material.node_tree
         if node_tree is None or height_node is None:
@@ -279,7 +317,10 @@ class BuildersMixin:
         if height_node.bl_idname != "ShaderNodeTexImage" or height_node.image is None:
             return None
 
-        pom_tree = self._ensure_runtime_parallax_group(height_image=height_node.image)
+        pom_tree = self._ensure_runtime_parallax_group(
+            height_image=height_node.image,
+            sampler_extension=_parallax_height_sampler_extension(uv_tile),
+        )
         if pom_tree is None:
             return None
 
@@ -456,63 +497,107 @@ class BuildersMixin:
             self._patch_mesh_decal_template_emission(group)
         return group
 
-    @staticmethod
-    def _patch_glass_template_lightpath(group: bpy.types.ShaderNodeTree) -> None:
-        """Insert a Light Path / Transparent mix for readable glass.
-
-        Aurora (and other cockpits) stack many interior panes behind the
-        canopy; with plain Glass BSDF the Beer-Lambert tinting compounds on
-        transmission/shadow/diffuse/glossy rays and reads near-black. For
-        non-camera rays we swap the Glass BSDF for a white Transparent BSDF.
-        Camera rays use a mostly-transparent mix that keeps a faint glass
-        surface without making interiors opaque. Idempotent via a versioned
-        property marker so older loaded groups are upgraded.
-        """
-        if group.get("starbreaker_glass_lightpath_patch_version") == 2:
+    def _patch_glass_template_lightpath(self, group: bpy.types.ShaderNodeTree) -> None:
+        """Patch the bundled GlassPBR template to the live validated graph."""
+        if group.get("starbreaker_glass_lightpath_patch_version") == 4:
             return
+        ddna_group = self._ensure_runtime_ddna_roughness_group()
         nodes = group.nodes
         links = group.links
-        out_node = next((n for n in nodes if n.bl_idname == "NodeGroupOutput"), None)
-        glass = nodes.get("Glass BSDF")
-        if out_node is None or glass is None:
+        group_input = next((n for n in nodes if n.bl_idname == "NodeGroupInput"), None)
+        group_output = next((n for n in nodes if n.bl_idname == "NodeGroupOutput"), None)
+        if group_input is None or group_output is None:
             return
-        shader_input = out_node.inputs.get("Shader") or (out_node.inputs[0] if out_node.inputs else None)
+        for node in list(nodes):
+            if node not in {group_input, group_output}:
+                nodes.remove(node)
+        group_input.location = (-132.14703369140625, -617.05126953125)
+        group_output.location = (1639.01513671875, -298.6864929199219)
+        shader_input = group_output.inputs.get("Shader") or (group_output.inputs[0] if group_output.inputs else None)
         if shader_input is None:
             return
-        transparent = nodes.get("SB Glass Transparent") or nodes.new("ShaderNodeBsdfTransparent")
-        transparent.name = "SB Glass Transparent"
-        transparent.label = "Glass Transparent (non-camera)"
-        transparent.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
-        transparent.location = (glass.location.x, glass.location.y - 220)
-        light_path = nodes.get("SB Glass LightPath") or nodes.new("ShaderNodeLightPath")
-        light_path.name = "SB Glass LightPath"
-        light_path.location = (glass.location.x - 200, glass.location.y + 250)
-        camera_glass_mix = nodes.get("SB Glass Camera Transparency Mix") or nodes.new("ShaderNodeMixShader")
-        camera_glass_mix.name = "SB Glass Camera Transparency Mix"
-        camera_glass_mix.label = "Camera Glass/Transparent Mix"
-        camera_glass_mix.location = (glass.location.x + 120, glass.location.y - 160)
-        camera_glass_mix.inputs["Fac"].default_value = 0.25
-        mix = nodes.get("SB Glass Camera Mix") or nodes.new("ShaderNodeMixShader")
-        mix.name = "SB Glass Camera Mix"
-        mix.label = "Camera Ray Mix"
-        mix.location = (glass.location.x + 260, glass.location.y)
-        for socket in (
-            shader_input,
-            camera_glass_mix.inputs[1],
-            camera_glass_mix.inputs[2],
-            mix.inputs[1],
-            mix.inputs[2],
+        mix_legacy = nodes.new("ShaderNodeMixRGB")
+        mix_legacy.name = "Mix (Legacy)"
+        mix_legacy.location = (474.3709716796875, -582.9908447265625)
+        mix_legacy.blend_type = "MULTIPLY"
+        mix_legacy.inputs[0].default_value = 1.0
+
+        normal_map = nodes.new("ShaderNodeNormalMap")
+        normal_map.name = "Normal Map"
+        normal_map.location = (775.9833984375, -803.2053833007812)
+        normal_map.space = "TANGENT"
+        normal_map.inputs["Strength"].default_value = 0.25
+
+        map_range = nodes.new("ShaderNodeMapRange")
+        map_range.name = "Map Range"
+        map_range.location = (790.1220703125, -230.03060913085938)
+        map_range.data_type = "FLOAT"
+        map_range.interpolation_type = "LINEAR"
+        map_range.clamp = True
+        map_range.inputs[1].default_value = 0.0
+        map_range.inputs[2].default_value = 0.8000000715255737
+        map_range.inputs[3].default_value = 0.07000000029802322
+        map_range.inputs[4].default_value = 1.0
+
+        hue_saturation = nodes.new("ShaderNodeHueSaturation")
+        hue_saturation.name = "Hue/Saturation/Value"
+        hue_saturation.location = (777.0719604492188, -579.3798828125)
+        hue_saturation.inputs["Hue"].default_value = 0.57
+        hue_saturation.inputs["Saturation"].default_value = 1.0
+        hue_saturation.inputs["Value"].default_value = 1.0
+        hue_saturation.inputs["Factor"].default_value = 1.0
+
+        principled = nodes.new("ShaderNodeBsdfPrincipled")
+        principled.name = "Principled BSDF.001"
+        principled.location = (1303.1201171875, -303.4607238769531)
+        transmission_socket = _input_socket(principled, "Transmission Weight", "Transmission")
+        if transmission_socket is not None:
+            transmission_socket.default_value = 1.0
+        principled_ior = _input_socket(principled, "IOR")
+        if principled_ior is not None:
+            principled_ior.default_value = 1.05
+
+        maths = nodes.new("ShaderNodeMath")
+        maths.name = "Maths"
+        maths.location = (478.7479553222656, -291.1023254394531)
+        maths.operation = "MULTIPLY"
+        maths.use_clamp = False
+
+        roughness_group = nodes.new("ShaderNodeGroup")
+        roughness_group.name = "StarBreaker Runtime DDNA Roughness"
+        roughness_group.location = (193.330810546875, -532.6305541992188)
+        roughness_group.node_tree = ddna_group
+
+        tint_color_socket = _output_socket(group_input, "TexSlot4_TintColor")
+        palette_glass_socket = _output_socket(group_input, "Palette_Glass")
+        normal_socket = _output_socket(group_input, "TexSlot2_NormalGloss")
+        smoothness_socket = _output_socket(group_input, "TexSlot6_WearGloss")
+        dirt_socket = _output_socket(group_input, "TexSlot11_Dirt")
+        roughness_socket = _output_socket(roughness_group, "Roughness") or roughness_group.outputs[0]
+        shader_output_socket = _output_socket(principled, "BSDF") or principled.outputs[0]
+        if (
+            tint_color_socket is None
+            or palette_glass_socket is None
+            or normal_socket is None
+            or smoothness_socket is None
+            or dirt_socket is None
         ):
-            for link in list(socket.links):
-                links.remove(link)
-        links.new(transparent.outputs["BSDF"], camera_glass_mix.inputs[1])
-        links.new(glass.outputs["BSDF"], camera_glass_mix.inputs[2])
-        links.new(light_path.outputs["Is Camera Ray"], mix.inputs["Fac"])
-        links.new(transparent.outputs["BSDF"], mix.inputs[1])
-        links.new(camera_glass_mix.outputs["Shader"], mix.inputs[2])
-        links.new(mix.outputs["Shader"], shader_input)
+            return
+
+        links.new(tint_color_socket, mix_legacy.inputs[1])
+        links.new(palette_glass_socket, mix_legacy.inputs[2])
+        links.new(normal_socket, normal_map.inputs["Color"])
+        links.new(_output_socket(mix_legacy, "Color") or mix_legacy.outputs[0], hue_saturation.inputs["Color"])
+        links.new(_output_socket(map_range, "Result") or map_range.outputs[0], _input_socket(principled, "Roughness"))
+        links.new(shader_output_socket, shader_input)
+        links.new(smoothness_socket, _input_socket(roughness_group, "Smoothness") or roughness_group.inputs[0])
+        links.new(roughness_socket, maths.inputs[0])
+        links.new(dirt_socket, maths.inputs[1])
+        links.new(_output_socket(maths, "Value") or maths.outputs[0], map_range.inputs[0])
+        links.new(_output_socket(hue_saturation, "Color") or hue_saturation.outputs[0], _input_socket(principled, "Base Color"))
+        links.new(_output_socket(normal_map, "Normal") or normal_map.outputs[0], _input_socket(principled, "Normal"))
         group["starbreaker_glass_lightpath_patched"] = 1
-        group["starbreaker_glass_lightpath_patch_version"] = 2
+        group["starbreaker_glass_lightpath_patch_version"] = 4
 
     @staticmethod
     def _patch_mesh_decal_template_emission(group: bpy.types.ShaderNodeTree) -> None:
@@ -834,8 +919,17 @@ class BuildersMixin:
                 )
             if source_socket is not None:
                 links.new(source_socket, target_socket)
-            elif "normal" in semantic and hasattr(target_socket, "default_value"):
-                target_socket.default_value = (0.5, 0.5, 1.0, 1.0)
+            else:
+                neutral_breakup = _mesh_decal_neutral_breakup_default(
+                    group_contract,
+                    submaterial,
+                    contract_input,
+                    source_socket,
+                )
+                if neutral_breakup is not None and hasattr(target_socket, "default_value"):
+                    target_socket.default_value = neutral_breakup
+                elif "normal" in semantic and hasattr(target_socket, "default_value"):
+                    target_socket.default_value = (0.5, 0.5, 1.0, 1.0)
             y -= 180
 
         group_handles_alpha = any(
@@ -1381,7 +1475,7 @@ class BuildersMixin:
             is_color=False,
         )
         primary_detail = self._detail_texture_channels(nodes, self._texture_path_for_slot(submaterial, "TexSlot6"), x=-720, y=-420)
-        primary_roughness, primary_roughness_is_smoothness = self._roughness_socket_for_texture_reference(nodes, primary_normal_ref, x=-460, y=-140)
+        primary_roughness, _primary_roughness_is_smoothness = self._roughness_socket_for_texture_reference(nodes, primary_normal_ref, x=-460, y=-140)
         primary_specular = self._specular_socket_for_texture_path(nodes, self._texture_path_for_slot(submaterial, "TexSlot4"), x=-720, y=760)
         primary = self._connect_layer_surface_group(
             nodes,
@@ -1394,7 +1488,6 @@ class BuildersMixin:
             ),
             normal_color_socket=primary_normal_node.outputs[0] if primary_normal_node is not None else None,
             roughness_socket=primary_roughness,
-            roughness_source_is_smoothness=primary_roughness_is_smoothness,
             detail_channels=primary_detail,
             detail_diffuse_strength=0.35,
             detail_gloss_strength=0.35,
@@ -1403,7 +1496,7 @@ class BuildersMixin:
             palette=palette,
             palette_channel_name=material_channel,
             palette_finish_channel_name=material_channel,
-            palette_glossiness=palette_finish_glossiness(palette, material_channel),
+            palette_glossiness=palette_finish_glossiness_factor(palette, material_channel),
             specular_value=0.0,
             palette_specular_value=_mean_triplet(palette_finish_specular(palette, material_channel)) or 0.0,
             metallic_value=0.0,
@@ -1441,7 +1534,7 @@ class BuildersMixin:
                 is_color=False,
             )
             secondary_detail = self._detail_texture_channels(nodes, self._texture_path_for_slot(submaterial, "TexSlot13"), x=-720, y=-980)
-            secondary_roughness, secondary_roughness_is_smoothness = self._roughness_socket_for_texture_reference(nodes, secondary_normal_ref, x=-460, y=-700)
+            secondary_roughness, _secondary_roughness_is_smoothness = self._roughness_socket_for_texture_reference(nodes, secondary_normal_ref, x=-460, y=-700)
             secondary_specular = self._specular_socket_for_texture_path(nodes, self._texture_path_for_slot(submaterial, "TexSlot10"), x=-720, y=980)
             secondary = self._connect_layer_surface_group(
                 nodes,
@@ -1454,7 +1547,6 @@ class BuildersMixin:
                 ),
                 normal_color_socket=secondary_normal_node.outputs[0] if secondary_normal_node is not None else None,
                 roughness_socket=secondary_roughness,
-                roughness_source_is_smoothness=secondary_roughness_is_smoothness,
                 detail_channels=secondary_detail,
                 detail_diffuse_strength=0.35,
                 detail_gloss_strength=0.35,
@@ -1463,7 +1555,7 @@ class BuildersMixin:
                 palette=palette,
                 palette_channel_name=material_channel,
                 palette_finish_channel_name=material_channel,
-                palette_glossiness=palette_finish_glossiness(palette, material_channel),
+                palette_glossiness=palette_finish_glossiness_factor(palette, material_channel),
                 specular_value=0.0,
                 palette_specular_value=_mean_triplet(palette_finish_specular(palette, material_channel)) or 0.0,
                 metallic_value=0.0,
@@ -2152,6 +2244,146 @@ class BuildersMixin:
             material_pointers.append(cls._id_pointer(mat))
         return data_pointer, tuple(material_pointers)
 
+    @staticmethod
+    def _stored_decal_host_channel(obj: bpy.types.Object | None) -> str | None:
+        if obj is None or not hasattr(obj, "get"):
+            return None
+        channel = obj.get(PROP_DECAL_HOST_CHANNEL)
+        if not isinstance(channel, str):
+            return None
+        normalized = channel.strip().lower()
+        if normalized in {"primary", "secondary", "tertiary", "glass"}:
+            return normalized
+        return None
+
+    @staticmethod
+    def _stored_decal_host_rgb(obj: bpy.types.Object | None) -> tuple[float, float, float] | None:
+        if obj is None or not hasattr(obj, "get"):
+            return None
+        rgb = obj.get(PROP_DECAL_HOST_RGB)
+        if not isinstance(rgb, (list, tuple)) or len(rgb) < 3:
+            return None
+        try:
+            return (float(rgb[0]), float(rgb[1]), float(rgb[2]))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _submaterial_palette_channel(submaterial: SubmaterialRecord) -> str | None:
+        routing = getattr(submaterial, "palette_routing", None)
+        material_channel = getattr(routing, "material_channel", None) if routing is not None else None
+        if material_channel is not None:
+            name = getattr(material_channel, "name", None)
+            if isinstance(name, str) and name:
+                return name.lower()
+        for binding in getattr(routing, "layer_channels", []) or []:
+            channel = getattr(binding, "channel", None)
+            name = getattr(channel, "name", None) if channel is not None else None
+            if isinstance(name, str) and name:
+                return name.lower()
+        return None
+
+    @staticmethod
+    def _submaterial_authored_tint_rgb(
+        submaterial: SubmaterialRecord,
+    ) -> tuple[float, float, float] | None:
+        for layer in getattr(submaterial, "layer_manifest", []) or []:
+            tint_color = getattr(layer, "tint_color", None)
+            if isinstance(tint_color, (list, tuple)) and len(tint_color) >= 3:
+                rgb = (float(tint_color[0]), float(tint_color[1]), float(tint_color[2]))
+                if rgb != (1.0, 1.0, 1.0):
+                    return rgb
+            for attribute in getattr(layer, "authored_attributes", []) or []:
+                name = str((attribute or {}).get("name", "")).lower()
+                if name != "tintcolor":
+                    continue
+                value = (attribute or {}).get("value")
+                if not isinstance(value, str):
+                    continue
+                parts = [part.strip() for part in value.split(",")]
+                if len(parts) < 3:
+                    continue
+                try:
+                    rgb = (float(parts[0]), float(parts[1]), float(parts[2]))
+                except ValueError:
+                    continue
+                if rgb != (1.0, 1.0, 1.0):
+                    return rgb
+        return None
+
+    @staticmethod
+    def _submaterial_is_host_candidate(submaterial: SubmaterialRecord) -> bool:
+        shader_family = getattr(submaterial, "shader_family", None)
+        if shader_family == "MeshDecal":
+            return False
+        try:
+            if template_plan_for_submaterial(submaterial).template_key == "decal_stencil":
+                return False
+        except Exception:
+            pass
+        return True
+
+    def _polygon_counts_by_material_index(self, obj: bpy.types.Object) -> dict[int, int]:
+        cache = getattr(self, "mesh_polygon_counts_cache", None)
+        data = getattr(obj, "data", None)
+        data_pointer = self._id_pointer(data)
+        if cache is not None and data_pointer in cache:
+            return cache[data_pointer]
+        counts: dict[int, int] = {}
+        polygons = getattr(data, "polygons", None) if data is not None else None
+        if polygons is None:
+            return counts
+        for poly in polygons:
+            idx = int(getattr(poly, "material_index", 0))
+            counts[idx] = counts.get(idx, 0) + 1
+        if cache is not None:
+            cache[data_pointer] = counts
+        return counts
+
+    def _derive_decal_host_route_from_submaterials(
+        self,
+        obj: bpy.types.Object,
+        slot_submaterials: list[SubmaterialRecord | None],
+    ) -> tuple[str | None, tuple[float, float, float] | None]:
+        priorities = ("primary", "secondary", "tertiary", "glass")
+        slot_channels: dict[int, str] = {}
+        slot_tints: dict[int, tuple[float, float, float]] = {}
+        for slot_index, submaterial in enumerate(slot_submaterials):
+            if submaterial is None or not self._submaterial_is_host_candidate(submaterial):
+                continue
+            channel = self._submaterial_palette_channel(submaterial)
+            if channel in priorities:
+                slot_channels[slot_index] = channel
+            tint = self._submaterial_authored_tint_rgb(submaterial)
+            if tint is not None:
+                slot_tints[slot_index] = tint
+
+        if slot_channels:
+            unique_channels = set(slot_channels.values())
+            if len(unique_channels) == 1:
+                return next(iter(unique_channels)), None
+            counts = self._polygon_counts_by_material_index(obj)
+            channel_counts: dict[str, int] = {}
+            for slot_index, channel in slot_channels.items():
+                channel_counts[channel] = channel_counts.get(channel, 0) + max(1, counts.get(slot_index, 0))
+            return (
+                min(channel_counts, key=lambda channel: (-channel_counts[channel], priorities.index(channel))),
+                None,
+            )
+
+        if slot_tints:
+            if len(slot_tints) == 1:
+                return None, next(iter(slot_tints.values()))
+            counts = self._polygon_counts_by_material_index(obj)
+            weighted_tints = [
+                (max(1, counts.get(slot_index, 0)), tint)
+                for slot_index, tint in slot_tints.items()
+            ]
+            weighted_tints.sort(key=lambda item: item[0], reverse=True)
+            return None, weighted_tints[0][1]
+
+        return None, None
+
     def _mesh_decal_host_channel_for_object(self, obj: bpy.types.Object) -> str | None:
         """Scan ``obj``'s material slots for a non-decal paint material
         with a palette channel assignment. Returns the canonical channel
@@ -2164,11 +2396,17 @@ class BuildersMixin:
         materials (typical of ``dec_*`` children split off their host
         ``geo_*`` geometry).
         """
+        stored = self._stored_decal_host_channel(obj)
+        if stored is not None:
+            return stored
         channel = self._scan_slots_for_host_channel(obj)
         if channel is not None:
             return channel
         parent = getattr(obj, "parent", None)
         if parent is not None:
+            stored = self._stored_decal_host_channel(parent)
+            if stored is not None:
+                return stored
             channel = self._scan_slots_for_host_channel(parent)
         return channel
 
@@ -2266,9 +2504,15 @@ class BuildersMixin:
         favour the main panel colour over structural accents. Returns
         None if no usable host colour can be read.
         """
+        stored = self._stored_decal_host_rgb(obj)
+        if stored is not None:
+            return stored
         for candidate in (obj, getattr(obj, "parent", None)):
             if candidate is None:
                 continue
+            stored = self._stored_decal_host_rgb(candidate)
+            if stored is not None:
+                return stored
             rgb = self._dominant_paint_tint_for_object(candidate)
             if rgb is not None:
                 return rgb
@@ -2528,6 +2772,9 @@ class BuildersMixin:
         self,
         obj: bpy.types.Object,
         palette: PaletteRecord | None,
+        *,
+        host_channel: str | None = None,
+        fallback_rgb: tuple[float, float, float] | None = None,
     ) -> int:
         """Post-pass called after all slots on ``obj`` have been
         assigned. For each slot carrying a MeshDecal material, detect
@@ -2565,13 +2812,13 @@ class BuildersMixin:
         if not decal_slots:
             return 0
 
-        channel = (
-            self._mesh_decal_host_channel_for_object(obj)
-            if palette is not None
-            else None
-        )
-        fallback_rgb = None if channel is not None else self._mesh_decal_host_rgb_for_object(obj)
-        if channel is None and fallback_rgb is None:
+        channel = host_channel if palette is not None else None
+        if channel is None and palette is not None:
+            channel = self._mesh_decal_host_channel_for_object(obj)
+        resolved_fallback_rgb = fallback_rgb
+        if channel is None and resolved_fallback_rgb is None:
+            resolved_fallback_rgb = self._mesh_decal_host_rgb_for_object(obj)
+        if channel is None and resolved_fallback_rgb is None:
             return 0
         rebound = 0
         for slot, mat, is_mesh_decal in decal_slots:
@@ -2584,7 +2831,7 @@ class BuildersMixin:
                 if channel is not None and palette is not None:
                     variant_rgb = palette_color(palette, channel)
                 if variant_rgb is None:
-                    variant_rgb = fallback_rgb
+                    variant_rgb = resolved_fallback_rgb
                 if variant_rgb is None:
                     continue
                 key = mat.get("starbreaker_decal_host_rgb_key")

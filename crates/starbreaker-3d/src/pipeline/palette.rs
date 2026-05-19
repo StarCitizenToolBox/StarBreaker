@@ -488,16 +488,7 @@ fn extract_subgeometry_palette(
     let root = get_value_field(root_record, "root")?;
 
     let read_entry = |entry_name: &str| -> [f32; 3] {
-        let entry = get_value_field(root, entry_name);
-        let tint = entry.and_then(|value| get_value_field(value, "tintColor"));
-        let r = tint.and_then(|value| get_value_u8(value, "r")).unwrap_or(128);
-        let g = tint.and_then(|value| get_value_u8(value, "g")).unwrap_or(128);
-        let b = tint.and_then(|value| get_value_u8(value, "b")).unwrap_or(128);
-        [
-            srgb_to_linear(r as f32 / 255.0),
-            srgb_to_linear(g as f32 / 255.0),
-            srgb_to_linear(b as f32 / 255.0),
-        ]
+        read_palette_rgb_entry(get_value_field(root, entry_name))
     };
     let read_finish = |entry_name: &str| -> mtl::TintPaletteFinishEntry {
         let entry = get_value_field(root, entry_name);
@@ -525,6 +516,22 @@ fn extract_subgeometry_palette(
             glass: read_finish("glassColor"),
         },
     })
+}
+
+fn read_palette_rgb_entry(
+    entry: Option<&starbreaker_datacore::query::value::Value>,
+) -> [f32; 3] {
+    let rgb = entry
+        .and_then(|value| get_value_field(value, "tintColor"))
+        .or(entry);
+    let r = rgb.and_then(|value| get_value_u8(value, "r")).unwrap_or(128);
+    let g = rgb.and_then(|value| get_value_u8(value, "g")).unwrap_or(128);
+    let b = rgb.and_then(|value| get_value_u8(value, "b")).unwrap_or(128);
+    [
+        srgb_to_linear(r as f32 / 255.0),
+        srgb_to_linear(g as f32 / 255.0),
+        srgb_to_linear(b as f32 / 255.0),
+    ]
 }
 
 fn read_rgb_value_field(
@@ -754,8 +761,13 @@ fn query_tint_from_path(
 ) -> Option<mtl::TintPalette> {
     let query_rgb = |entry: &str| -> [f32; 3] {
         let mut rgb = [0.5f32; 3];
+        let entry_base = if entry.eq_ignore_ascii_case("glassColor") {
+            format!("{base}.{entry}")
+        } else {
+            format!("{base}.{entry}.tintColor")
+        };
         for (i, ch) in ["r", "g", "b"].iter().enumerate() {
-            let path = format!("{base}.{entry}.tintColor.{ch}");
+            let path = format!("{entry_base}.{ch}");
             if let Ok(compiled) = db.compile_path::<u8>(record.struct_id(), &path)
                 && let Ok(Some(v)) = db.query_single::<u8>(&compiled, record)
             {
@@ -960,4 +972,83 @@ fn load_layer_specular_texture_mean(p4k: &MappedP4k, material: &mtl::SubMaterial
         .map(|pixel| u64::from(pixel[0]) + u64::from(pixel[1]) + u64::from(pixel[2]))
         .sum();
     Some(rgb_sum as f32 / (pixel_count as f32 * 255.0 * 3.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use starbreaker_datacore::query::value::Value;
+
+    fn object(type_name: &'static str, fields: Vec<(&'static str, Value<'static>)>) -> Value<'static> {
+        Value::Object {
+            type_name,
+            fields,
+            record_id: None,
+        }
+    }
+
+    fn rgb(r: u8, g: u8, b: u8) -> Value<'static> {
+        object(
+            "SRGB8",
+            vec![
+                ("r", Value::UInt8(r)),
+                ("g", Value::UInt8(g)),
+                ("b", Value::UInt8(b)),
+            ],
+        )
+    }
+
+    fn tint_entry(r: u8, g: u8, b: u8, spec_r: u8, spec_g: u8, spec_b: u8, glossiness: f32) -> Value<'static> {
+        object(
+            "TintEntry",
+            vec![
+                ("tintColor", rgb(r, g, b)),
+                ("specColor", rgb(spec_r, spec_g, spec_b)),
+                ("glossiness", Value::Float(glossiness)),
+            ],
+        )
+    }
+
+    #[test]
+    fn extract_subgeometry_palette_reads_direct_glass_color_fields() {
+        let geometry = object(
+            "SGeometryDataParams",
+            vec![(
+                "Palette",
+                object(
+                    "TintPaletteRef",
+                    vec![(
+                        "RootRecord",
+                        object(
+                            "TintPaletteTree",
+                            vec![(
+                                "root",
+                                object(
+                                    "TintPalette",
+                                    vec![
+                                        ("entryA", tint_entry(55, 55, 55, 59, 59, 59, 180.0)),
+                                        ("entryB", tint_entry(45, 45, 45, 59, 59, 59, 250.0)),
+                                        ("entryC", tint_entry(211, 152, 28, 59, 59, 59, 250.0)),
+                                        ("glassColor", rgb(255, 95, 17)),
+                                    ],
+                                ),
+                            )],
+                        ),
+                    )],
+                ),
+            )],
+        );
+
+        let palette = extract_subgeometry_palette(&geometry, Some("drak_pitbull".to_string()))
+            .expect("palette should parse");
+
+        assert_eq!(
+            palette.glass,
+            [
+                srgb_to_linear(1.0),
+                srgb_to_linear(95.0 / 255.0),
+                srgb_to_linear(17.0 / 255.0),
+            ]
+        );
+    }
 }
