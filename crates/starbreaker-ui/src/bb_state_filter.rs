@@ -160,10 +160,13 @@ fn parse_static_variables(record_value: &serde_json::Value) -> HashMap<String, b
 ///
 /// The idle-gate variable is the one whose **inverted** form gates the
 /// `Instantiated` (or `IsActive`) field of some widget — typically a Header
-/// or Footer that is hidden during the idle/attract state.  When the
-/// inverted operand is a `BindingsBooleanEvaluateOr`, the *first* input of
-/// the Or names the cold-default (Or operands are authored in
-/// idle-priority order).
+/// or Footer that is hidden during the idle/attract state.
+///
+/// **Structural requirement**: the Invert's inner operand must be a
+/// `BindingsBooleanEvaluateOr` over multiple variables (the active-state
+/// disjunction).  The *first* input of the Or names the cold-default.
+/// A plain `Invert(SingleVariable)` is a *different* pattern (single-flag
+/// hide gate) and never triggers an idle-default.
 fn apply_idle_defaults(
     ops: &[serde_json::Value],
     static_vals: &mut HashMap<String, bool>,
@@ -256,6 +259,24 @@ fn apply_idle_defaults(
         else {
             continue;
         };
+        // Structural rule: the idle-default pattern is
+        // `Instantiated = Invert(EvaluateOr(Var1, Var2, ...))` where the Or
+        // operands enumerate all active states for a mutual-exclusion group.
+        // Hiding when ANY is active means the framing widget is the *idle*
+        // state; the FIRST operand names the cold-default.
+        //
+        // A plain `Invert(SingleVariable)` is a different pattern: it gates a
+        // framing widget that is hidden when one specific flag is set (e.g.
+        // a loading/error overlay).  The variable must stay `false` so the
+        // framing widget remains visible at idle.  Skip those here.
+        let inner_ty = ptr_to_op
+            .get(&inner_ptr)
+            .and_then(|o| o.get("_Type_"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if inner_ty != "BuildingBlocks_BindingsBooleanEvaluateOr" {
+            continue;
+        }
         let mut visited = HashSet::new();
         let group_members = resolve_vars(inner_ptr, &ptr_to_op, &mut visited);
         if let Some(cold_default) = group_members.first().cloned() {
@@ -561,19 +582,23 @@ mod tests {
 
     // ── test 6 ──────────────────────────────────────────────────────────────
 
-    /// Idle-default rule: when the framing widget's `Instantiated` is bound to
-    /// `NOT(X)` and no group member has an explicit static-true override, the
-    /// idle-gate variable `X` defaults to `true`, so the framing widget is
-    /// filtered (hidden during the cold-default state).
+    /// Plain `Invert(SingleVariable)` is NOT an idle-default pattern.  This
+    /// is a single-flag hide gate: the framing widget is hidden only when
+    /// the flag is explicitly true.  At cold-default the flag is false so
+    /// the framing widget remains visible.
+    ///
+    /// This protects Header/Footer widgets bound via
+    /// `Instantiated = NOT(SomeFlag)` from being incorrectly hidden when
+    /// `SomeFlag` is the only thing being inverted.
     #[test]
-    fn idle_gate_invert_defaults_true_framing_widget_hidden() {
-        // ptr:3 = Attract (idle-gate)
+    fn invert_single_variable_does_not_trigger_idle_default() {
+        // ptr:3 = SomeFlag (no static value)
         // ptr:6 = NOT(ptr:3)
-        // ptr:5 (Header WidgetCanvas) bound to ptr:6 → hidden when Attract=true
+        // ptr:5 (Header WidgetCanvas) bound to ptr:6 → visible while flag is false
         let rv = make_record_value(
             vec![],
             vec![
-                variable_op(3, "state.Attract"),
+                variable_op(3, "state.SomeFlag"),
                 json!({
                     "_Pointer_": "ptr:6",
                     "_Type_": "BuildingBlocks_BindingsBooleanInvert",
@@ -584,8 +609,8 @@ mod tests {
         );
         let result = instantiated_false_widgets(&rv);
         assert!(
-            result.contains(&5),
-            "Header (ptr:5) must be filtered — Attract is idle-gate and defaults to true"
+            !result.contains(&5),
+            "Header (ptr:5) must NOT be filtered — Invert(SingleVariable) is not an idle-default pattern"
         );
     }
 
