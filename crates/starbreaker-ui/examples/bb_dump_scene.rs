@@ -55,13 +55,24 @@ fn main() {
     let fetch = |path: &str| -> Result<serde_json::Value, String> {
         let rec = extract_record_name(path);
         let rec_l = rec.to_lowercase();
+        // Prefer exact stem match; fall back to prefix only if no exact match found.
+        // Prefix matching ("h_eng_annunciator_" matching "h_eng_annunciator_master_combined")
+        // is ambiguous and causes false cycle expansion — exact match must win.
+        let mut prefix_hit: Option<&PathBuf> = None;
         for p in &all {
             let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
             let stem_l = stem.to_lowercase();
-            if stem_l == rec_l || stem_l.starts_with(&format!("{rec_l}_")) {
+            if stem_l == rec_l {
                 let text = std::fs::read_to_string(p).map_err(|e| e.to_string())?;
                 return serde_json::from_str(&text).map_err(|e| e.to_string());
             }
+            if prefix_hit.is_none() && stem_l.starts_with(&format!("{rec_l}_")) {
+                prefix_hit = Some(p);
+            }
+        }
+        if let Some(p) = prefix_hit {
+            let text = std::fs::read_to_string(p).map_err(|e| e.to_string())?;
+            return serde_json::from_str(&text).map_err(|e| e.to_string());
         }
         Err(format!("not found: {rec}"))
     };
