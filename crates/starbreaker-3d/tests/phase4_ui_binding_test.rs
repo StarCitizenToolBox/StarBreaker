@@ -174,6 +174,51 @@ fn test_mfd_container_canvas_guid() {
     });
 }
 
+/// Verify that `content_canvas_record_name` is resolved to the correct default
+/// content canvas for each Clipper MFD helper slot (R5.H fix).
+///
+/// Expected mappings (from DataCore `modeConfiguration.defaultConfiguration`):
+///   Screen_Left_Upper_RTT (primary)  → MC_S_Power_Master   (eView_ResourceNetwork)
+///   Screen_Right_Upper_RTT (1st sec) → MC_S_Scan_Master    (eView_Scanning)
+///   Screen_Left_Lower_RTT (2nd sec)  → MC_S_Diag_Master    (eView_Diagnostics)
+#[test]
+#[ignore = "requires Data.p4k; set SC_DATA_P4K to run Phase 4 UI binding tests"]
+fn test_mfd_content_canvas_record_names() {
+    with_integration_context(|db, idx| {
+        let p4k_path = integration_p4k_path().unwrap();
+        let p4k = MappedP4k::open(&p4k_path).unwrap();
+
+        let scene = export_scene_json(db, idx, &p4k, "DRAK_Clipper");
+
+        let expected: &[(&str, &str)] = &[
+            ("Screen_Left_Upper_RTT", "MC_S_Power_Master"),
+            ("Screen_Right_Upper_RTT", "MC_S_Scan_Master"),
+            ("Screen_Left_Lower_RTT", "MC_S_Diag_Master"),
+        ];
+
+        for (helper_name, expected_record) in expected {
+            let binding = find_binding_by_helper(&scene, helper_name)
+                .unwrap_or_else(|| panic!("{helper_name} helper not found in scene.json"));
+
+            let content = binding["content_canvas_record_name"]
+                .as_str()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{helper_name} content_canvas_record_name must be a non-null string; \
+                         got: {:?}",
+                        binding["content_canvas_record_name"]
+                    )
+                });
+
+            assert!(
+                content.contains(expected_record),
+                "{helper_name}: expected content_canvas_record_name to contain \
+                 '{expected_record}', got: '{content}'"
+            );
+        }
+    });
+}
+
 #[test]
 #[ignore = "requires Data.p4k; set SC_DATA_P4K to run Phase 4 UI binding tests"]
 fn test_annunciator_content_canvas_guid() {

@@ -1074,18 +1074,21 @@ fn build_mfd_view_canvas_map(db: &Database) -> HashMap<String, (String, Option<S
 /// `SCItemSeatDashboardParams.MFDParams`.  Returns a map from geometry name
 /// (e.g. `"Screen_Left_Upper_RTT"`) to `(canvas_guid, canvas_record_name)`.
 ///
-/// The selection logic mirrors the game's runtime default:
-/// - `primaryMFD`          → `defaultConfiguration.leftCastView`
-/// - `defaultCommsCallMFD` → `defaultConfiguration.rightCastView`
-/// - remaining MFDs (in `MFDs[]` order) → `primaryMFDScreenView`, then
-///   `secondaryMFDScreen1View` … `secondaryMFDScreen5View`
+/// The selection logic mirrors the game's runtime default per the `SMFDModeConfig`
+/// `defaultConfiguration` block:
+/// - The slot whose geometry name matches `primaryMFD.geometryName` → `primaryMFDScreenView`.
+/// - All remaining slots (in `MFDs[]` array order, skipping the primary) →
+///   `secondaryMFDScreen1View`, `secondaryMFDScreen2View`, … up to `secondaryMFDScreen5View`.
+///
+/// `leftCastView` and `rightCastView` are AR portrait overlays rendered in world
+/// space — they are **not** assigned to any geometry helper or item port.
 pub(crate) fn collect_mfd_default_canvases(
     db: &Database,
     dashboard_entity_record: &Record,
 ) -> HashMap<String, (String, Option<String>)> {
     let struct_id = dashboard_entity_record.struct_id();
 
-    // All MFD geometry names in loadout order.
+    // All MFD geometry names in MFDs[] array order.
     let all_mfd_names: Vec<String> = db
         .compile_path::<String>(
             struct_id,
@@ -1107,27 +1110,12 @@ pub(crate) fn collect_mfd_default_canvases(
         dashboard_entity_record,
         "Components[SCItemSeatDashboardParams].MFDParams.primaryMFD.geometryName",
     );
-    let comms_name = query_string_path(
-        db,
-        dashboard_entity_record,
-        "Components[SCItemSeatDashboardParams].MFDParams.defaultCommsCallMFD.geometryName",
-    );
 
     let base = "Components[SCItemSeatDashboardParams].MFDParams.modeConfiguration.defaultConfiguration";
     let primary_view = query_string_path(
         db,
         dashboard_entity_record,
         &format!("{base}.primaryMFDScreenView"),
-    );
-    let right_cast_view = query_string_path(
-        db,
-        dashboard_entity_record,
-        &format!("{base}.rightCastView"),
-    );
-    let left_cast_view = query_string_path(
-        db,
-        dashboard_entity_record,
-        &format!("{base}.leftCastView"),
     );
     let secondary_views: Vec<Option<String>> = (1..=5)
         .map(|i| {
@@ -1142,35 +1130,26 @@ pub(crate) fn collect_mfd_default_canvases(
     let view_canvas = build_mfd_view_canvas_map(db);
     let mut result = HashMap::new();
 
-    // Assign primary MFD → leftCastView (e.g. SelfStatus).
-    if let (Some(name), Some(view)) = (&primary_name, &left_cast_view) {
-        if let Some(canvas) = view_canvas.get(view) {
-            result.insert(name.clone(), canvas.clone());
-        }
-    }
-    // Assign comms MFD → rightCastView (e.g. TargetStatus).
-    if let (Some(name), Some(view)) = (&comms_name, &right_cast_view) {
-        if primary_name.as_deref() != Some(name.as_str()) {
+    // Assign each slot its default view canvas.
+    //   - The primary slot → primaryMFDScreenView (e.g. eView_ResourceNetwork).
+    //   - All remaining slots in MFDs[] order → secondaryMFDScreen1View, secondaryMFDScreen2View, …
+    // Cast views (leftCastView / rightCastView) are AR overlays and are deliberately
+    // not assigned to any geometry helper.
+    let secondary_view_iter: Vec<&str> = secondary_views.iter().filter_map(|v| v.as_deref()).collect();
+    let mut secondary_cursor = 0usize;
+
+    for name in &all_mfd_names {
+        let view_opt: Option<&str> = if primary_name.as_deref() == Some(name.as_str()) {
+            primary_view.as_deref()
+        } else {
+            let v = secondary_view_iter.get(secondary_cursor).copied();
+            secondary_cursor += 1;
+            v
+        };
+        if let Some(view) = view_opt {
             if let Some(canvas) = view_canvas.get(view) {
                 result.insert(name.clone(), canvas.clone());
             }
-        }
-    }
-    // Assign remaining MFDs in order: primaryMFDScreenView, secondaryMFDScreen1View, …
-    let remaining_views: Vec<&str> = std::iter::once(primary_view.as_deref())
-        .chain(secondary_views.iter().map(|v| v.as_deref()))
-        .flatten()
-        .collect();
-    let remaining_names: Vec<&String> = all_mfd_names
-        .iter()
-        .filter(|n| {
-            primary_name.as_deref() != Some(n.as_str())
-                && comms_name.as_deref() != Some(n.as_str())
-        })
-        .collect();
-    for (name, view) in remaining_names.iter().zip(remaining_views.iter()) {
-        if let Some(canvas) = view_canvas.get(*view) {
-            result.insert((*name).clone(), canvas.clone());
         }
     }
 
@@ -1394,5 +1373,120 @@ mod tests {
         let (g, p) = classify_canvas_fallback_value(url.clone());
         assert_eq!(g, None);
         assert_eq!(p, Some(url));
+    }
+
+    // ── MFD default-view assignment (pure logic, no DataCore required) ──────
+
+    /// Pure view-assignment logic mirroring `collect_mfd_default_canvases`.
+    /// Given ordered slot names, an optional primary slot name, and ordered view
+    /// enum strings, returns (slot_name, view_enum) pairs.
+    fn assign_mfd_default_views<'a>(
+        all_mfd_names: &'a [String],
+        primary_name: Option<&str>,
+        primary_view: Option<&'a str>,
+        secondary_views: &'a [Option<String>],
+    ) -> Vec<(&'a String, &'a str)> {
+        let secondary_strs: Vec<&str> =
+            secondary_views.iter().filter_map(|v| v.as_deref()).collect();
+        let mut secondary_cursor = 0usize;
+        let mut result = Vec::new();
+        for name in all_mfd_names {
+            let view_opt = if primary_name == Some(name.as_str()) {
+                primary_view
+            } else {
+                let v = secondary_strs.get(secondary_cursor).copied();
+                secondary_cursor += 1;
+                v
+            };
+            if let Some(view) = view_opt {
+                result.push((name, view));
+            }
+        }
+        result
+    }
+
+    fn names(s: &[&str]) -> Vec<String> {
+        s.iter().map(|n| n.to_string()).collect()
+    }
+
+    fn oviews(s: &[Option<&str>]) -> Vec<Option<String>> {
+        s.iter().map(|v| v.map(|s| s.to_string())).collect()
+    }
+
+    /// Clipper layout: 3 MFD slots, primary is slot 0 (Left_Upper).
+    /// Expected: Left_Upper → primaryMFDScreenView (eView_ResourceNetwork),
+    ///           Right_Upper → secondaryMFDScreen1View (eView_Scanning),
+    ///           Left_Lower  → secondaryMFDScreen2View (eView_Diagnostics).
+    #[test]
+    fn mfd_assignment_clipper_layout() {
+        let all = names(&["Screen_Left_Upper_RTT", "Screen_Right_Upper_RTT", "Screen_Left_Lower_RTT"]);
+        let primary = Some("Screen_Left_Upper_RTT");
+        let primary_view = Some("eView_ResourceNetwork");
+        let secondary = oviews(&[Some("eView_Scanning"), Some("eView_Diagnostics"), None, None, None]);
+
+        let assignments = assign_mfd_default_views(&all, primary, primary_view, &secondary);
+        let map: std::collections::HashMap<&str, &str> = assignments
+            .iter()
+            .map(|(n, v)| (n.as_str(), *v))
+            .collect();
+
+        assert_eq!(map.get("Screen_Left_Upper_RTT"), Some(&"eView_ResourceNetwork"), "primary must get primaryMFDScreenView");
+        assert_eq!(map.get("Screen_Right_Upper_RTT"), Some(&"eView_Scanning"), "first secondary must get secondaryMFDScreen1View");
+        assert_eq!(map.get("Screen_Left_Lower_RTT"), Some(&"eView_Diagnostics"), "second secondary must get secondaryMFDScreen2View");
+    }
+
+    /// When the primary slot is in the middle of the array, the slots before it
+    /// should consume secondaryMFD views starting from screen 1, then the primary
+    /// gets primaryMFDScreenView, then remaining get the next secondary views.
+    #[test]
+    fn mfd_assignment_primary_in_middle() {
+        let all = names(&["Slot_A", "Slot_B", "Slot_C"]);
+        let primary = Some("Slot_B");
+        let primary_view = Some("eView_ResourceNetwork");
+        let secondary = oviews(&[Some("eView_Scanning"), Some("eView_Diagnostics"), None, None, None]);
+
+        let assignments = assign_mfd_default_views(&all, primary, primary_view, &secondary);
+        let map: std::collections::HashMap<&str, &str> = assignments
+            .iter()
+            .map(|(n, v)| (n.as_str(), *v))
+            .collect();
+
+        assert_eq!(map.get("Slot_A"), Some(&"eView_Scanning"));
+        assert_eq!(map.get("Slot_B"), Some(&"eView_ResourceNetwork"));
+        assert_eq!(map.get("Slot_C"), Some(&"eView_Diagnostics"));
+    }
+
+    /// When there is no primary (no primaryMFD pointer), all slots consume
+    /// secondary views in order.
+    #[test]
+    fn mfd_assignment_no_primary() {
+        let all = names(&["Slot_A", "Slot_B"]);
+        let secondary = oviews(&[Some("eView_Scanning"), Some("eView_Diagnostics"), None, None, None]);
+
+        let assignments = assign_mfd_default_views(&all, None, None, &secondary);
+        let map: std::collections::HashMap<&str, &str> = assignments
+            .iter()
+            .map(|(n, v)| (n.as_str(), *v))
+            .collect();
+
+        assert_eq!(map.get("Slot_A"), Some(&"eView_Scanning"));
+        assert_eq!(map.get("Slot_B"), Some(&"eView_Diagnostics"));
+    }
+
+    /// Cast views (leftCastView, rightCastView) must NOT appear in the output.
+    /// The assignment only uses primaryMFDScreenView + secondaryMFDScreenNView.
+    #[test]
+    fn mfd_assignment_cast_views_excluded() {
+        let all = names(&["Screen_Left_Upper_RTT", "Screen_Right_Upper_RTT", "Screen_Left_Lower_RTT"]);
+        let primary = Some("Screen_Left_Upper_RTT");
+        let primary_view = Some("eView_ResourceNetwork");
+        let secondary = oviews(&[Some("eView_Scanning"), Some("eView_Diagnostics"), None, None, None]);
+
+        let assignments = assign_mfd_default_views(&all, primary, primary_view, &secondary);
+        // Neither eView_SelfStatus nor eView_TargetStatus (the cast views) should appear.
+        for (_, view) in &assignments {
+            assert_ne!(*view, "eView_SelfStatus", "leftCastView must not be assigned to any slot");
+            assert_ne!(*view, "eView_TargetStatus", "rightCastView must not be assigned to any slot");
+        }
     }
 }
