@@ -631,52 +631,56 @@ pub(crate) fn ui_binding_for_record(db: &Database, record: &Record) -> Option<Ui
             });
         }
     }
-    if let Some(canvas_guid) = query_stringish_path(
-        db,
-        record,
-        "Components[UIMapEntityComponentParams].uiElementsCanvasGUID",
-    )
-    .or_else(|| {
-        query_stringish_path(
+    let layers = query_value_path(db, record, "Components[UIBuildingBlocksEntityComponentParams].layers")
+        .or_else(|| query_value_path(db, record, "Components[UIBuildingBlocksEntityComponentParams].layers[BuildingBlocksLayer]"));
+    if layers.is_none() {
+        if let Some(canvas_guid) = query_stringish_path(
             db,
             record,
-            "Components[UIMapEntityComponentParams].starMapParams.uiElementsCanvasGUID",
+            "Components[UIMapEntityComponentParams].uiElementsCanvasGUID",
         )
-    }) {
-        let (canvas_record_name, canvas_record_path) = resolve_record_metadata(db, &canvas_guid);
-        let (canvas_widget_canvas_path, canvas_widget_url_postfix, canvas_widget_url_optional, canvas_variable_binding) =
-            canvas_widget_context_for_guid(db, &canvas_guid);
-        return Some(UiBinding {
-            binding_kind: "radar".to_string(),
-            source_entity_name: String::new(),
-            helper_name: None,
-            default_view: None,
-            default_state_is_off: false,
-            default_state_name: default_state_name.clone(),
-            default_light_color,
-            default_light_intensity_milli,
-            canvas_guid: Some(canvas_guid),
-            canvas_record_name,
-            canvas_record_path,
-            canvas_widget_canvas_path,
-            canvas_widget_url_postfix,
-            canvas_widget_url_optional,
-            canvas_variable_binding,
-            content_canvas_guid: None,
-            content_canvas_record_name: None,
-            dashboard_view_index: None,
-            dashboard_screen_slot: None,
-            owner_source_file,
-            runtime_image_source,
-            generated_image_path: None,
-            generated_context_manifest_path: None,
-            generated_resolved_source_path: None,
-            generated_backend: None,
-            generated_provenance: None,
-        });
+        .or_else(|| {
+            query_stringish_path(
+                db,
+                record,
+                "Components[UIMapEntityComponentParams].starMapParams.uiElementsCanvasGUID",
+            )
+        }) {
+            let (canvas_record_name, canvas_record_path) = resolve_record_metadata(db, &canvas_guid);
+            let (canvas_widget_canvas_path, canvas_widget_url_postfix, canvas_widget_url_optional, canvas_variable_binding) =
+                canvas_widget_context_for_guid(db, &canvas_guid);
+            return Some(UiBinding {
+                binding_kind: "radar".to_string(),
+                source_entity_name: String::new(),
+                helper_name: None,
+                default_view: None,
+                default_state_is_off: false,
+                default_state_name: default_state_name.clone(),
+                default_light_color,
+                default_light_intensity_milli,
+                canvas_guid: Some(canvas_guid),
+                canvas_record_name,
+                canvas_record_path,
+                canvas_widget_canvas_path,
+                canvas_widget_url_postfix,
+                canvas_widget_url_optional,
+                canvas_variable_binding,
+                content_canvas_guid: None,
+                content_canvas_record_name: None,
+                dashboard_view_index: None,
+                dashboard_screen_slot: None,
+                owner_source_file,
+                runtime_image_source,
+                generated_image_path: None,
+                generated_context_manifest_path: None,
+                generated_resolved_source_path: None,
+                generated_backend: None,
+                generated_provenance: None,
+            });
+        }
     }
 
-    let layers = query_value_path(db, record, "Components[UIBuildingBlocksEntityComponentParams].layers")?;
+    let layers = layers?;
     let first_layer = match layers {
         Value::Array(values) => values.into_iter().next()?,
         other => other,
@@ -685,12 +689,14 @@ pub(crate) fn ui_binding_for_record(db: &Database, record: &Record) -> Option<Ui
         .and_then(|default_view| value_object_string(default_view, "name"));
     let canvas_guid = value_object(&first_layer, "defaultView")
         .and_then(|default_view| value_object(default_view, "component"))
-        .and_then(|component| value_object_string(component, "canvas"))
+        .and_then(|component| value_object(component, "canvas"))
+        .and_then(value_stringish)
         .or_else(|| {
             value_object(&first_layer, "element")
-                .and_then(|element| value_object_string(element, "canvas"))
+                .and_then(|element| value_object(element, "canvas"))
+                .and_then(value_stringish)
         })
-        .or_else(|| value_object_string(&first_layer, "canvas"));
+        .or_else(|| value_object(&first_layer, "canvas").and_then(value_stringish));
 
     // When the defaultView has no canvas (e.g. the entity's default is an "Off"
     // view), search the layer's views[] array for the first entry that does carry
@@ -725,15 +731,17 @@ pub(crate) fn ui_binding_for_record(db: &Database, record: &Record) -> Option<Ui
                     views.iter().find_map(|view| {
                         let view_name = value_object_string(view, "name");
                         value_object(view, "component")
-                            .and_then(|c| value_object_string(c, "canvas"))
+                            .and_then(|c| value_object(c, "canvas"))
+                            .and_then(value_stringish)
                             .filter(|s| !s.is_empty() && s != "null" && !is_zero_guid(s))
                             .filter(|s| !is_shell_canvas_guid(db, s))
                             .map(|s| (view_name, s))
                     })
-                });
+                })
+                .or_else(|| first_non_null_layer_view_canvas(db, record).map(|s| (None, s)));
             match found {
                 Some((view_name, val)) => {
-                    let (fg, fp) = classify_canvas_fallback_value(val);
+                    let (fg, fp) = classify_canvas_fallback_value(db, val);
                     if fg.is_some() {
                         log::debug!(
                             "ui_binding: defaultView canvas absent; using fallback GUID {:?} from \
@@ -773,9 +781,12 @@ pub(crate) fn ui_binding_for_record(db: &Database, record: &Record) -> Option<Ui
     if canvas_widget_canvas_path.is_none() {
         canvas_widget_canvas_path = fallback_canvas_path;
     }
+    let has_radar_component = query_value_path(db, record, "Components[SCItemRadarDisplayScreenParams]").is_some()
+        || query_value_path(db, record, "Components[UIMapEntityComponentParams]").is_some();
     let binding_kind = match default_view.as_deref() {
         Some("_mfd") => "mfd",
         Some("_physicalScreen") => "physical",
+        _ if has_radar_component => "radar",
         _ => "physical",
     };
     // The originally-resolved defaultView had no concrete content if either
@@ -1243,6 +1254,48 @@ fn query_value_path<'a>(db: &'a Database<'a>, record: &'a Record, path: &str) ->
         .and_then(|mut values| if values.is_empty() { None } else { Some(values.remove(0)) })
 }
 
+fn first_non_null_layer_view_canvas(db: &Database, record: &Record) -> Option<String> {
+    let path = "Components[UIBuildingBlocksEntityComponentParams].layers[BuildingBlocksLayer].views[BuildingBlocksView].component.canvas";
+    db.compile_path::<Value>(record.struct_id(), path)
+        .ok()
+        .and_then(|compiled| db.query_no_references(&compiled, record).ok())
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value_stringish(&value))
+        .find(|s| !s.is_empty() && s != "null" && !is_zero_guid(s) && !is_shell_canvas_guid(db, s))
+        .or_else(|| first_non_null_layer_view_canvas_from_json(db, record))
+}
+
+fn first_non_null_layer_view_canvas_from_json(db: &Database, record: &Record) -> Option<String> {
+    let bytes = starbreaker_datacore::export::to_json_compact(db, record).ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let components = json
+        .get("_RecordValue_")?
+        .get("Components")?
+        .as_array()?;
+    components.iter().find_map(|component| {
+        if component.get("_Type_").and_then(|v| v.as_str())
+            != Some("UIBuildingBlocksEntityComponentParams")
+        {
+            return None;
+        }
+        component.get("layers")?.as_array()?.iter().find_map(|layer| {
+            layer.get("views")?.as_array()?.iter().find_map(|view| {
+                let canvas = view.get("component")?.get("canvas")?;
+                json_stringish(canvas)
+                    .filter(|s| !s.is_empty() && s != "null" && !is_zero_guid(s) && !is_shell_canvas_guid(db, s))
+            })
+        })
+    })
+}
+
+fn json_stringish(value: &serde_json::Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| value.get("_RecordId_").and_then(|v| v.as_str()).map(str::to_owned))
+}
+
 fn value_object<'a>(value: &'a Value<'a>, key: &str) -> Option<&'a Value<'a>> {
     match value {
         Value::Object { fields, .. } => fields.iter().find(|(name, _)| *name == key).map(|(_, value)| value),
@@ -1331,7 +1384,19 @@ fn resolve_record_metadata(db: &Database, guid: &str) -> (Option<String>, Option
 /// Used by the views[] fallback scan to correctly route the found canvas value:
 /// GUIDs flow through the normal `canvas_guid` pipeline while P4K paths are
 /// stored in `canvas_widget_canvas_path`.
-fn classify_canvas_fallback_value(value: String) -> (Option<String>, Option<String>) {
+fn classify_canvas_fallback_value(db: &Database, value: String) -> (Option<String>, Option<String>) {
+    if let (Some(guid), None) = classify_canvas_fallback_literal(value.clone()) {
+        return (Some(guid), None);
+    }
+    if let Some(record) = find_canvas_record_by_path_or_guid(db, &value) {
+        if !record.id.is_empty() {
+            return (Some(record.id.to_string()), None);
+        }
+    }
+    (None, Some(value))
+}
+
+fn classify_canvas_fallback_literal(value: String) -> (Option<String>, Option<String>) {
     if parse_guid(&value).is_some() && !is_zero_guid(&value) {
         (Some(value), None)
     } else {
@@ -1346,7 +1411,7 @@ mod tests {
     #[test]
     fn classify_real_guid_returns_guid_slot() {
         let guid = "abcdef01-1234-5678-9abc-def012345678".to_string();
-        let (g, p) = classify_canvas_fallback_value(guid.clone());
+        let (g, p) = classify_canvas_fallback_literal(guid.clone());
         assert_eq!(g, Some(guid));
         assert_eq!(p, None);
     }
@@ -1354,7 +1419,7 @@ mod tests {
     #[test]
     fn classify_zero_guid_returns_path_slot() {
         let zero = "00000000-0000-0000-0000-000000000000".to_string();
-        let (g, p) = classify_canvas_fallback_value(zero.clone());
+        let (g, p) = classify_canvas_fallback_literal(zero.clone());
         assert_eq!(g, None);
         assert_eq!(p, Some(zero));
     }
@@ -1362,7 +1427,7 @@ mod tests {
     #[test]
     fn classify_p4k_path_returns_path_slot() {
         let path = "Data/UI/Canvas/radar_screen.json".to_string();
-        let (g, p) = classify_canvas_fallback_value(path.clone());
+        let (g, p) = classify_canvas_fallback_literal(path.clone());
         assert_eq!(g, None);
         assert_eq!(p, Some(path));
     }
@@ -1370,7 +1435,7 @@ mod tests {
     #[test]
     fn classify_file_url_returns_path_slot() {
         let url = "file://UI/Canvas/gen_mc_s_target.json".to_string();
-        let (g, p) = classify_canvas_fallback_value(url.clone());
+        let (g, p) = classify_canvas_fallback_literal(url.clone());
         assert_eq!(g, None);
         assert_eq!(p, Some(url));
     }
