@@ -87,7 +87,7 @@ pub fn resolve_canvas_graph_with_loc(
     if let Some(name) = root_json.get("_RecordName_").and_then(|v| v.as_str()) {
         visited.insert(name.to_ascii_lowercase());
     }
-    resolve_canvas_graph_inner(root_json, manufacturer_id, fetch_by_path, loc_fetcher, 0, &mut visited)
+    resolve_canvas_graph_inner(root_json, manufacturer_id, fetch_by_path, loc_fetcher, 0, &mut visited, None)
 }
 
 /// Inner recursive resolver.  `visited` accumulates normalised record names
@@ -101,6 +101,7 @@ fn resolve_canvas_graph_inner(
     loc_fetcher: Option<&dyn LocFetcher>,
     depth: u8,
     visited: &mut HashSet<String>,
+    inherited_style: Option<&serde_json::Value>,
 ) -> Result<BbScene, String> {
     let mut scene = parse_bb_canvas(root_json)?;
     let record_value = root_json.get("_RecordValue_").ok_or("missing _RecordValue_")?;
@@ -140,6 +141,27 @@ fn resolve_canvas_graph_inner(
         .collect();
 
     let debug_trace = std::env::var("STARBREAKER_UI_DEBUG").as_deref() == Ok("1");
+
+    let local_style_value = record_value.get("style").and_then(|style| {
+        if let Some(style_url) = style.as_str().filter(|s| !s.is_empty()) {
+            match fetch_by_path(style_url) {
+                Ok(style_json) => Some(style_json.get("_RecordValue_").cloned().unwrap_or(style_json)),
+                Err(e) => {
+                    log::warn!(
+                        "bb_resolve: failed to fetch canvas-level style record '{}': {}",
+                        style_url,
+                        e
+                    );
+                    None
+                }
+            }
+        } else if style.is_object() && !style.is_null() {
+            Some(style.clone())
+        } else {
+            None
+        }
+    });
+    let palette_source = local_style_value.as_ref().or(inherited_style);
 
     // Pass 1: follow the default-state canvas-reference modifier.
     //
@@ -200,6 +222,7 @@ fn resolve_canvas_graph_inner(
                     loc_fetcher,
                     depth + 1,
                     visited,
+                    palette_source,
                 ) {
                     Ok(scene) => scene,
                     Err(e) => {
@@ -352,6 +375,7 @@ fn resolve_canvas_graph_inner(
                 loc_fetcher,
                 depth + 1,
                 visited,
+                palette_source,
             ) {
                 Ok(s) => s,
                 Err(e) => {
@@ -378,43 +402,32 @@ fn resolve_canvas_graph_inner(
     //      `BuildingBlocks_Style` record — e.g. `s_bioc` on medical canvases).
     //      The linked Style record has the same `entries[]` (StyleEntry) shape
     //      as a brandStyles entry, so we can apply it identically.
-    let _linked_style_value: Option<serde_json::Value>;
     if let Some(brand_style) = bb_brand_style::resolve_brand_style(record_value, manufacturer_id) {
         crate::bb_brand_apply::apply_brand_modifiers(&mut scene, &brand_style, loc_fetcher);
-        _linked_style_value = None;
-    } else if let Some(style_url) = record_value
-        .get("style")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-    {
-        match fetch_by_path(style_url) {
-            Ok(style_json) => {
-                let style_value = style_json
-                    .get("_RecordValue_")
-                    .cloned()
-                    .unwrap_or(style_json);
-                if let Some(entries) = style_value.get("entries").and_then(|v| v.as_array()) {
-                    let identifier = crate::pipeline::extract_record_name(style_url);
-                    let brand = bb_brand_style::BrandStyle {
-                        identifier,
-                        entries: entries.as_slice(),
-                        raw: &style_value,
-                    };
-                    crate::bb_brand_apply::apply_brand_modifiers(&mut scene, &brand, loc_fetcher);
-                }
-                _linked_style_value = Some(style_value);
-            }
-            Err(e) => {
-                log::warn!(
-                    "bb_resolve: failed to fetch canvas-level style record '{}': {}",
-                    style_url,
-                    e
-                );
-                _linked_style_value = None;
-            }
+    } else if let Some(style_value) = local_style_value.as_ref() {
+        if let Some(entries) = style_value.get("entries").and_then(|v| v.as_array()) {
+            let identifier = record_value
+                .get("style")
+                .and_then(|v| v.as_str())
+                .map(crate::pipeline::extract_record_name)
+                .unwrap_or_else(|| "linked_style".to_string());
+            let brand = bb_brand_style::BrandStyle {
+                identifier,
+                entries: entries.as_slice(),
+                raw: style_value,
+            };
+            crate::bb_brand_apply::apply_brand_modifiers(&mut scene, &brand, loc_fetcher);
         }
-    } else {
-        _linked_style_value = None;
+    }
+
+    if let Some(entries) = record_value.get("embeddedStyles").and_then(|v| v.as_array()) {
+        let palette_source = palette_source.unwrap_or(record_value);
+        let brand = bb_brand_style::BrandStyle {
+            identifier: "embeddedStyles".to_string(),
+            entries: entries.as_slice(),
+            raw: palette_source,
+        };
+        crate::bb_brand_apply::apply_brand_modifiers(&mut scene, &brand, loc_fetcher);
     }
 
     Ok(scene)

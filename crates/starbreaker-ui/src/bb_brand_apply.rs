@@ -16,7 +16,7 @@
 
 use crate::bb_brand_style::BrandStyle;
 use crate::bb_loc::LocFetcher;
-use crate::bb_scene::{BbBorder, BbNode, BbNodeType, BbScene, BbValue};
+use crate::bb_scene::{BbBorder, BbNode, BbNodeId, BbNodeType, BbScene, BbValue};
 
 /// Apply brand-style modifiers to a scene.
 ///
@@ -35,73 +35,149 @@ pub fn apply_brand_modifiers(
     brand: &BrandStyle<'_>,
     loc_fetcher: Option<&dyn LocFetcher>,
 ) {
-    for node in scene.nodes.values_mut() {
-        for entry in brand.entries {
-            if entry_matches_node(entry, node) {
-                apply_entry_modifiers(entry, node, loc_fetcher);
-            }
+    let node_ids: Vec<_> = scene.nodes.keys().copied().collect();
+    for node_id in node_ids {
+        let matching_entries: Vec<&serde_json::Value> = {
+            let Some(node) = scene.nodes.get(&node_id) else {
+                continue;
+            };
+            brand
+                .entries
+                .iter()
+                .filter(|entry| entry_matches_scene(entry, node_id, node, scene))
+                .collect()
+        };
+
+        let Some(node) = scene.nodes.get_mut(&node_id) else {
+            continue;
+        };
+        apply_inline_color_overlay(node, brand.raw);
+        for entry in matching_entries {
+            apply_entry_modifiers(entry, node, brand.raw, loc_fetcher);
         }
     }
 }
 
-/// Test whether a brand-style entry matches a node.
+/// Test whether a brand-style entry matches a node within a scene.
 ///
 /// An entry matches when:
 /// - Its `conditionsList` is absent or empty (unconditional), OR
 /// - There exists at least one `conditionsList[i]` such that **all**
-///   `conditions[j]` items pass (tag UUIDs present AND widget-type matches).
-fn entry_matches_node(entry: &serde_json::Value, node: &BbNode) -> bool {
+///   `conditions[j]` items pass. Conditions may be nested (`AllOf`, `AnyOf`,
+///   `Parent`), and parent conditions are evaluated against the node's direct
+///   parent in the parsed BB scene hierarchy.
+fn entry_matches_scene(
+    entry: &serde_json::Value,
+    node_id: BbNodeId,
+    node: &BbNode,
+    scene: &BbScene,
+) -> bool {
     let conditions_list = match entry.get("conditionsList").and_then(|v| v.as_array()) {
         Some(cl) => cl,
-        None => return true, // No conditionsList → matches all nodes.
+        None => return true,
     };
 
     if conditions_list.is_empty() {
-        return true; // Empty array → matches all nodes.
+        return true;
     }
 
-    // For each conditions block, check if all conditions pass for this node.
-    for conditions_block in conditions_list {
-        let conditions = match conditions_block
+    conditions_list.iter().any(|conditions_block| {
+        let Some(conditions) = conditions_block.get("conditions").and_then(|v| v.as_array()) else {
+            return false;
+        };
+        conditions
+            .iter()
+            .all(|condition| condition_matches_node(condition, node_id, node, scene))
+    })
+}
+
+fn condition_matches_node(
+    condition: &serde_json::Value,
+    node_id: BbNodeId,
+    node: &BbNode,
+    scene: &BbScene,
+) -> bool {
+    let cond_type = condition
+        .get("_Type_")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if cond_type.ends_with("ConditionAllOfCondition") {
+        return condition
             .get("conditions")
             .and_then(|v| v.as_array())
-        {
-            Some(c) => c,
-            None => continue,
+            .map(|conditions| {
+                conditions
+                    .iter()
+                    .all(|child| condition_matches_node(child, node_id, node, scene))
+            })
+            .unwrap_or(false);
+    }
+
+    if cond_type.ends_with("ConditionAnyOfCondition") {
+        return condition
+            .get("conditions")
+            .and_then(|v| v.as_array())
+            .map(|conditions| {
+                conditions
+                    .iter()
+                    .any(|child| condition_matches_node(child, node_id, node, scene))
+            })
+            .unwrap_or(false);
+    }
+
+    if cond_type.ends_with("ConditionNotCondition") {
+        return condition
+            .get("conditions")
+            .and_then(|v| v.as_array())
+            .map(|conditions| {
+                !conditions
+                    .iter()
+                    .any(|child| condition_matches_node(child, node_id, node, scene))
+            })
+            .unwrap_or(false);
+    }
+
+    if cond_type.ends_with("ConditionParent") {
+        let Some(parent_id) = node.parent else {
+            return false;
         };
+        let Some(parent) = scene.nodes.get(&parent_id) else {
+            return false;
+        };
+        return condition
+            .get("conditions")
+            .and_then(|v| v.as_array())
+            .map(|conditions| {
+                conditions
+                    .iter()
+                    .all(|child| condition_matches_node(child, parent_id, parent, scene))
+            })
+            .unwrap_or(false);
+    }
 
-        let all_conditions_pass = conditions.iter().all(|cond| {
-            let cond_type = cond.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
-            if cond_type.ends_with("ConditionTag") || cond.get("tag").is_some() {
-                // Tag condition: the tag UUID must be in node.style_tag_uuids.
-                if let Some(tag_id) = cond
-                    .get("tag")
-                    .and_then(|t| t.get("_RecordId_"))
-                    .and_then(|r| r.as_str())
-                {
-                    node.style_tag_uuids.contains(&tag_id.to_string())
-                } else {
-                    false
-                }
-            } else if cond_type.ends_with("ConditionType") {
-                // Type condition: node widget type must match the type string.
-                if let Some(type_str) = cond.get("type").and_then(|v| v.as_str()) {
-                    node_type_matches(type_str, &node.ty)
-                } else {
-                    true // No type specified → pass.
-                }
-            } else {
-                // Unknown condition kind → conservative fail.
-                false
-            }
-        });
+    if cond_type.ends_with("ConditionTag") || condition.get("tag").is_some() {
+        return condition_tag_id(condition)
+            .map(|tag_id| node.style_tag_uuids.iter().any(|tag| tag == tag_id))
+            .unwrap_or(false);
+    }
 
-        if all_conditions_pass {
-            return true; // At least one conditions block fully matched.
-        }
+    if cond_type.ends_with("ConditionType") {
+        return condition
+            .get("type")
+            .and_then(|v| v.as_str())
+            .map(|type_str| node_type_matches(type_str, &node.ty))
+            .unwrap_or(true);
     }
 
     false
+}
+
+fn condition_tag_id(condition: &serde_json::Value) -> Option<&str> {
+    let tag = condition.get("tag")?;
+    tag.get("_RecordId_")
+        .and_then(|v| v.as_str())
+        .or_else(|| tag.as_str())
 }
 
 /// Return `true` when `type_str` from a `ConditionType` entry matches the node type.
@@ -121,14 +197,47 @@ fn node_type_matches(type_str: &str, ty: &BbNodeType) -> bool {
 }
 
 /// Apply all modifiers from a matching entry to a node.
-fn apply_entry_modifiers(entry: &serde_json::Value, node: &mut BbNode, loc_fetcher: Option<&dyn LocFetcher>) {
+fn apply_entry_modifiers(
+    entry: &serde_json::Value,
+    node: &mut BbNode,
+    palette_source: &serde_json::Value,
+    loc_fetcher: Option<&dyn LocFetcher>,
+) {
     let modifiers = match entry.get("modifiers").and_then(|v| v.as_array()) {
         Some(m) => m,
         None => return,
     };
 
     for modifier in modifiers {
-        apply_modifier(modifier, node, loc_fetcher);
+        apply_modifier(modifier, node, palette_source, loc_fetcher);
+    }
+}
+
+fn apply_inline_color_overlay(node: &mut BbNode, palette_source: &serde_json::Value) {
+    if node.raw.get("FillColor").is_some() {
+        return;
+    }
+    let overlay_enabled = node
+        .raw
+        .get("enableColorOverlay")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        || node
+            .raw
+            .get("svgFill")
+            .and_then(|v| v.get("enableColorOverlay"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+    if !overlay_enabled {
+        return;
+    }
+
+    let color_value = node
+        .raw
+        .get("color")
+        .or_else(|| node.raw.get("svgFill").and_then(|v| v.get("color")));
+    if let Some(color) = color_value.and_then(|value| parse_color_value(value, palette_source)) {
+        apply_color_field("FillColor", color, node);
     }
 }
 
@@ -136,43 +245,41 @@ fn apply_entry_modifiers(entry: &serde_json::Value, node: &mut BbNode, loc_fetch
 ///
 /// Parses the `field._Type_` discriminator and `field.field` name, then updates
 /// the appropriate typed field on `node` (or writes to `node.raw` as a fallback).
-fn apply_modifier(modifier: &serde_json::Value, node: &mut BbNode, loc_fetcher: Option<&dyn LocFetcher>) {
-    let field = match modifier.get("field") {
-        Some(f) => f,
-        None => return,
+fn apply_modifier(
+    modifier: &serde_json::Value,
+    node: &mut BbNode,
+    palette_source: &serde_json::Value,
+    loc_fetcher: Option<&dyn LocFetcher>,
+) {
+    let Some((type_str, field_name, value)) = modifier_parts(modifier) else {
+        return;
     };
-
-    let type_str = field
-        .get("_Type_")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let field_name = field.get("field").and_then(|v| v.as_str()).unwrap_or("");
 
     // Skip canvas-reference modifiers (already handled by bb_resolve).
     if type_str.ends_with("CanvasReferenceRecord") {
         return;
     }
 
-    // Extract the value based on the modifier type.
     match type_str {
         "BuildingBlocks_FieldModifierString" => {
-            if let Some(value) = field.get("value").and_then(|v| v.as_str()) {
+            if let Some(value) = value.and_then(|v| v.as_str()) {
                 apply_string_field(field_name, value, node, loc_fetcher);
             }
         }
         "BuildingBlocks_FieldModifierNumber" => {
-            if let Some(value) = field.get("value").and_then(|v| v.as_f64()) {
+            if let Some(value) = value.and_then(|v| v.as_f64()) {
                 apply_number_field(field_name, value, node);
             }
         }
         "BuildingBlocks_FieldModifierColor" => {
-            if let Some(color_obj) = field.get("value").and_then(|v| v.as_object()) {
-                let color = parse_color(color_obj);
-                apply_color_field(field_name, color, node);
+            if let Some(value) = value {
+                if let Some(color) = parse_color_value(value, palette_source) {
+                    apply_color_field(field_name, color, node);
+                }
             }
         }
         "BuildingBlocks_FieldModifierBoolean" => {
-            if let Some(value) = field.get("value").and_then(|v| v.as_bool()) {
+            if let Some(value) = value.and_then(|v| v.as_bool()) {
                 apply_boolean_field(field_name, value, node);
             }
         }
@@ -180,29 +287,61 @@ fn apply_modifier(modifier: &serde_json::Value, node: &mut BbNode, loc_fetcher: 
         | "BuildingBlocks_FieldModifierEnumeratedTypeImageScalingBehavior"
         | "BuildingBlocks_FieldModifierEnumeratedTypeWidthBehavior"
         | "BuildingBlocks_FieldModifierEnumeratedTypeHeightBehavior" => {
-            if let Some(value) = field.get("value").and_then(|v| v.as_str()) {
+            if let Some(value) = value.and_then(|v| v.as_str()) {
                 apply_enum_field(field_name, value, node);
             }
         }
         "BuildingBlocks_FieldModifierRecordRef"
         | "BuildingBlocks_FieldModifierRecordRefTypeFontStyleRecord" => {
-            if let Some(value) = field.get("value").and_then(|v| v.as_str()) {
+            if let Some(value) = value.and_then(|v| v.as_str()) {
                 apply_record_ref_field(field_name, value, node);
             }
         }
         _ => {
-            // Unrecognised modifier type → log and passthrough to raw.
             log::debug!(
                 "bb_brand_apply: unrecognised modifier type '{}' for field '{}'",
                 type_str,
                 field_name
             );
-            if let Some(value) = field.get("value") {
+            if let Some(value) = value {
                 node.raw
                     .as_object_mut()
                     .and_then(|obj| obj.insert(field_name.to_string(), value.clone()));
             }
         }
+    }
+}
+
+fn modifier_parts(modifier: &serde_json::Value) -> Option<(&str, &str, Option<&serde_json::Value>)> {
+    let modifier_type = modifier.get("_Type_").and_then(|v| v.as_str());
+
+    match modifier.get("field")? {
+        serde_json::Value::String(field_name) => {
+            let type_str = modifier_type?;
+            let value = if type_str == "BuildingBlocks_FieldModifierColor" {
+                modifier.get("color").or_else(|| modifier.get("value"))
+            } else {
+                modifier.get("value")
+            };
+            Some((type_str, field_name.as_str(), value))
+        }
+        serde_json::Value::Object(field) => {
+            let type_str = field
+                .get("_Type_")
+                .and_then(|v| v.as_str())
+                .or(modifier_type)?;
+            let field_name = field
+                .get("field")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let value = field
+                .get("value")
+                .or_else(|| field.get("color"))
+                .or_else(|| modifier.get("value"))
+                .or_else(|| modifier.get("color"));
+            Some((type_str, field_name, value))
+        }
+        _ => None,
     }
 }
 
@@ -444,11 +583,19 @@ fn apply_record_ref_field(field_name: &str, value: &str, node: &mut BbNode) {
     });
 }
 
-/// Parse a color object from JSON.
+/// Parse a color value from JSON.
 ///
-/// Detects whether the values are in 0..1 range (f32) or 0..255 range (u8)
-/// and normalizes to [f32; 4] in 0..1.
-fn parse_color(color_obj: &serde_json::Map<String, serde_json::Value>) -> [f32; 4] {
+/// Supports literal `{r,g,b,a}` values and `BuildingBlocks_ColorStyle` named
+/// palette slots. Named slots are resolved against the style record's
+/// `colorStyles[]` array using the standard BuildingBlocks slot ordering.
+fn parse_color_value(value: &serde_json::Value, palette_source: &serde_json::Value) -> Option<[f32; 4]> {
+    if value.get("color").and_then(|v| v.as_str()).is_some() && value.get("r").is_none() {
+        return parse_named_color(value, palette_source);
+    }
+    value.as_object().map(parse_literal_color)
+}
+
+fn parse_literal_color(color_obj: &serde_json::Map<String, serde_json::Value>) -> [f32; 4] {
     let r = color_obj
         .get("r")
         .and_then(|v| v.as_f64())
@@ -466,11 +613,47 @@ fn parse_color(color_obj: &serde_json::Map<String, serde_json::Value>) -> [f32; 
         .and_then(|v| v.as_f64())
         .unwrap_or(1.0) as f32;
 
-    // Detect range: if any component > 1.0, assume 0..255 and normalize.
     if r > 1.0 || g > 1.0 || b > 1.0 || a > 1.0 {
         [r / 255.0, g / 255.0, b / 255.0, a / 255.0]
     } else {
         [r, g, b, a]
+    }
+}
+
+fn parse_named_color(value: &serde_json::Value, palette_source: &serde_json::Value) -> Option<[f32; 4]> {
+    let name = value.get("color")?.as_str()?;
+    let alpha = value.get("alpha").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+    let slot = color_style_slot_index(name)?;
+    let color_styles = palette_source
+        .get("colorStyles")
+        .or_else(|| palette_source.get("_RecordValue_").and_then(|v| v.get("colorStyles")))?
+        .as_array()?;
+    let color_obj = color_styles.get(slot)?.get("color")?.as_object()?;
+    let mut color = parse_literal_color(color_obj);
+    color[3] *= alpha.clamp(0.0, 1.0);
+    Some(color)
+}
+
+fn color_style_slot_index(name: &str) -> Option<usize> {
+    match name {
+        "Accent1" | "Bright" => Some(0),
+        "Accent2" | "Positive" | "Success" => Some(1),
+        "Accent3" | "Warning" => Some(2),
+        "Accent4" | "Critical" | "Negative" => Some(3),
+        "Accent5" | "ContactUnknown" => Some(4),
+        "Mid" | "ContactNeutral" => Some(5),
+        "Light" | "Disabled" => Some(6),
+        "Highlight" | "ContactPositiveRep" => Some(7),
+        "Surface" => Some(8),
+        "BG" | "Background" => Some(9),
+        "FG" | "Foreground" => Some(10),
+        "Backlight" | "ContactAgressive" | "ContactAggressive" => Some(11),
+        "PositiveState" => Some(12),
+        "WarningState" => Some(13),
+        "CriticalState" => Some(14),
+        "Text" => Some(15),
+        "Gold" | "Special" => Some(16),
+        _ => None,
     }
 }
 
@@ -497,7 +680,7 @@ fn write_color_to_raw(field_name: &str, color: [f32; 4], node: &mut BbNode) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bb_scene::{BbNode, BbNodeType, BbScene};
+    use crate::bb_scene::{BbBackground, BbNode, BbNodeType, BbScene};
     use serde_json::json;
     use std::collections::BTreeMap;
 
@@ -943,6 +1126,144 @@ mod tests {
             Some("UI/Textures/DRAK_Background.tif"),
             "Mixed type+tag condition must match WidgetImage with matching tag"
         );
+    }
+
+    #[test]
+    fn test_inline_color_overlay_resolves_named_svg_tint() {
+        let mut scene = make_test_scene();
+        let node = scene.nodes.get_mut(&1).unwrap();
+        node.ty = BbNodeType::WidgetCustomShape;
+        node.background = Some(BbBackground::default());
+        node.raw = json!({
+            "enableColorOverlay": true,
+            "svgPath": "UI/Textures/Vector/General/FingerPrint.svg",
+            "color": {
+                "_Type_": "BuildingBlocks_ColorStyle",
+                "color": "Accent1",
+                "alpha": 1.0
+            }
+        });
+        let style_record = json!({
+            "colorStyles": [
+                { "color": { "r": 115, "g": 198, "b": 254, "a": 255 } }
+            ]
+        });
+        let brand = BrandStyle {
+            identifier: "s_bioc".to_string(),
+            entries: &[],
+            raw: &style_record,
+        };
+
+        apply_brand_modifiers(&mut scene, &brand, None);
+
+        let fill = scene
+            .nodes
+            .get(&1)
+            .unwrap()
+            .background
+            .as_ref()
+            .unwrap()
+            .fill_colour
+            .unwrap();
+        assert!((fill[0] - 115.0 / 255.0).abs() < 0.001);
+        assert!((fill[1] - 198.0 / 255.0).abs() < 0.001);
+        assert!((fill[2] - 254.0 / 255.0).abs() < 0.001);
+        assert_eq!(fill[3], 1.0);
+    }
+
+    #[test]
+    fn test_embedded_parent_child_bright_fill_tints_svg_node() {
+        let mut scene = make_test_scene();
+        let parent = BbNode {
+            id: 2,
+            parent: None,
+            children: vec![1],
+            ty: BbNodeType::WidgetCanvas,
+            name: "parent".to_string(),
+            style_tag_uuids: vec!["parent-tag".to_string()],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Default::default(),
+            position_offset: Default::default(),
+            sizing: Default::default(),
+            padding: Default::default(),
+            margin: Default::default(),
+            pivot: Default::default(),
+            anchor: Default::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: json!({}),
+        };
+        scene.nodes.insert(2, parent);
+        let child = scene.nodes.get_mut(&1).unwrap();
+        child.parent = Some(2);
+        child.children.clear();
+        child.style_tag_uuids = vec!["fingerprint-child-tag".to_string()];
+        child.background = Some(BbBackground::default());
+        child.raw = json!({ "svgPath": "UI/Textures/Vector/General/FingerPrint.svg" });
+        scene.roots = vec![2];
+
+        let style_record = json!({
+            "colorStyles": [
+                { "color": { "r": 115, "g": 198, "b": 254, "a": 255 } }
+            ]
+        });
+        let brand = BrandStyle {
+            identifier: "embeddedStyles".to_string(),
+            entries: &[json!({
+                "conditionsList": [
+                    {
+                        "conditions": [
+                            {
+                                "_Type_": "BuildingBlocks_StyleSelectorConditionTag",
+                                "tag": { "_RecordId_": "fingerprint-child-tag" }
+                            },
+                            {
+                                "_Type_": "BuildingBlocks_StyleSelectorConditionParent",
+                                "conditions": [
+                                    {
+                                        "_Type_": "BuildingBlocks_StyleSelectorConditionTag",
+                                        "tag": { "_RecordId_": "parent-tag" }
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ],
+                "modifiers": [
+                    {
+                        "_Type_": "BuildingBlocks_FieldModifierColor",
+                        "field": "FillColor",
+                        "color": {
+                            "_Type_": "BuildingBlocks_ColorStyle",
+                            "color": "Bright",
+                            "alpha": 1.0
+                        }
+                    }
+                ]
+            })],
+            raw: &style_record,
+        };
+
+        apply_brand_modifiers(&mut scene, &brand, None);
+
+        let fill = scene
+            .nodes
+            .get(&1)
+            .unwrap()
+            .background
+            .as_ref()
+            .unwrap()
+            .fill_colour
+            .unwrap();
+        assert!((fill[0] - 115.0 / 255.0).abs() < 0.001);
+        assert!((fill[1] - 198.0 / 255.0).abs() < 0.001);
+        assert!((fill[2] - 254.0 / 255.0).abs() < 0.001);
+        assert_eq!(fill[3], 1.0);
     }
 
     #[test]
