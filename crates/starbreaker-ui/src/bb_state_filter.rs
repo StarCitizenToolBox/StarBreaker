@@ -44,17 +44,33 @@
 //! selection to the C++ runtime), the static export must still pick one
 //! sub-canvas as the visible "switched-on but not interacted-with" state.
 //!
-//! The structural rule, derived from inspection of medical, MFD, and door
-//! canvases:
+//! Two structural patterns name the cold-default state variable.  Both
+//! resolve to the same variable on canvases that use both (e.g. the wall
+//! medbay canvas which has Header bound via Invert(Or) AND child canvases
+//! bound via direct variables):
 //!
-//! > The state variable whose **inverted** value gates the `Instantiated`
-//! > (or `IsActive`) field of a framing widget (Header / Footer / always-on
-//! > sibling) is the canvas's idle / cold-default.  If the inverted operand
-//! > is an `EvaluateOr`, the **first** input of the Or is the cold default
-//! > (Or convention: list states in idle-priority order).
+//! 1. **Invert-of-Or framing-widget pattern**: a framing widget (Header /
+//!    Footer / always-on sibling) gates its `Instantiated` on
+//!    `Invert(EvaluateOr(state1, state2, …))` — visible only when no active
+//!    state is selected.  The *first* input of the Or is the cold-default
+//!    (Or convention: list states in idle-priority order).  A plain
+//!    `Invert(SingleVariable)` is a single-flag hide gate, NOT this
+//!    pattern, and never triggers an idle-default.
 //!
-//! When no other variable in the same dotted-prefix group has an explicit
-//! static-true override, this idle-gate variable defaults to `true`.
+//! 2. **Direct-variable scene-order pattern**: a sibling `WidgetCanvas`
+//!    has `Instantiated = SingleVariable` (direct, no Or).  Scanning
+//!    `operations[]` in order (which matches scene-child order), the
+//!    *first* such state-group variable referenced is the cold-default.
+//!    This handles canvases like `I_Med_MedicalBed_A` where every state
+//!    sub-canvas has a direct variable and no framing widget uses the
+//!    Invert(Or) pattern.
+//!
+//! In both patterns the candidate must belong to a *mutual-exclusion
+//! group* — a set of `BindingsBooleanVariable` bindings sharing the same
+//! dotted prefix (e.g. `Bed/state.BaseScreens.*`).  The cold-default is
+//! applied only when no other group member has an explicit static-true
+//! override.  Capability flags (`_SV` suffix) are excluded from group
+//! membership.
 
 use std::collections::{HashMap, HashSet};
 
@@ -222,8 +238,42 @@ fn apply_idle_defaults(
         }
     }
 
-    // Collect idle-gate candidates: (cold-default binding, all group members).
+    // Collect cold-default candidates from both structural patterns:
+    //   1. Invert-of-Or framing-widget pattern (Header hidden when ANY state)
+    //   2. Direct-variable scene-order pattern (sibling canvas gated by a
+    //      single state variable; first such in operations order is default)
+    //
+    // Group membership for a state-group is detected by inspecting all
+    // `BindingsBooleanVariable` ops in `operations[]` and grouping by the
+    // dotted prefix of their `binding`.  A group must contain ≥2 variables
+    // to qualify (a single variable is not a mutual-exclusion group).
+    let mut group_index: HashMap<String, Vec<String>> = HashMap::new();
+    for op in ops {
+        let ty = op.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
+        if ty != "BuildingBlocks_BindingsBooleanVariable" {
+            continue;
+        }
+        let Some(name) = op.get("binding").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if name.ends_with("_SV") {
+            continue;
+        }
+        let Some((prefix, _)) = name.rsplit_once('.') else {
+            continue;
+        };
+        let bucket = group_index.entry(prefix.to_owned()).or_default();
+        if !bucket.iter().any(|s| s == name) {
+            bucket.push(name.to_owned());
+        }
+    }
+    // Retain only prefixes with ≥2 distinct member variables.
+    group_index.retain(|_, v| v.len() >= 2);
+
+    // `seen_prefix` ensures we record only the FIRST candidate per group.
+    let mut seen_prefix: HashSet<String> = HashSet::new();
     let mut candidates: Vec<(String, Vec<String>)> = Vec::new();
+
     for op in ops {
         let ty = op.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
         if ty != "BuildingBlocks_BindingsBooleanField" {
@@ -240,8 +290,6 @@ fn apply_idle_defaults(
         else {
             continue;
         };
-        // The input must be an Invert (the framing widget is hidden when the
-        // idle-gate state is true).
         let Some(input_op) = ptr_to_op.get(&input_ptr) else {
             continue;
         };
@@ -249,39 +297,56 @@ fn apply_idle_defaults(
             .get("_Type_")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        if input_ty != "BuildingBlocks_BindingsBooleanInvert" {
-            continue;
-        }
-        let Some(inner_ptr) = input_op
-            .get("input")
-            .and_then(|v| v.as_str())
-            .and_then(parse_points_to_ptr)
-        else {
+
+        // Pattern detection: figure out the candidate variable name.
+        let cold_default: Option<String> = match input_ty {
+            // Pattern 1: Invert(EvaluateOr(Var1, Var2, ...)) → Var1 is default.
+            // A plain Invert(SingleVariable) is a single-flag hide gate, not
+            // an idle-default candidate; skipped here.
+            "BuildingBlocks_BindingsBooleanInvert" => {
+                let inner_ptr = input_op
+                    .get("input")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_points_to_ptr);
+                let inner_ty = inner_ptr
+                    .and_then(|p| ptr_to_op.get(&p))
+                    .and_then(|o| o.get("_Type_"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if inner_ty == "BuildingBlocks_BindingsBooleanEvaluateOr" {
+                    let mut visited = HashSet::new();
+                    let vars = resolve_vars(inner_ptr.unwrap(), &ptr_to_op, &mut visited);
+                    vars.into_iter().next()
+                } else {
+                    None
+                }
+            }
+            // Pattern 2: direct SingleVariable → that variable, if it belongs
+            // to a recognized state-group.
+            "BuildingBlocks_BindingsBooleanVariable" => input_op
+                .get("binding")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty() && !s.ends_with("_SV"))
+                .map(|s| s.to_owned()),
+            _ => None,
+        };
+
+        let Some(name) = cold_default else { continue };
+        let Some((prefix, _)) = name.rsplit_once('.') else {
             continue;
         };
-        // Structural rule: the idle-default pattern is
-        // `Instantiated = Invert(EvaluateOr(Var1, Var2, ...))` where the Or
-        // operands enumerate all active states for a mutual-exclusion group.
-        // Hiding when ANY is active means the framing widget is the *idle*
-        // state; the FIRST operand names the cold-default.
-        //
-        // A plain `Invert(SingleVariable)` is a different pattern: it gates a
-        // framing widget that is hidden when one specific flag is set (e.g.
-        // a loading/error overlay).  The variable must stay `false` so the
-        // framing widget remains visible at idle.  Skip those here.
-        let inner_ty = ptr_to_op
-            .get(&inner_ptr)
-            .and_then(|o| o.get("_Type_"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if inner_ty != "BuildingBlocks_BindingsBooleanEvaluateOr" {
+        // Must be a recognized multi-member state group.
+        let Some(group_members) = group_index.get(prefix) else {
+            continue;
+        };
+        // Only the first candidate per group wins (operations order ≈ scene
+        // order; the framing-widget Invert pattern is processed in the same
+        // pass and naturally precedes state-child direct-variable patterns
+        // when both are present).
+        if !seen_prefix.insert(prefix.to_owned()) {
             continue;
         }
-        let mut visited = HashSet::new();
-        let group_members = resolve_vars(inner_ptr, &ptr_to_op, &mut visited);
-        if let Some(cold_default) = group_members.first().cloned() {
-            candidates.push((cold_default, group_members));
-        }
+        candidates.push((name, group_members.clone()));
     }
 
     // For each candidate, apply only if no group member has an explicit
@@ -484,21 +549,34 @@ mod tests {
     /// A `_SV`-suffixed capability flag in `staticVariables` must NOT activate
     /// the same-named active-mode bool.  This is the wall-medbay case:
     /// `state.Admin_SV=true` is a capability flag, NOT an Admin-state activator.
+    ///
+    /// Scaffold: include an Invert(EvaluateOr) framing-widget pattern that
+    /// names Attract as the cold-default (matches real wall medbay shape) so
+    /// the direct-variable scene-order rule does NOT promote Admin.
     #[test]
     fn sv_capability_flag_does_not_activate_active_mode() {
         let rv = make_record_value(
             vec![static_var("state.Admin_SV", true)],
             vec![
-                variable_op(10, "state.Admin"),
-                boolean_field_op(5, 10),
-                // Idle-gate so apply_idle_defaults does not default Admin to true:
+                // Cold-default chain: Invert(Or(Attract, LogIn)) → Attract is
+                // first Or operand → cold-default = Attract.
                 variable_op(20, "state.Attract"),
+                variable_op(30, "state.LogIn"),
+                json!({
+                    "_Pointer_": "ptr:23",
+                    "_Type_": "BuildingBlocks_BindingsBooleanEvaluateOr",
+                    "inputs": ["_PointsTo_:ptr:20", "_PointsTo_:ptr:30"]
+                }),
                 json!({
                     "_Pointer_": "ptr:22",
                     "_Type_": "BuildingBlocks_BindingsBooleanInvert",
-                    "input": "_PointsTo_:ptr:20"
+                    "input": "_PointsTo_:ptr:23"
                 }),
-                boolean_field_op(21, 22), // Header hidden when Attract=true
+                boolean_field_op(21, 22), // Header hidden when Or(Attract, LogIn) is true
+                // Admin sub-canvas gated by direct variable; should remain
+                // false (Attract is the cold-default for the group).
+                variable_op(10, "state.Admin"),
+                boolean_field_op(5, 10),
             ],
         );
         let result = instantiated_false_widgets(&rv);
@@ -614,7 +692,57 @@ mod tests {
         );
     }
 
-    /// Idle-default rule with `EvaluateOr`: when the inverted operand is
+    /// Direct-variable scene-order rule: when sibling WidgetCanvases each
+    /// bind `Instantiated` to a SingleVariable (no Invert/Or framing), and
+    /// those variables share a dotted prefix forming a state-group, the
+    /// FIRST such field op in operations order names the cold-default.
+    ///
+    /// This is the overhead-medbay (`I_Med_MedicalBed_A`) shape: Attract,
+    /// MainMenu, Heal canvases each gated directly by their state variable
+    /// with no framing-widget Invert(Or).
+    #[test]
+    fn direct_variable_scene_order_picks_first_as_cold_default() {
+        // ptr:3 = Attract, ptr:4 = MainMenu, ptr:7 = Heal
+        // ptr:5 (AttractCanvas) bound to ptr:3
+        // ptr:6 (MainMenuCanvas) bound to ptr:4
+        // ptr:8 (HealCanvas) bound to ptr:7
+        let rv = make_record_value(
+            vec![],
+            vec![
+                variable_op(3, "state.BaseScreens.Attract"),
+                variable_op(4, "state.BaseScreens.MainMenu"),
+                variable_op(7, "state.BaseScreens.Heal"),
+                boolean_field_op(5, 3),
+                boolean_field_op(6, 4),
+                boolean_field_op(8, 7),
+            ],
+        );
+        let result = instantiated_false_widgets(&rv);
+        assert!(!result.contains(&5), "AttractCanvas (ptr:5) shown — first direct-variable in group is cold-default");
+        assert!(result.contains(&6), "MainMenuCanvas (ptr:6) hidden — not the cold-default");
+        assert!(result.contains(&8), "HealCanvas (ptr:8) hidden — not the cold-default");
+    }
+
+    /// Direct-variable rule requires a group of ≥2 same-prefix variables.
+    /// A single-member group (just `state.X` with no siblings) must NOT be
+    /// elected — it's likely a single hide/show flag, not a state-machine.
+    #[test]
+    fn direct_variable_singleton_group_not_promoted() {
+        let rv = make_record_value(
+            vec![],
+            vec![
+                variable_op(3, "state.LonelyFlag"),
+                boolean_field_op(5, 3),
+            ],
+        );
+        let result = instantiated_false_widgets(&rv);
+        assert!(
+            result.contains(&5),
+            "Singleton-group canvas (ptr:5) must remain filtered — no other group members to make it a state-machine"
+        );
+    }
+
+
     /// `Or(Attract, LogIn)`, the FIRST operand (Attract) is the cold-default;
     /// LogIn defaults to false.  This matches the wall medbay shape.
     #[test]
