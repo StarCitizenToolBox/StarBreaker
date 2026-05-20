@@ -196,9 +196,26 @@ fn layout_node(
     let Some(node) = scene.nodes.get(&node_id) else { return };
 
     // ── 1. Resolve outer dimensions ─────────────────────────────────────────
-
-    let outer_w = resolve_value(&node.sizing.width, parent_inner.w, parent_inner.h, csx, true);
-    let outer_h = resolve_value(&node.sizing.height, parent_inner.h, parent_inner.w, csy, false);
+    //
+    // Two-pass resolve: a `PercentOfX` height or `PercentOfY` width is a
+    // percentage of THIS NODE's OTHER axis, not the parent's other axis.
+    // First compute each axis using parent's other-axis as cross_dim (naïve);
+    // then re-resolve any cross-axis behaviour using the node's own naïve
+    // opposite dimension. This handles the common "square icon" idiom
+    // (e.g. `width: Percent(0.8), height: PercentOfX(1.0)`) correctly while
+    // remaining a no-op for non-cross-axis sizing.
+    let naive_w = resolve_value(&node.sizing.width, parent_inner.w, parent_inner.h, csx, true);
+    let naive_h = resolve_value(&node.sizing.height, parent_inner.h, parent_inner.w, csy, false);
+    let outer_w = if matches!(node.sizing.width, BbValue::Other { ref behavior, .. } if behavior == "PercentOfY") {
+        resolve_value(&node.sizing.width, parent_inner.w, naive_h, csx, true)
+    } else {
+        naive_w
+    };
+    let outer_h = if matches!(node.sizing.height, BbValue::Other { ref behavior, .. } if behavior == "PercentOfX") {
+        resolve_value(&node.sizing.height, parent_inner.h, naive_w, csy, false)
+    } else {
+        naive_h
+    };
 
     // ── 2. Anchor / pivot / position ────────────────────────────────────────
     //
@@ -598,6 +615,98 @@ mod tests {
             .unwrap_or_else(|e| panic!("cannot read fixture {name}: {e}"));
         serde_json::from_str(&text)
             .unwrap_or_else(|e| panic!("cannot parse fixture {name}: {e}"))
+    }
+
+    /// R5.I-A: `PercentOfX` height (and `PercentOfY` width) must be evaluated
+    /// against THIS NODE's OWN other-axis dimension, not the parent's other
+    /// dimension. A square icon authored as
+    /// `width: Percent(0.8), height: PercentOfX(1.0)` inside a 200×400 parent
+    /// must be 160×160, not 160×200.
+    #[test]
+    fn percent_of_x_uses_own_width_not_parent() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let parent = BbNode {
+            id: 1, parent: None, children: vec![2],
+            ty: BbNodeType::DisplayWidget, name: "parent".into(),
+            style_tag_uuids: vec![], is_active: true, layer: 0, alpha: 1.0,
+            position: Vec3::default(), position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(200.0), height: BbValue::Fixed(400.0) },
+            padding: BbTrbl::default(), margin: BbTrbl::default(),
+            pivot: Vec2::default(), anchor: Vec2::default(),
+            background: None, border: None, radial: None, text: None, icon: None,
+            raw: serde_json::Value::Null,
+        };
+        let child = BbNode {
+            id: 2, parent: Some(1), children: vec![],
+            ty: BbNodeType::WidgetIcon, name: "icon".into(),
+            style_tag_uuids: vec![], is_active: true, layer: 0, alpha: 1.0,
+            position: Vec3::default(), position_offset: Vec3::default(),
+            sizing: BbSizing {
+                width: BbValue::Percent(0.8),
+                height: BbValue::Other { value: 1.0, behavior: "PercentOfX".into() },
+            },
+            padding: BbTrbl::default(), margin: BbTrbl::default(),
+            pivot: Vec2::default(), anchor: Vec2::default(),
+            background: None, border: None, radial: None, text: None, icon: None,
+            raw: serde_json::Value::Null,
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, parent);
+        nodes.insert(2, child);
+        let scene = BbScene { canvas_size: (200.0, 400.0), roots: vec![1], nodes, operations: vec![] };
+
+        let result = layout(&scene, 200, 400);
+        let r = result.rects[&2];
+        // width = 0.8 × parent_w(200) = 160
+        // height = 1.0 × own_w(160)   = 160   (NOT 1.0 × parent_w(200) = 200 or × parent_h(400))
+        assert!((r.w - 160.0).abs() < 0.5, "expected width ≈ 160, got {}", r.w);
+        assert!((r.h - 160.0).abs() < 0.5, "expected height ≈ 160 (square), got {}", r.h);
+    }
+
+    /// Mirror of above: `PercentOfY` for width must use own height.
+    #[test]
+    fn percent_of_y_uses_own_height_not_parent() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let parent = BbNode {
+            id: 1, parent: None, children: vec![2],
+            ty: BbNodeType::DisplayWidget, name: "parent".into(),
+            style_tag_uuids: vec![], is_active: true, layer: 0, alpha: 1.0,
+            position: Vec3::default(), position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(400.0), height: BbValue::Fixed(200.0) },
+            padding: BbTrbl::default(), margin: BbTrbl::default(),
+            pivot: Vec2::default(), anchor: Vec2::default(),
+            background: None, border: None, radial: None, text: None, icon: None,
+            raw: serde_json::Value::Null,
+        };
+        let child = BbNode {
+            id: 2, parent: Some(1), children: vec![],
+            ty: BbNodeType::WidgetIcon, name: "icon".into(),
+            style_tag_uuids: vec![], is_active: true, layer: 0, alpha: 1.0,
+            position: Vec3::default(), position_offset: Vec3::default(),
+            sizing: BbSizing {
+                width: BbValue::Other { value: 1.0, behavior: "PercentOfY".into() },
+                height: BbValue::Percent(0.6),
+            },
+            padding: BbTrbl::default(), margin: BbTrbl::default(),
+            pivot: Vec2::default(), anchor: Vec2::default(),
+            background: None, border: None, radial: None, text: None, icon: None,
+            raw: serde_json::Value::Null,
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, parent);
+        nodes.insert(2, child);
+        let scene = BbScene { canvas_size: (400.0, 200.0), roots: vec![1], nodes, operations: vec![] };
+
+        let result = layout(&scene, 400, 200);
+        let r = result.rects[&2];
+        // height = 0.6 × parent_h(200) = 120
+        // width  = 1.0 × own_h(120)    = 120  (NOT 1.0 × parent_h(200) or × parent_w(400))
+        assert!((r.h - 120.0).abs() < 0.5, "expected height ≈ 120, got {}", r.h);
+        assert!((r.w - 120.0).abs() < 0.5, "expected width ≈ 120 (square), got {}", r.w);
     }
 
     // ── A1.6 — fixture-based layout tests ────────────────────────────────────
