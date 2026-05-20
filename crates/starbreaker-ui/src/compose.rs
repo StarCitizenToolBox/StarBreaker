@@ -450,8 +450,31 @@ fn draw_raw_asset(
     pixmap: &mut Pixmap,
     alpha: f32,
 ) -> bool {
-    let svg_path_raw = node.raw.get("SvgPath").and_then(|v| v.as_str());
-    let img_path_raw = node.raw.get("ImagePath").and_then(|v| v.as_str());
+    // Two field-name conventions exist:
+    //  * Brand-style modifiers write PascalCase (`SvgPath`, `ImagePath`) — those
+    //    are the FieldModifier name authored in `embeddedStyles[].modifiers[].field`.
+    //  * Authored widget data uses camelCase (`svgPath`, `imagePath`) at the
+    //    widget's top level (and `svgFill.svgPath` for the SvgFill slot).
+    // Read both; brand-applied (PascalCase) takes priority, falling back to
+    // authored (camelCase top-level) and finally the `svgFill.svgPath` slot.
+    let svg_path_raw = node
+        .raw
+        .get("SvgPath")
+        .and_then(|v| v.as_str())
+        .or_else(|| node.raw.get("svgPath").and_then(|v| v.as_str()))
+        .or_else(|| {
+            node.raw
+                .get("svgFill")
+                .and_then(|s| s.get("svgPath"))
+                .and_then(|v| v.as_str())
+        })
+        .filter(|s| !s.is_empty());
+    let img_path_raw = node
+        .raw
+        .get("ImagePath")
+        .and_then(|v| v.as_str())
+        .or_else(|| node.raw.get("imagePath").and_then(|v| v.as_str()))
+        .filter(|s| !s.is_empty());
 
     if svg_path_raw.is_none() && img_path_raw.is_none() {
         return false;
