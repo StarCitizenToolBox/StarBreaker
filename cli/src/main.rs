@@ -11,6 +11,7 @@ mod nmc;
 mod p4k;
 mod skin;
 mod socpak;
+mod swf;
 mod wwise;
 
 use clap::{Parser, Subcommand};
@@ -138,6 +139,11 @@ enum Command {
         #[command(subcommand)]
         command: wwise::WwiseCommand,
     },
+    /// SWF / GFX operations (font extraction)
+    Swf {
+        #[command(subcommand)]
+        command: swf::SwfCommand,
+    },
     /// NMC (Node Mesh Combo) chunk inspection from `.cga` / `.cgf` files
     Nmc {
         #[command(subcommand)]
@@ -174,6 +180,7 @@ fn main() {
         Command::Glb { command } => command.run(),
         Command::Chf { command } => command.run(),
         Command::Wwise { command } => command.run(),
+        Command::Swf { command } => command.run(),
         Command::Nmc { command } => command.run(),
     };
 

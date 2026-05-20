@@ -4,6 +4,7 @@ use starbreaker_cryxml::CryXmlError;
 use starbreaker_datacore::error::{ExportError, QueryError};
 use starbreaker_dds::DdsError;
 use starbreaker_p4k::P4kError;
+use starbreaker_swf::SwfError;
 use starbreaker_wem::WemError;
 use starbreaker_wwise::BnkError;
 
@@ -29,6 +30,8 @@ pub enum CliError {
     Wem(#[from] WemError),
     #[error(transparent)]
     CryXml(#[from] CryXmlError),
+    #[error(transparent)]
+    Swf(#[from] SwfError),
     #[error(transparent)]
     Chf(#[from] ChfError),
     #[error(transparent)]

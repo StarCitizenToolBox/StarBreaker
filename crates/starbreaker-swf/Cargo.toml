@@ -1,0 +1,16 @@
+[package]
+name = "starbreaker-swf"
+version.workspace = true
+edition = "2024"
+
+[dependencies]
+swf = "0.2"
+write-fonts = "0.48"
+kurbo = "0.13"
+thiserror = "2"
+
+[dev-dependencies]
+anyhow = "1"
+ttf-parser = "0.25"
+tiny-skia = "0.11"
+image = { version = "0.25", default-features = false, features = ["png"] }
