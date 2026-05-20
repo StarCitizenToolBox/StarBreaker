@@ -4,15 +4,19 @@
 //! to nodes in a `BbScene` by matching `conditionsList` tags against node
 //! `style_tag_uuids`.
 //!
-//! # Tag-matching algorithm
+//! # Condition-matching algorithm
 //! An entry matches a node when there exists at least one `conditionsList[i]` such
-//! that **every** `conditions[j].tag._RecordId_` is in the node's `style_tag_uuids`.
+//! that **every** `conditions[j]` item passes. Each condition item is one of:
+//! - `BuildingBlocks_StyleSelectorConditionTag` — `tag._RecordId_` must be in
+//!   `node.style_tag_uuids`.
+//! - `BuildingBlocks_StyleSelectorConditionType` — `type` string must match the
+//!   node widget type (e.g. `"Image"` → `WidgetImage`).
 //! An entry with EMPTY or ABSENT `conditionsList` matches **every** node
 //! (unconditional defaults).
 
 use crate::bb_brand_style::BrandStyle;
 use crate::bb_loc::LocFetcher;
-use crate::bb_scene::{BbBorder, BbNode, BbScene, BbValue};
+use crate::bb_scene::{BbBorder, BbNode, BbNodeType, BbScene, BbValue};
 
 /// Apply brand-style modifiers to a scene.
 ///
@@ -45,7 +49,7 @@ pub fn apply_brand_modifiers(
 /// An entry matches when:
 /// - Its `conditionsList` is absent or empty (unconditional), OR
 /// - There exists at least one `conditionsList[i]` such that **all**
-///   `conditions[j].tag._RecordId_` are in `node.style_tag_uuids`.
+///   `conditions[j]` items pass (tag UUIDs present AND widget-type matches).
 fn entry_matches_node(entry: &serde_json::Value, node: &BbNode) -> bool {
     let conditions_list = match entry.get("conditionsList").and_then(|v| v.as_array()) {
         Some(cl) => cl,
@@ -56,7 +60,7 @@ fn entry_matches_node(entry: &serde_json::Value, node: &BbNode) -> bool {
         return true; // Empty array → matches all nodes.
     }
 
-    // For each conditions block, check if all tags are present on the node.
+    // For each conditions block, check if all conditions pass for this node.
     for conditions_block in conditions_list {
         let conditions = match conditions_block
             .get("conditions")
@@ -66,24 +70,54 @@ fn entry_matches_node(entry: &serde_json::Value, node: &BbNode) -> bool {
             None => continue,
         };
 
-        let all_tags_match = conditions.iter().all(|cond| {
-            if let Some(tag_id) = cond
-                .get("tag")
-                .and_then(|t| t.get("_RecordId_"))
-                .and_then(|r| r.as_str())
-            {
-                node.style_tag_uuids.contains(&tag_id.to_string())
+        let all_conditions_pass = conditions.iter().all(|cond| {
+            let cond_type = cond.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
+            if cond_type.ends_with("ConditionTag") || cond.get("tag").is_some() {
+                // Tag condition: the tag UUID must be in node.style_tag_uuids.
+                if let Some(tag_id) = cond
+                    .get("tag")
+                    .and_then(|t| t.get("_RecordId_"))
+                    .and_then(|r| r.as_str())
+                {
+                    node.style_tag_uuids.contains(&tag_id.to_string())
+                } else {
+                    false
+                }
+            } else if cond_type.ends_with("ConditionType") {
+                // Type condition: node widget type must match the type string.
+                if let Some(type_str) = cond.get("type").and_then(|v| v.as_str()) {
+                    node_type_matches(type_str, &node.ty)
+                } else {
+                    true // No type specified → pass.
+                }
             } else {
+                // Unknown condition kind → conservative fail.
                 false
             }
         });
 
-        if all_tags_match {
+        if all_conditions_pass {
             return true; // At least one conditions block fully matched.
         }
     }
 
     false
+}
+
+/// Return `true` when `type_str` from a `ConditionType` entry matches the node type.
+///
+/// Maps the game's short widget-family names (e.g. `"Image"`) to our `BbNodeType`
+/// variants.  Unknown type strings return `false`.
+fn node_type_matches(type_str: &str, ty: &BbNodeType) -> bool {
+    match type_str {
+        "Image" => matches!(ty, BbNodeType::WidgetImage),
+        "Text" => matches!(ty, BbNodeType::WidgetText | BbNodeType::WidgetTextField),
+        "Canvas" => matches!(ty, BbNodeType::WidgetCanvas),
+        "Icon" => matches!(ty, BbNodeType::WidgetIcon),
+        "Card" => matches!(ty, BbNodeType::WidgetCard),
+        "DisplayWidget" => matches!(ty, BbNodeType::DisplayWidget),
+        _ => false,
+    }
 }
 
 /// Apply all modifiers from a matching entry to a node.
@@ -783,5 +817,175 @@ mod tests {
         let node = scene.nodes.get(&1).unwrap();
         assert_eq!(node.sizing.width, BbValue::Fixed(640.0));
         assert_eq!(node.sizing.height, BbValue::Fixed(480.0));
+    }
+
+    #[test]
+    fn test_type_condition_matches_widget_image() {
+        // ConditionType "Image" must match a WidgetImage node.
+        let mut scene = make_test_scene(); // node ty = WidgetImage
+        let brand = BrandStyle {
+            identifier: "test_brand".to_string(),
+            entries: &[json!({
+                "conditionsList": [
+                    {
+                        "_Type_": "BuildingBlocks_StyleConditionList",
+                        "conditions": [
+                            {
+                                "_Type_": "BuildingBlocks_StyleSelectorConditionType",
+                                "type": "Image"
+                            }
+                        ]
+                    }
+                ],
+                "modifiers": [
+                    {
+                        "field": {
+                            "_Type_": "BuildingBlocks_FieldModifierString",
+                            "field": "ImagePath",
+                            "value": "UI/Textures/test_image.tif"
+                        }
+                    }
+                ]
+            })],
+            raw: &json!({}),
+        };
+
+        apply_brand_modifiers(&mut scene, &brand, None);
+
+        let node = scene.nodes.get(&1).unwrap();
+        assert_eq!(
+            node.raw.get("ImagePath").and_then(|v| v.as_str()),
+            Some("UI/Textures/test_image.tif"),
+            "ConditionType 'Image' must match WidgetImage node"
+        );
+    }
+
+    #[test]
+    fn test_type_condition_no_match_wrong_type() {
+        // ConditionType "Text" must NOT match a WidgetImage node.
+        let mut scene = make_test_scene(); // node ty = WidgetImage
+        let brand = BrandStyle {
+            identifier: "test_brand".to_string(),
+            entries: &[json!({
+                "conditionsList": [
+                    {
+                        "_Type_": "BuildingBlocks_StyleConditionList",
+                        "conditions": [
+                            {
+                                "_Type_": "BuildingBlocks_StyleSelectorConditionType",
+                                "type": "Text"
+                            }
+                        ]
+                    }
+                ],
+                "modifiers": [
+                    {
+                        "field": {
+                            "_Type_": "BuildingBlocks_FieldModifierString",
+                            "field": "ImagePath",
+                            "value": "UI/Textures/should_not_apply.tif"
+                        }
+                    }
+                ]
+            })],
+            raw: &json!({}),
+        };
+
+        apply_brand_modifiers(&mut scene, &brand, None);
+
+        let node = scene.nodes.get(&1).unwrap();
+        assert!(
+            node.raw.get("ImagePath").is_none(),
+            "ConditionType 'Text' must NOT match WidgetImage node"
+        );
+    }
+
+    #[test]
+    fn test_mixed_type_and_tag_condition_matches() {
+        // Mixed AllOf condition: ConditionType "Image" + ConditionTag must both pass.
+        let mut scene = make_test_scene(); // WidgetImage, style_tag_uuids = ["tag-uuid-1"]
+        let brand = BrandStyle {
+            identifier: "test_brand".to_string(),
+            entries: &[json!({
+                "conditionsList": [
+                    {
+                        "_Type_": "BuildingBlocks_StyleSelectorConditionAllOfCondition",
+                        "conditions": [
+                            {
+                                "_Type_": "BuildingBlocks_StyleSelectorConditionType",
+                                "type": "Image"
+                            },
+                            {
+                                "_Type_": "BuildingBlocks_StyleSelectorConditionTag",
+                                "tag": { "_RecordId_": "tag-uuid-1" }
+                            }
+                        ]
+                    }
+                ],
+                "modifiers": [
+                    {
+                        "field": {
+                            "_Type_": "BuildingBlocks_FieldModifierString",
+                            "field": "ImagePath",
+                            "value": "UI/Textures/DRAK_Background.tif"
+                        }
+                    }
+                ]
+            })],
+            raw: &json!({}),
+        };
+
+        apply_brand_modifiers(&mut scene, &brand, None);
+
+        let node = scene.nodes.get(&1).unwrap();
+        assert_eq!(
+            node.raw.get("ImagePath").and_then(|v| v.as_str()),
+            Some("UI/Textures/DRAK_Background.tif"),
+            "Mixed type+tag condition must match WidgetImage with matching tag"
+        );
+    }
+
+    #[test]
+    fn test_mixed_type_and_tag_condition_tag_mismatch() {
+        // Mixed AllOf: type matches but tag doesn't → should NOT apply.
+        let mut scene = make_test_scene(); // WidgetImage, tag = "tag-uuid-1"
+        let brand = BrandStyle {
+            identifier: "test_brand".to_string(),
+            entries: &[json!({
+                "conditionsList": [
+                    {
+                        "_Type_": "BuildingBlocks_StyleSelectorConditionAllOfCondition",
+                        "conditions": [
+                            {
+                                "_Type_": "BuildingBlocks_StyleSelectorConditionType",
+                                "type": "Image"
+                            },
+                            {
+                                "_Type_": "BuildingBlocks_StyleSelectorConditionTag",
+                                "tag": { "_RecordId_": "wrong-tag" }
+                            }
+                        ]
+                    }
+                ],
+                "modifiers": [
+                    {
+                        "field": {
+                            "_Type_": "BuildingBlocks_FieldModifierString",
+                            "field": "ImagePath",
+                            "value": "UI/Textures/should_not_apply.tif"
+                        }
+                    }
+                ]
+            })],
+            raw: &json!({}),
+        };
+
+        apply_brand_modifiers(&mut scene, &brand, None);
+
+        let node = scene.nodes.get(&1).unwrap();
+        assert!(
+            node.raw.get("ImagePath").is_none(),
+            "Mixed type+tag condition must NOT match when tag is wrong"
+        );
     }
 }
