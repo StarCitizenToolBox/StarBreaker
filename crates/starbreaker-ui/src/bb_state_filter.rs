@@ -44,18 +44,17 @@
 //! selection to the C++ runtime), the static export must still pick one
 //! sub-canvas as the visible "switched-on but not interacted-with" state.
 //!
-//! Two structural patterns name the cold-default state variable.  Both
-//! resolve to the same variable on canvases that use both (e.g. the wall
-//! medbay canvas which has Header bound via Invert(Or) AND child canvases
-//! bound via direct variables):
+//! Two structural patterns name the cold-default state variable(s):
 //!
 //! 1. **Invert-of-Or framing-widget pattern**: a framing widget (Header /
 //!    Footer / always-on sibling) gates its `Instantiated` on
 //!    `Invert(EvaluateOr(state1, state2, …))` — visible only when no active
-//!    state is selected.  The *first* input of the Or is the cold-default
-//!    (Or convention: list states in idle-priority order).  A plain
-//!    `Invert(SingleVariable)` is a single-flag hide gate, NOT this
-//!    pattern, and never triggers an idle-default.
+//!    state in that hidden-set is selected.  When Or operands also appear as
+//!    directly-gated sibling canvases, the first Or input remains the selected
+//!    idle overlay, but the framing widget itself is kept visible so authored
+//!    chrome can coexist with that overlay.  A plain `Invert(SingleVariable)`
+//!    is a single-flag hide gate, NOT this pattern, and never triggers an
+//!    idle-default.
 //!
 //! 2. **Direct-variable scene-order pattern**: a sibling `WidgetCanvas`
 //!    has `Instantiated = SingleVariable` (direct, no Or).  Scanning
@@ -122,13 +121,18 @@ pub fn instantiated_false_widgets(record_value: &serde_json::Value) -> HashSet<B
         else {
             continue;
         };
-        let val = op
+        let Some(input_ptr) = op
             .get("input")
             .and_then(|v| v.as_str())
             .and_then(parse_points_to_ptr)
-            .and_then(|inp| ptr_vals.get(&inp).copied())
-            .unwrap_or(true); // no binding or unknown expression → default true (show)
+        else {
+            continue;
+        };
+        let val = ptr_vals.get(&input_ptr).copied().unwrap_or(true); // no binding or unknown expression → default true (show)
         if !val {
+            if is_framing_hidden_set_field(input_ptr, widget, ops) {
+                continue;
+            }
             false_set.insert(widget);
         }
     }
@@ -174,15 +178,17 @@ fn parse_static_variables(record_value: &serde_json::Value) -> HashMap<String, b
 /// `Bed/state.BaseScreens` / `Standing/state.BaseScreens` prefix; in MFD
 /// canvases it is `eView_*` etc.
 ///
-/// The idle-gate variable is the one whose **inverted** form gates the
+/// The idle-gate variable set is the one whose **inverted** form gates the
 /// `Instantiated` (or `IsActive`) field of some widget — typically a Header
-/// or Footer that is hidden during the idle/attract state.
+/// or Footer that is hidden during selected startup overlays.
 ///
 /// **Structural requirement**: the Invert's inner operand must be a
 /// `BindingsBooleanEvaluateOr` over multiple variables (the active-state
-/// disjunction).  The *first* input of the Or names the cold-default.
-/// A plain `Invert(SingleVariable)` is a *different* pattern (single-flag
-/// hide gate) and never triggers an idle-default.
+/// hidden-set).  The first input of the Or names the cold-default. When the
+/// same Or operands also directly gate sibling canvases, the framing widget's
+/// own false result is ignored so chrome remains visible with the selected
+/// overlay. A plain `Invert(SingleVariable)` is a *different* pattern
+/// (single-flag hide gate) and never triggers an idle-default.
 fn apply_idle_defaults(
     ops: &[serde_json::Value],
     static_vals: &mut HashMap<String, bool>,
@@ -270,9 +276,9 @@ fn apply_idle_defaults(
     // Retain only prefixes with ≥2 distinct member variables.
     group_index.retain(|_, v| v.len() >= 2);
 
-    // `seen_prefix` ensures we record only the FIRST candidate per group.
+    // `seen_prefix` ensures we record only the FIRST candidate set per group.
     let mut seen_prefix: HashSet<String> = HashSet::new();
-    let mut candidates: Vec<(String, Vec<String>)> = Vec::new();
+    let mut candidates: Vec<(Vec<String>, Vec<String>)> = Vec::new();
 
     for op in ops {
         let ty = op.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
@@ -298,9 +304,10 @@ fn apply_idle_defaults(
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        // Pattern detection: figure out the candidate variable name.
-        let cold_default: Option<String> = match input_ty {
+        // Pattern detection: figure out the candidate variable name(s).
+        let cold_defaults: Vec<String> = match input_ty {
             // Pattern 1: Invert(EvaluateOr(Var1, Var2, ...)) → Var1 is default.
+            //
             // A plain Invert(SingleVariable) is a single-flag hide gate, not
             // an idle-default candidate; skipped here.
             "BuildingBlocks_BindingsBooleanInvert" => {
@@ -316,9 +323,9 @@ fn apply_idle_defaults(
                 if inner_ty == "BuildingBlocks_BindingsBooleanEvaluateOr" {
                     let mut visited = HashSet::new();
                     let vars = resolve_vars(inner_ptr.unwrap(), &ptr_to_op, &mut visited);
-                    vars.into_iter().next()
+                    vars.into_iter().take(1).collect()
                 } else {
-                    None
+                    Vec::new()
                 }
             }
             // Pattern 2: direct SingleVariable → that variable, if it belongs
@@ -327,35 +334,37 @@ fn apply_idle_defaults(
                 .get("binding")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty() && !s.ends_with("_SV"))
-                .map(|s| s.to_owned()),
-            _ => None,
+                .map(|s| vec![s.to_owned()])
+                .unwrap_or_default(),
+            _ => Vec::new(),
         };
 
-        let Some(name) = cold_default else { continue };
-        let Some((prefix, _)) = name.rsplit_once('.') else {
+        if cold_defaults.is_empty() {
+            continue;
+        }
+        let Some(prefix) = common_state_prefix(&cold_defaults) else {
             continue;
         };
         // Must be a recognized multi-member state group.
         let Some(group_members) = group_index.get(prefix) else {
             continue;
         };
-        // Only the first candidate per group wins (operations order ≈ scene
+        // Only the first candidate set per group wins (operations order ≈ scene
         // order; the framing-widget Invert pattern is processed in the same
         // pass and naturally precedes state-child direct-variable patterns
         // when both are present).
         if !seen_prefix.insert(prefix.to_owned()) {
             continue;
         }
-        candidates.push((name, group_members.clone()));
+        candidates.push((cold_defaults, group_members.clone()));
     }
 
-    // For each candidate, apply only if no group member has an explicit
+    // For each candidate set, apply only if no group member has an explicit
     // static override.  Group membership: variables that share the same
-    // dotted prefix as `cold_default`.
-    for (cold_default, group_members) in candidates {
-        let prefix = match cold_default.rsplit_once('.') {
-            Some((p, _)) => p,
-            None => continue, // ungrouped variable; skip
+    // dotted prefix as the cold-default candidate set.
+    for (cold_defaults, group_members) in candidates {
+        let Some(prefix) = common_state_prefix(&cold_defaults) else {
+            continue;
         };
         // Group includes both the resolved `group_members` (same Or chain)
         // and any other static-var name sharing the prefix.
@@ -373,8 +382,122 @@ fn apply_idle_defaults(
         }
         let any_explicit_override = group.iter().any(|m| static_vals.get(m).copied() == Some(true));
         if !any_explicit_override {
-            static_vals.entry(cold_default).or_insert(true);
+            for cold_default in cold_defaults {
+                static_vals.entry(cold_default).or_insert(true);
+            }
         }
+    }
+}
+
+fn is_framing_hidden_set_field(
+    input_ptr: BbNodeId,
+    widget_ptr: BbNodeId,
+    ops: &[serde_json::Value],
+) -> bool {
+    let mut ptr_to_op: HashMap<BbNodeId, &serde_json::Value> = HashMap::new();
+    for op in ops {
+        if let Some(p) = op
+            .get("_Pointer_")
+            .and_then(|v| v.as_str())
+            .and_then(parse_ptr_id)
+        {
+            ptr_to_op.insert(p, op);
+        }
+    }
+    let Some(input_op) = ptr_to_op.get(&input_ptr) else {
+        return false;
+    };
+    if input_op.get("_Type_").and_then(|v| v.as_str())
+        != Some("BuildingBlocks_BindingsBooleanInvert")
+    {
+        return false;
+    }
+    let Some(inner_ptr) = input_op
+        .get("input")
+        .and_then(|v| v.as_str())
+        .and_then(parse_points_to_ptr)
+    else {
+        return false;
+    };
+    let Some(inner_op) = ptr_to_op.get(&inner_ptr) else {
+        return false;
+    };
+    if inner_op.get("_Type_").and_then(|v| v.as_str())
+        != Some("BuildingBlocks_BindingsBooleanEvaluateOr")
+    {
+        return false;
+    }
+
+    let mut vars = HashSet::new();
+    if let Some(inputs) = inner_op.get("inputs").and_then(|v| v.as_array()) {
+        for inp in inputs {
+            if let Some(ptr) = inp.as_str().and_then(parse_points_to_ptr) {
+                if let Some(var_op) = ptr_to_op.get(&ptr) {
+                    if var_op.get("_Type_").and_then(|v| v.as_str())
+                        == Some("BuildingBlocks_BindingsBooleanVariable")
+                    {
+                        if let Some(binding) = var_op.get("binding").and_then(|v| v.as_str()) {
+                            vars.insert(binding.to_owned());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if vars.is_empty() {
+        return false;
+    }
+
+    for op in ops {
+        if op.get("_Type_").and_then(|v| v.as_str())
+            != Some("BuildingBlocks_BindingsBooleanField")
+        {
+            continue;
+        }
+        let Some(other_widget) = op
+            .get("widget")
+            .and_then(|v| v.as_str())
+            .and_then(parse_points_to_ptr)
+        else {
+            continue;
+        };
+        if other_widget == widget_ptr {
+            continue;
+        }
+        let Some(other_input) = op
+            .get("input")
+            .and_then(|v| v.as_str())
+            .and_then(parse_points_to_ptr)
+        else {
+            continue;
+        };
+        let Some(other_op) = ptr_to_op.get(&other_input) else {
+            continue;
+        };
+        if other_op.get("_Type_").and_then(|v| v.as_str())
+            != Some("BuildingBlocks_BindingsBooleanVariable")
+        {
+            continue;
+        }
+        if other_op
+            .get("binding")
+            .and_then(|v| v.as_str())
+            .is_some_and(|binding| vars.contains(binding))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn common_state_prefix(names: &[String]) -> Option<&str> {
+    let mut iter = names.iter();
+    let first = iter.next()?;
+    let (prefix, _) = first.rsplit_once('.')?;
+    if iter.all(|name| name.rsplit_once('.').is_some_and(|(p, _)| p == prefix)) {
+        Some(prefix)
+    } else {
+        None
     }
 }
 
@@ -743,14 +866,16 @@ mod tests {
     }
 
 
-    /// `Or(Attract, LogIn)`, the FIRST operand (Attract) is the cold-default;
-    /// LogIn defaults to false.  This matches the wall medbay shape.
+    /// If an `Invert(Or(...))` gate names directly-gated sibling canvases,
+    /// the first Or operand is still the idle overlay, but the framing canvas
+    /// itself remains visible so chrome/text can coexist with that overlay.
     #[test]
-    fn idle_gate_or_first_operand_is_cold_default() {
+    fn idle_gate_or_keeps_direct_sibling_framing_visible() {
+        // Mirrors the wall medbay shape:
         // ptr:3 = Attract, ptr:4 = LogIn, ptr:19 = Or(3, 4), ptr:6 = NOT(19)
-        // ptr:5 (Header) bound to ptr:6
-        // ptr:11 (LogInCanvas) bound to ptr:4 → must remain hidden
-        // ptr:8 (AttractCanvas) bound to ptr:3 → must be shown
+        // ptr:5 (Header) bound to ptr:6 → kept visible as framing chrome
+        // ptr:11 (LogInCanvas) bound to ptr:4 → hidden
+        // ptr:8 (AttractCanvas) bound to ptr:3 → shown as first Or operand
         let rv = make_record_value(
             vec![],
             vec![
@@ -767,14 +892,41 @@ mod tests {
                     "input": "_PointsTo_:ptr:19"
                 }),
                 boolean_field_op(5, 6),
+                // Direct-field order in the real wall canvas is LogIn, then Attract.
                 boolean_field_op(11, 4),
                 boolean_field_op(8, 3),
             ],
         );
         let result = instantiated_false_widgets(&rv);
-        assert!(result.contains(&5), "Header (ptr:5) hidden under idle (Attract=true)");
+        assert!(!result.contains(&5), "Header (ptr:5) shown as framing chrome despite Attract=true");
         assert!(result.contains(&11), "LogInCanvas (ptr:11) hidden (LogIn=false)");
-        assert!(!result.contains(&8), "AttractCanvas (ptr:8) shown (Attract=true cold default)");
+        assert!(!result.contains(&8), "AttractCanvas (ptr:8) shown (first Or operand)");
+    }
+
+    /// `Invert(Or(...))` still falls back to the first Or operand when the Or
+    /// operands do not have directly-gated sibling canvases.
+    #[test]
+    fn idle_gate_or_without_direct_siblings_uses_first_operand() {
+        let rv = make_record_value(
+            vec![],
+            vec![
+                variable_op(3, "state.Attract"),
+                variable_op(4, "state.LogIn"),
+                json!({
+                    "_Pointer_": "ptr:19",
+                    "_Type_": "BuildingBlocks_BindingsBooleanEvaluateOr",
+                    "inputs": ["_PointsTo_:ptr:3", "_PointsTo_:ptr:4"]
+                }),
+                json!({
+                    "_Pointer_": "ptr:6",
+                    "_Type_": "BuildingBlocks_BindingsBooleanInvert",
+                    "input": "_PointsTo_:ptr:19"
+                }),
+                boolean_field_op(5, 6),
+            ],
+        );
+        let result = instantiated_false_widgets(&rv);
+        assert!(result.contains(&5), "Header (ptr:5) hidden under first-operand idle default");
     }
 
     /// Explicit static-true override of any group member SUPPRESSES the
