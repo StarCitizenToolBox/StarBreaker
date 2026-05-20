@@ -525,9 +525,26 @@ fn draw_raw_asset(
 
     if let Some(raw_path) = img_path_raw {
         let norm = UiAssetResolver::normalise_path(raw_path);
+        let image_probe = std::env::var("BB_A3_IMAGE_PROBE").as_deref() == Ok("1");
+        if image_probe {
+            log::info!(
+                "A3-image-probe: node={} id=ptr:{} raw={:?} norm={:?}",
+                node.name,
+                node.id,
+                raw_path,
+                norm
+            );
+        }
         if !UiAssetResolver::is_reference_overlay(&norm) {
             if let Some(img) = atlas.resolve(&norm, iw, ih) {
                 blit_atlas_image(pixmap, &img, rect.x as i32, rect.y as i32, alpha);
+            } else if image_probe {
+                log::info!(
+                    "A3-image-probe: node={} id=ptr:{} atlas_miss norm={:?}",
+                    node.name,
+                    node.id,
+                    norm
+                );
             }
         }
         return true;

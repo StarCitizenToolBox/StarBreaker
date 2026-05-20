@@ -803,7 +803,7 @@ fn parse_points_to(s: &str) -> Option<BbNodeId> {
 
 fn parse_points_to_or_ptr(value: Option<&serde_json::Value>) -> Option<BbNodeId> {
     match value {
-        Some(serde_json::Value::String(s)) => parse_points_to(s),
+        Some(serde_json::Value::String(s)) => parse_points_to(s).or_else(|| parse_ptr(s)),
         Some(serde_json::Value::Object(obj)) => obj
             .get("_Pointer_")
             .and_then(|v| v.as_str())
@@ -887,5 +887,18 @@ mod tests {
         let raw = json!({"locString": "@LOC_EMPTY"});
         let result = resolver.resolve_text_detailed(0, &raw, &defaults);
         assert_eq!(result.text, "");
+    }
+
+    #[test]
+    fn synth_string_widget_ptr_string_maps_to_resolved_string() {
+        let resolver = BindingResolver::from_operations(&[json!({
+            "_Type_": "_SynthStringWidget_",
+            "widget": "ptr:4",
+            "resolvedString": "UI/Textures/I_InteractiveScreens/Med/i_med_bioc_menuoption_a.tif"
+        })]);
+        assert_eq!(
+            resolver.resolve_string_binding(4),
+            Some("UI/Textures/I_InteractiveScreens/Med/i_med_bioc_menuoption_a.tif")
+        );
     }
 }
