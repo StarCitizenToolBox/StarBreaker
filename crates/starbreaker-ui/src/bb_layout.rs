@@ -295,12 +295,10 @@ fn layout_node_with_rect(
     }
 
     // ── 5. Recurse into children ─────────────────────────────────────────────
-    // Sort children by (layer asc, id asc).
+    // Sort by layer only (stable) so authored sibling order is preserved for
+    // nodes sharing the same layer.
     let mut children: Vec<BbNodeId> = node.children.clone();
-    children.sort_by_key(|&child_id| {
-        let layer = scene.nodes.get(&child_id).map(|n| n.layer).unwrap_or(0);
-        (layer, child_id)
-    });
+    children.sort_by_key(|&child_id| scene.nodes.get(&child_id).map(|n| n.layer).unwrap_or(0));
 
     // Detect FlexContainer layout policy — if present, use flex layout instead
     // of overlay for child positioning.
@@ -376,6 +374,12 @@ fn layout_flex_children(
 
     for &child_id in children {
         let Some(child_node) = scene.nodes.get(&child_id) else { continue };
+        if !child_node.is_active {
+            // Keep inactive nodes laid out for diagnostics, but do not let them
+            // consume flex-flow slots that push active siblings off-screen.
+            overlay_non_flex.push(child_id);
+            continue;
+        }
         let affects_layout = child_node
             .raw
             .get("affectsLayout")
@@ -488,6 +492,15 @@ fn layout_flex_no_grow_children(
         .and_then(|v| v.as_str())
         .or_else(|| flex.get("itemAlignment").and_then(|v| v.as_str()))
         .unwrap_or("Stretch");
+    let wrap_enabled = flex
+        .get("wrap")
+        .and_then(|v| v.as_str())
+        .is_some_and(|w| w.eq_ignore_ascii_case("Wrap"));
+    let cross_spacing = if is_row {
+        flex.get("rowSpacing").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32 * csy
+    } else {
+        flex.get("columnSpacing").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32 * csx
+    };
 
     let mut sizes: Vec<(BbNodeId, f32, f32, bool)> = Vec::with_capacity(children.len());
     let mut total_main = 0.0f32;
@@ -533,6 +546,42 @@ fn layout_flex_no_grow_children(
         _ => 0.0,
     };
     let mut cursor = if is_row { container.x + main_offset } else { container.y + main_offset };
+    if wrap_enabled {
+        let mut cursor_x = container.x;
+        let mut cursor_y = container.y;
+        let mut line_cross = 0.0f32;
+        for (id, w, h, auto_main) in sizes {
+            if auto_main {
+                layout_node(id, container, scene, csx, csy, rects, draw_order);
+                continue;
+            }
+            let main = if is_row { w } else { h };
+            let cross = if is_row { h } else { w };
+            if is_row {
+                if cursor_x > container.x && cursor_x + w > container.x + container.w + 0.5 {
+                    cursor_x = container.x;
+                    cursor_y += line_cross + cross_spacing;
+                    line_cross = 0.0;
+                }
+                let ch = if cross_just.eq_ignore_ascii_case("stretch") { container.h } else { h };
+                let rect = Rect { x: cursor_x, y: cursor_y, w, h: ch };
+                layout_node_with_rect(id, rect, scene, csx, csy, rects, draw_order);
+                cursor_x += main + item_spacing;
+            } else {
+                if cursor_y > container.y && cursor_y + h > container.y + container.h + 0.5 {
+                    cursor_y = container.y;
+                    cursor_x += line_cross + cross_spacing;
+                    line_cross = 0.0;
+                }
+                let cw = if cross_just.eq_ignore_ascii_case("stretch") { container.w } else { w };
+                let rect = Rect { x: cursor_x, y: cursor_y, w: cw, h };
+                layout_node_with_rect(id, rect, scene, csx, csy, rects, draw_order);
+                cursor_y += main + item_spacing;
+            }
+            line_cross = line_cross.max(cross.max(0.0));
+        }
+        return;
+    }
     for (id, w, h, auto_main) in sizes {
         if auto_main {
             // Auto-sized text-like items still contribute spacing/alignment
@@ -856,6 +905,110 @@ mod tests {
         // width  = 1.0 × own_h(120)    = 120  (NOT 1.0 × parent_h(200) or × parent_w(400))
         assert!((r.h - 120.0).abs() < 0.5, "expected height ≈ 120, got {}", r.h);
         assert!((r.w - 120.0).abs() < 0.5, "expected width ≈ 120 (square), got {}", r.w);
+    }
+
+    #[test]
+    fn flex_row_wrap_moves_full_width_child_to_next_line() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let root = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![2, 3],
+            ty: BbNodeType::DisplayWidget,
+            name: "root".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(300.0), height: BbValue::Fixed(200.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({
+                "layoutPolicy": {
+                    "_Type_": "BuildingBlocks_FlexContainer",
+                    "direction": "Row",
+                    "wrap": "Wrap",
+                    "axisJustification": "Start",
+                    "crossAxisJustification": "Start",
+                    "columnSpacing": 0,
+                    "rowSpacing": 0
+                }
+            }),
+        };
+        let child1 = BbNode {
+            id: 2,
+            parent: Some(1),
+            children: vec![],
+            ty: BbNodeType::DisplayWidget,
+            name: "c1".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(300.0), height: BbValue::Fixed(50.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+        let child2 = BbNode {
+            id: 3,
+            parent: Some(1),
+            children: vec![],
+            ty: BbNodeType::DisplayWidget,
+            name: "c2".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(300.0), height: BbValue::Fixed(50.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, root);
+        nodes.insert(2, child1);
+        nodes.insert(3, child2);
+        let scene = BbScene { canvas_size: (300.0, 200.0), roots: vec![1], nodes, operations: vec![] };
+        let result = layout(&scene, 300, 200);
+        let r1 = result.rects[&2];
+        let r2 = result.rects[&3];
+        assert!((r1.x - 0.0).abs() < 0.5 && (r1.y - 0.0).abs() < 0.5);
+        assert!(
+            (r2.x - 0.0).abs() < 0.5 && (r2.y - 50.0).abs() < 0.5,
+            "second wrapped child expected at y=50, got ({:.1},{:.1})",
+            r2.x,
+            r2.y
+        );
     }
 
     // ── A1.6 — fixture-based layout tests ────────────────────────────────────

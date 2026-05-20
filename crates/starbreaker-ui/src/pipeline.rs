@@ -208,14 +208,20 @@ pub fn render_for_binding(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiErro
             type_counts,
         );
 
-        // Diagnostic node dump for a selected helper.
-        // Set BB_A3_PROBE=1 and BB_A3_PROBE_HELPER=<helper-name>.
+        // Diagnostic node dump for a selected helper or canvas GUID.
+        // Set BB_A3_PROBE=1 and either:
+        //   - BB_A3_PROBE_HELPER=<helper-name>
+        //   - BB_A3_PROBE_CANVAS_GUID=<canvas-guid>
         let probe_enabled = std::env::var("BB_A3_PROBE").as_deref() == Ok("1");
         let probe_helper = std::env::var("BB_A3_PROBE_HELPER").ok();
+        let probe_canvas_guid = std::env::var("BB_A3_PROBE_CANVAS_GUID").ok();
         let helper_matches = probe_helper
             .as_deref()
             .is_some_and(|h| b.helper_name == Some(h));
-        if probe_enabled && helper_matches {
+        let canvas_matches = probe_canvas_guid
+            .as_deref()
+            .is_some_and(|g| g.eq_ignore_ascii_case(effective_guid));
+        if probe_enabled && (helper_matches || canvas_matches) {
             let probe_layout =
                 crate::bb_layout::layout(scene, inputs.target_size.0, inputs.target_size.1);
             for (&node_id, node) in &scene.nodes {
@@ -226,7 +232,9 @@ pub fn render_for_binding(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiErro
                     .unwrap_or_default();
                 eprintln!(
                     "A3-probe: helper={:?} id=ptr:{node_id} parent={} type={:?} name={:?} \
-                     rect=({:.0},{:.0},{:.0},{:.0}) active={} alpha={:.2} bg={} icon={} text={} raw_img={:?} raw_svg={:?}",
+                     rect=({:.0},{:.0},{:.0},{:.0}) active={} alpha={:.2} \
+                     anchor=({:.3},{:.3}) pivot=({:.3},{:.3}) pos=({:.1},{:.1}) \
+                     size=({:?},{:?}) bg={} icon={} text={} raw_img={:?} raw_svg={:?}",
                     b.helper_name,
                     node.parent
                         .map(|p| format!("ptr:{p}"))
@@ -239,6 +247,14 @@ pub fn render_for_binding(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiErro
                     rect.h,
                     node.is_active,
                     node.alpha,
+                    node.anchor.x,
+                    node.anchor.y,
+                    node.pivot.x,
+                    node.pivot.y,
+                    node.position.x,
+                    node.position.y,
+                    node.sizing.width,
+                    node.sizing.height,
                     node.background.is_some(),
                     node.icon.is_some(),
                     node.text.is_some(),

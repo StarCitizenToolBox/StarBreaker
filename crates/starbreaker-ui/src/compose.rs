@@ -128,7 +128,7 @@ pub fn render_bb_scene_pass1(
         if rect.w < 0.5 || rect.h < 0.5 {
             continue;
         }
-        draw_node(node, rect, ctx, atlas, &mut pixmap);
+        draw_node(node, rect, &resolver, ctx, atlas, &mut pixmap);
     }
 
     // Convert premultiplied tiny-skia pixmap → straight-alpha RgbaImage.
@@ -240,6 +240,7 @@ pub fn render_canvas_with_postprocess(
 fn draw_node(
     node: &BbNode,
     rect: Rect,
+    resolver: &BindingResolver,
     ctx: &ComposeContext<'_>,
     atlas: &AtlasLibrary<'_>,
     pixmap: &mut Pixmap,
@@ -265,7 +266,7 @@ fn draw_node(
             if fill[3] > 0.005 {
                 fill_rect_ts(pixmap, tsk_rect, fill, alpha);
             }
-            if !draw_raw_asset(node, rect, atlas, pixmap, alpha) {
+            if !draw_raw_asset(node, rect, resolver, atlas, pixmap, alpha) {
                 if let Some(img) = atlas.resolve_for_node(node, iw, ih) {
                     blit_atlas_image(pixmap, &img, rect.x as i32, rect.y as i32, alpha);
                 }
@@ -308,7 +309,7 @@ fn draw_node(
             if fill[3] > 0.005 {
                 fill_rect_ts(pixmap, tsk_rect, fill, alpha);
             }
-            if !draw_raw_asset(node, rect, atlas, pixmap, alpha) {
+            if !draw_raw_asset(node, rect, resolver, atlas, pixmap, alpha) {
                 if let Some(img) = atlas.resolve_for_node(node, iw, ih) {
                     blit_atlas_image(pixmap, &img, rect.x as i32, rect.y as i32, alpha);
                 }
@@ -326,7 +327,7 @@ fn draw_node(
         // outlines that do not exist in the in-game reference; rendering
         // nothing is structurally honest until the asset can be resolved.
         BbNodeType::WidgetIcon | BbNodeType::WidgetImage => {
-            if draw_raw_asset(node, rect, atlas, pixmap, alpha) {
+            if draw_raw_asset(node, rect, resolver, atlas, pixmap, alpha) {
                 // Raw-path asset was found and attempted; skip atlas fallback.
             } else if let Some(img) = atlas.resolve_for_node(node, iw, ih) {
                 let tint = node
@@ -346,7 +347,7 @@ fn draw_node(
         }
 
         BbNodeType::Other(kind) if kind == "BuildingBlocks_WidgetManufacturerLogo" => {
-            if !draw_raw_asset(node, rect, atlas, pixmap, alpha) {
+            if !draw_raw_asset(node, rect, resolver, atlas, pixmap, alpha) {
                 if !draw_manufacturer_logo(node, rect, atlas, pixmap, alpha, ctx) {
                     if let Some(img) = atlas.resolve_for_node(node, iw, ih) {
                         blit_atlas_image(pixmap, &img, rect.x as i32, rect.y as i32, alpha);
@@ -367,7 +368,7 @@ fn draw_node(
         // `draw_swf_symbol` here is a no-op for Flash-backed shapes (returns
         // false when the name is not found in the SWF exports).
         BbNodeType::WidgetCustomShape => {
-            let drew_raw = draw_raw_asset(node, rect, atlas, pixmap, alpha);
+            let drew_raw = draw_raw_asset(node, rect, resolver, atlas, pixmap, alpha);
             if drew_raw {
                 // Raw-path asset was rendered; still apply any authored border.
                 if let Some(border) = &node.border {
@@ -427,7 +428,7 @@ fn draw_node(
             if fill[3] > 0.005 {
                 fill_rect_ts(pixmap, tsk_rect, fill, alpha);
             }
-            if !draw_raw_asset(node, rect, atlas, pixmap, alpha) {
+            if !draw_raw_asset(node, rect, resolver, atlas, pixmap, alpha) {
                 if let Some(img) = atlas.resolve_for_node(node, iw, ih) {
                     blit_atlas_image(pixmap, &img, rect.x as i32, rect.y as i32, alpha);
                 }
@@ -456,6 +457,7 @@ fn draw_node(
 fn draw_raw_asset(
     node: &BbNode,
     rect: Rect,
+    resolver: &BindingResolver,
     atlas: &AtlasLibrary<'_>,
     pixmap: &mut Pixmap,
     alpha: f32,
@@ -471,19 +473,33 @@ fn draw_raw_asset(
         .raw
         .get("SvgPath")
         .and_then(|v| v.as_str())
-        .or_else(|| node.raw.get("svgPath").and_then(|v| v.as_str()))
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            node.raw
+                .get("svgPath")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+        })
         .or_else(|| {
             node.raw
                 .get("svgFill")
                 .and_then(|s| s.get("svgPath"))
                 .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
         })
-        .filter(|s| !s.is_empty());
+        ;
     let img_path_raw = node
         .raw
         .get("ImagePath")
         .and_then(|v| v.as_str())
-        .or_else(|| node.raw.get("imagePath").and_then(|v| v.as_str()))
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            node.raw
+                .get("imagePath")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(|| resolver.resolve_string_binding(node.id))
         .filter(|s| !s.is_empty());
 
     if svg_path_raw.is_none() && img_path_raw.is_none() {
@@ -756,7 +772,7 @@ fn draw_text_node(
 ) {
     let resolved = resolver.resolve_text_detailed(node.id, &node.raw, ctx.defaults);
     let text_probe = std::env::var("BB_A3_TEXT_PROBE").as_deref() == Ok("1");
-    if text_probe && matches!(node.name.as_str(), "TierLevel" | "TitleText" | "TouchPromptText" | "FunctionTitle" | "MachineTypeNameText" | "TouchToStart") {
+    if text_probe && matches!(node.name.as_str(), "TierLevel" | "TitleText" | "TouchPromptText" | "FunctionTitle" | "MachineTypeNameText" | "TouchToStart" | "OptionNameText" | "OptionDescriptionText") {
         log::info!(
             "A3-text-probe: node={} id=ptr:{} resolved={:?}",
             node.name, node.id, resolved.text

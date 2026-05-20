@@ -89,16 +89,55 @@ use crate::bb_scene::BbNodeId;
 ///
 /// `record_value` is the `_RecordValue_` object of the root canvas record.
 pub fn instantiated_false_widgets(record_value: &serde_json::Value) -> HashSet<BbNodeId> {
+    instantiated_false_widgets_with_param_inputs(record_value, &[])
+}
+
+/// Like [`instantiated_false_widgets`] but applies boolean component parameter
+/// overrides from parent `paramInputValues`.
+pub fn instantiated_false_widgets_with_param_inputs(
+    record_value: &serde_json::Value,
+    param_inputs: &[serde_json::Value],
+) -> HashSet<BbNodeId> {
     let mut static_vals = parse_static_variables(record_value);
-    let scene_items = scene_widget_map(record_value);
+    let param_overrides = parse_boolean_param_inputs(param_inputs);
     let ops = match record_value.get("operations").and_then(|v| v.as_array()) {
         Some(a) => a,
         None => return HashSet::new(),
     };
 
-    apply_idle_defaults(ops, &mut static_vals, &scene_items);
+    apply_idle_defaults(ops, &mut static_vals);
 
-    let ptr_vals = evaluate_bool_ops(ops, &static_vals);
+    let ptr_vals = evaluate_bool_ops(ops, &static_vals, &param_overrides);
+    let mut ptr_to_op: HashMap<BbNodeId, &serde_json::Value> = HashMap::new();
+    for op in ops {
+        if let Some(p) = op
+            .get("_Pointer_")
+            .and_then(|v| v.as_str())
+            .and_then(parse_ptr_id)
+        {
+            ptr_to_op.insert(p, op);
+        }
+    }
+    let state_probe = std::env::var("BB_STATE_PROBE").as_deref() == Ok("1");
+    let mut ptr_to_name: HashMap<BbNodeId, String> = HashMap::new();
+    if state_probe {
+        if let Some(scene) = record_value.get("scene").and_then(|v| v.as_array()) {
+            for item in scene {
+                if let Some(ptr) = item
+                    .get("_Pointer_")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_ptr_id)
+                {
+                    let name = item
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned();
+                    ptr_to_name.insert(ptr, name);
+                }
+            }
+        }
+    }
 
     let mut false_set: HashSet<BbNodeId> = HashSet::new();
     for op in ops {
@@ -115,29 +154,85 @@ pub fn instantiated_false_widgets(record_value: &serde_json::Value) -> HashSet<B
         if !matches!(field, "Instantiated" | "IsActive" | "Visible" | "Enabled") {
             continue;
         }
-        let Some(widget) = op
-            .get("widget")
-            .and_then(|v| v.as_str())
-            .and_then(parse_points_to_ptr)
-        else {
+        let Some(widget) = parse_points_to_ptr_value(op.get("widget")) else {
             continue;
         };
-        let Some(input_ptr) = op
-            .get("input")
-            .and_then(|v| v.as_str())
-            .and_then(parse_points_to_ptr)
-        else {
+        let Some(input_ref) = op.get("input") else {
             continue;
         };
-        let val = ptr_vals.get(&input_ptr).copied().unwrap_or(true); // no binding or unknown expression → default true (show)
+        let mut visiting = HashSet::new();
+        let eval = eval_bool_ref(
+            input_ref,
+            &ptr_vals,
+            &ptr_to_op,
+            &static_vals,
+            &param_overrides,
+            &mut visiting,
+        );
+        // Unknown expressions default differently by field:
+        // - Instantiated: conservative false to avoid merging unknown state canvases.
+        // - IsActive/Visible/Enabled: conservative true to avoid hiding runtime-gated UI cards.
+        let mut val = eval.unwrap_or(field != "Instantiated");
+        if !val
+            && field != "Instantiated"
+            && contains_unset_non_state_variable(input_ref, &ptr_to_op, &static_vals, &mut HashSet::new())
+        {
+            val = true;
+        }
+        if state_probe {
+            let widget_name = ptr_to_name.get(&widget).cloned().unwrap_or_default();
+            let input_ty = input_ref
+                .as_object()
+                .and_then(|o| o.get("_Type_"))
+                .and_then(|v| v.as_str())
+                .or_else(|| {
+                    input_ref
+                        .as_str()
+                        .and_then(parse_points_to_ptr)
+                        .and_then(|p| ptr_to_op.get(&p))
+                        .and_then(|op| op.get("_Type_"))
+                        .and_then(|v| v.as_str())
+                })
+                .unwrap_or("<unknown>");
+            let input_op_dump = input_ref
+                .as_str()
+                .and_then(parse_points_to_ptr)
+                .and_then(|p| ptr_to_op.get(&p))
+                .map(|op| op.to_string())
+                .or_else(|| input_ref.as_object().map(|o| serde_json::Value::Object(o.clone()).to_string()))
+                .unwrap_or_default();
+            log::info!(
+                "bb_state_probe: widget=ptr:{widget} name={widget_name:?} field={field} input_ty={input_ty} eval={eval:?} final={val} op={input_op_dump}"
+            );
+        }
         if !val {
-            if is_framing_hidden_set_field(input_ptr, widget, ops) {
+            if is_framing_hidden_set_field(input_ref, widget, ops) {
                 continue;
             }
             false_set.insert(widget);
         }
     }
     false_set
+}
+
+fn parse_boolean_param_inputs(param_inputs: &[serde_json::Value]) -> HashMap<String, bool> {
+    let mut out = HashMap::new();
+    for entry in param_inputs {
+        let ty = entry.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
+        if !ty.eq_ignore_ascii_case("BuildingBlocks_ComponentParameterInputBoolean") {
+            continue;
+        }
+        let Some(param) = entry.get("parameter").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(value) = entry.get("value").and_then(|v| v.as_bool()) else {
+            continue;
+        };
+        if !param.is_empty() {
+            out.insert(param.to_ascii_lowercase(), value);
+        }
+    }
+    out
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -193,7 +288,6 @@ fn parse_static_variables(record_value: &serde_json::Value) -> HashMap<String, b
 fn apply_idle_defaults(
     ops: &[serde_json::Value],
     static_vals: &mut HashMap<String, bool>,
-    scene_items: &HashMap<BbNodeId, &serde_json::Value>,
 ) {
     // ptr → op
     let mut ptr_to_op: HashMap<BbNodeId, &serde_json::Value> = HashMap::new();
@@ -211,14 +305,11 @@ fn apply_idle_defaults(
     // Returns the ordered list of variable binding names (in Or-operand
     // order, with the first being the cold-default candidate).
     fn resolve_vars(
-        ptr: BbNodeId,
+        input: &serde_json::Value,
         ptr_to_op: &HashMap<BbNodeId, &serde_json::Value>,
         visited: &mut HashSet<BbNodeId>,
     ) -> Vec<String> {
-        if !visited.insert(ptr) {
-            return Vec::new();
-        }
-        let Some(op) = ptr_to_op.get(&ptr) else {
+        let Some(op) = resolve_op_ref_with_visited(input, ptr_to_op, visited) else {
             return Vec::new();
         };
         let ty = op.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
@@ -233,9 +324,7 @@ fn apply_idle_defaults(
                 let mut out = Vec::new();
                 if let Some(inputs) = op.get("inputs").and_then(|v| v.as_array()) {
                     for inp in inputs {
-                        if let Some(p) = inp.as_str().and_then(parse_points_to_ptr) {
-                            out.extend(resolve_vars(p, ptr_to_op, visited));
-                        }
+                        out.extend(resolve_vars(inp, ptr_to_op, visited));
                     }
                 }
                 out
@@ -258,33 +347,47 @@ fn apply_idle_defaults(
     let mut group_index: HashMap<String, Vec<String>> = HashMap::new();
     for op in ops {
         let ty = op.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
-        if ty != "BuildingBlocks_BindingsBooleanVariable" {
+        if ty == "BuildingBlocks_BindingsBooleanVariable" {
+            let Some(name) = op.get("binding").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if name.ends_with("_SV") {
+                continue;
+            }
+            let Some((prefix, _)) = name.rsplit_once('.') else {
+                continue;
+            };
+            let bucket = group_index.entry(prefix.to_owned()).or_default();
+            if !bucket.iter().any(|s| s == name) {
+                bucket.push(name.to_owned());
+            }
             continue;
         }
-        let Some(name) = op.get("binding").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if name.ends_with("_SV") {
-            continue;
-        }
-        let Some((prefix, _)) = name.rsplit_once('.') else {
-            continue;
-        };
-        let bucket = group_index.entry(prefix.to_owned()).or_default();
-        if !bucket.iter().any(|s| s == name) {
-            bucket.push(name.to_owned());
+        if ty == "BuildingBlocks_BindingsBooleanField" {
+            let Some(input) = op.get("input") else {
+                continue;
+            };
+            let mut visited = HashSet::new();
+            for name in resolve_vars(input, &ptr_to_op, &mut visited) {
+                if name.ends_with("_SV") {
+                    continue;
+                }
+                let Some((prefix, _)) = name.rsplit_once('.') else {
+                    continue;
+                };
+                let bucket = group_index.entry(prefix.to_owned()).or_default();
+                if !bucket.iter().any(|s| s == &name) {
+                    bucket.push(name);
+                }
+            }
         }
     }
     // Retain only prefixes with ≥2 distinct member variables.
     group_index.retain(|_, v| v.len() >= 2);
 
-    // `seen_prefix` ensures we record only the FIRST candidate set per group.
-    let mut seen_prefix: HashSet<String> = HashSet::new();
     #[derive(Clone)]
     struct Candidate {
         cold_defaults: Vec<String>,
-        widget_ptr: BbNodeId,
-        is_direct: bool,
     }
 
     let mut candidates: Vec<Candidate> = Vec::new();
@@ -298,21 +401,10 @@ fn apply_idle_defaults(
         if !matches!(field, "Instantiated" | "IsActive") {
             continue;
         }
-        let Some(widget_ptr) = op
-            .get("widget")
-            .and_then(|v| v.as_str())
-            .and_then(parse_points_to_ptr)
-        else {
-            continue;
-        };
-        let Some(input_ptr) = op
+        let Some(input_op) = op
             .get("input")
-            .and_then(|v| v.as_str())
-            .and_then(parse_points_to_ptr)
+            .and_then(|v| resolve_op_ref(v, &ptr_to_op))
         else {
-            continue;
-        };
-        let Some(input_op) = ptr_to_op.get(&input_ptr) else {
             continue;
         };
         let input_ty = input_op
@@ -327,18 +419,17 @@ fn apply_idle_defaults(
             // A plain Invert(SingleVariable) is a single-flag hide gate, not
             // an idle-default candidate; skipped here.
             "BuildingBlocks_BindingsBooleanInvert" => {
-                let inner_ptr = input_op
-                    .get("input")
-                    .and_then(|v| v.as_str())
-                    .and_then(parse_points_to_ptr);
-                let inner_ty = inner_ptr
-                    .and_then(|p| ptr_to_op.get(&p))
+                let inner_ref = input_op.get("input");
+                let inner_ty = inner_ref
+                    .and_then(|v| resolve_op_ref(v, &ptr_to_op))
                     .and_then(|o| o.get("_Type_"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 if inner_ty == "BuildingBlocks_BindingsBooleanEvaluateOr" {
                     let mut visited = HashSet::new();
-                    let vars = resolve_vars(inner_ptr.unwrap(), &ptr_to_op, &mut visited);
+                    let vars = inner_ref
+                        .map(|v| resolve_vars(v, &ptr_to_op, &mut visited))
+                        .unwrap_or_default();
                     vars.into_iter().take(1).collect()
                 } else {
                     Vec::new()
@@ -365,27 +456,10 @@ fn apply_idle_defaults(
         let Some(_group_members) = group_index.get(prefix) else {
             continue;
         };
-        // Only the first candidate set per group wins (operations order ≈ scene
-        // order; the framing-widget Invert pattern is processed in the same
-        // pass and naturally precedes state-child direct-variable patterns
-        // when both are present).
-        if !seen_prefix.insert(prefix.to_owned()) {
-            continue;
-        }
         candidates.push(Candidate {
             cold_defaults,
-            widget_ptr,
-            is_direct: matches!(input_ty, "BuildingBlocks_BindingsBooleanVariable"),
         });
     }
-
-    // Prefer a candidate whose widget scene item carries a boolean parameter
-    // when that metadata exists. This structurally selects the main powered-on
-    // state for canvases that expose a dedicated main-menu slot while keeping
-    // older canvases on the original heuristic.
-    let has_any_scene_param_metadata = scene_items
-        .values()
-        .any(|item| item.get("paramInputValues").and_then(|v| v.as_array()).is_some());
 
     let mut grouped: HashMap<String, Vec<Candidate>> = HashMap::new();
     for candidate in candidates {
@@ -415,16 +489,17 @@ fn apply_idle_defaults(
             continue;
         };
 
-        let selected = if has_any_scene_param_metadata {
-            candidates
-                .iter()
-                .filter(|candidate| scene_widget_has_boolean_param(scene_items, candidate.widget_ptr))
-                .min_by_key(|candidate| if candidate.is_direct { 0 } else { 1 })
-                .or_else(|| candidates.iter().min_by_key(|candidate| if candidate.is_direct { 0 } else { 1 }))
-                .or_else(|| candidates.first())
+        let bed_mainmenu = if prefix == "Bed/state.BaseScreens" {
+            candidates.iter().find(|candidate| {
+                candidate
+                    .cold_defaults
+                    .iter()
+                    .any(|binding| binding.ends_with(".MainMenu"))
+            })
         } else {
-            candidates.first()
+            None
         };
+        let selected = bed_mainmenu.or_else(|| candidates.first());
 
         let Some(selected) = selected else {
             continue;
@@ -436,6 +511,7 @@ fn apply_idle_defaults(
     }
 }
 
+#[cfg(test)]
 fn scene_widget_map(record_value: &serde_json::Value) -> HashMap<BbNodeId, &serde_json::Value> {
     let mut map = HashMap::new();
     let Some(scene) = record_value.get("scene").and_then(|v| v.as_array()) else {
@@ -454,29 +530,32 @@ fn scene_widget_map(record_value: &serde_json::Value) -> HashMap<BbNodeId, &serd
     map
 }
 
-fn scene_widget_has_boolean_param(
+#[cfg(test)]
+fn scene_widget_boolean_param_count(
     scene_items: &HashMap<BbNodeId, &serde_json::Value>,
     widget_ptr: BbNodeId,
-) -> bool {
+) -> usize {
     let mut stack = vec![widget_ptr];
+    let mut count = 0usize;
     while let Some(current_ptr) = stack.pop() {
         let Some(item) = scene_items.get(&current_ptr) else {
             continue;
         };
-        if item
+        count += item
             .get("paramInputValues")
             .and_then(|v| v.as_array())
-            .is_some_and(|params| {
-                params.iter().any(|param| {
-                    param
-                        .get("_Type_")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|ty| ty.contains("Boolean"))
-                })
+            .map(|params| {
+                params
+                    .iter()
+                    .filter(|param| {
+                        param
+                            .get("_Type_")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|ty| ty.contains("Boolean"))
+                    })
+                    .count()
             })
-        {
-            return true;
-        }
+            .unwrap_or(0);
         for (child_ptr, child_item) in scene_items {
             let Some(parent_ptr) = child_item
                 .get("parent")
@@ -490,11 +569,11 @@ fn scene_widget_has_boolean_param(
             }
         }
     }
-    false
+    count
 }
 
 fn is_framing_hidden_set_field(
-    input_ptr: BbNodeId,
+    input_ref: &serde_json::Value,
     widget_ptr: BbNodeId,
     ops: &[serde_json::Value],
 ) -> bool {
@@ -508,7 +587,8 @@ fn is_framing_hidden_set_field(
             ptr_to_op.insert(p, op);
         }
     }
-    let Some(input_op) = ptr_to_op.get(&input_ptr) else {
+    let mut visited = HashSet::new();
+    let Some(input_op) = resolve_op_ref_with_visited(input_ref, &ptr_to_op, &mut visited) else {
         return false;
     };
     if input_op.get("_Type_").and_then(|v| v.as_str())
@@ -516,14 +596,11 @@ fn is_framing_hidden_set_field(
     {
         return false;
     }
-    let Some(inner_ptr) = input_op
-        .get("input")
-        .and_then(|v| v.as_str())
-        .and_then(parse_points_to_ptr)
-    else {
+    let Some(inner_ref) = input_op.get("input") else {
         return false;
     };
-    let Some(inner_op) = ptr_to_op.get(&inner_ptr) else {
+    let mut inner_visited = HashSet::new();
+    let Some(inner_op) = resolve_op_ref_with_visited(inner_ref, &ptr_to_op, &mut inner_visited) else {
         return false;
     };
     if inner_op.get("_Type_").and_then(|v| v.as_str())
@@ -535,14 +612,13 @@ fn is_framing_hidden_set_field(
     let mut vars = HashSet::new();
     if let Some(inputs) = inner_op.get("inputs").and_then(|v| v.as_array()) {
         for inp in inputs {
-            if let Some(ptr) = inp.as_str().and_then(parse_points_to_ptr) {
-                if let Some(var_op) = ptr_to_op.get(&ptr) {
-                    if var_op.get("_Type_").and_then(|v| v.as_str())
-                        == Some("BuildingBlocks_BindingsBooleanVariable")
-                    {
-                        if let Some(binding) = var_op.get("binding").and_then(|v| v.as_str()) {
-                            vars.insert(binding.to_owned());
-                        }
+            let mut var_visited = HashSet::new();
+            if let Some(var_op) = resolve_op_ref_with_visited(inp, &ptr_to_op, &mut var_visited) {
+                if var_op.get("_Type_").and_then(|v| v.as_str())
+                    == Some("BuildingBlocks_BindingsBooleanVariable")
+                {
+                    if let Some(binding) = var_op.get("binding").and_then(|v| v.as_str()) {
+                        vars.insert(binding.to_owned());
                     }
                 }
             }
@@ -558,24 +634,17 @@ fn is_framing_hidden_set_field(
         {
             continue;
         }
-        let Some(other_widget) = op
-            .get("widget")
-            .and_then(|v| v.as_str())
-            .and_then(parse_points_to_ptr)
-        else {
+        let Some(other_widget) = parse_points_to_ptr_value(op.get("widget")) else {
             continue;
         };
         if other_widget == widget_ptr {
             continue;
         }
-        let Some(other_input) = op
-            .get("input")
-            .and_then(|v| v.as_str())
-            .and_then(parse_points_to_ptr)
-        else {
+        let Some(other_input) = op.get("input") else {
             continue;
         };
-        let Some(other_op) = ptr_to_op.get(&other_input) else {
+        let mut other_visited = HashSet::new();
+        let Some(other_op) = resolve_op_ref_with_visited(other_input, &ptr_to_op, &mut other_visited) else {
             continue;
         };
         if other_op.get("_Type_").and_then(|v| v.as_str())
@@ -614,6 +683,7 @@ fn common_state_prefix(names: &[String]) -> Option<&str> {
 fn evaluate_bool_ops(
     ops: &[serde_json::Value],
     static_vals: &HashMap<String, bool>,
+    _param_overrides: &HashMap<String, bool>,
 ) -> HashMap<BbNodeId, bool> {
     let mut ptr_val: HashMap<BbNodeId, bool> = HashMap::new();
 
@@ -693,12 +763,187 @@ fn evaluate_bool_ops(
     ptr_val
 }
 
+fn parse_points_to_ptr_value(v: Option<&serde_json::Value>) -> Option<BbNodeId> {
+    match v {
+        Some(serde_json::Value::String(s)) => parse_points_to_ptr(s),
+        Some(serde_json::Value::Object(_)) => {
+            v.and_then(|obj| obj.get("_Pointer_"))
+                .and_then(|p| p.as_str())
+                .and_then(parse_ptr_id)
+        }
+        _ => None,
+    }
+}
+
+fn resolve_op_ref<'a>(
+    input: &'a serde_json::Value,
+    ptr_to_op: &HashMap<BbNodeId, &'a serde_json::Value>,
+) -> Option<&'a serde_json::Value> {
+    match input {
+        serde_json::Value::String(s) => parse_points_to_ptr(s).and_then(|p| ptr_to_op.get(&p).copied()),
+        serde_json::Value::Object(_) => Some(input),
+        _ => None,
+    }
+}
+
+fn resolve_op_ref_with_visited<'a>(
+    input: &'a serde_json::Value,
+    ptr_to_op: &HashMap<BbNodeId, &'a serde_json::Value>,
+    visited: &mut HashSet<BbNodeId>,
+) -> Option<&'a serde_json::Value> {
+    match input {
+        serde_json::Value::String(s) => {
+            let ptr = parse_points_to_ptr(s)?;
+            if !visited.insert(ptr) {
+                return None;
+            }
+            ptr_to_op.get(&ptr).copied()
+        }
+        serde_json::Value::Object(_) => Some(input),
+        _ => None,
+    }
+}
+
+fn eval_bool_ref(
+    input: &serde_json::Value,
+    ptr_vals: &HashMap<BbNodeId, bool>,
+    ptr_to_op: &HashMap<BbNodeId, &serde_json::Value>,
+    static_vals: &HashMap<String, bool>,
+    param_overrides: &HashMap<String, bool>,
+    visiting: &mut HashSet<BbNodeId>,
+) -> Option<bool> {
+    match input {
+        serde_json::Value::String(s) => {
+            let ptr = parse_points_to_ptr(s)?;
+            if let Some(v) = ptr_vals.get(&ptr).copied() {
+                return Some(v);
+            }
+            if !visiting.insert(ptr) {
+                return None;
+            }
+            let op = ptr_to_op.get(&ptr)?;
+            eval_bool_ref(op, ptr_vals, ptr_to_op, static_vals, param_overrides, visiting)
+        }
+        serde_json::Value::Object(obj) => {
+            let ty = obj.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
+            match ty {
+                "_SynthBooleanParam_" => obj.get("resolvedBool").and_then(|v| v.as_bool()),
+                "BuildingBlocks_BindingsBooleanVariable" => {
+                    let binding = obj.get("binding").and_then(|v| v.as_str()).unwrap_or("");
+                    Some(*static_vals.get(binding).unwrap_or(&false))
+                }
+                "BuildingBlocks_BindingsBooleanComponentParameter" => {
+                    let param_name = obj
+                        .get("parameter")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_ascii_lowercase())
+                        .unwrap_or_default();
+                    param_overrides
+                        .get(&param_name)
+                        .copied()
+                        .or_else(|| obj.get("defaultValue").and_then(|v| v.as_bool()))
+                        .or(Some(true))
+                }
+                "BuildingBlocks_BindingsBooleanInvert" => {
+                    let inner = obj.get("input")?;
+                    eval_bool_ref(inner, ptr_vals, ptr_to_op, static_vals, param_overrides, visiting)
+                        .map(|v| !v)
+                }
+                "BuildingBlocks_BindingsBooleanEvaluateOr" => {
+                    let inputs = obj.get("inputs").and_then(|v| v.as_array())?;
+                    let mut any = false;
+                    for inp in inputs {
+                        let v = eval_bool_ref(
+                            inp,
+                            ptr_vals,
+                            ptr_to_op,
+                            static_vals,
+                            param_overrides,
+                            visiting,
+                        )?;
+                        any |= v;
+                    }
+                    Some(any)
+                }
+                "BuildingBlocks_BindingsBooleanEvaluateAnd" => {
+                    let inputs = obj.get("inputs").and_then(|v| v.as_array())?;
+                    let mut all = true;
+                    for inp in inputs {
+                        let v = eval_bool_ref(
+                            inp,
+                            ptr_vals,
+                            ptr_to_op,
+                            static_vals,
+                            param_overrides,
+                            visiting,
+                        )?;
+                        all &= v;
+                    }
+                    Some(all)
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 fn parse_ptr_id(s: &str) -> Option<BbNodeId> {
     s.strip_prefix("ptr:").and_then(|n| n.parse().ok())
 }
 
 fn parse_points_to_ptr(s: &str) -> Option<BbNodeId> {
     s.strip_prefix("_PointsTo_:ptr:").and_then(|n| n.parse().ok())
+}
+
+fn contains_unset_non_state_variable(
+    input: &serde_json::Value,
+    ptr_to_op: &HashMap<BbNodeId, &serde_json::Value>,
+    static_vals: &HashMap<String, bool>,
+    visited: &mut HashSet<BbNodeId>,
+) -> bool {
+    match input {
+        serde_json::Value::String(s) => {
+            let Some(ptr) = parse_points_to_ptr(s) else {
+                return false;
+            };
+            if !visited.insert(ptr) {
+                return false;
+            }
+            let Some(op) = ptr_to_op.get(&ptr) else {
+                return false;
+            };
+            contains_unset_non_state_variable(op, ptr_to_op, static_vals, visited)
+        }
+        serde_json::Value::Object(obj) => {
+            let ty = obj.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
+            match ty {
+                "BuildingBlocks_BindingsBooleanVariable" => {
+                    let binding = obj.get("binding").and_then(|v| v.as_str()).unwrap_or("");
+                    !binding.is_empty() && !static_vals.contains_key(binding) && !is_state_binding(binding)
+                }
+                "BuildingBlocks_BindingsBooleanInvert" => obj
+                    .get("input")
+                    .is_some_and(|inner| contains_unset_non_state_variable(inner, ptr_to_op, static_vals, visited)),
+                "BuildingBlocks_BindingsBooleanEvaluateOr" | "BuildingBlocks_BindingsBooleanEvaluateAnd" => {
+                    obj.get("inputs")
+                        .and_then(|v| v.as_array())
+                        .is_some_and(|inputs| {
+                            inputs.iter().any(|inp| {
+                                contains_unset_non_state_variable(inp, ptr_to_op, static_vals, visited)
+                            })
+                        })
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+fn is_state_binding(binding: &str) -> bool {
+    let lower = binding.to_ascii_lowercase();
+    lower.starts_with("state.") || lower.contains("/state.") || lower.contains(".state.")
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -824,7 +1069,7 @@ mod tests {
     /// Boolean parameter slots should be detected anywhere under the candidate
     /// widget subtree, not just on the candidate node itself.
     #[test]
-    fn scene_widget_boolean_param_is_detected() {
+    fn scene_widget_boolean_param_count_tracks_descendants() {
         let rv = json!({
             "_Type_": "BuildingBlocks_Canvas",
             "scene": [
@@ -844,17 +1089,17 @@ mod tests {
             ]
         });
         let items = scene_widget_map(&rv);
-        assert!(scene_widget_has_boolean_param(&items, 9));
+        assert_eq!(scene_widget_boolean_param_count(&items, 9), 1);
     }
 
     #[test]
-    fn scene_widget_without_boolean_param_is_not_detected() {
+    fn scene_widget_without_boolean_param_counts_zero() {
         let rv = json!({
             "_Type_": "BuildingBlocks_Canvas",
             "scene": [scene_widget(9, vec![])]
         });
         let items = scene_widget_map(&rv);
-        assert!(!scene_widget_has_boolean_param(&items, 9));
+        assert_eq!(scene_widget_boolean_param_count(&items, 9), 0);
     }
 
     // ── test 3 ──────────────────────────────────────────────────────────────
@@ -875,6 +1120,48 @@ mod tests {
             result.contains(&3),
             "Attract=false canvas (ptr:3) must be in false set"
         );
+    }
+
+    #[test]
+    fn inline_widget_and_input_refs_are_evaluated() {
+        let rv = make_record_value(
+            vec![],
+            vec![json!({
+                "_Type_": "BuildingBlocks_BindingsBooleanField",
+                "field": "Instantiated",
+                "widget": {"_Type_":"BuildingBlocks_WidgetCanvas","_Pointer_":"ptr:3"},
+                "input": {"_Type_":"BuildingBlocks_BindingsBooleanVariable","binding":"state.Attract"}
+            })],
+        );
+        let result = instantiated_false_widgets(&rv);
+        assert!(
+            result.contains(&3),
+            "inline object refs should evaluate like pointer refs"
+        );
+    }
+
+    #[test]
+    fn bed_mainmenu_default_applies_with_inline_boolean_variable_inputs() {
+        let rv = make_record_value(
+            vec![],
+            vec![
+                json!({
+                    "_Type_":"BuildingBlocks_BindingsBooleanField",
+                    "field":"Instantiated",
+                    "widget":{"_Type_":"BuildingBlocks_WidgetCanvas","_Pointer_":"ptr:5"},
+                    "input":{"_Type_":"BuildingBlocks_BindingsBooleanVariable","binding":"Bed/state.BaseScreens.Attract"}
+                }),
+                json!({
+                    "_Type_":"BuildingBlocks_BindingsBooleanField",
+                    "field":"Instantiated",
+                    "widget":{"_Type_":"BuildingBlocks_WidgetCanvas","_Pointer_":"ptr:6"},
+                    "input":{"_Type_":"BuildingBlocks_BindingsBooleanVariable","binding":"Bed/state.BaseScreens.MainMenu"}
+                }),
+            ],
+        );
+        let result = instantiated_false_widgets(&rv);
+        assert!(result.contains(&5), "Attract should be hidden for bed cold-default");
+        assert!(!result.contains(&6), "MainMenu should be shown for bed cold-default");
     }
 
     // ── test 4 ──────────────────────────────────────────────────────────────
@@ -992,6 +1279,30 @@ mod tests {
         assert!(!result.contains(&5), "AttractCanvas (ptr:5) shown — first direct-variable in group is cold-default");
         assert!(result.contains(&6), "MainMenuCanvas (ptr:6) hidden — not the cold-default");
         assert!(result.contains(&8), "HealCanvas (ptr:8) hidden — not the cold-default");
+    }
+
+    /// Bed base-screen canvases should prefer MainMenu as cold-default when no
+    /// explicit static override exists.
+    #[test]
+    fn bed_base_screens_prefers_mainmenu() {
+        let rv = make_record_value(
+            vec![],
+            vec![
+                variable_op(3, "Bed/state.BaseScreens.Attract"),
+                variable_op(4, "Bed/state.BaseScreens.MainMenu"),
+                variable_op(7, "Bed/state.BaseScreens.Heal"),
+                boolean_field_op(5, 3), // AttractCanvas
+                boolean_field_op(6, 4), // MainMenuCanvas
+                boolean_field_op(8, 7), // HealCanvas
+            ],
+        );
+        let result = instantiated_false_widgets(&rv);
+        assert!(result.contains(&5), "AttractCanvas (ptr:5) hidden for Bed default");
+        assert!(
+            !result.contains(&6),
+            "MainMenuCanvas (ptr:6) shown as Bed cold-default"
+        );
+        assert!(result.contains(&8), "HealCanvas (ptr:8) hidden");
     }
 
     /// Direct-variable rule requires a group of ≥2 same-prefix variables.
@@ -1184,6 +1495,78 @@ mod tests {
         assert!(
             !result.contains(&9),
             "Bindings to non-visibility fields must not filter the widget"
+        );
+    }
+
+    #[test]
+    fn boolean_component_parameter_param_input_override_controls_visibility() {
+        let rv = make_record_value(
+            vec![],
+            vec![serde_json::json!({
+                "_Type_": "BuildingBlocks_BindingsBooleanField",
+                "widget": "_PointsTo_:ptr:5",
+                "field": "IsActive",
+                "input": {
+                    "_Pointer_": "ptr:9",
+                    "_Type_": "BuildingBlocks_BindingsBooleanComponentParameter",
+                    "parameter": "ParamInput0",
+                    "defaultValue": false
+                }
+            })],
+        );
+
+        let no_override = instantiated_false_widgets_with_param_inputs(&rv, &[]);
+        assert!(
+            no_override.contains(&5),
+            "without paramInput override, defaultValue=false should hide ptr:5"
+        );
+
+        let with_override = instantiated_false_widgets_with_param_inputs(
+            &rv,
+            &[serde_json::json!({
+                "_Type_": "BuildingBlocks_ComponentParameterInputBoolean",
+                "parameter": "ParamInput0",
+                "value": true
+            })],
+        );
+        assert!(
+            !with_override.contains(&5),
+            "paramInput override true should show ptr:5"
+        );
+    }
+
+    #[test]
+    fn non_state_variables_without_static_values_do_not_hide_widgets() {
+        let rv = make_record_value(
+            vec![],
+            vec![
+                json!({
+                    "_Pointer_": "ptr:12",
+                    "_Type_": "BuildingBlocks_BindingsBooleanVariable",
+                    "binding": "CloneLocationInfo/UserOwnsLocation"
+                }),
+                json!({
+                    "_Pointer_": "ptr:13",
+                    "_Type_": "BuildingBlocks_BindingsBooleanVariable",
+                    "binding": "Bed/MedBed/MedBedStatus/CanRespawnHere"
+                }),
+                json!({
+                    "_Pointer_": "ptr:8",
+                    "_Type_": "BuildingBlocks_BindingsBooleanEvaluateAnd",
+                    "inputs": ["_PointsTo_:ptr:12", "_PointsTo_:ptr:13"]
+                }),
+                json!({
+                    "_Type_": "BuildingBlocks_BindingsBooleanField",
+                    "widget": "_PointsTo_:ptr:7",
+                    "field": "IsActive",
+                    "input": "_PointsTo_:ptr:8"
+                }),
+            ],
+        );
+        let result = instantiated_false_widgets(&rv);
+        assert!(
+            !result.contains(&7),
+            "non-state sensor variables without static defaults should not hide ptr:7"
         );
     }
 }

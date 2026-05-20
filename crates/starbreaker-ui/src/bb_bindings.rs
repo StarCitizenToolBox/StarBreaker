@@ -34,6 +34,8 @@ pub struct BindingResolver {
     ptr_to_op: HashMap<BbNodeId, serde_json::Value>,
     /// op pointer (Variable ops) → binding path.
     ptr_to_path: HashMap<BbNodeId, String>,
+    /// widget_node_id → resolved string override (e.g. image asset path).
+    widget_to_string: HashMap<BbNodeId, String>,
 }
 
 impl BindingResolver {
@@ -101,14 +103,12 @@ impl BindingResolver {
         let mut widget_to_path: HashMap<BbNodeId, String> = HashMap::new();
         // Also collect localized-field ops → widget ptr → loc key.
         let mut widget_to_loc_key: HashMap<BbNodeId, String> = HashMap::new();
+        let mut widget_to_string: HashMap<BbNodeId, String> = HashMap::new();
         let mut widget_to_input_prio_ptrs: HashMap<BbNodeId, Vec<(u8, BbNodeId)>> = HashMap::new();
         for op in operations {
             let type_str = op.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
             if type_str == "_SynthLocalizedWidget_" {
-                let widget_ptr = op
-                    .get("widget")
-                    .and_then(|v| v.as_str())
-                    .and_then(parse_points_to);
+                let widget_ptr = parse_points_to_or_ptr(op.get("widget"));
                 let loc_key = op
                     .get("resolvedLocKey")
                     .and_then(|v| v.as_str())
@@ -119,18 +119,24 @@ impl BindingResolver {
                     }
                 }
             }
+            if type_str == "_SynthStringWidget_" {
+                let widget_ptr = parse_points_to_or_ptr(op.get("widget"));
+                let value = op
+                    .get("resolvedString")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_owned());
+                if let (Some(w), Some(value)) = (widget_ptr, value) {
+                    if !value.is_empty() {
+                        widget_to_string.insert(w, value);
+                    }
+                }
+            }
         }
         for op in operations {
             let type_str = op.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
             if type_str.contains("Field") {
-                let widget_ptr = op
-                    .get("widget")
-                    .and_then(|v| v.as_str())
-                    .and_then(parse_points_to);
-                let input_ptr = op
-                    .get("input")
-                    .and_then(|v| v.as_str())
-                    .and_then(parse_points_to);
+                let widget_ptr = parse_points_to_or_ptr(op.get("widget"));
+                let input_ptr = parse_points_to_or_ptr(op.get("input"));
                 if let (Some(w), Some(inp)) = (widget_ptr, input_ptr) {
                     let prio = if type_str.contains("LocalizedField") {
                         3
@@ -161,7 +167,14 @@ impl BindingResolver {
             widget_to_input_ptrs.insert(widget, ordered);
         }
 
-        Self { widget_to_path, widget_to_loc_key, widget_to_input_ptrs, ptr_to_op, ptr_to_path }
+        Self {
+            widget_to_path,
+            widget_to_loc_key,
+            widget_to_input_ptrs,
+            ptr_to_op,
+            ptr_to_path,
+            widget_to_string,
+        }
     }
 
 }
@@ -184,6 +197,11 @@ impl BindingResolver {
         defaults: &DefaultValueRegistry,
     ) -> String {
         self.resolve_text_detailed(node_id, node_raw, defaults).text
+    }
+
+    /// Resolve non-text string bindings for a widget (e.g. ImagePath fields).
+    pub fn resolve_string_binding(&self, node_id: BbNodeId) -> Option<&str> {
+        self.widget_to_string.get(&node_id).map(|s| s.as_str())
     }
 
     /// Resolve display text with provenance for downstream formatting.
@@ -274,6 +292,16 @@ impl BindingResolver {
                     let num = self.eval_integer_ptr(input_ptr, defaults, &mut seen_num);
                     log::info!("A3-text-probe: node=ptr:{node_id} input=ptr:{input_ptr} type={ty}");
                     log::info!("A3-text-probe: node=ptr:{node_id} input_num={num:?}");
+                    if matches!(
+                        ty,
+                        "BuildingBlocks_BindingsLocalizedFromBoolean"
+                            | "BuildingBlocks_BindingsTagFromBoolean"
+                            | "BuildingBlocks_BindingsBooleanComponentParameter"
+                    ) {
+                        if let Some(op) = self.ptr_to_op.get(&input_ptr) {
+                            log::info!("A3-text-probe: node=ptr:{node_id} input_op={op}");
+                        }
+                    }
                 }
                 if let Some(s) = self.eval_localized_ptr(input_ptr, defaults, &mut seen) {
                     if !s.is_empty() {
@@ -407,6 +435,84 @@ impl BindingResolver {
                 }
                 Some(defaults.lookup_localization(key).unwrap_or(key).to_string())
             }
+            "_SynthLocalizedParam_" => {
+                let key = op.get("resolvedLocKey").and_then(|v| v.as_str()).unwrap_or("");
+                if key.is_empty() {
+                    return None;
+                }
+                Some(defaults.lookup_localization(key).unwrap_or(key).to_string())
+            }
+            "BuildingBlocks_BindingsLocalizedFromBoolean" => {
+                let mut seen_bool = std::collections::HashSet::new();
+                let enabled = self
+                    .eval_bool_ptr_from_field(op.get("input"), defaults, &mut seen_bool)
+                    .unwrap_or(false);
+                let mut branch_seen = std::collections::HashSet::new();
+                let ptr_branch = if enabled { op.get("inputTrue") } else { op.get("inputFalse") };
+                if std::env::var("BB_A3_TEXT_PROBE").as_deref() == Ok("1") {
+                    if let Some(ptr) = ptr_branch
+                        .and_then(|v| v.as_str())
+                        .and_then(parse_points_to)
+                    {
+                        if let Some(branch_op) = self.ptr_to_op.get(&ptr) {
+                            let branch_ty = branch_op
+                                .get("_Type_")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("<none>");
+                            log::info!(
+                                "A3-text-probe: LocalizedFromBoolean branch_ptr=ptr:{ptr} type={branch_ty} op={branch_op}"
+                            );
+                        }
+                    }
+                    log::info!(
+                        "A3-text-probe: LocalizedFromBoolean enabled={} ptr_branch={:?} isTrue={:?} isFalse={:?}",
+                        enabled,
+                        ptr_branch.and_then(|v| v.as_str()),
+                        op.get("isTrue").and_then(|v| v.as_str()),
+                        op.get("isFalse").and_then(|v| v.as_str()),
+                    );
+                }
+                if let Some(ptr_key) = self.eval_localized_ptr_from_field(ptr_branch, defaults, &mut branch_seen)
+                {
+                    if std::env::var("BB_A3_TEXT_PROBE").as_deref() == Ok("1") {
+                        log::info!("A3-text-probe: LocalizedFromBoolean branch resolved={ptr_key:?}");
+                    }
+                    return Some(ptr_key);
+                }
+                let key = if enabled { op.get("isTrue") } else { op.get("isFalse") }
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if key.is_empty() {
+                    return None;
+                }
+                Some(defaults.lookup_localization(key).unwrap_or(key).to_string())
+            }
+            "BuildingBlocks_BindingsTagFromBoolean" => {
+                let mut seen_bool = std::collections::HashSet::new();
+                let enabled = self
+                    .eval_bool_ptr_from_field(op.get("input"), defaults, &mut seen_bool)
+                    .unwrap_or(false);
+                let true_tag = op
+                    .get("trueTag")
+                    .or_else(|| op.get("valueTrue"))
+                    .or_else(|| op.get("valueA"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let false_tag = op
+                    .get("falseTag")
+                    .or_else(|| op.get("valueFalse"))
+                    .or_else(|| op.get("valueB"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let tag = if enabled { true_tag } else { false_tag };
+                if tag.is_empty() {
+                    None
+                } else if tag.starts_with('@') {
+                    Some(defaults.lookup_localization(tag).unwrap_or(tag).to_string())
+                } else {
+                    Some(tag.to_string())
+                }
+            }
             _ => None,
         }
     }
@@ -419,6 +525,82 @@ impl BindingResolver {
     ) -> Option<i64> {
         let ptr = field.and_then(parse_points_to)?;
         self.eval_integer_ptr(ptr, defaults, seen)
+    }
+
+    fn eval_localized_ptr_from_field(
+        &self,
+        field: Option<&serde_json::Value>,
+        defaults: &DefaultValueRegistry,
+        seen: &mut std::collections::HashSet<BbNodeId>,
+    ) -> Option<String> {
+        let ptr = field.and_then(|v| v.as_str()).and_then(parse_points_to)?;
+        self.eval_localized_ptr(ptr, defaults, seen)
+    }
+
+    fn eval_bool_ptr_from_field(
+        &self,
+        field: Option<&serde_json::Value>,
+        defaults: &DefaultValueRegistry,
+        seen: &mut std::collections::HashSet<BbNodeId>,
+    ) -> Option<bool> {
+        let ptr = field.and_then(|v| v.as_str()).and_then(parse_points_to)?;
+        self.eval_bool_ptr(ptr, defaults, seen)
+    }
+
+    fn eval_bool_ptr(
+        &self,
+        ptr: BbNodeId,
+        defaults: &DefaultValueRegistry,
+        seen: &mut std::collections::HashSet<BbNodeId>,
+    ) -> Option<bool> {
+        if !seen.insert(ptr) {
+            return None;
+        }
+        let op = self.ptr_to_op.get(&ptr)?;
+        let ty = op.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
+        match ty {
+            "_SynthBooleanParam_" => op.get("resolvedBool").and_then(|v| v.as_bool()),
+            "BuildingBlocks_BindingsBooleanComponentParameter" => {
+                op.get("defaultValue").and_then(|v| v.as_bool()).or(Some(false))
+            }
+            "BuildingBlocks_BindingsBooleanVariable" => {
+                let path = self.ptr_to_path.get(&ptr)?;
+                let val = defaults.lookup_path(path)?;
+                match val {
+                    Value::Bool(b) => Some(*b),
+                    Value::Int(i) => Some(*i != 0),
+                    Value::Float(f) => Some(*f != 0.0),
+                    Value::Str(s) | Value::Guid(s) => match s.to_ascii_lowercase().as_str() {
+                        "1" | "true" | "yes" => Some(true),
+                        "0" | "false" | "no" => Some(false),
+                        _ => None,
+                    },
+                }
+            }
+            "BuildingBlocks_BindingsBooleanInvert" => {
+                let inp = op.get("input").and_then(|v| v.as_str()).and_then(parse_points_to)?;
+                self.eval_bool_ptr(inp, defaults, seen).map(|v| !v)
+            }
+            "BuildingBlocks_BindingsBooleanEvaluateOr" => {
+                let inputs = op.get("inputs").and_then(|v| v.as_array())?;
+                let mut out = false;
+                for input in inputs {
+                    let ptr = input.as_str().and_then(parse_points_to)?;
+                    out |= self.eval_bool_ptr(ptr, defaults, seen).unwrap_or(false);
+                }
+                Some(out)
+            }
+            "BuildingBlocks_BindingsBooleanEvaluateAnd" => {
+                let inputs = op.get("inputs").and_then(|v| v.as_array())?;
+                let mut out = true;
+                for input in inputs {
+                    let ptr = input.as_str().and_then(parse_points_to)?;
+                    out &= self.eval_bool_ptr(ptr, defaults, seen).unwrap_or(false);
+                }
+                Some(out)
+            }
+            _ => None,
+        }
     }
 
     fn eval_integer_ptr(
@@ -619,6 +801,17 @@ fn parse_points_to(s: &str) -> Option<BbNodeId> {
     s.strip_prefix("_PointsTo_:").and_then(parse_ptr)
 }
 
+fn parse_points_to_or_ptr(value: Option<&serde_json::Value>) -> Option<BbNodeId> {
+    match value {
+        Some(serde_json::Value::String(s)) => parse_points_to(s),
+        Some(serde_json::Value::Object(obj)) => obj
+            .get("_Pointer_")
+            .and_then(|v| v.as_str())
+            .and_then(parse_ptr),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -632,6 +825,7 @@ mod tests {
             widget_to_input_ptrs: Default::default(),
             ptr_to_op: Default::default(),
             ptr_to_path: Default::default(),
+            widget_to_string: Default::default(),
         }
     }
 

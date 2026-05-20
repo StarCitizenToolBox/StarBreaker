@@ -87,7 +87,16 @@ pub fn resolve_canvas_graph_with_loc(
     if let Some(name) = root_json.get("_RecordName_").and_then(|v| v.as_str()) {
         visited.insert(name.to_ascii_lowercase());
     }
-    resolve_canvas_graph_inner(root_json, manufacturer_id, fetch_by_path, loc_fetcher, 0, &mut visited, None)
+    resolve_canvas_graph_inner(
+        root_json,
+        manufacturer_id,
+        fetch_by_path,
+        loc_fetcher,
+        0,
+        &mut visited,
+        None,
+        None,
+    )
 }
 
 /// Inner recursive resolver.  `visited` accumulates normalised record names
@@ -102,6 +111,7 @@ fn resolve_canvas_graph_inner(
     depth: u8,
     visited: &mut HashSet<String>,
     inherited_style: Option<&serde_json::Value>,
+    inherited_param_inputs: Option<&[serde_json::Value]>,
 ) -> Result<BbScene, String> {
     let mut scene = parse_bb_canvas(root_json)?;
     let record_value = root_json.get("_RecordValue_").ok_or("missing _RecordValue_")?;
@@ -214,6 +224,11 @@ fn resolve_canvas_graph_inner(
                         continue;
                     }
                 };
+                let match_to_param_inputs = if match_to.is_empty() {
+                    None
+                } else {
+                    param_inputs_for_match_to(&scene, match_to)
+                };
                 // Recurse: resolve the child's own style-references and WidgetCanvas URLs.
                 let mut child_scene = match resolve_canvas_graph_inner(
                     &child_json,
@@ -223,6 +238,7 @@ fn resolve_canvas_graph_inner(
                     depth + 1,
                     visited,
                     palette_source,
+                    match_to_param_inputs.as_deref(),
                 ) {
                     Ok(scene) => scene,
                     Err(e) => {
@@ -238,10 +254,8 @@ fn resolve_canvas_graph_inner(
                 // paramInputValues on the matched host node (same mechanism as
                 // Pass2 WidgetCanvas.canvas references). Inject those overrides
                 // so localized component-parameter defaults resolve correctly.
-                if !match_to.is_empty() {
-                    if let Some(param_inputs) = param_inputs_for_match_to(&scene, match_to) {
-                        inject_param_overrides(&param_inputs, &mut child_scene);
-                    }
+                if let Some(param_inputs) = match_to_param_inputs.as_ref() {
+                    inject_param_overrides(param_inputs, &mut child_scene);
                 }
                 merge_child_scene(&mut scene, child_scene, match_to, None);
             }
@@ -313,8 +327,12 @@ fn resolve_canvas_graph_inner(
         // canvases are inactive at startup and must not be followed in Pass 2.
         // For canvases without any `Instantiated` bindings (e.g. MFD screens)
         // the set is empty and all WidgetCanvas URLs are followed normally.
-        let instantiated_false =
-            crate::bb_state_filter::instantiated_false_widgets(record_value);
+        let instantiated_false = crate::bb_state_filter::instantiated_false_widgets_with_param_inputs(
+            record_value,
+            inherited_param_inputs.unwrap_or(&[]),
+        );
+
+        deactivate_subtrees(&mut scene, &instantiated_false);
 
         // Snapshot the visited set as it stands right after Pass 1.  Used
         // below to test "was this canvas already merged by Pass 1?" without
@@ -385,6 +403,7 @@ fn resolve_canvas_graph_inner(
                 depth + 1,
                 visited,
                 palette_source,
+                Some(param_inputs.as_slice()),
             ) {
                 Ok(s) => s,
                 Err(e) => {
@@ -440,6 +459,21 @@ fn resolve_canvas_graph_inner(
     }
 
     Ok(scene)
+}
+
+fn deactivate_subtrees(scene: &mut BbScene, roots: &std::collections::HashSet<BbNodeId>) {
+    let mut stack: Vec<BbNodeId> = roots.iter().copied().collect();
+    let mut seen: std::collections::HashSet<BbNodeId> = std::collections::HashSet::new();
+    while let Some(node_id) = stack.pop() {
+        if !seen.insert(node_id) {
+            continue;
+        }
+        let Some(node) = scene.nodes.get_mut(&node_id) else {
+            continue;
+        };
+        node.is_active = false;
+        stack.extend(node.children.iter().copied());
+    }
 }
 
 fn pick_active_entries<'a>(
@@ -699,8 +733,8 @@ fn merge_child_scene(
             inserted_child_roots
         };
         host.children.extend(roots_to_add);
-        host.children.sort_unstable();
-        host.children.dedup();
+        let mut seen = std::collections::BTreeSet::new();
+        host.children.retain(|id| seen.insert(*id));
     }
 }
 
@@ -726,6 +760,19 @@ fn child_canvas_scale_for_host(
     let sx = host_w / child_w;
     let sy = host_h / child_h;
     if !sx.is_finite() || !sy.is_finite() || sx <= 0.0 || sy <= 0.0 {
+        return None;
+    }
+    if sx > 4.0 || sy > 4.0 || sx < 0.25 || sy < 0.25 {
+        log::debug!(
+            "bb_resolve: skipping child-canvas scaling for host ptr:{} (child {:.0}x{:.0} -> host {:.0}x{:.0}, scale {:.3}x{:.3})",
+            host_parent_id,
+            child_w,
+            child_h,
+            host_w,
+            host_h,
+            sx,
+            sy,
+        );
         return None;
     }
     if (sx - 1.0).abs() < 0.0001 && (sy - 1.0).abs() < 0.0001 {
@@ -956,28 +1003,46 @@ fn inject_param_overrides(
         return;
     }
 
-    // Build param_name → loc_key map from parent paramInputValues.
+    // Build param_name → override maps from parent paramInputValues.
     let mut param_to_loc: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut param_to_string: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut param_to_bool: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
     for entry in param_inputs {
-        let is_localization = entry
+        let ty = entry
             .get("_Type_")
             .and_then(|v| v.as_str())
-            .map(|t| t.eq_ignore_ascii_case("BuildingBlocks_ComponentParameterInputLocalization"))
-            .unwrap_or(false);
-        if !is_localization {
-            continue;
-        }
+            .unwrap_or("");
         let Some(param) = entry.get("parameter").and_then(|v| v.as_str()) else {
             continue;
         };
-        let Some(value) = entry.get("value").and_then(|v| v.as_str()) else {
+        if param.is_empty() {
             continue;
-        };
-        if !param.is_empty() && !value.is_empty() {
-            param_to_loc.insert(param.to_ascii_lowercase(), value.to_owned());
+        }
+        let key = param.to_ascii_lowercase();
+        if ty.eq_ignore_ascii_case("BuildingBlocks_ComponentParameterInputLocalization") {
+            let Some(value) = entry.get("value").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if value.is_empty() {
+                continue;
+            }
+            param_to_loc.insert(key, value.to_owned());
+        } else if ty.eq_ignore_ascii_case("BuildingBlocks_ComponentParameterInputString") {
+            let Some(value) = entry.get("value").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if value.is_empty() {
+                continue;
+            }
+            param_to_string.insert(key, value.to_owned());
+        } else if ty.eq_ignore_ascii_case("BuildingBlocks_ComponentParameterInputBoolean") {
+            if let Some(v) = entry.get("value").and_then(|v| v.as_bool()) {
+                param_to_bool.insert(param.to_ascii_lowercase(), v);
+            }
         }
     }
-    if param_to_loc.is_empty() {
+    if param_to_loc.is_empty() && param_to_string.is_empty() && param_to_bool.is_empty() {
         return;
     }
 
@@ -985,69 +1050,99 @@ fn inject_param_overrides(
     // entries and inject a synthetic _SynthLocalizedParam_ op for each match.
     let mut synthetics: Vec<serde_json::Value> = Vec::new();
     let mut param_ptr_to_loc: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut param_ptr_to_string: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     for op in &child_scene.operations {
-        let is_local_param = op
-            .get("_Type_")
-            .and_then(|v| v.as_str())
-            .map(|t| t.eq_ignore_ascii_case("BuildingBlocks_BindingsLocalizedComponentParameter"))
-            .unwrap_or(false);
-        if !is_local_param {
-            continue;
-        }
+        let ty = op.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
         let param_name_lc = op
             .get("parameter")
             .and_then(|v| v.as_str())
             .map(|s| s.to_ascii_lowercase())
             .unwrap_or_default();
-        let Some(loc_key) = param_to_loc.get(&param_name_lc) else {
-            continue;
-        };
         let Some(ptr_str) = op.get("_Pointer_").and_then(|v| v.as_str()) else {
             continue;
         };
-        synthetics.push(serde_json::json!({
-            "_Type_": "_SynthLocalizedParam_",
-            "_Pointer_": ptr_str,
-            "resolvedLocKey": loc_key,
-        }));
-        param_ptr_to_loc.insert(ptr_str.to_owned(), loc_key.to_owned());
+        if ty.eq_ignore_ascii_case("BuildingBlocks_BindingsLocalizedComponentParameter") {
+            let Some(loc_key) = param_to_loc.get(&param_name_lc) else {
+                continue;
+            };
+            synthetics.push(serde_json::json!({
+                "_Type_": "_SynthLocalizedParam_",
+                "_Pointer_": ptr_str,
+                "resolvedLocKey": loc_key,
+            }));
+            param_ptr_to_loc.insert(ptr_str.to_owned(), loc_key.to_owned());
+        } else if ty.eq_ignore_ascii_case("BuildingBlocks_BindingsStringComponentParameter") {
+            let Some(value) = param_to_string.get(&param_name_lc) else {
+                continue;
+            };
+            synthetics.push(serde_json::json!({
+                "_Type_": "_SynthStringParam_",
+                "_Pointer_": ptr_str,
+                "resolvedString": value,
+            }));
+            param_ptr_to_string.insert(ptr_str.to_owned(), value.to_owned());
+        } else if ty.eq_ignore_ascii_case("BuildingBlocks_BindingsBooleanComponentParameter") {
+            let Some(value) = param_to_bool.get(&param_name_lc) else {
+                continue;
+            };
+            synthetics.push(serde_json::json!({
+                "_Type_": "_SynthBooleanParam_",
+                "_Pointer_": ptr_str,
+                "resolvedBool": value,
+            }));
+        }
     }
 
     // Also synthesize direct widget→loc mappings for LocalizedField ops that
     // consume those component-parameter pointers. This avoids losing the
     // mapping when intermediate pointer graphs are ambiguous after deep merges.
-    if !param_ptr_to_loc.is_empty() {
+    if !param_ptr_to_loc.is_empty() || !param_ptr_to_string.is_empty() {
         for op in &child_scene.operations {
-            let is_localized_field = op
-                .get("_Type_")
-                .and_then(|v| v.as_str())
-                .map(|t| t.eq_ignore_ascii_case("BuildingBlocks_BindingsLocalizedField"))
-                .unwrap_or(false);
-            if !is_localized_field {
+            let ty = op.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
+            if !ty.eq_ignore_ascii_case("BuildingBlocks_BindingsLocalizedField")
+                && !ty.eq_ignore_ascii_case("BuildingBlocks_BindingsStringField")
+            {
                 continue;
             }
-            let Some(widget_ptr) = op.get("widget").and_then(|v| v.as_str()) else {
+            let Some(widget_ptr) = ptr_ref_str(op.get("widget")) else {
                 continue;
             };
-            let Some(input_ptr) = op.get("input").and_then(|v| v.as_str()) else {
+            let Some(input_ptr_raw) = ptr_ref_str(op.get("input")) else {
                 continue;
             };
-            let Some(input_ptr_raw) = input_ptr.strip_prefix("_PointsTo_:") else {
-                continue;
-            };
-            let Some(loc_key) = param_ptr_to_loc.get(input_ptr_raw) else {
-                continue;
-            };
-            synthetics.push(serde_json::json!({
-                "_Type_": "_SynthLocalizedWidget_",
-                "widget": widget_ptr,
-                "resolvedLocKey": loc_key,
-            }));
+            if ty.eq_ignore_ascii_case("BuildingBlocks_BindingsLocalizedField") {
+                let Some(loc_key) = param_ptr_to_loc.get(input_ptr_raw) else {
+                    continue;
+                };
+                synthetics.push(serde_json::json!({
+                    "_Type_": "_SynthLocalizedWidget_",
+                    "widget": widget_ptr,
+                    "resolvedLocKey": loc_key,
+                }));
+            } else if ty.eq_ignore_ascii_case("BuildingBlocks_BindingsStringField") {
+                let Some(value) = param_ptr_to_string.get(input_ptr_raw) else {
+                    continue;
+                };
+                synthetics.push(serde_json::json!({
+                    "_Type_": "_SynthStringWidget_",
+                    "widget": widget_ptr,
+                    "resolvedString": value,
+                }));
+            }
         }
     }
 
     if !synthetics.is_empty() {
         child_scene.operations.extend(synthetics);
+    }
+}
+
+fn ptr_ref_str(value: Option<&serde_json::Value>) -> Option<&str> {
+    match value {
+        Some(serde_json::Value::String(s)) => s.strip_prefix("_PointsTo_:"),
+        Some(serde_json::Value::Object(obj)) => obj.get("_Pointer_").and_then(|v| v.as_str()),
+        _ => None,
     }
 }
 
@@ -1318,6 +1413,63 @@ mod tests {
     }
 
     #[test]
+    fn instantiated_false_widget_is_deactivated_and_not_merged() {
+        let host = serde_json::json!({
+            "_RecordName_": "test_host_instantiated_false",
+            "_RecordId_": "00000000-0000-0000-0000-000000000120",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 800.0, "y": 600.0, "z": 0.0},
+                "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "root"},
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetCanvas",
+                        "name": "attract_canvas",
+                        "parent": "_PointsTo_:ptr:1",
+                        "canvas": "file://./content_canvas.json"
+                    }
+                ],
+                "operations": [
+                    {"_Pointer_":"ptr:10","_Type_":"BuildingBlocks_BindingsBooleanVariable","value":"Bed/state.BaseScreens.Attract"},
+                    {"_Pointer_":"ptr:11","_Type_":"BuildingBlocks_BindingsBooleanVariable","value":"Bed/state.BaseScreens.MainMenu"},
+                    {"_Pointer_":"ptr:12","_Type_":"BuildingBlocks_BindingsBooleanField","widget":"_PointsTo_:ptr:2","field":"Instantiated","input":"_PointsTo_:ptr:10"}
+                ]
+            }
+        });
+        let content = serde_json::json!({
+            "_RecordName_": "content_canvas",
+            "_RecordId_": "00000000-0000-0000-0000-000000000121",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 800.0, "y": 600.0, "z": 0.0},
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "content_root"}
+                ]
+            }
+        });
+
+        let scene = resolve_canvas_graph(&host, None, &|url| {
+            assert_eq!(url, "file://./content_canvas.json");
+            Ok(content.clone())
+        })
+        .expect("resolve failed");
+
+        let widget = scene
+            .nodes
+            .get(&2)
+            .expect("host widget canvas ptr:2 must exist");
+        assert!(!widget.is_active, "Instantiated=false widget must be deactivated");
+        assert_eq!(
+            scene.nodes.len(),
+            2,
+            "inactive widget should not merge child canvas content"
+        );
+    }
+
+    #[test]
     fn resolve_follows_multiple_widget_canvas_levels() {
         // Verify that the resolver follows WidgetCanvas.canvas URLs at depth 1,
         // 2, 3, and 4 (all within MAX_CANVAS_DEPTH = 8).
@@ -1547,6 +1699,38 @@ mod tests {
             target_scene.nodes.len(),
             self_scene.nodes.len(),
         );
+    }
+
+    #[test]
+    fn inject_param_overrides_synthesizes_boolean_component_parameter_values() {
+        let mut child_scene = crate::bb_scene::BbScene {
+            canvas_size: (1920.0, 1080.0),
+            roots: Vec::new(),
+            nodes: std::collections::BTreeMap::new(),
+            operations: vec![serde_json::json!({
+                "_Type_": "BuildingBlocks_BindingsBooleanComponentParameter",
+                "_Pointer_": "ptr:42",
+                "parameter": "ParamInput0",
+                "defaultValue": false
+            })],
+        };
+        let param_inputs = vec![serde_json::json!({
+            "_Type_": "BuildingBlocks_ComponentParameterInputBoolean",
+            "parameter": "ParamInput0",
+            "value": true
+        })];
+
+        inject_param_overrides(&param_inputs, &mut child_scene);
+
+        let synth = child_scene
+            .operations
+            .iter()
+            .find(|op| {
+                op.get("_Type_").and_then(|v| v.as_str()) == Some("_SynthBooleanParam_")
+                    && op.get("_Pointer_").and_then(|v| v.as_str()) == Some("ptr:42")
+            })
+            .expect("expected _SynthBooleanParam_ for ptr:42");
+        assert_eq!(synth.get("resolvedBool").and_then(|v| v.as_bool()), Some(true));
     }
 
     /// Build a minimal canvas JSON that carries a single Pass 1 canvas-reference

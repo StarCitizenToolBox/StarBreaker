@@ -332,14 +332,19 @@ pub fn parse_bb_canvas(json: &serde_json::Value) -> Result<BbScene, String> {
     // always small positive integers in practice).
     let mut nodes: BTreeMap<BbNodeId, BbNode> = BTreeMap::new();
     let mut library_ids = std::collections::BTreeSet::new();
+    let mut scene_order_ids: Vec<BbNodeId> = Vec::new();
+    let mut library_order_ids: Vec<BbNodeId> = Vec::new();
     let mut synthetic_base: u32 = 0x8000_0000;
 
     for raw_item in scene_arr {
-        let _ = parse_node_into(raw_item, &mut nodes, &mut synthetic_base, "scene");
+        if let Some(id) = parse_node_into(raw_item, &mut nodes, &mut synthetic_base, "scene") {
+            scene_order_ids.push(id);
+        }
     }
     for raw_item in library_arr {
         if let Some(id) = parse_node_into(raw_item, &mut nodes, &mut synthetic_base, "library") {
             library_ids.insert(id);
+            library_order_ids.push(id);
         }
     }
 
@@ -364,9 +369,10 @@ pub fn parse_bb_canvas(json: &serde_json::Value) -> Result<BbScene, String> {
 
     // ── Second pass: wire up children. ──────────────────────────────────────
     // Collect (parent_id, child_id) pairs first to avoid borrow conflicts.
-    let parent_child_pairs: Vec<(BbNodeId, BbNodeId)> = nodes
-        .values()
-        .filter_map(|n| n.parent.map(|p| (p, n.id)))
+    let parent_child_pairs: Vec<(BbNodeId, BbNodeId)> = scene_order_ids
+        .iter()
+        .chain(library_order_ids.iter())
+        .filter_map(|id| nodes.get(id).and_then(|n| n.parent.map(|p| (p, *id))))
         .collect();
 
     for (parent_id, child_id) in parent_child_pairs {
@@ -379,18 +385,13 @@ pub fn parse_bb_canvas(json: &serde_json::Value) -> Result<BbScene, String> {
         }
     }
 
-    // Sort children by insertion order (by child id for determinism).
-    for node in nodes.values_mut() {
-        node.children.sort_unstable();
-    }
-
     // ── Collect roots. ───────────────────────────────────────────────────────
-    let mut roots: Vec<BbNodeId> = nodes
-        .values()
-        .filter(|n| n.parent.is_none() && !library_ids.contains(&n.id))
-        .map(|n| n.id)
+    let roots: Vec<BbNodeId> = scene_order_ids
+        .iter()
+        .filter_map(|id| nodes.get(id).map(|n| (*id, n)))
+        .filter(|(id, n)| n.parent.is_none() && !library_ids.contains(id))
+        .map(|(id, _)| id)
         .collect();
-    roots.sort_unstable();
 
     Ok(BbScene { canvas_size: (canvas_w, canvas_h), roots, nodes, operations })
 }
