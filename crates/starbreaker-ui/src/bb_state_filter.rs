@@ -20,13 +20,41 @@
 //! visibility evaluates to `false`, so the caller can skip following those
 //! canvas URLs in Pass 2 of the resolver.
 //!
-//! # Naming convention
+//! # Capability vs active-mode variables
 //!
-//! `staticVariables[i].name` is the binding path with an `"_SV"` suffix
-//! (e.g. `"Standing/state.BaseScreens.Admin_SV"` for the `Admin` variable
-//! whose binding path is `"Standing/state.BaseScreens.Admin"`).
-//! Stripping the `"_SV"` suffix recovers the binding path used in the
-//! corresponding `BuildingBlocks_BindingsBooleanVariable` operation.
+//! BB canvases use two distinct families of boolean variables that share a
+//! common namespace prefix but have different semantics:
+//!
+//! - **Active-mode** variables — bare binding path
+//!   (e.g. `"Standing/state.BaseScreens.Admin"`).  Referenced from
+//!   `BuildingBlocks_BindingsBooleanVariable` operations and gate which
+//!   sub-canvas is currently visible.  Exactly one is true at a time.
+//! - **Capability/sensor** variables — same path with an `"_SV"` suffix
+//!   (e.g. `"Standing/state.BaseScreens.Admin_SV"`).  Authored into
+//!   `staticVariables[]` to declare "this surface permits the named mode".
+//!   They do NOT activate the matching active-mode variable; they only
+//!   enable optional UI affordances (e.g. an Admin button in MainMenu)
+//!   inside sub-canvases.  Treated as opaque names that no `BooleanVariable`
+//!   operation references.
+//!
+//! # Idle / cold-default state
+//!
+//! When a canvas declares no `true` active-mode variable in
+//! `staticVariables[]` (the common case — most canvases leave state
+//! selection to the C++ runtime), the static export must still pick one
+//! sub-canvas as the visible "switched-on but not interacted-with" state.
+//!
+//! The structural rule, derived from inspection of medical, MFD, and door
+//! canvases:
+//!
+//! > The state variable whose **inverted** value gates the `Instantiated`
+//! > (or `IsActive`) field of a framing widget (Header / Footer / always-on
+//! > sibling) is the canvas's idle / cold-default.  If the inverted operand
+//! > is an `EvaluateOr`, the **first** input of the Or is the cold default
+//! > (Or convention: list states in idle-priority order).
+//!
+//! When no other variable in the same dotted-prefix group has an explicit
+//! static-true override, this idle-gate variable defaults to `true`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -46,11 +74,13 @@ use crate::bb_scene::BbNodeId;
 ///
 /// `record_value` is the `_RecordValue_` object of the root canvas record.
 pub fn instantiated_false_widgets(record_value: &serde_json::Value) -> HashSet<BbNodeId> {
-    let static_vals = parse_static_variables(record_value);
+    let mut static_vals = parse_static_variables(record_value);
     let ops = match record_value.get("operations").and_then(|v| v.as_array()) {
         Some(a) => a,
         None => return HashSet::new(),
     };
+
+    apply_idle_defaults(ops, &mut static_vals);
 
     let ptr_vals = evaluate_bool_ops(ops, &static_vals);
 
@@ -93,10 +123,13 @@ pub fn instantiated_false_widgets(record_value: &serde_json::Value) -> HashSet<B
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Parse `staticVariables[]` into a map from binding path → bool.
+/// Parse `staticVariables[]` into a map from variable name → bool.
 ///
-/// The `name` field uses the `"<binding>_SV"` convention; stripping the
-/// `"_SV"` suffix recovers the binding path.
+/// The variable name is preserved verbatim.  In particular, the `"_SV"`
+/// suffix (capability flag) is NOT stripped, so capability flags occupy
+/// distinct keys from their matching active-mode bool and never alias.
+/// Operations reference active-mode variables by their bare name; capability
+/// flags are effectively unused by the state-selection evaluator.
 fn parse_static_variables(record_value: &serde_json::Value) -> HashMap<String, bool> {
     let mut map: HashMap<String, bool> = HashMap::new();
     let Some(arr) = record_value
@@ -108,12 +141,155 @@ fn parse_static_variables(record_value: &serde_json::Value) -> HashMap<String, b
     for sv in arr {
         let name = sv.get("name").and_then(|v| v.as_str()).unwrap_or("");
         let val = sv.get("value").and_then(|v| v.as_bool()).unwrap_or(false);
-        let binding = name.strip_suffix("_SV").unwrap_or(name);
-        if !binding.is_empty() {
-            map.insert(binding.to_owned(), val);
+        if !name.is_empty() {
+            map.insert(name.to_owned(), val);
         }
     }
     map
+}
+
+/// Walk `operations[]` to discover the idle-gate state variable for each
+/// mutual-exclusion group, and insert a default `true` for that variable
+/// into `static_vals` when no other group member has an explicit override.
+///
+/// A *mutual-exclusion group* is the set of `BindingsBooleanVariable` ops
+/// whose `binding` shares the same dotted-prefix (everything before the
+/// last `.`).  In the medbay canvases this is the
+/// `Bed/state.BaseScreens` / `Standing/state.BaseScreens` prefix; in MFD
+/// canvases it is `eView_*` etc.
+///
+/// The idle-gate variable is the one whose **inverted** form gates the
+/// `Instantiated` (or `IsActive`) field of some widget — typically a Header
+/// or Footer that is hidden during the idle/attract state.  When the
+/// inverted operand is a `BindingsBooleanEvaluateOr`, the *first* input of
+/// the Or names the cold-default (Or operands are authored in
+/// idle-priority order).
+fn apply_idle_defaults(
+    ops: &[serde_json::Value],
+    static_vals: &mut HashMap<String, bool>,
+) {
+    // ptr → op
+    let mut ptr_to_op: HashMap<BbNodeId, &serde_json::Value> = HashMap::new();
+    for op in ops {
+        if let Some(p) = op
+            .get("_Pointer_")
+            .and_then(|v| v.as_str())
+            .and_then(parse_ptr_id)
+        {
+            ptr_to_op.insert(p, op);
+        }
+    }
+
+    // Resolve a pointer to the variable bindings it ultimately reads.
+    // Returns the ordered list of variable binding names (in Or-operand
+    // order, with the first being the cold-default candidate).
+    fn resolve_vars(
+        ptr: BbNodeId,
+        ptr_to_op: &HashMap<BbNodeId, &serde_json::Value>,
+        visited: &mut HashSet<BbNodeId>,
+    ) -> Vec<String> {
+        if !visited.insert(ptr) {
+            return Vec::new();
+        }
+        let Some(op) = ptr_to_op.get(&ptr) else {
+            return Vec::new();
+        };
+        let ty = op.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
+        match ty {
+            "BuildingBlocks_BindingsBooleanVariable" => op
+                .get("binding")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| vec![s.to_owned()])
+                .unwrap_or_default(),
+            "BuildingBlocks_BindingsBooleanEvaluateOr" => {
+                let mut out = Vec::new();
+                if let Some(inputs) = op.get("inputs").and_then(|v| v.as_array()) {
+                    for inp in inputs {
+                        if let Some(p) = inp.as_str().and_then(parse_points_to_ptr) {
+                            out.extend(resolve_vars(p, ptr_to_op, visited));
+                        }
+                    }
+                }
+                out
+            }
+            // EvaluateAnd is not an idle-gate (would require ALL false to
+            // unhide Header), so skip; ditto for unknown ops.
+            _ => Vec::new(),
+        }
+    }
+
+    // Collect idle-gate candidates: (cold-default binding, all group members).
+    let mut candidates: Vec<(String, Vec<String>)> = Vec::new();
+    for op in ops {
+        let ty = op.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
+        if ty != "BuildingBlocks_BindingsBooleanField" {
+            continue;
+        }
+        let field = op.get("field").and_then(|v| v.as_str()).unwrap_or("");
+        if !matches!(field, "Instantiated" | "IsActive") {
+            continue;
+        }
+        let Some(input_ptr) = op
+            .get("input")
+            .and_then(|v| v.as_str())
+            .and_then(parse_points_to_ptr)
+        else {
+            continue;
+        };
+        // The input must be an Invert (the framing widget is hidden when the
+        // idle-gate state is true).
+        let Some(input_op) = ptr_to_op.get(&input_ptr) else {
+            continue;
+        };
+        let input_ty = input_op
+            .get("_Type_")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if input_ty != "BuildingBlocks_BindingsBooleanInvert" {
+            continue;
+        }
+        let Some(inner_ptr) = input_op
+            .get("input")
+            .and_then(|v| v.as_str())
+            .and_then(parse_points_to_ptr)
+        else {
+            continue;
+        };
+        let mut visited = HashSet::new();
+        let group_members = resolve_vars(inner_ptr, &ptr_to_op, &mut visited);
+        if let Some(cold_default) = group_members.first().cloned() {
+            candidates.push((cold_default, group_members));
+        }
+    }
+
+    // For each candidate, apply only if no group member has an explicit
+    // static override.  Group membership: variables that share the same
+    // dotted prefix as `cold_default`.
+    for (cold_default, group_members) in candidates {
+        let prefix = match cold_default.rsplit_once('.') {
+            Some((p, _)) => p,
+            None => continue, // ungrouped variable; skip
+        };
+        // Group includes both the resolved `group_members` (same Or chain)
+        // and any other static-var name sharing the prefix.
+        let mut group: HashSet<String> = group_members.into_iter().collect();
+        for key in static_vals.keys() {
+            // Exclude `_SV` capability flags from group-override consideration.
+            if key.ends_with("_SV") {
+                continue;
+            }
+            if let Some((p, _)) = key.rsplit_once('.') {
+                if p == prefix {
+                    group.insert(key.clone());
+                }
+            }
+        }
+        let any_explicit_override = group.iter().any(|m| static_vals.get(m).copied() == Some(true));
+        if !any_explicit_override {
+            static_vals.entry(cold_default).or_insert(true);
+        }
+    }
 }
 
 /// Evaluate the boolean operation graph, returning a map from pointer ID to
@@ -265,12 +441,13 @@ mod tests {
 
     // ── test 2 ──────────────────────────────────────────────────────────────
 
-    /// A WidgetCanvas whose Instantiated is bound to a variable with a
-    /// `staticVariables` entry of `true` must NOT appear in the false set.
+    /// A WidgetCanvas whose Instantiated is bound to a variable with a direct
+    /// `staticVariables` entry of `true` (no `_SV` suffix) must NOT appear in
+    /// the false set.
     #[test]
     fn static_true_variable_widget_is_not_filtered() {
         let rv = make_record_value(
-            vec![static_var("state.Admin_SV", true)],
+            vec![static_var("state.Admin", true)],
             vec![
                 variable_op(10, "state.Admin"),
                 boolean_field_op(5, 10), // ptr:5 (WidgetCanvas) bound to ptr:10 (Admin=true)
@@ -280,6 +457,33 @@ mod tests {
         assert!(
             !result.contains(&5),
             "Admin=true canvas (ptr:5) must not be filtered"
+        );
+    }
+
+    /// A `_SV`-suffixed capability flag in `staticVariables` must NOT activate
+    /// the same-named active-mode bool.  This is the wall-medbay case:
+    /// `state.Admin_SV=true` is a capability flag, NOT an Admin-state activator.
+    #[test]
+    fn sv_capability_flag_does_not_activate_active_mode() {
+        let rv = make_record_value(
+            vec![static_var("state.Admin_SV", true)],
+            vec![
+                variable_op(10, "state.Admin"),
+                boolean_field_op(5, 10),
+                // Idle-gate so apply_idle_defaults does not default Admin to true:
+                variable_op(20, "state.Attract"),
+                json!({
+                    "_Pointer_": "ptr:22",
+                    "_Type_": "BuildingBlocks_BindingsBooleanInvert",
+                    "input": "_PointsTo_:ptr:20"
+                }),
+                boolean_field_op(21, 22), // Header hidden when Attract=true
+            ],
+        );
+        let result = instantiated_false_widgets(&rv);
+        assert!(
+            result.contains(&5),
+            "Admin canvas (ptr:5) must be filtered — _SV capability flag must NOT activate the matching active-mode bool"
         );
     }
 
@@ -357,12 +561,15 @@ mod tests {
 
     // ── test 6 ──────────────────────────────────────────────────────────────
 
-    /// Invert: `Instantiated = NOT(false)` → `true` → canvas is shown.
+    /// Idle-default rule: when the framing widget's `Instantiated` is bound to
+    /// `NOT(X)` and no group member has an explicit static-true override, the
+    /// idle-gate variable `X` defaults to `true`, so the framing widget is
+    /// filtered (hidden during the cold-default state).
     #[test]
-    fn invert_of_false_is_true_and_not_filtered() {
-        // ptr:3 = Attract (no static → false)
-        // ptr:6 = NOT(ptr:3) → true
-        // ptr:5 (Header WidgetCanvas) bound to ptr:6 → shown
+    fn idle_gate_invert_defaults_true_framing_widget_hidden() {
+        // ptr:3 = Attract (idle-gate)
+        // ptr:6 = NOT(ptr:3)
+        // ptr:5 (Header WidgetCanvas) bound to ptr:6 → hidden when Attract=true
         let rv = make_record_value(
             vec![],
             vec![
@@ -377,9 +584,93 @@ mod tests {
         );
         let result = instantiated_false_widgets(&rv);
         assert!(
-            !result.contains(&5),
-            "NOT(false) canvas (ptr:5) must not be filtered"
+            result.contains(&5),
+            "Header (ptr:5) must be filtered — Attract is idle-gate and defaults to true"
         );
+    }
+
+    /// Idle-default rule with `EvaluateOr`: when the inverted operand is
+    /// `Or(Attract, LogIn)`, the FIRST operand (Attract) is the cold-default;
+    /// LogIn defaults to false.  This matches the wall medbay shape.
+    #[test]
+    fn idle_gate_or_first_operand_is_cold_default() {
+        // ptr:3 = Attract, ptr:4 = LogIn, ptr:19 = Or(3, 4), ptr:6 = NOT(19)
+        // ptr:5 (Header) bound to ptr:6
+        // ptr:11 (LogInCanvas) bound to ptr:4 → must remain hidden
+        // ptr:8 (AttractCanvas) bound to ptr:3 → must be shown
+        let rv = make_record_value(
+            vec![],
+            vec![
+                variable_op(3, "state.Attract"),
+                variable_op(4, "state.LogIn"),
+                json!({
+                    "_Pointer_": "ptr:19",
+                    "_Type_": "BuildingBlocks_BindingsBooleanEvaluateOr",
+                    "inputs": ["_PointsTo_:ptr:3", "_PointsTo_:ptr:4"]
+                }),
+                json!({
+                    "_Pointer_": "ptr:6",
+                    "_Type_": "BuildingBlocks_BindingsBooleanInvert",
+                    "input": "_PointsTo_:ptr:19"
+                }),
+                boolean_field_op(5, 6),
+                boolean_field_op(11, 4),
+                boolean_field_op(8, 3),
+            ],
+        );
+        let result = instantiated_false_widgets(&rv);
+        assert!(result.contains(&5), "Header (ptr:5) hidden under idle (Attract=true)");
+        assert!(result.contains(&11), "LogInCanvas (ptr:11) hidden (LogIn=false)");
+        assert!(!result.contains(&8), "AttractCanvas (ptr:8) shown (Attract=true cold default)");
+    }
+
+    /// Explicit static-true override of any group member SUPPRESSES the
+    /// idle-default rule: the idle-gate variable stays false and the
+    /// framing widget is shown.
+    #[test]
+    fn explicit_group_override_suppresses_idle_default() {
+        // ptr:3 = Attract, ptr:7 = Admin, ptr:6 = NOT(3)
+        // staticVariables[]: state.Admin=true (explicit override → suppresses
+        // Attract idle-default)
+        let rv = make_record_value(
+            vec![static_var("state.Admin", true)],
+            vec![
+                variable_op(3, "state.Attract"),
+                variable_op(7, "state.Admin"),
+                json!({
+                    "_Pointer_": "ptr:6",
+                    "_Type_": "BuildingBlocks_BindingsBooleanInvert",
+                    "input": "_PointsTo_:ptr:3"
+                }),
+                boolean_field_op(5, 6),
+                boolean_field_op(8, 7),
+            ],
+        );
+        let result = instantiated_false_widgets(&rv);
+        assert!(!result.contains(&5), "Header (ptr:5) shown — Admin override suppresses Attract idle-default");
+        assert!(!result.contains(&8), "AdminCanvas (ptr:8) shown via explicit static-true");
+    }
+
+    /// Old test 6 kept as a separate scenario: when the inverted variable is
+    /// NOT a member of an idle-gate group (no shared dotted prefix at all),
+    /// idle-default does not kick in and `NOT(false) → true`.
+    #[test]
+    fn ungrouped_invert_does_not_trigger_idle_default() {
+        // Variable binding is a single segment with no dotted prefix.
+        let rv = make_record_value(
+            vec![],
+            vec![
+                variable_op(3, "Attract"), // no `.` → no group
+                json!({
+                    "_Pointer_": "ptr:6",
+                    "_Type_": "BuildingBlocks_BindingsBooleanInvert",
+                    "input": "_PointsTo_:ptr:3"
+                }),
+                boolean_field_op(5, 6),
+            ],
+        );
+        let result = instantiated_false_widgets(&rv);
+        assert!(!result.contains(&5), "ungrouped variable: NOT(false)=true, Header shown");
     }
 
     #[test]
