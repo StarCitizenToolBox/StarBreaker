@@ -314,6 +314,11 @@ pub fn parse_bb_canvas(json: &serde_json::Value) -> Result<BbScene, String> {
         .get("scene")
         .and_then(|v| v.as_array())
         .ok_or("missing or non-array _RecordValue_.scene")?;
+    let empty_library = Vec::new();
+    let library_arr = record_value
+        .get("library")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&empty_library);
     let operations = record_value
         .get("operations")
         .and_then(|v| v.as_array())
@@ -326,28 +331,33 @@ pub fn parse_bb_canvas(json: &serde_json::Value) -> Result<BbScene, String> {
     // start at 0x8000_0000 to avoid collision with real ptr:N values (which are
     // always small positive integers in practice).
     let mut nodes: BTreeMap<BbNodeId, BbNode> = BTreeMap::new();
+    let mut library_ids = std::collections::BTreeSet::new();
     let mut synthetic_base: u32 = 0x8000_0000;
 
     for raw_item in scene_arr {
-        let needs_synthetic = raw_item
-            .get("_Pointer_")
-            .and_then(|v| v.as_str())
-            .is_none();
+        let _ = parse_node_into(raw_item, &mut nodes, &mut synthetic_base, "scene");
+    }
+    for raw_item in library_arr {
+        if let Some(id) = parse_node_into(raw_item, &mut nodes, &mut synthetic_base, "library") {
+            library_ids.insert(id);
+        }
+    }
 
-        let node_result = if needs_synthetic {
-            let synthetic_id = synthetic_base;
-            synthetic_base += 1;
-            parse_node_with_id(raw_item, synthetic_id)
-        } else {
-            parse_node(raw_item)
-        };
-
-        match node_result {
-            Ok(node) => {
-                nodes.insert(node.id, node);
-            }
-            Err(e) => {
-                log::warn!("bb_scene: skipping scene item: {e}");
+    // WidgetList nodes reference a reusable library template through `target`.
+    // Static renders do not have runtime array data, so attach one template
+    // instance under the list. This mirrors the authored structure without
+    // inventing list rows or canvas-specific defaults.
+    let list_targets: Vec<(BbNodeId, BbNodeId)> = nodes
+        .values()
+        .filter_map(|n| {
+            let target = n.raw.get("target")?.as_str().and_then(parse_points_to)?;
+            Some((n.id, target))
+        })
+        .collect();
+    for (list_id, target_id) in list_targets {
+        if let Some(target) = nodes.get_mut(&target_id) {
+            if target.parent.is_none() && library_ids.contains(&target_id) {
+                target.parent = Some(list_id);
             }
         }
     }
@@ -377,7 +387,7 @@ pub fn parse_bb_canvas(json: &serde_json::Value) -> Result<BbScene, String> {
     // ── Collect roots. ───────────────────────────────────────────────────────
     let mut roots: Vec<BbNodeId> = nodes
         .values()
-        .filter(|n| n.parent.is_none())
+        .filter(|n| n.parent.is_none() && !library_ids.contains(&n.id))
         .map(|n| n.id)
         .collect();
     roots.sort_unstable();
@@ -388,6 +398,38 @@ pub fn parse_bb_canvas(json: &serde_json::Value) -> Result<BbScene, String> {
 // ─────────────────────────────────────────────────────────────────────────────
 // Node parser
 // ─────────────────────────────────────────────────────────────────────────────
+
+fn parse_node_into(
+    raw_item: &serde_json::Value,
+    nodes: &mut BTreeMap<BbNodeId, BbNode>,
+    synthetic_base: &mut u32,
+    source: &str,
+) -> Option<BbNodeId> {
+    let needs_synthetic = raw_item
+        .get("_Pointer_")
+        .and_then(|v| v.as_str())
+        .is_none();
+
+    let node_result = if needs_synthetic {
+        let synthetic_id = *synthetic_base;
+        *synthetic_base += 1;
+        parse_node_with_id(raw_item, synthetic_id)
+    } else {
+        parse_node(raw_item)
+    };
+
+    match node_result {
+        Ok(node) => {
+            let id = node.id;
+            nodes.insert(id, node);
+            Some(id)
+        }
+        Err(e) => {
+            log::warn!("bb_scene: skipping {source} item: {e}");
+            None
+        }
+    }
+}
 
 fn parse_node(raw: &serde_json::Value) -> Result<BbNode, String> {
     let pointer_str = raw
