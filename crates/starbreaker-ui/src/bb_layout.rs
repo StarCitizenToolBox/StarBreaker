@@ -233,11 +233,28 @@ fn layout_node(
     let pos_x = (node.position.x + node.position_offset.x) * csx;
     let pos_y = (node.position.y + node.position_offset.y) * csy;
 
-    let anchor_world_x = parent_inner.x + parent_inner.w * node.anchor.x + pos_x;
-    let anchor_world_y = parent_inner.y + parent_inner.h * node.anchor.y + pos_y;
+    let is_flex_container = node
+        .raw
+        .get("layoutPolicy")
+        .and_then(|v| v.get("_Type_"))
+        .and_then(|v| v.as_str())
+        .map(|t| t.contains("FlexContainer"))
+        .unwrap_or(false);
+    let fills_parent = matches!(node.sizing.width, BbValue::Percent(p) if (p - 1.0).abs() < 0.0001)
+        && matches!(node.sizing.height, BbValue::Percent(p) if (p - 1.0).abs() < 0.0001);
 
-    let outer_x = anchor_world_x - outer_w * node.pivot.x;
-    let outer_y = anchor_world_y - outer_h * node.pivot.y;
+    let (outer_x, outer_y) = if is_flex_container && fills_parent {
+        // Full-bleed flex roots are parent-space containers; authoring anchor/pivot
+        // offsets should not shift them out of the parent rect.
+        (parent_inner.x + pos_x, parent_inner.y + pos_y)
+    } else {
+        let anchor_world_x = parent_inner.x + parent_inner.w * node.anchor.x + pos_x;
+        let anchor_world_y = parent_inner.y + parent_inner.h * node.anchor.y + pos_y;
+        (
+            anchor_world_x - outer_w * node.pivot.x,
+            anchor_world_y - outer_h * node.pivot.y,
+        )
+    };
 
     // ── 3. Margin (Phase A1: top-left offset only) ───────────────────────────
     let outer_x = outer_x + node.margin.left * csx;
@@ -354,10 +371,16 @@ fn layout_flex_children(
         grow: f32,
     }
     let mut flex_children: Vec<FlexChild> = Vec::new();
-    let mut non_flex: Vec<BbNodeId> = Vec::new();
+    let mut flow_non_grow: Vec<BbNodeId> = Vec::new();
+    let mut overlay_non_flex: Vec<BbNodeId> = Vec::new();
 
     for &child_id in children {
         let Some(child_node) = scene.nodes.get(&child_id) else { continue };
+        let affects_layout = child_node
+            .raw
+            .get("affectsLayout")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
         let grow = child_node
             .raw
             .get("layoutPolicyItem")
@@ -365,20 +388,43 @@ fn layout_flex_children(
             .and_then(|v| v.as_f64())
             .map(|g| g as f32)
             .unwrap_or(0.0);
-        if grow > 0.0 {
+        if affects_layout && grow > 0.0 {
             flex_children.push(FlexChild { id: child_id, grow });
+        } else if affects_layout {
+            flow_non_grow.push(child_id);
         } else {
-            non_flex.push(child_id);
+            overlay_non_flex.push(child_id);
         }
     }
 
-    // Lay out non-flex children with overlay fallback.
-    for child_id in non_flex {
+    // Children that do not participate in flex layout are overlayed.
+    for child_id in overlay_non_flex {
         layout_node(child_id, container, scene, csx, csy, rects, draw_order);
     }
 
     if flex_children.is_empty() {
+        if !flow_non_grow.is_empty() {
+            layout_flex_no_grow_children(
+                &flow_non_grow,
+                container,
+                flex,
+                scene,
+                csx,
+                csy,
+                rects,
+                draw_order,
+                is_row,
+            );
+        } else {
+            for child_id in flow_non_grow {
+                layout_node(child_id, container, scene, csx, csy, rects, draw_order);
+            }
+        }
         return;
+    }
+
+    for child_id in flow_non_grow {
+        layout_node(child_id, container, scene, csx, csy, rects, draw_order);
     }
 
     let n = flex_children.len();
@@ -414,6 +460,109 @@ fn layout_flex_children(
         };
         cursor += main_size + item_spacing;
         layout_node_with_rect(*id, child_rect, scene, csx, csy, rects, draw_order);
+    }
+}
+
+fn layout_flex_no_grow_children(
+    children: &[BbNodeId],
+    container: Rect,
+    flex: &serde_json::Value,
+    scene: &BbScene,
+    csx: f32,
+    csy: f32,
+    rects: &mut BTreeMap<BbNodeId, Rect>,
+    draw_order: &mut Vec<BbNodeId>,
+    is_row: bool,
+) {
+    if children.is_empty() {
+        return;
+    }
+    let item_spacing = if is_row {
+        flex.get("columnSpacing").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32 * csx
+    } else {
+        flex.get("rowSpacing").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32 * csy
+    };
+    let axis_just = flex.get("axisJustification").and_then(|v| v.as_str()).unwrap_or("Start");
+    let cross_just = flex
+        .get("crossAxisJustification")
+        .and_then(|v| v.as_str())
+        .or_else(|| flex.get("itemAlignment").and_then(|v| v.as_str()))
+        .unwrap_or("Stretch");
+
+    let mut sizes: Vec<(BbNodeId, f32, f32, bool)> = Vec::with_capacity(children.len());
+    let mut total_main = 0.0f32;
+    for &child_id in children {
+        let Some(node) = scene.nodes.get(&child_id) else { continue };
+        let mut w = resolve_value(&node.sizing.width, container.w, container.h, csx, true);
+        let mut h = resolve_value(&node.sizing.height, container.h, container.w, csy, false);
+        if matches!(node.sizing.width, BbValue::Other { ref behavior, .. } if behavior == "PercentOfY")
+        {
+            w = resolve_value(&node.sizing.width, container.w, h, csx, true);
+        }
+        if matches!(node.sizing.height, BbValue::Other { ref behavior, .. } if behavior == "PercentOfX")
+        {
+            h = resolve_value(&node.sizing.height, container.h, w, csy, false);
+        }
+        // In non-grow flex flow, "Auto" on main axis behaves like content-fit.
+        // We do not have content measurement here, so treat it as zero so fixed/
+        // percent children can still be axis-justified (instead of Auto filling
+        // the whole container and pushing everything out of view).
+        let auto_main = if is_row {
+            matches!(node.sizing.width, BbValue::Other { ref behavior, .. } if behavior == "Auto")
+        } else {
+            matches!(node.sizing.height, BbValue::Other { ref behavior, .. } if behavior == "Auto")
+        };
+        if auto_main {
+            if is_row {
+                w = 0.0;
+            } else {
+                h = 0.0;
+            }
+        }
+        total_main += if is_row { w.max(0.0) } else { h.max(0.0) };
+        sizes.push((child_id, w.max(0.0), h.max(0.0), auto_main));
+    }
+    if sizes.is_empty() {
+        return;
+    }
+    total_main += item_spacing * (sizes.len().saturating_sub(1) as f32);
+    let avail_main = if is_row { container.w } else { container.h };
+    let main_offset = match axis_just.to_ascii_lowercase().as_str() {
+        "center" => ((avail_main - total_main) * 0.5).max(0.0),
+        "end" | "right" | "bottom" => (avail_main - total_main).max(0.0),
+        _ => 0.0,
+    };
+    let mut cursor = if is_row { container.x + main_offset } else { container.y + main_offset };
+    for (id, w, h, auto_main) in sizes {
+        if auto_main {
+            // Auto-sized text-like items still contribute spacing/alignment
+            // slots, but keep their own overlay layout so they can render with
+            // intrinsic content bounds.
+            layout_node(id, container, scene, csx, csy, rects, draw_order);
+            cursor += if is_row { w } else { h };
+            cursor += item_spacing;
+            continue;
+        }
+        let rect = if is_row {
+            let y = match cross_just.to_ascii_lowercase().as_str() {
+                "center" => container.y + (container.h - h) * 0.5,
+                "end" | "right" | "bottom" => container.y + (container.h - h),
+                _ => container.y,
+            };
+            let ch = if cross_just.eq_ignore_ascii_case("stretch") { container.h } else { h };
+            Rect { x: cursor, y, w, h: ch }
+        } else {
+            let x = match cross_just.to_ascii_lowercase().as_str() {
+                "center" => container.x + (container.w - w) * 0.5,
+                "end" | "right" | "bottom" => container.x + (container.w - w),
+                _ => container.x,
+            };
+            let cw = if cross_just.eq_ignore_ascii_case("stretch") { container.w } else { w };
+            Rect { x, y: cursor, w: cw, h }
+        };
+        layout_node_with_rect(id, rect, scene, csx, csy, rects, draw_order);
+        cursor += if is_row { w } else { h };
+        cursor += item_spacing;
     }
 }
 

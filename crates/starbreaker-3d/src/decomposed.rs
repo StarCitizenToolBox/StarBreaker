@@ -5,7 +5,6 @@ use std::time::Instant;
 use gltf_json as json;
 use starbreaker_common::progress::{report as report_progress, Progress};
 use starbreaker_dds;
-use sha2::{Digest, Sha256};
 use starbreaker_datacore::Database;
 use starbreaker_p4k::MappedP4k;
 
@@ -944,7 +943,8 @@ pub(crate) fn write_decomposed_export(
     const INTERIOR_ASSETS_END: f32 = 0.99;
 
     let mut files = BTreeMap::new();
-    let root_manufacturer_id: Option<String> = derive_manufacturer_id(&input.entity_name);
+    let root_manufacturer_id: Option<String> =
+        derive_manufacturer_id(export_entity_basename(&input.entity_name));
     let mut texture_cache: HashMap<(String, TextureFlavor), String> = HashMap::new();
     let mut mtl_cache: HashMap<String, Option<MtlFile>> = HashMap::new();
     let mut png_cache = PngCache::new();
@@ -1139,7 +1139,18 @@ pub(crate) fn write_decomposed_export(
         let ui_bindings = child
             .ui_bindings
             .iter()
-            .map(|binding| generated_ui_binding_record(&mut files, binding, db, p4k, opts.texture_mip, root_manufacturer_id.as_deref()))
+            .map(|binding| {
+                generated_ui_binding_record(
+                    &mut files,
+                    binding,
+                    db,
+                    p4k,
+                    opts.texture_mip,
+                    &input.entity_name,
+                    &input.geometry_path,
+                    root_manufacturer_id.as_deref(),
+                )
+            })
             .collect();
 
         let resolved_transform = resolved_child_transforms[index];
@@ -1384,7 +1395,18 @@ pub(crate) fn write_decomposed_export(
                 ui_bindings: placement
                     .ui_bindings
                     .iter()
-                    .map(|binding| generated_ui_binding_record(&mut files, binding, db, p4k, opts.texture_mip, root_manufacturer_id.as_deref()))
+                    .map(|binding| {
+                        generated_ui_binding_record(
+                            &mut files,
+                            binding,
+                            db,
+                            p4k,
+                            opts.texture_mip,
+                            &input.entity_name,
+                            &input.geometry_path,
+                            root_manufacturer_id.as_deref(),
+                        )
+                    })
                     .collect(),
                 transform: placement.transform,
                 palette_id: placement_palette_id,
@@ -2531,6 +2553,8 @@ fn generated_ui_binding_record(
     db: &Database<'_>,
     p4k: &MappedP4k,
     texture_mip: u32,
+    root_entity_name: &str,
+    root_geometry_path: &str,
     root_manufacturer_id: Option<&str>,
 ) -> UiBinding {
     let mut binding = binding.clone();
@@ -2542,9 +2566,12 @@ fn generated_ui_binding_record(
         root_manufacturer_id,
     ) {
         Ok(png_bytes) => {
-            let hash_bytes = Sha256::digest(&png_bytes);
-            let hash_hex: String = hash_bytes[..8].iter().map(|b| format!("{b:02x}")).collect();
-            let export_path = format!("Data/UI/Generated/{hash_hex}_TEX{texture_mip}.png");
+            let export_path = generated_ui_binding_path(
+                root_entity_name,
+                root_geometry_path,
+                root_manufacturer_id,
+                &binding,
+            );
             if !files.contains_key(&export_path) {
                 insert_binary_file(files, export_path.clone(), png_bytes);
             }
@@ -2558,6 +2585,71 @@ fn generated_ui_binding_record(
         }
     }
     binding
+}
+
+fn generated_ui_binding_path(
+    root_entity_name: &str,
+    root_geometry_path: &str,
+    root_manufacturer_id: Option<&str>,
+    binding: &UiBinding,
+) -> String {
+    let ui_type = generated_ui_type_segment(root_geometry_path);
+    let manufacturer = root_manufacturer_id
+        .map(sanitize_identifier)
+        .unwrap_or_else(|| "unknown".to_string());
+    let ship_name = generated_ui_ship_name(root_entity_name, root_manufacturer_id);
+    let asset_name = generated_ui_asset_name(binding);
+    format!(
+        "Data/UI/Generated/{ui_type}/{manufacturer}/{ship_name}/{asset_name}.png"
+    )
+}
+
+fn generated_ui_type_segment(root_geometry_path: &str) -> &'static str {
+    let lowered = root_geometry_path.replace('\\', "/").to_ascii_lowercase();
+    if lowered.contains("/vehicles/") {
+        "vehicle"
+    } else {
+        "ship"
+    }
+}
+
+fn generated_ui_ship_name(root_entity_name: &str, root_manufacturer_id: Option<&str>) -> String {
+    let base = clean_export_label(export_entity_basename(root_entity_name));
+    let Some(manufacturer_id) = root_manufacturer_id else {
+        return base;
+    };
+    let mut parts = base.split_whitespace();
+    let Some(first) = parts.next() else {
+        return base;
+    };
+    if !first.eq_ignore_ascii_case(manufacturer_id) {
+        return base;
+    }
+    let remainder = parts.collect::<Vec<_>>().join(" ");
+    if remainder.is_empty() {
+        base
+    } else {
+        remainder
+    }
+}
+
+fn generated_ui_asset_name(binding: &UiBinding) -> String {
+    let candidates = [
+        binding.content_canvas_record_name.as_deref(),
+        binding.canvas_record_name.as_deref(),
+        binding.helper_name.as_deref(),
+        binding.default_view.as_deref(),
+        binding.canvas_widget_url_postfix.as_deref(),
+        Some(binding.source_entity_name.as_str()),
+        Some(binding.binding_kind.as_str()),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        let cleaned = sanitize_identifier(candidate);
+        if !cleaned.is_empty() {
+            return cleaned;
+        }
+    }
+    "generated_ui".to_string()
 }
 
 /// Derive a short manufacturer id (lowercase, e.g. "drak", "rsi", "aegs") from
@@ -2593,7 +2685,11 @@ fn derive_manufacturer_id(root_entity_name: &str) -> Option<String> {
 
 #[cfg(test)]
 mod manufacturer_id_tests {
-    use super::derive_manufacturer_id;
+    use super::{
+        derive_manufacturer_id, generated_ui_asset_name, generated_ui_binding_path,
+        generated_ui_ship_name, generated_ui_type_segment,
+    };
+    use crate::types::UiBinding;
 
     #[test]
     fn drake_prefix_is_recognised() {
@@ -2612,6 +2708,51 @@ mod manufacturer_id_tests {
     fn unknown_prefix_returns_none() {
         assert_eq!(derive_manufacturer_id("Vehicle_Screen_MFD"), None);
         assert_eq!(derive_manufacturer_id(""), None);
+    }
+
+    #[test]
+    fn ui_generated_path_is_structured() {
+        let binding = UiBinding {
+            binding_kind: "physical".into(),
+            source_entity_name: "DRAK_Clipper_Screen".into(),
+            helper_name: Some("mesh_end_screen_plane".into()),
+            default_view: None,
+            default_state_is_off: false,
+            default_state_name: None,
+            default_light_color: None,
+            default_light_intensity_milli: None,
+            canvas_guid: None,
+            canvas_record_name: None,
+            canvas_record_path: None,
+            canvas_widget_canvas_path: None,
+            canvas_widget_url_postfix: None,
+            canvas_widget_url_optional: None,
+            canvas_variable_binding: None,
+            content_canvas_guid: None,
+            content_canvas_record_name: None,
+            dashboard_view_index: None,
+            dashboard_screen_slot: None,
+            owner_source_file: None,
+            runtime_image_source: None,
+            generated_image_path: None,
+            generated_context_manifest_path: None,
+            generated_resolved_source_path: None,
+            generated_backend: None,
+            generated_provenance: None,
+        };
+
+        assert_eq!(generated_ui_type_segment("Objects/Spaceships/Ships/DRAK/Clipper/exterior/test.cga"), "ship");
+        assert_eq!(generated_ui_ship_name("DRAK_Clipper", Some("drak")), "Clipper");
+        assert_eq!(generated_ui_asset_name(&binding), "mesh_end_screen_plane");
+        assert_eq!(
+            generated_ui_binding_path(
+                "DRAK_Clipper",
+                "Objects/Spaceships/Ships/DRAK/Clipper/exterior/test.cga",
+                Some("drak"),
+                &binding,
+            ),
+            "Data/UI/Generated/ship/drak/Clipper/mesh_end_screen_plane.png"
+        );
     }
 }
 

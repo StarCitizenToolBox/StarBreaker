@@ -255,6 +255,7 @@ pub fn render_ui_binding_png(
     texture_mip: u32,
     root_manufacturer_id: Option<&str>,
 ) -> Result<Vec<u8>, String> {
+    let canvas_fetcher = DatacoreCanvasFetcher { db };
     let view = UiBindingView {
         canvas_guid: binding.canvas_guid.as_deref(),
         content_canvas_guid: binding.content_canvas_guid.as_deref(),
@@ -264,12 +265,20 @@ pub fn render_ui_binding_png(
         default_view_index: binding.dashboard_view_index,
         default_screen_slot: binding.dashboard_screen_slot,
     };
-    let target_size = binding_target_size(&binding.binding_kind);
+    let effective_guid = binding
+        .content_canvas_guid
+        .as_deref()
+        .filter(|g| !g.is_empty())
+        .or_else(|| binding.canvas_guid.as_deref().filter(|g| !g.is_empty()));
+    let authored_canvas_size = effective_guid
+        .and_then(|guid| canvas_fetcher.fetch_canvas_json(guid).ok())
+        .and_then(|json| authored_canvas_size(&json));
+    let target_size = binding_target_size(&binding.binding_kind, authored_canvas_size);
     let localization_map = crate::pipeline::load_localization_map(p4k);
     let ini_loc_fetcher = starbreaker_ui::bb_loc_p4k::load_global_ini(|path| p4k.read_file(path).ok());
     let inputs = PipelineInputs {
         binding: &view,
-        canvas_fetcher: &DatacoreCanvasFetcher { db },
+        canvas_fetcher: &canvas_fetcher,
         swf_fetcher: &P4kSwfFetcher { p4k },
         style_fetcher: &ManufacturerStyleFetcher { db },
         asset_fetcher: &P4kAssetFetcher { p4k },
@@ -292,12 +301,28 @@ pub fn render_ui_binding_png(
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Map `binding_kind` to a canvas raster size.
-fn binding_target_size(binding_kind: &str) -> (u32, u32) {
+fn binding_target_size(binding_kind: &str, authored_canvas_size: Option<(u32, u32)>) -> (u32, u32) {
     match binding_kind {
         "mfd" => (1600, 900),
         "radar" => (1024, 1024),
-        _ => (2048, 1024),
+        _ => authored_canvas_size.unwrap_or((2048, 1024)),
     }
+}
+
+fn authored_canvas_size(canvas_json: &serde_json::Value) -> Option<(u32, u32)> {
+    let record = canvas_json.get("_RecordValue_")?;
+    let size = record.get("size")?;
+    let width = size.get("x")?.as_f64()?;
+    let height = size.get("y")?.as_f64()?;
+    if width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    let width = width.round() as u32;
+    let height = height.round() as u32;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some((width, height))
 }
 
 /// Parse a GUID string, tolerating surrounding braces and optional hyphens.
@@ -305,4 +330,42 @@ fn parse_guid(value: &str) -> Option<starbreaker_datacore::starbreaker_common::C
     use starbreaker_datacore::starbreaker_common::CigGuid;
     let trimmed = value.trim().trim_matches('{').trim_matches('}');
     CigGuid::from_str(trimmed).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{authored_canvas_size, binding_target_size};
+    use serde_json::json;
+
+    #[test]
+    fn authored_canvas_size_reads_record_value_size() {
+        let canvas = json!({
+            "_RecordValue_": {
+                "size": { "x": 1920.0, "y": 1080.0, "z": 0.0 }
+            }
+        });
+        assert_eq!(authored_canvas_size(&canvas), Some((1920, 1080)));
+    }
+
+    #[test]
+    fn authored_canvas_size_ignores_invalid_size() {
+        let canvas = json!({
+            "_RecordValue_": {
+                "size": { "x": 0.0, "y": 1080.0, "z": 0.0 }
+            }
+        });
+        assert_eq!(authored_canvas_size(&canvas), None);
+    }
+
+    #[test]
+    fn non_mfd_prefers_authored_canvas_size() {
+        assert_eq!(binding_target_size("physical", Some((1920, 1080))), (1920, 1080));
+        assert_eq!(binding_target_size("physical", None), (2048, 1024));
+    }
+
+    #[test]
+    fn mfd_and_radar_keep_fixed_sizes() {
+        assert_eq!(binding_target_size("mfd", Some((1920, 1080))), (1600, 900));
+        assert_eq!(binding_target_size("radar", Some((1920, 1080))), (1024, 1024));
+    }
 }

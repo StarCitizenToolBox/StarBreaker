@@ -208,11 +208,14 @@ pub fn render_for_binding(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiErro
             type_counts,
         );
 
-        // A3 probe: per-node summary for first pilot binding.
-        // Guarded by env var BB_A3_PROBE=1; removed after probe run.
-        if std::env::var("BB_A3_PROBE").as_deref() == Ok("1")
-            && b.helper_name == Some("Screen_Right_Upper_RTT")
-        {
+        // Diagnostic node dump for a selected helper.
+        // Set BB_A3_PROBE=1 and BB_A3_PROBE_HELPER=<helper-name>.
+        let probe_enabled = std::env::var("BB_A3_PROBE").as_deref() == Ok("1");
+        let probe_helper = std::env::var("BB_A3_PROBE_HELPER").ok();
+        let helper_matches = probe_helper
+            .as_deref()
+            .is_some_and(|h| b.helper_name == Some(h));
+        if probe_enabled && helper_matches {
             let probe_layout =
                 crate::bb_layout::layout(scene, inputs.target_size.0, inputs.target_size.1);
             for (&node_id, node) in &scene.nodes {
@@ -222,8 +225,9 @@ pub fn render_for_binding(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiErro
                     .copied()
                     .unwrap_or_default();
                 eprintln!(
-                    "A3-probe: id=ptr:{node_id} parent={} type={:?} name={:?} \
-                     rect=({:.0},{:.0},{:.0},{:.0}) bg={} icon={} text={}",
+                    "A3-probe: helper={:?} id=ptr:{node_id} parent={} type={:?} name={:?} \
+                     rect=({:.0},{:.0},{:.0},{:.0}) active={} alpha={:.2} bg={} icon={} text={} raw_img={:?} raw_svg={:?}",
+                    b.helper_name,
                     node.parent
                         .map(|p| format!("ptr:{p}"))
                         .unwrap_or_else(|| "none".to_string()),
@@ -233,9 +237,16 @@ pub fn render_for_binding(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiErro
                     rect.y,
                     rect.w,
                     rect.h,
+                    node.is_active,
+                    node.alpha,
                     node.background.is_some(),
                     node.icon.is_some(),
                     node.text.is_some(),
+                    node.raw.get("imagePath").and_then(|v| v.as_str()),
+                    node.raw
+                        .get("svgFill")
+                        .and_then(|s| s.get("svgPath"))
+                        .and_then(|v| v.as_str()),
                 );
             }
         }
@@ -444,8 +455,8 @@ pub fn render_for_binding(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiErro
         .as_ref()
         .map_or(false, |j| canvas_has_flash_renderer(j));
 
-    let needs_swf_overlay = (has_flash_shapes || is_fully_flash_canvas)
-        && flash_swf_opt.is_some();
+    let needs_swf_overlay =
+        (has_flash_shapes || is_fully_flash_canvas) && flash_swf_opt.is_some();
 
     let mut img = if let Some(ref scene) = bb_scene_opt {
         let atlas = crate::bb_atlas::AtlasLibrary::new(inputs.asset_fetcher, b.manufacturer_id);

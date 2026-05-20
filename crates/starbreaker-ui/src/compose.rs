@@ -345,6 +345,16 @@ fn draw_node(
             }
         }
 
+        BbNodeType::Other(kind) if kind == "BuildingBlocks_WidgetManufacturerLogo" => {
+            if !draw_raw_asset(node, rect, atlas, pixmap, alpha) {
+                if !draw_manufacturer_logo(node, rect, atlas, pixmap, alpha, ctx) {
+                    if let Some(img) = atlas.resolve_for_node(node, iw, ih) {
+                        blit_atlas_image(pixmap, &img, rect.x as i32, rect.y as i32, alpha);
+                    }
+                }
+            }
+        }
+
         // Text widgets are rendered in a second RgbaImage pass after tiny-skia output.
         BbNodeType::WidgetTextField | BbNodeType::WidgetText => {}
 
@@ -508,6 +518,66 @@ fn draw_raw_asset(
     }
 
     false
+}
+
+fn draw_manufacturer_logo(
+    node: &BbNode,
+    rect: Rect,
+    atlas: &AtlasLibrary<'_>,
+    pixmap: &mut Pixmap,
+    alpha: f32,
+    ctx: &ComposeContext<'_>,
+) -> bool {
+    let brand = brand_slug(&ctx.style.name);
+    let brand_title = brand_title(&brand);
+    let candidates = [
+        format!("UI/Textures/Vector/General/BrandLogos/logo_{brand}_a.svg"),
+        format!("UI/Textures/Signs/Brands/{brand}/{brand_title}_logo.dds"),
+        format!("UI/Textures/Signs/Brands/{brand}/{brand_title}_logo.svg"),
+    ];
+
+    let iw = rect.w.round().max(1.0) as u32;
+    let ih = rect.h.round().max(1.0) as u32;
+    let fill_override = node_fill_override(node);
+
+    for raw_path in candidates {
+        let norm = UiAssetResolver::normalise_path(&raw_path);
+        if UiAssetResolver::is_reference_overlay(&norm) {
+            continue;
+        }
+        if norm.ends_with(".svg") {
+            if let Some(svg_bytes) = atlas.fetch_raw(&norm) {
+                if let Some(img) = crate::bb_svg::rasterize_svg(&svg_bytes, iw, ih, fill_override)
+                {
+                    blit_atlas_image(pixmap, &img, rect.x as i32, rect.y as i32, alpha);
+                    return true;
+                }
+            }
+        } else if let Some(img) = atlas.resolve(&norm, iw, ih) {
+            blit_atlas_image(pixmap, &img, rect.x as i32, rect.y as i32, alpha);
+            return true;
+        }
+    }
+
+    false
+}
+
+fn brand_slug(identifier: &str) -> String {
+    match identifier.to_ascii_lowercase().as_str() {
+        "bioc" | "s_bioc" => "bioticorp".to_string(),
+        "s_drak" => "drak".to_string(),
+        "s_rsi" => "rsi".to_string(),
+        "s_aegs" => "aegs".to_string(),
+        other => other.trim_start_matches("s_").to_string(),
+    }
+}
+
+fn brand_title(slug: &str) -> String {
+    let mut chars = slug.chars();
+    match chars.next() {
+        Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
 }
 
 /// Extract a fill-colour override for SVG tinting from a node.
@@ -685,10 +755,29 @@ fn draw_text_node(
     ctx: &ComposeContext<'_>,
 ) {
     let resolved = resolver.resolve_text_detailed(node.id, &node.raw, ctx.defaults);
+    let text_probe = std::env::var("BB_A3_TEXT_PROBE").as_deref() == Ok("1");
+    if text_probe && matches!(node.name.as_str(), "TierLevel" | "TitleText" | "TouchPromptText" | "FunctionTitle" | "MachineTypeNameText" | "TouchToStart") {
+        log::info!(
+            "A3-text-probe: node={} id=ptr:{} resolved={:?}",
+            node.name, node.id, resolved.text
+        );
+    }
     if resolved.text.is_empty() {
         return;
     }
     let text = &resolved.text;
+    if text_probe {
+        log::info!(
+            "A3-text: node={} id=ptr:{} rect=({:.0},{:.0},{:.0},{:.0}) text={:?}",
+            node.name,
+            node.id,
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+            text,
+        );
+    }
 
     // Resolve nominal font size:
     //  1. Explicit `fontSize` actually present in raw JSON (BbValue::Fixed) wins.

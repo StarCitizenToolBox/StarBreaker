@@ -27,6 +27,13 @@ pub struct BindingResolver {
     /// widget_node_id → localization key (e.g. "@hud_Pwr") resolved from
     /// `BuildingBlocks_BindingsLocalizedField` + `_SynthLocalizedParam_` ops.
     widget_to_loc_key: HashMap<BbNodeId, String>,
+    /// widget_node_id → ordered candidate input operation pointers from *Field
+    /// ops (highest-priority first: LocalizedField > StringField > others).
+    widget_to_input_ptrs: HashMap<BbNodeId, Vec<BbNodeId>>,
+    /// op pointer → raw operation object.
+    ptr_to_op: HashMap<BbNodeId, serde_json::Value>,
+    /// op pointer (Variable ops) → binding path.
+    ptr_to_path: HashMap<BbNodeId, String>,
 }
 
 impl BindingResolver {
@@ -37,7 +44,15 @@ impl BindingResolver {
     pub fn from_operations(operations: &[serde_json::Value]) -> Self {
         // Pass 1: variable ops → ptr → binding path.
         let mut ptr_to_path: HashMap<BbNodeId, String> = HashMap::new();
+        let mut ptr_to_op: HashMap<BbNodeId, serde_json::Value> = HashMap::new();
         for op in operations {
+            if let Some(ptr) = op
+                .get("_Pointer_")
+                .and_then(|v| v.as_str())
+                .and_then(parse_ptr)
+            {
+                ptr_to_op.insert(ptr, op.clone());
+            }
             let type_str = op.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
             if type_str.contains("Variable") {
                 let ptr = op
@@ -86,6 +101,25 @@ impl BindingResolver {
         let mut widget_to_path: HashMap<BbNodeId, String> = HashMap::new();
         // Also collect localized-field ops → widget ptr → loc key.
         let mut widget_to_loc_key: HashMap<BbNodeId, String> = HashMap::new();
+        let mut widget_to_input_prio_ptrs: HashMap<BbNodeId, Vec<(u8, BbNodeId)>> = HashMap::new();
+        for op in operations {
+            let type_str = op.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
+            if type_str == "_SynthLocalizedWidget_" {
+                let widget_ptr = op
+                    .get("widget")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_points_to);
+                let loc_key = op
+                    .get("resolvedLocKey")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_owned());
+                if let (Some(w), Some(key)) = (widget_ptr, loc_key) {
+                    if !key.is_empty() {
+                        widget_to_loc_key.insert(w, key);
+                    }
+                }
+            }
+        }
         for op in operations {
             let type_str = op.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
             if type_str.contains("Field") {
@@ -98,6 +132,14 @@ impl BindingResolver {
                     .and_then(|v| v.as_str())
                     .and_then(parse_points_to);
                 if let (Some(w), Some(inp)) = (widget_ptr, input_ptr) {
+                    let prio = if type_str.contains("LocalizedField") {
+                        3
+                    } else if type_str.contains("StringField") {
+                        2
+                    } else {
+                        1
+                    };
+                    widget_to_input_prio_ptrs.entry(w).or_default().push((prio, inp));
                     if let Some(path) = ptr_to_path.get(&inp) {
                         widget_to_path.insert(w, path.clone());
                     }
@@ -107,7 +149,19 @@ impl BindingResolver {
                 }
             }
         }
-        Self { widget_to_path, widget_to_loc_key }
+        let mut widget_to_input_ptrs: HashMap<BbNodeId, Vec<BbNodeId>> = HashMap::new();
+        for (widget, mut pairs) in widget_to_input_prio_ptrs {
+            pairs.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            let mut ordered: Vec<BbNodeId> = Vec::new();
+            for (_, ptr) in pairs {
+                if !ordered.contains(&ptr) {
+                    ordered.push(ptr);
+                }
+            }
+            widget_to_input_ptrs.insert(widget, ordered);
+        }
+
+        Self { widget_to_path, widget_to_loc_key, widget_to_input_ptrs, ptr_to_op, ptr_to_path }
     }
 
 }
@@ -178,7 +232,17 @@ impl BindingResolver {
             .filter(|s| !s.is_empty())
         {
             if let Some(resolved) = defaults.lookup_localization(loc_key) {
-                return ResolvedText { text: resolved.to_owned(), is_name_derived: false };
+                if !resolved.is_empty() {
+                    let case_modifier = node_raw
+                        .get("labelProperties")
+                        .and_then(|lp| lp.get("caseModifier"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    return ResolvedText {
+                        text: apply_case_modifier(resolved, case_modifier),
+                        is_name_derived: false,
+                    };
+                }
             }
             // Log every miss so B11 static-label sweep can collect new keys.
             log::debug!("bb_bindings: unresolved labelProperties.label key={loc_key:?}");
@@ -194,12 +258,64 @@ impl BindingResolver {
             }
         }
 
+        // Resolve localized-operation graphs (LocalizationCombine,
+        // LocalizedFromInteger, LocalizationFromIntegerSwitch, etc.).
+        if let Some(input_ptrs) = self.widget_to_input_ptrs.get(&node_id) {
+            for &input_ptr in input_ptrs {
+                let mut seen = std::collections::HashSet::new();
+                if std::env::var("BB_A3_TEXT_PROBE").as_deref() == Ok("1") {
+                    let ty = self
+                        .ptr_to_op
+                        .get(&input_ptr)
+                        .and_then(|op| op.get("_Type_"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("<none>");
+                    let mut seen_num = std::collections::HashSet::new();
+                    let num = self.eval_integer_ptr(input_ptr, defaults, &mut seen_num);
+                    log::info!("A3-text-probe: node=ptr:{node_id} input=ptr:{input_ptr} type={ty}");
+                    log::info!("A3-text-probe: node=ptr:{node_id} input_num={num:?}");
+                }
+                if let Some(s) = self.eval_localized_ptr(input_ptr, defaults, &mut seen) {
+                    if !s.is_empty() {
+                        let case_modifier = node_raw
+                            .get("labelProperties")
+                            .and_then(|lp| lp.get("caseModifier"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        return ResolvedText {
+                            text: apply_case_modifier(&s, case_modifier),
+                            is_name_derived: false,
+                        };
+                    }
+                }
+                let mut seen_num = std::collections::HashSet::new();
+                if let Some(n) = self.eval_number_ptr(input_ptr, defaults, &mut seen_num) {
+                    let text = if (n.fract()).abs() < 0.0001 {
+                        (n as i64).to_string()
+                    } else {
+                        format!("{n:.2}")
+                    };
+                    if !text.is_empty() {
+                        return ResolvedText { text, is_name_derived: false };
+                    }
+                }
+            }
+        }
+
         // Localized component parameter (e.g. annunciator chiclet labels).
         // Injected by bb_resolve::inject_param_overrides from paramInputValues.
         if let Some(loc_key) = self.widget_to_loc_key.get(&node_id) {
             if let Some(resolved) = defaults.lookup_localization(loc_key) {
                 log::trace!("compose pass2: node={node_id} loc_key={loc_key:?} → {resolved:?}");
-                return ResolvedText { text: resolved.to_owned(), is_name_derived: false };
+                let case_modifier = node_raw
+                    .get("labelProperties")
+                    .and_then(|lp| lp.get("caseModifier"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                return ResolvedText {
+                    text: apply_case_modifier(resolved, case_modifier),
+                    is_name_derived: false,
+                };
             }
             // loc_key not found in registry → render it raw so the label is visible.
             let bare = loc_key.strip_prefix('@').unwrap_or(loc_key);
@@ -213,6 +329,184 @@ impl BindingResolver {
         // They must not appear in static renders (they would show internal
         // identifiers like "GIMBAL", "GROUP", "GUNS" instead of real data).
         ResolvedText { text: String::new(), is_name_derived: false }
+    }
+
+    fn eval_localized_ptr(
+        &self,
+        ptr: BbNodeId,
+        defaults: &DefaultValueRegistry,
+        seen: &mut std::collections::HashSet<BbNodeId>,
+    ) -> Option<String> {
+        if !seen.insert(ptr) {
+            return None;
+        }
+        let op = self.ptr_to_op.get(&ptr)?;
+        let ty = op.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
+        match ty {
+            "BindingsOperations_LocalizationCombine" => {
+                let value_key = op.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                let base = defaults.lookup_localization(value_key).unwrap_or(value_key);
+                let left_ptr = op.get("inputL").and_then(|v| v.as_str()).and_then(parse_points_to);
+                let right_ptr = op.get("inputR").and_then(|v| v.as_str()).and_then(parse_points_to);
+                let left = left_ptr
+                    .and_then(|p| self.eval_localized_ptr(p, defaults, seen))
+                    .or_else(|| left_ptr.and_then(|p| self.eval_integer_ptr(p, defaults, seen)).map(|v| v.to_string()))
+                    .unwrap_or_default();
+                let right = right_ptr
+                    .and_then(|p| self.eval_localized_ptr(p, defaults, seen))
+                    .or_else(|| right_ptr.and_then(|p| self.eval_integer_ptr(p, defaults, seen)).map(|v| v.to_string()))
+                    .unwrap_or_default();
+                let mut out = base.to_string();
+                if out.contains("%d") {
+                    out = out.replacen("%d", if !right.is_empty() { &right } else { &left }, 1);
+                } else if out.contains("%s") {
+                    out = out.replacen("%s", if !right.is_empty() { &right } else { &left }, 1);
+                } else if left.is_empty() && right.is_empty() {
+                    // keep base
+                } else if left.is_empty() {
+                    out = format!("{out}{right}");
+                } else if right.is_empty() {
+                    out = format!("{left}{out}");
+                } else {
+                    out = format!("{left}{out}{right}");
+                }
+                Some(out)
+            }
+            "BuildingBlocks_BindingsLocalizedFromInteger" => self
+                .eval_integer_ptr_from_field(op.get("input").and_then(|v| v.as_str()), defaults, seen)
+                .map(|v| v.to_string()),
+            "BuildingBlocks_BindingsLocalizationFromIntegerSwitch" => {
+                let input = self.eval_integer_ptr_from_field(op.get("input").and_then(|v| v.as_str()), defaults, seen)?;
+                let values = op.get("values").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                let key = values
+                    .iter()
+                    .find_map(|pair| {
+                        let first = pair.get("first").and_then(|v| v.as_i64())?;
+                        if first == input {
+                            pair.get("second").and_then(|v| v.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .or_else(|| op.get("defaultValue").and_then(|v| v.as_str()))
+                    .unwrap_or("");
+                if key.is_empty() {
+                    return None;
+                }
+                Some(defaults.lookup_localization(key).unwrap_or(key).to_string())
+            }
+            "BuildingBlocks_BindingsLocalizedVariable" => {
+                let path = self.ptr_to_path.get(&ptr)?;
+                let val = defaults.lookup_path(path)?;
+                Some(value_to_string(val))
+            }
+            "BuildingBlocks_BindingsLocalizedComponentParameter" => {
+                let key = op.get("defaultValue").and_then(|v| v.as_str()).unwrap_or("");
+                if key.is_empty() {
+                    return None;
+                }
+                Some(defaults.lookup_localization(key).unwrap_or(key).to_string())
+            }
+            _ => None,
+        }
+    }
+
+    fn eval_integer_ptr_from_field(
+        &self,
+        field: Option<&str>,
+        defaults: &DefaultValueRegistry,
+        seen: &mut std::collections::HashSet<BbNodeId>,
+    ) -> Option<i64> {
+        let ptr = field.and_then(parse_points_to)?;
+        self.eval_integer_ptr(ptr, defaults, seen)
+    }
+
+    fn eval_integer_ptr(
+        &self,
+        ptr: BbNodeId,
+        defaults: &DefaultValueRegistry,
+        seen: &mut std::collections::HashSet<BbNodeId>,
+    ) -> Option<i64> {
+        let op = self.ptr_to_op.get(&ptr)?;
+        let ty = op.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
+        match ty {
+            "BuildingBlocks_BindingsIntegerVariable" => {
+                let path = self.ptr_to_path.get(&ptr)?;
+                let val = defaults.lookup_path(path)?;
+                match val {
+                    Value::Int(i) => Some(*i as i64),
+                    Value::Float(f) => Some(*f as i64),
+                    Value::Bool(b) => Some(if *b { 1 } else { 0 }),
+                    Value::Str(s) | Value::Guid(s) => s.parse::<i64>().ok(),
+                }
+            }
+            "BuildingBlocks_BindingsIntegerArithmatic" => {
+                let kind = op.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                let amount = op.get("amount").and_then(|v| v.as_i64()).unwrap_or(0);
+                let l = self
+                    .eval_integer_ptr_from_field(op.get("inputL").and_then(|v| v.as_str()), defaults, seen)
+                    .or_else(|| self.eval_integer_ptr_from_field(op.get("input").and_then(|v| v.as_str()), defaults, seen))
+                    .unwrap_or(0);
+                let r = self
+                    .eval_integer_ptr_from_field(op.get("inputR").and_then(|v| v.as_str()), defaults, seen)
+                    .or_else(|| self.eval_integer_ptr_from_field(op.get("inputB").and_then(|v| v.as_str()), defaults, seen))
+                    .unwrap_or(amount);
+                Some(match kind {
+                    "Add" => l + amount,
+                    "Min" => l.min(r),
+                    "Max" => l.max(r),
+                    "Sub" => l - r,
+                    _ => l,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn eval_number_ptr(
+        &self,
+        ptr: BbNodeId,
+        defaults: &DefaultValueRegistry,
+        seen: &mut std::collections::HashSet<BbNodeId>,
+    ) -> Option<f64> {
+        let op = self.ptr_to_op.get(&ptr)?;
+        let ty = op.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
+        match ty {
+            "BuildingBlocks_BindingsNumberVariable" => {
+                let path = self.ptr_to_path.get(&ptr)?;
+                let val = defaults.lookup_path(path)?;
+                match val {
+                    Value::Int(i) => Some(*i as f64),
+                    Value::Float(f) => Some(*f as f64),
+                    Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+                    Value::Str(s) | Value::Guid(s) => s.parse::<f64>().ok(),
+                }
+            }
+            "BuildingBlocks_BindingsNumberFromInteger" => {
+                let inp = op.get("input").and_then(|v| v.as_str()).and_then(parse_points_to)?;
+                self.eval_integer_ptr(inp, defaults, seen).map(|v| v as f64)
+            }
+            "BuildingBlocks_BindingsNumberArithmatic" => {
+                let kind = op.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                let amount = op.get("amount").and_then(|v| v.as_f64()).unwrap_or(1.0);
+                let input = op.get("input").and_then(|v| v.as_str()).and_then(parse_points_to);
+                let input_b = op.get("inputB").and_then(|v| v.as_str()).and_then(parse_points_to);
+                let a = input.and_then(|p| self.eval_number_ptr(p, defaults, seen)).unwrap_or(0.0);
+                let b = input_b
+                    .and_then(|p| self.eval_number_ptr(p, defaults, seen))
+                    .unwrap_or(amount);
+                Some(match kind {
+                    "Add" => a + amount,
+                    "Sub" => a - b,
+                    "Mul" => a * b,
+                    "Div" => {
+                        if b.abs() > f64::EPSILON { a / b } else { 0.0 }
+                    }
+                    _ => a,
+                })
+            }
+            _ => self.eval_integer_ptr(ptr, defaults, seen).map(|v| v as f64),
+        }
     }
 }
 
@@ -335,6 +629,9 @@ mod tests {
         BindingResolver {
             widget_to_path: Default::default(),
             widget_to_loc_key: Default::default(),
+            widget_to_input_ptrs: Default::default(),
+            ptr_to_op: Default::default(),
+            ptr_to_path: Default::default(),
         }
     }
 
@@ -369,6 +666,22 @@ mod tests {
         let raw = json!({"locString": "@mykey"});
         let result = resolver.resolve_text_detailed(0, &raw, &defaults);
         assert_eq!(result.text, "My Label");
+    }
+
+    #[test]
+    fn label_properties_case_modifier_upper_applied() {
+        let resolver = resolver();
+        let mut defaults = DefaultValueRegistry::default();
+        defaults.merge_localization([("info_kiosks_logoscreen_001".to_string(), "Touch to start".to_string())].into());
+
+        let raw = json!({
+            "labelProperties": {
+                "label": "@Info_Kiosks_LogoScreen_001",
+                "caseModifier": "Upper"
+            }
+        });
+        let result = resolver.resolve_text_detailed(0, &raw, &defaults);
+        assert_eq!(result.text, "TOUCH TO START");
     }
 
     #[test]

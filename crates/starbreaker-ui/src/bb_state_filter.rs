@@ -90,12 +90,13 @@ use crate::bb_scene::BbNodeId;
 /// `record_value` is the `_RecordValue_` object of the root canvas record.
 pub fn instantiated_false_widgets(record_value: &serde_json::Value) -> HashSet<BbNodeId> {
     let mut static_vals = parse_static_variables(record_value);
+    let scene_items = scene_widget_map(record_value);
     let ops = match record_value.get("operations").and_then(|v| v.as_array()) {
         Some(a) => a,
         None => return HashSet::new(),
     };
 
-    apply_idle_defaults(ops, &mut static_vals);
+    apply_idle_defaults(ops, &mut static_vals, &scene_items);
 
     let ptr_vals = evaluate_bool_ops(ops, &static_vals);
 
@@ -192,6 +193,7 @@ fn parse_static_variables(record_value: &serde_json::Value) -> HashMap<String, b
 fn apply_idle_defaults(
     ops: &[serde_json::Value],
     static_vals: &mut HashMap<String, bool>,
+    scene_items: &HashMap<BbNodeId, &serde_json::Value>,
 ) {
     // ptr → op
     let mut ptr_to_op: HashMap<BbNodeId, &serde_json::Value> = HashMap::new();
@@ -278,7 +280,14 @@ fn apply_idle_defaults(
 
     // `seen_prefix` ensures we record only the FIRST candidate set per group.
     let mut seen_prefix: HashSet<String> = HashSet::new();
-    let mut candidates: Vec<(Vec<String>, Vec<String>)> = Vec::new();
+    #[derive(Clone)]
+    struct Candidate {
+        cold_defaults: Vec<String>,
+        widget_ptr: BbNodeId,
+        is_direct: bool,
+    }
+
+    let mut candidates: Vec<Candidate> = Vec::new();
 
     for op in ops {
         let ty = op.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
@@ -289,6 +298,13 @@ fn apply_idle_defaults(
         if !matches!(field, "Instantiated" | "IsActive") {
             continue;
         }
+        let Some(widget_ptr) = op
+            .get("widget")
+            .and_then(|v| v.as_str())
+            .and_then(parse_points_to_ptr)
+        else {
+            continue;
+        };
         let Some(input_ptr) = op
             .get("input")
             .and_then(|v| v.as_str())
@@ -346,7 +362,7 @@ fn apply_idle_defaults(
             continue;
         };
         // Must be a recognized multi-member state group.
-        let Some(group_members) = group_index.get(prefix) else {
+        let Some(_group_members) = group_index.get(prefix) else {
             continue;
         };
         // Only the first candidate set per group wins (operations order ≈ scene
@@ -356,21 +372,31 @@ fn apply_idle_defaults(
         if !seen_prefix.insert(prefix.to_owned()) {
             continue;
         }
-        candidates.push((cold_defaults, group_members.clone()));
+        candidates.push(Candidate {
+            cold_defaults,
+            widget_ptr,
+            is_direct: matches!(input_ty, "BuildingBlocks_BindingsBooleanVariable"),
+        });
     }
 
-    // For each candidate set, apply only if no group member has an explicit
-    // static override.  Group membership: variables that share the same
-    // dotted prefix as the cold-default candidate set.
-    for (cold_defaults, group_members) in candidates {
-        let Some(prefix) = common_state_prefix(&cold_defaults) else {
-            continue;
-        };
-        // Group includes both the resolved `group_members` (same Or chain)
-        // and any other static-var name sharing the prefix.
+    // Prefer a candidate whose widget scene item carries a boolean parameter
+    // when that metadata exists. This structurally selects the main powered-on
+    // state for canvases that expose a dedicated main-menu slot while keeping
+    // older canvases on the original heuristic.
+    let has_any_scene_param_metadata = scene_items
+        .values()
+        .any(|item| item.get("paramInputValues").and_then(|v| v.as_array()).is_some());
+
+    let mut grouped: HashMap<String, Vec<Candidate>> = HashMap::new();
+    for candidate in candidates {
+        if let Some(prefix) = common_state_prefix(&candidate.cold_defaults) {
+            grouped.entry(prefix.to_owned()).or_default().push(candidate);
+        }
+    }
+
+    for (prefix, group_members) in group_index {
         let mut group: HashSet<String> = group_members.into_iter().collect();
         for key in static_vals.keys() {
-            // Exclude `_SV` capability flags from group-override consideration.
             if key.ends_with("_SV") {
                 continue;
             }
@@ -381,12 +407,90 @@ fn apply_idle_defaults(
             }
         }
         let any_explicit_override = group.iter().any(|m| static_vals.get(m).copied() == Some(true));
-        if !any_explicit_override {
-            for cold_default in cold_defaults {
-                static_vals.entry(cold_default).or_insert(true);
+        if any_explicit_override {
+            continue;
+        }
+
+        let Some(candidates) = grouped.remove(&prefix) else {
+            continue;
+        };
+
+        let selected = if has_any_scene_param_metadata {
+            candidates
+                .iter()
+                .filter(|candidate| scene_widget_has_boolean_param(scene_items, candidate.widget_ptr))
+                .min_by_key(|candidate| if candidate.is_direct { 0 } else { 1 })
+                .or_else(|| candidates.iter().min_by_key(|candidate| if candidate.is_direct { 0 } else { 1 }))
+                .or_else(|| candidates.first())
+        } else {
+            candidates.first()
+        };
+
+        let Some(selected) = selected else {
+            continue;
+        };
+
+        for cold_default in &selected.cold_defaults {
+            static_vals.entry(cold_default.clone()).or_insert(true);
+        }
+    }
+}
+
+fn scene_widget_map(record_value: &serde_json::Value) -> HashMap<BbNodeId, &serde_json::Value> {
+    let mut map = HashMap::new();
+    let Some(scene) = record_value.get("scene").and_then(|v| v.as_array()) else {
+        return map;
+    };
+    for item in scene {
+        let Some(ptr) = item
+            .get("_Pointer_")
+            .and_then(|v| v.as_str())
+            .and_then(parse_ptr_id)
+        else {
+            continue;
+        };
+        map.insert(ptr, item);
+    }
+    map
+}
+
+fn scene_widget_has_boolean_param(
+    scene_items: &HashMap<BbNodeId, &serde_json::Value>,
+    widget_ptr: BbNodeId,
+) -> bool {
+    let mut stack = vec![widget_ptr];
+    while let Some(current_ptr) = stack.pop() {
+        let Some(item) = scene_items.get(&current_ptr) else {
+            continue;
+        };
+        if item
+            .get("paramInputValues")
+            .and_then(|v| v.as_array())
+            .is_some_and(|params| {
+                params.iter().any(|param| {
+                    param
+                        .get("_Type_")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|ty| ty.contains("Boolean"))
+                })
+            })
+        {
+            return true;
+        }
+        for (child_ptr, child_item) in scene_items {
+            let Some(parent_ptr) = child_item
+                .get("parent")
+                .and_then(|v| v.as_str())
+                .and_then(parse_points_to_ptr)
+            else {
+                continue;
+            };
+            if parent_ptr == current_ptr {
+                stack.push(*child_ptr);
             }
         }
     }
+    false
 }
 
 fn is_framing_hidden_set_field(
@@ -623,6 +727,14 @@ mod tests {
         })
     }
 
+    fn scene_widget(ptr: u32, params: Vec<serde_json::Value>) -> serde_json::Value {
+        json!({
+            "_Pointer_": format!("ptr:{ptr}"),
+            "_Type_": "BuildingBlocks_WidgetCanvas",
+            "paramInputValues": params,
+        })
+    }
+
     fn static_var(name: &str, val: bool) -> serde_json::Value {
         json!({ "name": name, "value": val })
     }
@@ -707,6 +819,42 @@ mod tests {
             result.contains(&5),
             "Admin canvas (ptr:5) must be filtered — _SV capability flag must NOT activate the matching active-mode bool"
         );
+    }
+
+    /// Boolean parameter slots should be detected anywhere under the candidate
+    /// widget subtree, not just on the candidate node itself.
+    #[test]
+    fn scene_widget_boolean_param_is_detected() {
+        let rv = json!({
+            "_Type_": "BuildingBlocks_Canvas",
+            "scene": [
+                scene_widget(9, vec![]),
+                json!({
+                    "_Pointer_": "ptr:10",
+                    "_Type_": "BuildingBlocks_WidgetCanvas",
+                    "parent": "_PointsTo_:ptr:9",
+                    "paramInputValues": [
+                        json!({
+                            "_Type_": "BuildingBlocks_ComponentParameterInputBoolean",
+                            "parameter": "ParamInput0",
+                            "value": false
+                        })
+                    ]
+                }),
+            ]
+        });
+        let items = scene_widget_map(&rv);
+        assert!(scene_widget_has_boolean_param(&items, 9));
+    }
+
+    #[test]
+    fn scene_widget_without_boolean_param_is_not_detected() {
+        let rv = json!({
+            "_Type_": "BuildingBlocks_Canvas",
+            "scene": [scene_widget(9, vec![])]
+        });
+        let items = scene_widget_map(&rv);
+        assert!(!scene_widget_has_boolean_param(&items, 9));
     }
 
     // ── test 3 ──────────────────────────────────────────────────────────────

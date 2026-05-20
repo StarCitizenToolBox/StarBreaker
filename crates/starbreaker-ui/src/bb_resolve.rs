@@ -42,7 +42,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::bb_loc::LocFetcher;
-use crate::bb_scene::{BbNodeId, BbNodeType, BbScene, parse_bb_canvas};
+use crate::bb_scene::{BbNodeId, BbNodeType, BbScene, BbValue, parse_bb_canvas};
 use crate::bb_brand_style;
 use crate::pipeline::extract_record_name;
 
@@ -215,7 +215,7 @@ fn resolve_canvas_graph_inner(
                     }
                 };
                 // Recurse: resolve the child's own style-references and WidgetCanvas URLs.
-                let child_scene = match resolve_canvas_graph_inner(
+                let mut child_scene = match resolve_canvas_graph_inner(
                     &child_json,
                     manufacturer_id,
                     fetch_by_path,
@@ -234,7 +234,16 @@ fn resolve_canvas_graph_inner(
                         continue;
                     }
                 };
-                merge_child_scene(&mut scene, child_scene, match_to);
+                // Pass1 canvas-reference merges can also carry localized
+                // paramInputValues on the matched host node (same mechanism as
+                // Pass2 WidgetCanvas.canvas references). Inject those overrides
+                // so localized component-parameter defaults resolve correctly.
+                if !match_to.is_empty() {
+                    if let Some(param_inputs) = param_inputs_for_match_to(&scene, match_to) {
+                        inject_param_overrides(&param_inputs, &mut child_scene);
+                    }
+                }
+                merge_child_scene(&mut scene, child_scene, match_to, None);
             }
         }
     }
@@ -388,7 +397,7 @@ fn resolve_canvas_graph_inner(
                 }
             };
             inject_param_overrides(&param_inputs, &mut child_scene);
-            merge_child_scene(&mut scene, child_scene, "");
+            merge_child_scene(&mut scene, child_scene, "", Some(node_id));
         }
     }
 
@@ -587,8 +596,18 @@ fn entries_from(value: &serde_json::Value) -> Vec<&serde_json::Value> {
         .unwrap_or_default()
 }
 
-fn merge_child_scene(parent_scene: &mut BbScene, child_scene: BbScene, match_to: &str) {
-    let BbScene { roots: child_roots, nodes: child_nodes, operations: child_ops, .. } = child_scene;
+fn merge_child_scene(
+    parent_scene: &mut BbScene,
+    child_scene: BbScene,
+    match_to: &str,
+    host_parent_override: Option<BbNodeId>,
+) {
+    let BbScene {
+        canvas_size: child_canvas_size,
+        roots: child_roots,
+        nodes: child_nodes,
+        operations: child_ops,
+    } = child_scene;
 
     // Build a collision-free mapping from child original IDs to new IDs.
     // We use a monotonic counter that wraps and skips any ID already present
@@ -617,10 +636,20 @@ fn merge_child_scene(parent_scene: &mut BbScene, child_scene: BbScene, match_to:
         .filter_map(|id| id_map.get(id).copied())
         .collect();
 
-    let Some(host_parent_id) = find_host_parent(parent_scene, match_to) else {
+    let host_parent_id = if let Some(id) = host_parent_override {
+        if parent_scene.nodes.contains_key(&id) {
+            Some(id)
+        } else {
+            None
+        }
+    } else {
+        find_host_parent(parent_scene, match_to)
+    };
+    let Some(host_parent_id) = host_parent_id else {
         log::warn!("bb_resolve: no host parent available for child canvas merge");
         return;
     };
+    let canvas_scale = child_canvas_scale_for_host(parent_scene, host_parent_id, child_canvas_size);
 
     let mut inserted_child_roots = Vec::new();
     for (orig_id, mut node) in child_nodes {
@@ -643,14 +672,23 @@ fn merge_child_scene(parent_scene: &mut BbScene, child_scene: BbScene, match_to:
             node.parent = Some(host_parent_id);
             inserted_child_roots.push(new_id);
         }
+        if let Some((sx, sy)) = canvas_scale {
+            scale_node_from_child_canvas(&mut node, sx, sy);
+        }
 
         parent_scene.nodes.insert(new_id, node);
     }
 
-    // Remap ptr: / _PointsTo_:ptr: references in operations using id_map.
+    // Remap operation-pointer namespace to avoid collisions across merged child
+    // canvases. Node IDs and operation IDs are distinct domains in source
+    // records, but both use ptr:N string encoding and can collide numerically.
+    let op_id_map = remap_child_operation_ids(parent_scene, &child_ops);
+
+    // Remap ptr: / _PointsTo_:ptr: references in operations using both node-id
+    // and operation-id maps.
     let mut remapped_ops = child_ops;
     for op in &mut remapped_ops {
-        remap_ptrs_in_json_map(op, &id_map);
+        remap_ptrs_in_json_map(op, &id_map, &op_id_map);
     }
     parent_scene.operations.extend(remapped_ops);
 
@@ -666,34 +704,185 @@ fn merge_child_scene(parent_scene: &mut BbScene, child_scene: BbScene, match_to:
     }
 }
 
-fn remap_ptrs_in_json_map(v: &mut serde_json::Value, id_map: &HashMap<BbNodeId, BbNodeId>) {
+fn child_canvas_scale_for_host(
+    parent_scene: &BbScene,
+    host_parent_id: BbNodeId,
+    child_canvas_size: (f32, f32),
+) -> Option<(f32, f32)> {
+    let host = parent_scene.nodes.get(&host_parent_id)?;
+    let child_w = child_canvas_size.0;
+    let child_h = child_canvas_size.1;
+    if child_w <= 0.0 || child_h <= 0.0 {
+        return None;
+    }
+    let host_w = match host.sizing.width {
+        BbValue::Fixed(v) if v > 0.0 => v,
+        _ => return None,
+    };
+    let host_h = match host.sizing.height {
+        BbValue::Fixed(v) if v > 0.0 => v,
+        _ => return None,
+    };
+    let sx = host_w / child_w;
+    let sy = host_h / child_h;
+    if !sx.is_finite() || !sy.is_finite() || sx <= 0.0 || sy <= 0.0 {
+        return None;
+    }
+    if (sx - 1.0).abs() < 0.0001 && (sy - 1.0).abs() < 0.0001 {
+        return None;
+    }
+    Some((sx, sy))
+}
+
+fn scale_node_from_child_canvas(node: &mut crate::bb_scene::BbNode, sx: f32, sy: f32) {
+    node.position.x *= sx;
+    node.position.y *= sy;
+    node.position_offset.x *= sx;
+    node.position_offset.y *= sy;
+    scale_bb_value(&mut node.sizing.width, sx);
+    scale_bb_value(&mut node.sizing.height, sy);
+    node.padding.left *= sx;
+    node.padding.right *= sx;
+    node.padding.top *= sy;
+    node.padding.bottom *= sy;
+    node.margin.left *= sx;
+    node.margin.right *= sx;
+    node.margin.top *= sy;
+    node.margin.bottom *= sy;
+    if let Some(text) = node.text.as_mut() {
+        scale_bb_value(&mut text.font_size, sy);
+    }
+    if let Some(border) = node.border.as_mut() {
+        let sw = sx.min(sy);
+        border.top.width *= sw;
+        border.right.width *= sw;
+        border.bottom.width *= sw;
+        border.left.width *= sw;
+    }
+}
+
+fn scale_bb_value(value: &mut BbValue, scale: f32) {
+    if let BbValue::Fixed(v) = value {
+        *v *= scale;
+    }
+}
+
+fn remap_child_operation_ids(
+    parent_scene: &BbScene,
+    child_ops: &[serde_json::Value],
+) -> HashMap<BbNodeId, BbNodeId> {
+    let mut occupied: std::collections::BTreeSet<BbNodeId> = std::collections::BTreeSet::new();
+    for id in parent_scene.nodes.keys().copied() {
+        occupied.insert(id);
+    }
+    for op in &parent_scene.operations {
+        if let Some(id) = op
+            .get("_Pointer_")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.strip_prefix("ptr:"))
+            .and_then(|n| n.parse::<BbNodeId>().ok())
+        {
+            occupied.insert(id);
+        }
+    }
+
+    let mut next: BbNodeId = occupied.iter().next_back().copied().unwrap_or(0).wrapping_add(1);
+    let mut out = HashMap::new();
+    for op in child_ops {
+        let Some(old_id) = op
+            .get("_Pointer_")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.strip_prefix("ptr:"))
+            .and_then(|n| n.parse::<BbNodeId>().ok())
+        else {
+            continue;
+        };
+        if out.contains_key(&old_id) {
+            continue;
+        }
+        while occupied.contains(&next) || out.values().any(|&v| v == next) {
+            next = next.wrapping_add(1);
+        }
+        out.insert(old_id, next);
+        next = next.wrapping_add(1);
+    }
+    out
+}
+
+fn remap_ptrs_in_json_map(
+    v: &mut serde_json::Value,
+    id_map: &HashMap<BbNodeId, BbNodeId>,
+    op_id_map: &HashMap<BbNodeId, BbNodeId>,
+) {
+    remap_ptrs_in_json_map_keyed(v, None, id_map, op_id_map);
+}
+
+fn remap_ptrs_in_json_map_keyed(
+    v: &mut serde_json::Value,
+    key: Option<&str>,
+    id_map: &HashMap<BbNodeId, BbNodeId>,
+    op_id_map: &HashMap<BbNodeId, BbNodeId>,
+) {
     match v {
         serde_json::Value::String(s) => {
             if let Some(n) = s.strip_prefix("ptr:").and_then(|n| n.parse::<BbNodeId>().ok()) {
-                if let Some(&new_id) = id_map.get(&n) {
+                let remapped = remap_ptr_with_key(n, key, id_map, op_id_map);
+                if let Some(new_id) = remapped {
                     *s = format!("ptr:{new_id}");
                 }
             } else if let Some(n) = s
                 .strip_prefix("_PointsTo_:ptr:")
                 .and_then(|n| n.parse::<BbNodeId>().ok())
             {
-                if let Some(&new_id) = id_map.get(&n) {
+                let remapped = remap_ptr_with_key(n, key, id_map, op_id_map);
+                if let Some(new_id) = remapped {
                     *s = format!("_PointsTo_:ptr:{new_id}");
                 }
             }
         }
         serde_json::Value::Array(arr) => {
             for item in arr {
-                remap_ptrs_in_json_map(item, id_map);
+                remap_ptrs_in_json_map_keyed(item, key, id_map, op_id_map);
             }
         }
         serde_json::Value::Object(map) => {
-            for value in map.values_mut() {
-                remap_ptrs_in_json_map(value, id_map);
+            for (k, value) in map {
+                remap_ptrs_in_json_map_keyed(value, Some(k.as_str()), id_map, op_id_map);
             }
         }
         _ => {}
     }
+}
+
+fn remap_ptr_with_key(
+    old: BbNodeId,
+    key: Option<&str>,
+    id_map: &HashMap<BbNodeId, BbNodeId>,
+    op_id_map: &HashMap<BbNodeId, BbNodeId>,
+) -> Option<BbNodeId> {
+    let k = key.unwrap_or("");
+    let prefer_node = matches!(k, "widget" | "parent" | "target");
+    let prefer_op = k == "_Pointer_" || k.starts_with("input") || k == "nZeros";
+
+    if prefer_node {
+        if let Some(&n) = id_map.get(&old) {
+            return Some(n);
+        }
+        if let Some(&n) = op_id_map.get(&old) {
+            return Some(n);
+        }
+        return None;
+    }
+    if prefer_op {
+        if let Some(&n) = op_id_map.get(&old) {
+            return Some(n);
+        }
+        if let Some(&n) = id_map.get(&old) {
+            return Some(n);
+        }
+        return None;
+    }
+    op_id_map.get(&old).copied().or_else(|| id_map.get(&old).copied())
 }
 
 fn find_host_parent(parent_scene: &BbScene, match_to: &str) -> Option<BbNodeId> {
@@ -714,6 +903,35 @@ fn find_host_parent(parent_scene: &BbScene, match_to: &str) -> Option<BbNodeId> 
     }
 
     parent_scene.roots.first().copied()
+}
+
+fn param_inputs_for_match_to(
+    scene: &BbScene,
+    match_to: &str,
+) -> Option<Vec<serde_json::Value>> {
+    for root_id in &scene.roots {
+        let Some(root) = scene.nodes.get(root_id) else {
+            continue;
+        };
+        for child_id in &root.children {
+            let Some(child) = scene.nodes.get(child_id) else {
+                continue;
+            };
+            if !child.name.eq_ignore_ascii_case(match_to) {
+                continue;
+            }
+            let inputs = child
+                .raw
+                .get("paramInputValues")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if !inputs.is_empty() {
+                return Some(inputs);
+            }
+        }
+    }
+    None
 }
 
 /// Synthesize `_SynthLocalizedParam_` operations from a parent `WidgetCanvas`
@@ -766,6 +984,7 @@ fn inject_param_overrides(
     // Scan existing ops for BuildingBlocks_BindingsLocalizedComponentParameter
     // entries and inject a synthetic _SynthLocalizedParam_ op for each match.
     let mut synthetics: Vec<serde_json::Value> = Vec::new();
+    let mut param_ptr_to_loc: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for op in &child_scene.operations {
         let is_local_param = op
             .get("_Type_")
@@ -791,6 +1010,40 @@ fn inject_param_overrides(
             "_Pointer_": ptr_str,
             "resolvedLocKey": loc_key,
         }));
+        param_ptr_to_loc.insert(ptr_str.to_owned(), loc_key.to_owned());
+    }
+
+    // Also synthesize direct widget→loc mappings for LocalizedField ops that
+    // consume those component-parameter pointers. This avoids losing the
+    // mapping when intermediate pointer graphs are ambiguous after deep merges.
+    if !param_ptr_to_loc.is_empty() {
+        for op in &child_scene.operations {
+            let is_localized_field = op
+                .get("_Type_")
+                .and_then(|v| v.as_str())
+                .map(|t| t.eq_ignore_ascii_case("BuildingBlocks_BindingsLocalizedField"))
+                .unwrap_or(false);
+            if !is_localized_field {
+                continue;
+            }
+            let Some(widget_ptr) = op.get("widget").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(input_ptr) = op.get("input").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(input_ptr_raw) = input_ptr.strip_prefix("_PointsTo_:") else {
+                continue;
+            };
+            let Some(loc_key) = param_ptr_to_loc.get(input_ptr_raw) else {
+                continue;
+            };
+            synthetics.push(serde_json::json!({
+                "_Type_": "_SynthLocalizedWidget_",
+                "widget": widget_ptr,
+                "resolvedLocKey": loc_key,
+            }));
+        }
     }
 
     if !synthetics.is_empty() {
@@ -913,6 +1166,87 @@ mod tests {
                 ]
             }
         })
+    }
+
+    #[test]
+    fn merge_scales_child_canvas_units_to_host_slot_size() {
+        // Parent canvas authored at 1920x1080 with a 400x400 WidgetCanvas slot.
+        let host = serde_json::json!({
+            "_RecordName_": "host_touch_slot",
+            "_RecordId_": "00000000-0000-0000-0000-000000000111",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_":"Vec3","x":1920.0,"y":1080.0,"z":0.0},
+                "defaultStyles": {
+                    "_Type_": "BuildingBlocks_DefaultStyles",
+                    "sharedStyles": null,
+                    "entries": [{
+                        "_Type_":"BuildingBlocks_StyleEntry",
+                        "name":"Default",
+                        "matchTo":"touch_slot",
+                        "conditionsList":[],
+                        "modifiers":[
+                            {"_Type_":"BuildingBlocks_FieldModifier",
+                             "field":{"_Type_":"BuildingBlocks_FieldModifierRecordRefTypeCanvasReferenceRecord","value":"file://./child_touch.json"}}
+                        ]
+                    }]
+                },
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_":"ptr:1","_Type_":"BuildingBlocks_DisplayWidget","name":"root"},
+                    {"_Pointer_":"ptr:2","_Type_":"BuildingBlocks_WidgetCanvas","name":"touch_slot","parent":"_PointsTo_:ptr:1",
+                     "sizing":{"_Type_":"BuildingBlocks_Size",
+                        "width":{"_Type_":"BuildingBlocks_FixedOrRelativeValue","value":400.0,"behavior":"Fixed"},
+                        "height":{"_Type_":"BuildingBlocks_FixedOrRelativeValue","value":400.0,"behavior":"Fixed"}}}
+                ]
+            }
+        });
+        // Child canvas authored at 1024x1024 with a 512px image.
+        let child = serde_json::json!({
+            "_RecordName_": "child_touch",
+            "_RecordId_": "00000000-0000-0000-0000-000000000112",
+            "_RecordValue_": {
+                "_Type_":"BuildingBlocks_Canvas",
+                "size":{"_Type_":"Vec3","x":1024.0,"y":1024.0,"z":0.0},
+                "scene":[
+                    {"_Pointer_":"ptr:10","_Type_":"BuildingBlocks_DisplayWidget","name":"child_root",
+                     "sizing":{"_Type_":"BuildingBlocks_Size",
+                        "width":{"_Type_":"BuildingBlocks_FixedOrRelativeValue","value":1024.0,"behavior":"Fixed"},
+                        "height":{"_Type_":"BuildingBlocks_FixedOrRelativeValue","value":1024.0,"behavior":"Fixed"}}},
+                    {"_Pointer_":"ptr:11","_Type_":"BuildingBlocks_WidgetImage","name":"child_image","parent":"_PointsTo_:ptr:10",
+                     "sizing":{"_Type_":"BuildingBlocks_Size",
+                        "width":{"_Type_":"BuildingBlocks_FixedOrRelativeValue","value":512.0,"behavior":"Fixed"},
+                        "height":{"_Type_":"BuildingBlocks_FixedOrRelativeValue","value":256.0,"behavior":"Fixed"}}}
+                ]
+            }
+        });
+
+        let scene = resolve_canvas_graph(&host, None, &|path| {
+            if path.to_ascii_lowercase().contains("child_touch.json") {
+                Ok(child.clone())
+            } else {
+                Err(format!("unexpected fetch path: {path}"))
+            }
+        })
+        .expect("resolve failed");
+
+        let image_node = scene
+            .nodes
+            .values()
+            .find(|n| n.name == "child_image")
+            .expect("child image node missing after merge");
+        let w = match image_node.sizing.width {
+            BbValue::Fixed(v) => v,
+            _ => panic!("child image width must stay fixed"),
+        };
+        let h = match image_node.sizing.height {
+            BbValue::Fixed(v) => v,
+            _ => panic!("child image height must stay fixed"),
+        };
+        assert!(
+            (w - 200.0).abs() < 0.01 && (h - 100.0).abs() < 0.01,
+            "expected 512x256 in 1024-child scaled into 400x400 slot => 200x100, got {w}x{h}"
+        );
     }
 
     /// A host canvas (like M_MFD_Screen) with empty defaultStyles but a

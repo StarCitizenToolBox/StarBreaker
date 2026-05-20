@@ -109,6 +109,12 @@ impl DefaultValueRegistry {
         // (Phase 1 contract: "GUNS (ALL)" gun-group runtime default)
         reg.insert_path("/vehicle/gungroup", Value::Str("(ALL)".into()));
 
+        // Med-bed header defaults (Clipper / hospital screens):
+        // runtime `MedicalTier` commonly resolves to 3 in the static "switched-on"
+        // view; operations add +1 to the min tier, so seed inputs as 2.
+        reg.insert_path("CloneLocationInfo/MedicalTier", Value::Int(2));
+        reg.insert_path("Bed/MedBed/MedBedStatus/MedicalTier", Value::Int(2));
+
         // ── Static localization fallback ─────────────────────────────────────
         //
         // `Data\Localization\english\global.ini` is NOT present in the SC 4.x

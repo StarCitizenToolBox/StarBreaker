@@ -226,11 +226,12 @@ pub fn draw_swf_stage_rgba(
 /// main stage timeline (frame 0) that are not already covered by a named
 /// export.
 ///
-/// Named exports are rendered at the origin using the identity transform; stage
-/// frame items are rendered using their actual PlaceObject matrices so they
-/// appear at the correct position within the SWF stage bounds.  This ensures
-/// shapes/sprites placed directly on the stage without being exported by name
-/// are still rendered (e.g. chrome overlays and dashed lines in TargetStatus).
+/// Stage frame items are rendered first using their PlaceObject matrices so they
+/// keep authored runtime placement. Named exports then fill any remaining
+/// character IDs not already present on stage, using identity placement as a
+/// fallback. This ensures shapes/sprites placed directly on the stage without
+/// being exported by name are still rendered (e.g. chrome overlays and dashed
+/// lines in TargetStatus) without overriding stage transforms.
 ///
 /// Returns `true` if at least one shape was drawn.
 pub fn draw_swf_visual_exports(
@@ -253,9 +254,21 @@ pub fn draw_swf_visual_exports(
     // Deduplicate by character id — a symbol may be exported under multiple
     // names, or appear both as a named export and in the stage frame list.
     let mut seen: std::collections::HashSet<swf::CharacterId> = std::collections::HashSet::new();
+    // Render stage frame 0 first so stage placement matrices win over fallback
+    // identity placement from ExportAssets names.
+    let stage_places = assets.stage_frame(0);
+    for place in &stage_places {
+        if !seen.insert(place.character_id) {
+            continue;
+        }
+        let ct_tint = color_transform_tint(tint, place.color_transform.as_ref());
+        if draw_stage_character(pixmap, assets, place, sw, sh, sx, sy, dest, ct_tint, alpha) {
+            drew_any = true;
+        }
+    }
+
     // Collect first to avoid borrow conflict with `assets` inside the loop.
     let char_ids: Vec<swf::CharacterId> = assets.visual_exports().collect();
-
     for char_id in char_ids {
         if !seen.insert(char_id) {
             continue;
@@ -268,19 +281,6 @@ pub fn draw_swf_visual_exports(
             name: None,
         };
         if draw_stage_character(pixmap, assets, &place, sw, sh, sx, sy, dest, tint, alpha) {
-            drew_any = true;
-        }
-    }
-
-    // Also render stage frame 0 — catches shapes/sprites placed on the main
-    // timeline that have no named export (e.g. chrome overlays, dashed lines).
-    let stage_places = assets.stage_frame(0);
-    for place in &stage_places {
-        if !seen.insert(place.character_id) {
-            continue;
-        }
-        let ct_tint = color_transform_tint(tint, place.color_transform.as_ref());
-        if draw_stage_character(pixmap, assets, place, sw, sh, sx, sy, dest, ct_tint, alpha) {
             drew_any = true;
         }
     }
