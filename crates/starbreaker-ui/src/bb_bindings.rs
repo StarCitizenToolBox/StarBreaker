@@ -153,6 +153,22 @@ impl BindingResolver {
             }
         }
 
+        // `locString` is an alternative loc-key field on WidgetText nodes.
+        // It typically contains `@LOC_EMPTY` (→ empty sentinel) but may carry
+        // a real key, so we check it after `text` and skip the empty sentinel.
+        if let Some(loc_key) = node_raw
+            .get("locString")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && s.starts_with('@'))
+        {
+            if let Some(resolved) = defaults.lookup_localization(loc_key) {
+                if !resolved.is_empty() {
+                    return ResolvedText { text: resolved.to_owned(), is_name_derived: false };
+                }
+            }
+        }
+
         // `labelProperties.label` carries a localization key such as
         // `@hud_NoTarget`.  Resolve it before falling back to the binding path.
         if let Some(loc_key) = node_raw
@@ -307,4 +323,62 @@ fn parse_ptr(s: &str) -> Option<BbNodeId> {
 
 fn parse_points_to(s: &str) -> Option<BbNodeId> {
     s.strip_prefix("_PointsTo_:").and_then(parse_ptr)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn resolver() -> BindingResolver {
+        BindingResolver {
+            widget_to_path: Default::default(),
+            widget_to_loc_key: Default::default(),
+        }
+    }
+
+    #[test]
+    fn text_at_key_resolves_via_loc_map() {
+        let resolver = resolver();
+        let mut defaults = DefaultValueRegistry::default();
+        defaults.merge_localization([("foo".to_string(), "POWER MANAGEMENT".to_string())].into());
+
+        let raw = json!({"text": "@foo"});
+        let result = resolver.resolve_text_detailed(0, &raw, &defaults);
+        assert_eq!(result.text, "POWER MANAGEMENT");
+    }
+
+    #[test]
+    fn text_literal_returned_as_is() {
+        let resolver = resolver();
+        let defaults = DefaultValueRegistry::default();
+
+        let raw = json!({"text": "Hello World"});
+        let result = resolver.resolve_text_detailed(0, &raw, &defaults);
+        assert_eq!(result.text, "Hello World");
+    }
+
+    #[test]
+    fn loc_string_field_resolved() {
+        let resolver = resolver();
+        let mut defaults = DefaultValueRegistry::default();
+        defaults.merge_localization([("mykey".to_string(), "My Label".to_string())].into());
+
+        // `locString` field carries the loc key; `text` is absent.
+        let raw = json!({"locString": "@mykey"});
+        let result = resolver.resolve_text_detailed(0, &raw, &defaults);
+        assert_eq!(result.text, "My Label");
+    }
+
+    #[test]
+    fn loc_empty_sentinel_skipped() {
+        let resolver = resolver();
+        let defaults = DefaultValueRegistry::default();
+
+        // @LOC_EMPTY resolves to "" (suppressed sentinel) — must not emit that.
+        let raw = json!({"locString": "@LOC_EMPTY"});
+        let result = resolver.resolve_text_detailed(0, &raw, &defaults);
+        assert_eq!(result.text, "");
+    }
 }

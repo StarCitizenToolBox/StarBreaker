@@ -13,16 +13,21 @@
 //! key are lowercased before comparison.
 //!
 //! # Availability note
-//! `global.ini` is absent from the Star Citizen 4.x P4K, so the returned map
-//! is usually empty in a live installation.  The pipeline continues to work
-//! correctly: unresolved `@KEY` strings are passed through as-is.
+//! `global.ini` is present in Star Citizen 4.x P4K archives at
+//! `Data\Localization\english\global.ini`.  When absent, the returned map is
+//! empty and the pipeline continues correctly: unresolved `@KEY` strings are
+//! passed through as-is and resolved at render time by [`DefaultValueRegistry`].
+//!
+//! [`DefaultValueRegistry`]: crate::defaults::DefaultValueRegistry
 
 use std::collections::HashMap;
 
 use crate::bb_loc::LocFetcher;
 
-/// Constant P4K path for the English localization file.
-const GLOBAL_INI_PATH: &str = "Data/Localization/english/global.ini";
+/// Canonical P4K path for the English localization file.
+///
+/// The P4K archive stores paths with Windows-style backslash separators.
+const GLOBAL_INI_PATH: &str = "Data\\Localization\\english\\global.ini";
 
 /// Localization fetcher backed by a parsed `global.ini` map.
 pub struct IniLocFetcher {
@@ -57,6 +62,12 @@ pub fn load_global_ini(fetch: impl Fn(&str) -> Option<Vec<u8>>) -> IniLocFetcher
 ///
 /// Strips an optional UTF-8 BOM, skips blank lines and comment lines
 /// (`;` or `#` prefix), and splits each remaining line on the first `=`.
+///
+/// # Plural-form suffix
+/// Star Citizen `global.ini` uses `,P` (e.g. `engineering_ui_Item_Output,P=Output`)
+/// for plural/parameter-form entries.  Both the raw key (`foo,p`) and the bare
+/// base key (`foo`) are inserted, with the base form taking priority so that
+/// simple `@foo` lookups always resolve.
 pub fn parse_ini_bytes(bytes: &[u8]) -> HashMap<String, String> {
     // Strip UTF-8 BOM if present.
     let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
@@ -78,9 +89,18 @@ pub fn parse_ini_bytes(bytes: &[u8]) -> HashMap<String, String> {
         if let Some(eq_pos) = line.find('=') {
             let key = line[..eq_pos].trim().to_ascii_lowercase();
             let value = line[eq_pos + 1..].trim().to_string();
-            if !key.is_empty() {
-                map.insert(key, value);
+            if key.is_empty() {
+                continue;
             }
+            // Also insert under the bare key (without `,p` suffix) so that
+            // lookups of the form `@engineering_ui_item_output` work even when
+            // the file only has `engineering_ui_item_output,p=Output`.
+            // `or_insert` preserves a previously inserted value (e.g. a
+            // non-suffixed singular form comes first).
+            if let Some(base) = key.strip_suffix(",p") {
+                map.entry(base.to_string()).or_insert_with(|| value.clone());
+            }
+            map.insert(key, value);
         }
     }
     map
@@ -147,5 +167,25 @@ mod tests {
         // resolve_loc_string strips `@` then lowercases the key via fetch_loc.
         let result = resolve_loc_string("@hud_NoTarget", &[], &fetcher);
         assert_eq!(result, "No Target");
+    }
+
+    #[test]
+    fn plural_suffix_base_key_resolved() {
+        // Star Citizen global.ini uses `,P` for plural-form entries.
+        // Looking up the bare key (no suffix) should return the value.
+        let ini = b"engineering_ui_Item_Output,P=Output\n";
+        let map = parse_ini_bytes(ini);
+        // Bare key inserted automatically.
+        assert_eq!(map.get("engineering_ui_item_output"), Some(&"Output".to_string()));
+        // Original suffixed key also present.
+        assert_eq!(map.get("engineering_ui_item_output,p"), Some(&"Output".to_string()));
+    }
+
+    #[test]
+    fn plural_suffix_singular_wins_over_plural() {
+        // If a singular form appears before the `,P` form, it should win.
+        let ini = b"mykey=Singular\nmykey,P=Plural\n";
+        let map = parse_ini_bytes(ini);
+        assert_eq!(map.get("mykey"), Some(&"Singular".to_string()));
     }
 }
