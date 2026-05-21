@@ -1148,6 +1148,7 @@ pub(crate) fn write_decomposed_export(
                     opts.texture_mip,
                     &input.entity_name,
                     &input.geometry_path,
+                    &scene_manifest_path,
                     root_manufacturer_id.as_deref(),
                 )
             })
@@ -1404,6 +1405,7 @@ pub(crate) fn write_decomposed_export(
                             opts.texture_mip,
                             &input.entity_name,
                             &input.geometry_path,
+                            &scene_manifest_path,
                             root_manufacturer_id.as_deref(),
                         )
                     })
@@ -1966,6 +1968,11 @@ fn ui_binding_json(binding: &UiBinding) -> serde_json::Value {
         "owner_source_file": binding.owner_source_file,
         "runtime_image_source": binding.runtime_image_source,
         "generated_image_path": binding.generated_image_path,
+        "generated_context_manifest_path": binding.generated_context_manifest_path,
+        "generated_resolved_source_path": binding.generated_resolved_source_path,
+        "generated_backend": binding.generated_backend,
+        "generated_provenance": binding.generated_provenance,
+        "generated_confidence": binding.generated_confidence,
     })
 }
 
@@ -2555,6 +2562,7 @@ fn generated_ui_binding_record(
     texture_mip: u32,
     root_entity_name: &str,
     root_geometry_path: &str,
+    scene_manifest_path: &str,
     root_manufacturer_id: Option<&str>,
 ) -> UiBinding {
     let mut binding = binding.clone();
@@ -2576,6 +2584,86 @@ fn generated_ui_binding_record(
                 insert_binary_file(files, export_path.clone(), png_bytes);
             }
             binding.generated_image_path = Some(export_path);
+            binding.generated_context_manifest_path = Some(scene_manifest_path.to_string());
+            let selected_style_source = root_manufacturer_id
+                .map(|id| format!("manufacturer:{id}"))
+                .unwrap_or_else(|| "manufacturer:drak".to_string());
+            let selected_swf_source = binding
+                .runtime_image_source
+                .clone()
+                .or_else(|| binding.canvas_widget_canvas_path.clone())
+                .or_else(|| binding.canvas_record_path.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+            binding.generated_resolved_source_path = Some(selected_swf_source.clone());
+            binding.generated_backend = Some("starbreaker-ui".to_string());
+            let mut fallback_counters = serde_json::Map::new();
+            fallback_counters.insert(
+                "canvas".to_string(),
+                serde_json::json!(if binding.content_canvas_guid.is_none() { 1u32 } else { 0u32 }),
+            );
+            fallback_counters.insert(
+                "style".to_string(),
+                serde_json::json!(if binding.canvas_widget_canvas_path.is_none() { 1u32 } else { 0u32 }),
+            );
+            fallback_counters.insert(
+                "swf".to_string(),
+                serde_json::json!(if binding.runtime_image_source.is_none() { 1u32 } else { 0u32 }),
+            );
+            let unresolved_references = [
+                binding
+                    .canvas_guid
+                    .is_none()
+                    .then_some("canvas_guid".to_string()),
+                binding
+                    .content_canvas_guid
+                    .is_none()
+                    .then_some("content_canvas_guid".to_string()),
+                binding
+                    .runtime_image_source
+                    .is_none()
+                    .then_some("runtime_image_source".to_string()),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+            let mut confidence: i16 = 100;
+            if binding.content_canvas_guid.is_none() {
+                confidence -= 20;
+            }
+            if binding.runtime_image_source.is_none() {
+                confidence -= 20;
+            }
+            if binding.canvas_record_name.is_none() {
+                confidence -= 10;
+            }
+            if binding.helper_name.is_none() {
+                confidence -= 10;
+            }
+            if unresolved_references.len() > 2 {
+                confidence -= 10;
+            }
+            let confidence = confidence.clamp(0, 100) as u8;
+            binding.generated_confidence = Some(confidence);
+            binding.generated_provenance = Some(
+                serde_json::to_string(&serde_json::json!({
+                    "resolved_canvas_ids": [
+                        binding.canvas_guid.clone(),
+                        binding.content_canvas_guid.clone(),
+                    ],
+                    "resolved_canvas_names": [
+                        binding.canvas_record_name.clone(),
+                        binding.content_canvas_record_name.clone(),
+                        binding.helper_name.clone(),
+                    ],
+                    "selected_style_source": selected_style_source,
+                    "selected_swf_source": selected_swf_source,
+                    "render_backend": "starbreaker-ui",
+                    "fallback_counters": fallback_counters,
+                    "unresolved_references": unresolved_references,
+                    "confidence": confidence,
+                }))
+                .unwrap_or_else(|_| "{}".to_string()),
+            );
         }
         Err(e) => {
             log::warn!(
@@ -2739,6 +2827,7 @@ mod manufacturer_id_tests {
             generated_resolved_source_path: None,
             generated_backend: None,
             generated_provenance: None,
+            generated_confidence: None,
         };
 
         assert_eq!(generated_ui_type_segment("Objects/Spaceships/Ships/DRAK/Clipper/exterior/test.cga"), "ship");

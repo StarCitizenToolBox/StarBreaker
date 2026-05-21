@@ -533,6 +533,7 @@ pub struct UiBinding {
     pub generated_resolved_source_path: Option<String>,
     pub generated_backend: Option<String>,
     pub generated_provenance: Option<String>,
+    pub generated_confidence: Option<u8>,
 }
 
 pub struct EntityPayload {

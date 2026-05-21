@@ -23,7 +23,7 @@
 //!    manufacturer post-process pass.
 //! 7. Encode to PNG and return.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::canvas::{CanvasRecord, CanvasWidgetTreeResolver, ResolvedCanvas, SceneItem};
 use crate::compose::{ComposeContext, ComposeTarget, encode_png, render_canvas_with_postprocess};
@@ -137,6 +137,26 @@ pub struct PipelineInputs<'a> {
     /// modifiers are resolved to their display strings during scene construction.
     /// When `None`, `@KEY` strings are passed through as-is.
     pub loc_fetcher: Option<&'a dyn crate::bb_loc::LocFetcher>,
+}
+
+/// Diagnostics captured while rendering a UI image.
+#[derive(Debug, Clone)]
+pub struct UiRenderDiagnostics {
+    pub resolved_canvas_ids: Vec<String>,
+    pub resolved_canvas_names: Vec<String>,
+    pub selected_style_source: String,
+    pub selected_swf_source: String,
+    pub render_backend: String,
+    pub fallback_counters: BTreeMap<String, u32>,
+    pub unresolved_references: Vec<String>,
+    pub confidence: u8,
+}
+
+/// Render output plus diagnostics for provenance metadata.
+#[derive(Debug, Clone)]
+pub struct UiRenderOutput {
+    pub png: Vec<u8>,
+    pub diagnostics: UiRenderDiagnostics,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

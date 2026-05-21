@@ -190,6 +190,9 @@ fn parse_ui_binding(v: &Value) -> Option<UiBinding> {
     let opt_u32 = |key: &str| -> Option<u32> {
         obj.get(key)?.as_u64().map(|n| n as u32)
     };
+    let opt_u8 = |key: &str| -> Option<u8> {
+        obj.get(key)?.as_u64().map(|n| n as u8)
+    };
     let default_light_color: Option<[u8; 4]> = obj
         .get("default_light_color")
         .and_then(|v| v.as_array())
@@ -236,6 +239,7 @@ fn parse_ui_binding(v: &Value) -> Option<UiBinding> {
         generated_resolved_source_path: opt_str("generated_resolved_source_path"),
         generated_backend: opt_str("generated_backend"),
         generated_provenance: opt_str("generated_provenance"),
+        generated_confidence: opt_u8("generated_confidence"),
     })
 }
 

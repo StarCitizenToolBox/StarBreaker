@@ -628,6 +628,7 @@ pub(crate) fn ui_binding_for_record(db: &Database, record: &Record) -> Option<Ui
                 generated_resolved_source_path: None,
                 generated_backend: None,
                 generated_provenance: None,
+                generated_confidence: None,
             });
         }
     }
@@ -676,6 +677,7 @@ pub(crate) fn ui_binding_for_record(db: &Database, record: &Record) -> Option<Ui
                 generated_resolved_source_path: None,
                 generated_backend: None,
                 generated_provenance: None,
+                generated_confidence: None,
             });
         }
     }
@@ -821,6 +823,7 @@ pub(crate) fn ui_binding_for_record(db: &Database, record: &Record) -> Option<Ui
         generated_resolved_source_path: None,
         generated_backend: None,
         generated_provenance: None,
+        generated_confidence: None,
     })
 }
 
