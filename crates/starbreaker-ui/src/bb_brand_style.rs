@@ -89,9 +89,14 @@ pub struct BrandStyle<'a> {
 ///    (manufacturer-agnostic fallback).
 /// 5. If still nothing, return None.
 pub fn resolve_brand_style<'a>(
-    record_value: &'a serde_json::Value,
+    record_or_value: &'a serde_json::Value,
     ship_manufacturer_id: Option<&str>,
+    preferred_identifier: Option<&str>,
 ) -> Option<BrandStyle<'a>> {
+    let record_value = record_or_value
+        .get("_RecordValue_")
+        .unwrap_or(record_or_value);
+
     let brand_styles = record_value
         .get("brandStyles")
         .and_then(|v| v.as_array())?;
@@ -101,9 +106,14 @@ pub fn resolve_brand_style<'a>(
     }
     
     // Step 2: Per-canvas brand override for IC_* canvases with exactly one brand entry
-    let record_name = record_value
+    let record_name = record_or_value
         .get("_RecordName_")
         .and_then(|v| v.as_str())
+        .or_else(|| {
+            record_value
+                .get("_RecordName_")
+                .and_then(|v| v.as_str())
+        })
         .unwrap_or("");
     
     let family = classify_canvas_family(record_name);
@@ -129,6 +139,17 @@ pub fn resolve_brand_style<'a>(
             if let Some(basename) = brand_identifier_basename(entry) {
                 let lower_base = basename.to_ascii_lowercase();
                 if lower_base.starts_with("gen_") || lower_base.starts_with("s_default_") {
+                    return build_brand_style(entry);
+                }
+            }
+        }
+    }
+
+    if let Some(preferred) = preferred_identifier {
+        let preferred = preferred.to_ascii_lowercase();
+        for entry in brand_styles {
+            if let Some(basename) = brand_identifier_basename(entry) {
+                if basename.to_ascii_lowercase() == preferred {
                     return build_brand_style(entry);
                 }
             }
@@ -207,20 +228,20 @@ mod tests {
         let record_value = record.get("_RecordValue_").unwrap_or(&record);
 
         // Drake manufacturer picks drak
-        let result = resolve_brand_style(record_value, Some("drak"));
+        let result = resolve_brand_style(record_value, Some("drak"), None);
         assert!(result.is_some());
         let brand = result.unwrap();
         assert_eq!(brand.identifier, "s_drak");
         assert_eq!(brand.entries.len(), 1);
 
         // RSI manufacturer picks rsi
-        let result = resolve_brand_style(record_value, Some("rsi"));
+        let result = resolve_brand_style(record_value, Some("rsi"), None);
         assert!(result.is_some());
         let brand = result.unwrap();
         assert_eq!(brand.identifier, "s_rsi");
 
         // Unknown manufacturer with no generic fallback → None
-        let result = resolve_brand_style(record_value, Some("unknown"));
+        let result = resolve_brand_style(record_value, Some("unknown"), None);
         assert!(result.is_none());
     }
 
@@ -242,13 +263,39 @@ mod tests {
         let record_value = record.get("_RecordValue_").unwrap_or(&record);
 
         // Drake ship still gets BioCorp brand (per-canvas override)
-        let result = resolve_brand_style(record_value, Some("drak"));
+        let result = resolve_brand_style(record_value, Some("drak"), None);
         assert!(result.is_some());
         let brand = result.unwrap();
         assert_eq!(brand.identifier, "s_bioc");
 
         // Aegis ship also gets BioCorp brand
-        let result = resolve_brand_style(record_value, Some("aegs"));
+        let result = resolve_brand_style(record_value, Some("aegs"), None);
+        assert!(result.is_some());
+        let brand = result.unwrap();
+        assert_eq!(brand.identifier, "s_bioc");
+    }
+
+    #[test]
+    fn test_resolve_brand_style_ic_override_wrapped_record() {
+        let record = json!({
+            "_RecordName_": "IC_Med_MedicalCommon_A_Footer",
+            "_RecordValue_": {
+                "brandStyles": [
+                    {
+                        "brandIdentifier": "file://libs/foundry/records/ui/buildingblocks/brands/s_bioc.json",
+                        "entries": [
+                            {"modifiers": [{"field": "ImagePath", "value": "i_med_bioc_bottom-bar.dds"}]}
+                        ]
+                    },
+                    {
+                        "brandIdentifier": "file://libs/foundry/records/ui/buildingblocks/brands/s_rsi.json",
+                        "entries": []
+                    }
+                ]
+            }
+        });
+
+        let result = resolve_brand_style(&record, Some("drak"), Some("s_bioc"));
         assert!(result.is_some());
         let brand = result.unwrap();
         assert_eq!(brand.identifier, "s_bioc");
@@ -276,7 +323,7 @@ mod tests {
         let record_value = record.get("_RecordValue_").unwrap_or(&record);
 
         // Unknown manufacturer falls back to gen_s
-        let result = resolve_brand_style(record_value, Some("unknown"));
+        let result = resolve_brand_style(record_value, Some("unknown"), None);
         assert!(result.is_some());
         let brand = result.unwrap();
         assert_eq!(brand.identifier, "gen_s");

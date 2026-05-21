@@ -96,6 +96,7 @@ pub fn resolve_canvas_graph_with_loc(
         &mut visited,
         None,
         None,
+        None,
     )
 }
 
@@ -111,6 +112,7 @@ fn resolve_canvas_graph_inner(
     depth: u8,
     visited: &mut HashSet<String>,
     inherited_style: Option<&serde_json::Value>,
+    inherited_style_identifier: Option<&str>,
     inherited_param_inputs: Option<&[serde_json::Value]>,
 ) -> Result<BbScene, String> {
     let mut scene = parse_bb_canvas(root_json)?;
@@ -152,8 +154,10 @@ fn resolve_canvas_graph_inner(
 
     let debug_trace = std::env::var("STARBREAKER_UI_DEBUG").as_deref() == Ok("1");
 
+    let mut local_style_identifier = inherited_style_identifier.map(ToOwned::to_owned);
     let local_style_value = record_value.get("style").and_then(|style| {
         if let Some(style_url) = style.as_str().filter(|s| !s.is_empty()) {
+            local_style_identifier = Some(extract_record_name(style_url));
             match fetch_by_path(style_url) {
                 Ok(style_json) => Some(style_json.get("_RecordValue_").cloned().unwrap_or(style_json)),
                 Err(e) => {
@@ -181,7 +185,7 @@ fn resolve_canvas_graph_inner(
     //
     // The selected child canvas is resolved recursively so multi-level
     // hierarchies (master → gen → leaf) are fully expanded.
-    if let Some(entry) = pick_default_entry(record_value, manufacturer_id) {
+    if let Some(entry) = pick_default_entry(record_value, root_json, manufacturer_id) {
         let entry_name = entry.get("name").and_then(|v| v.as_str()).unwrap_or("?");
         let match_to = entry.get("matchTo").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -233,13 +237,14 @@ fn resolve_canvas_graph_inner(
                 let mut child_scene = match resolve_canvas_graph_inner(
                     &child_json,
                     manufacturer_id,
-                    fetch_by_path,
-                    loc_fetcher,
-                    depth + 1,
-                    visited,
-                    palette_source,
-                    match_to_param_inputs.as_deref(),
-                ) {
+                fetch_by_path,
+                loc_fetcher,
+                depth + 1,
+                visited,
+                palette_source,
+                local_style_identifier.as_deref(),
+                match_to_param_inputs.as_deref(),
+            ) {
                     Ok(scene) => scene,
                     Err(e) => {
                         log::warn!(
@@ -287,7 +292,7 @@ fn resolve_canvas_graph_inner(
     // recursive `resolve_canvas_graph_inner` calls — no cycle can run forever.
     let conditional_canvas_norms: std::collections::HashSet<String> = {
         let mut set = std::collections::HashSet::new();
-        for entry in pick_active_entries(record_value, manufacturer_id) {
+        for entry in pick_active_entries(record_value, root_json, manufacturer_id) {
             let has_conditions = entry
                 .get("conditionsList")
                 .and_then(|v| v.as_array())
@@ -398,13 +403,14 @@ fn resolve_canvas_graph_inner(
             let mut child_scene = match resolve_canvas_graph_inner(
                 &child_json,
                 manufacturer_id,
-                fetch_by_path,
-                loc_fetcher,
-                depth + 1,
-                visited,
-                palette_source,
-                Some(param_inputs.as_slice()),
-            ) {
+                    fetch_by_path,
+                    loc_fetcher,
+                    depth + 1,
+                    visited,
+                    palette_source,
+                    local_style_identifier.as_deref(),
+                    Some(param_inputs.as_slice()),
+                ) {
                 Ok(s) => s,
                 Err(e) => {
                     log::warn!(
@@ -430,7 +436,10 @@ fn resolve_canvas_graph_inner(
     //      `BuildingBlocks_Style` record — e.g. `s_bioc` on medical canvases).
     //      The linked Style record has the same `entries[]` (StyleEntry) shape
     //      as a brandStyles entry, so we can apply it identically.
-    if let Some(brand_style) = bb_brand_style::resolve_brand_style(record_value, manufacturer_id) {
+    let preferred_brand = local_style_identifier.as_deref();
+    if let Some(brand_style) =
+        bb_brand_style::resolve_brand_style(root_json, manufacturer_id, preferred_brand)
+    {
         crate::bb_brand_apply::apply_brand_modifiers(&mut scene, &brand_style, loc_fetcher);
     } else if let Some(style_value) = local_style_value.as_ref() {
         if let Some(entries) = style_value.get("entries").and_then(|v| v.as_array()) {
@@ -478,10 +487,19 @@ fn deactivate_subtrees(scene: &mut BbScene, roots: &std::collections::HashSet<Bb
 
 fn pick_active_entries<'a>(
     record_value: &'a serde_json::Value,
+    record_root: &'a serde_json::Value,
     manufacturer_id: Option<&str>,
 ) -> Vec<&'a serde_json::Value> {
+    let preferred_brand = record_value
+        .get("style")
+        .and_then(|v| v.as_str())
+        .map(extract_record_name);
     // Use new brand-style resolver (R1 phase) which handles IC_* per-canvas override + generic fallback
-    if let Some(brand_style) = bb_brand_style::resolve_brand_style(record_value, manufacturer_id) {
+    if let Some(brand_style) = bb_brand_style::resolve_brand_style(
+        record_root,
+        manufacturer_id,
+        preferred_brand.as_deref(),
+    ) {
         return brand_style.entries.iter().collect();
     }
 
@@ -503,9 +521,10 @@ fn pick_active_entries<'a>(
 /// to the first entry overall as a last resort.
 fn pick_default_entry<'a>(
     record_value: &'a serde_json::Value,
+    record_root: &'a serde_json::Value,
     manufacturer_id: Option<&str>,
 ) -> Option<&'a serde_json::Value> {
-    let entries = pick_active_entries(record_value, manufacturer_id);
+    let entries = pick_active_entries(record_value, record_root, manufacturer_id);
     // Prefer first unconditional (empty/absent conditionsList).
     if let Some(entry) = entries.iter().copied().find(|e| {
         e.get("conditionsList")

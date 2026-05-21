@@ -66,11 +66,14 @@ impl<'a> UiAssetResolver<'a> {
     ///
     /// * Paths containing the `_references` directory — the engine's
     ///   convention for designer-time overlay sources.
+    /// * UI texture paths containing `mockup` — design/layout reference images
+    ///   (for example medical layout mockups) that are not part of in-game UI.
     ///
     /// The check is path-prefix agnostic and case-insensitive.
     pub fn is_reference_overlay(raw: &str) -> bool {
         let s = raw.to_lowercase().replace('/', "\\");
         s.contains("\\_references\\")
+            || (s.contains("ui\\textures\\") && s.contains("mockup"))
     }
 
     /// Fetch SVG bytes for `raw_path` from the P4K archive.
@@ -178,11 +181,11 @@ mod tests {
     }
 
     #[test]
-    fn reference_overlay_false_for_ui_mockup_path() {
-        assert!(!UiAssetResolver::is_reference_overlay(
+    fn reference_overlay_true_for_ui_mockup_path() {
+        assert!(UiAssetResolver::is_reference_overlay(
             r"Data\UI\Textures\I_InteractiveScreens\Med\i_med_bioc_mockupImage.dds"
         ));
-        assert!(!UiAssetResolver::is_reference_overlay(
+        assert!(UiAssetResolver::is_reference_overlay(
             "UI/Textures/I_InteractiveScreens/Med/i_med_bioc_mockupimage.tif"
         ));
     }
