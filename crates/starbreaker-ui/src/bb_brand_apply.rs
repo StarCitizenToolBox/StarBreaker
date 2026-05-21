@@ -66,12 +66,25 @@ pub fn apply_brand_modifiers(
         let Some(node) = scene.nodes.get_mut(&node_id) else {
             continue;
         };
+        if looks_like_style_brand_identifier(&brand.identifier) {
+            node.raw.as_object_mut().and_then(|obj| {
+                obj.insert(
+                    "__BrandIdentifier".to_string(),
+                    serde_json::Value::String(brand.identifier.clone()),
+                )
+            });
+        }
         apply_inline_color_overlay(node, brand.raw);
         resolve_node_background_color(node, brand.raw);
         for entry in matching_entries {
             apply_entry_modifiers(entry, node, brand.raw, loc_fetcher);
         }
     }
+}
+
+fn looks_like_style_brand_identifier(identifier: &str) -> bool {
+    let lower = identifier.to_ascii_lowercase();
+    lower.starts_with("s_") || lower.starts_with("gen_")
 }
 
 fn resolve_node_background_color(node: &mut BbNode, palette_source: &serde_json::Value) {
@@ -708,7 +721,7 @@ fn parse_named_color(value: &serde_json::Value, palette_source: &serde_json::Val
 
 fn color_style_slot_index(name: &str) -> Option<usize> {
     match name {
-        "Accent1" | "Bright" => Some(0),
+        "Accent1" | "Bright" | "Base" => Some(0),
         "Accent2" | "Positive" | "Success" => Some(1),
         "Accent3" | "Warning" => Some(2),
         "Accent4" | "Critical" | "Negative" => Some(3),
@@ -983,6 +996,46 @@ mod tests {
         assert!((color[0] - 128.0 / 255.0).abs() < 0.01);
         assert!((color[1] - 192.0 / 255.0).abs() < 0.01);
         assert!((color[2] - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_named_base_color_maps_to_slot_zero() {
+        let mut scene = make_test_scene();
+        scene.nodes.get_mut(&1).unwrap().background = Some(Default::default());
+        let palette = json!({
+            "colorStyles": [
+                { "color": { "r": 115, "g": 198, "b": 254, "a": 255 } }
+            ]
+        });
+        let brand = BrandStyle {
+            identifier: "test_brand".to_string(),
+            entries: &[json!({
+                "modifiers": [{
+                    "_Type_": "BuildingBlocks_FieldModifierColor",
+                    "field": "FillColor",
+                    "color": {
+                        "_Type_": "BuildingBlocks_ColorStyle",
+                        "color": "Base",
+                        "alpha": 1.0
+                    }
+                }]
+            })],
+            raw: &palette,
+        };
+        apply_brand_modifiers(&mut scene, &brand, None);
+        let color = scene
+            .nodes
+            .get(&1)
+            .unwrap()
+            .background
+            .as_ref()
+            .unwrap()
+            .fill_colour
+            .unwrap();
+        assert!((color[0] - 115.0 / 255.0).abs() < 0.001);
+        assert!((color[1] - 198.0 / 255.0).abs() < 0.001);
+        assert!((color[2] - 254.0 / 255.0).abs() < 0.001);
+        assert_eq!(color[3], 1.0);
     }
 
     #[test]

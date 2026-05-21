@@ -467,6 +467,16 @@ fn resolve_canvas_graph_inner(
         crate::bb_brand_apply::apply_brand_modifiers(&mut scene, &brand, loc_fetcher);
     }
 
+    let animated_roots: std::collections::HashSet<BbNodeId> = scene
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.name.eq_ignore_ascii_case("base_animatedelements"))
+        .map(|(id, _)| *id)
+        .collect();
+    if !animated_roots.is_empty() {
+        deactivate_subtrees(&mut scene, &animated_roots);
+    }
+
     Ok(scene)
 }
 

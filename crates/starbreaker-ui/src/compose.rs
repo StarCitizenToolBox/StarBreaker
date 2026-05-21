@@ -252,6 +252,11 @@ fn draw_node(
     let iw = rect.w.round().max(1.0) as u32;
     let ih = rect.h.round().max(1.0) as u32;
 
+    // Static snapshot exports should not include decorative animated strips.
+    if node.name.eq_ignore_ascii_case("base_animatedelements") {
+        return;
+    }
+
     match &node.ty {
         // DisplayWidget is documented as a layout container, but BB authors
         // routinely attach background fill, raw SVG paths, atlas-backed
@@ -276,6 +281,73 @@ fn draw_node(
             }
         }
         BbNodeType::WidgetBodyBackground => {
+            let body_rect = Rect {
+                x: 0.0,
+                y: 0.0,
+                w: pixmap.width() as f32,
+                h: pixmap.height() as f32,
+            };
+            let Some(body_tsk_rect) =
+                TskRect::from_xywh(body_rect.x, body_rect.y, body_rect.w, body_rect.h)
+            else {
+                return;
+            };
+            let body_iw = body_rect.w.round().max(1.0) as u32;
+            let body_ih = body_rect.h.round().max(1.0) as u32;
+
+            let background_type = node
+                .raw
+                .get("backgroundType")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if background_type.eq_ignore_ascii_case("Texture") {
+                let image_probe = std::env::var("BB_A3_IMAGE_PROBE").as_deref() == Ok("1");
+                if draw_raw_asset(node, body_rect, resolver, atlas, pixmap, alpha) {
+                    return;
+                }
+
+                // Engine-authored medical body backgrounds commonly use implicit
+                // style-branded texture naming for the base gradient.
+                let brand = node_brand_slug(node, ctx);
+                let med_brand = med_texture_brand_slug(&brand);
+                let candidates = [format!(
+                    "UI/Textures/I_InteractiveScreens/Med/i_med_{med_brand}_bg_gradient.tif"
+                )];
+                for raw_path in candidates {
+                    let norm = UiAssetResolver::normalise_path(&raw_path);
+                    if image_probe {
+                        log::info!(
+                            "A3-image-probe: body-bg node={} id=ptr:{} style={} raw={:?} norm={:?}",
+                            node.name,
+                            node.id,
+                            ctx.style.name,
+                            raw_path,
+                            norm
+                        );
+                    }
+                    if UiAssetResolver::is_reference_overlay(&norm) {
+                        continue;
+                    }
+                    if let Some(img) = atlas.resolve(&norm, body_iw, body_ih) {
+                        blit_atlas_image(
+                            pixmap,
+                            &img,
+                            body_rect.x as i32,
+                            body_rect.y as i32,
+                            alpha,
+                        );
+                        return;
+                    } else if image_probe {
+                        log::info!(
+                            "A3-image-probe: body-bg atlas_miss node={} id=ptr:{} norm={:?}",
+                            node.name,
+                            node.id,
+                            norm
+                        );
+                    }
+                }
+            }
+
             let bl = &ctx.style.backlight;
             let fill = [
                 bl.r as f32 / 255.0,
@@ -283,7 +355,7 @@ fn draw_node(
                 bl.b as f32 / 255.0,
                 0.50,
             ];
-            fill_rect_ts(pixmap, tsk_rect, fill, alpha);
+            fill_rect_ts(pixmap, body_tsk_rect, fill, alpha);
         }
 
         // Container widgets: explicit background fill + atlas image + border.
@@ -537,7 +609,31 @@ fn draw_raw_asset(
         }
         if !UiAssetResolver::is_reference_overlay(&norm) {
             if let Some(img) = atlas.resolve(&norm, iw, ih) {
-                blit_atlas_image(pixmap, &img, rect.x as i32, rect.y as i32, alpha);
+                let tint = node
+                    .icon
+                    .as_ref()
+                    .and_then(|i| i.tint_colour)
+                    .or_else(|| node_fill_override(node))
+                    .unwrap_or([1.0, 1.0, 1.0, 1.0]);
+                if node.raw.get("FillColor").is_some() {
+                    blit_atlas_image_alpha_mask_tinted(
+                        pixmap,
+                        &img,
+                        rect.x as i32,
+                        rect.y as i32,
+                        tint,
+                        alpha,
+                    );
+                } else {
+                    blit_atlas_image_tinted(
+                        pixmap,
+                        &img,
+                        rect.x as i32,
+                        rect.y as i32,
+                        tint,
+                        alpha,
+                    );
+                }
             } else if image_probe {
                 log::info!(
                     "A3-image-probe: node={} id=ptr:{} atlas_miss norm={:?}",
@@ -561,7 +657,7 @@ fn draw_manufacturer_logo(
     alpha: f32,
     ctx: &ComposeContext<'_>,
 ) -> bool {
-    let brand = brand_slug(&ctx.style.name);
+    let brand = node_brand_slug(node, ctx);
     let brand_title = brand_title(&brand);
     let candidates = [
         format!("UI/Textures/Vector/General/BrandLogos/logo_{brand}_a.svg"),
@@ -602,6 +698,21 @@ fn brand_slug(identifier: &str) -> String {
         "s_rsi" => "rsi".to_string(),
         "s_aegs" => "aegs".to_string(),
         other => other.trim_start_matches("s_").to_string(),
+    }
+}
+
+fn node_brand_slug(node: &BbNode, ctx: &ComposeContext<'_>) -> String {
+    node.raw
+        .get("__BrandIdentifier")
+        .and_then(|v| v.as_str())
+        .map(brand_slug)
+        .unwrap_or_else(|| brand_slug(&ctx.style.name))
+}
+
+fn med_texture_brand_slug(brand_slug: &str) -> &str {
+    match brand_slug {
+        "bioticorp" => "bioc",
+        other => other,
     }
 }
 
@@ -931,6 +1042,50 @@ fn blit_atlas_image_tinted(
         return;
     };
 
+    let mut paint = PixmapPaint::default();
+    paint.opacity = alpha.clamp(0.0, 1.0);
+    pixmap.as_mut().draw_pixmap(
+        dx,
+        dy,
+        src_pixmap.as_ref(),
+        &paint,
+        Transform::identity(),
+        None,
+    );
+}
+
+/// Blit using source alpha as a mask and a flat tint colour for RGB.
+///
+/// This matches BuildingBlocks image-color overlays where `FillColor` provides
+/// the display colour and the source image contributes primarily alpha/shape.
+fn blit_atlas_image_alpha_mask_tinted(
+    pixmap: &mut Pixmap,
+    img: &RgbaImage,
+    dx: i32,
+    dy: i32,
+    tint: [f32; 4],
+    alpha: f32,
+) {
+    let w = img.width();
+    let h = img.height();
+    let mut premul: Vec<u8> = Vec::with_capacity((w * h * 4) as usize);
+    for chunk in img.as_raw().chunks_exact(4) {
+        let src_a = chunk[3] as f32 / 255.0;
+        let a = (src_a * tint[3]).clamp(0.0, 1.0);
+        let r = tint[0].clamp(0.0, 1.0);
+        let g = tint[1].clamp(0.0, 1.0);
+        let b = tint[2].clamp(0.0, 1.0);
+        premul.push((r * a * 255.0).clamp(0.0, 255.0) as u8);
+        premul.push((g * a * 255.0).clamp(0.0, 255.0) as u8);
+        premul.push((b * a * 255.0).clamp(0.0, 255.0) as u8);
+        premul.push((a * 255.0).clamp(0.0, 255.0) as u8);
+    }
+    let Some(size) = IntSize::from_wh(w, h) else {
+        return;
+    };
+    let Some(src_pixmap) = Pixmap::from_vec(premul, size) else {
+        return;
+    };
     let mut paint = PixmapPaint::default();
     paint.opacity = alpha.clamp(0.0, 1.0);
     pixmap.as_mut().draw_pixmap(
