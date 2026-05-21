@@ -479,13 +479,13 @@ fn parse_node_with_id(raw: &serde_json::Value, id: BbNodeId) -> Result<BbNode, S
     let border = parse_border(raw.get("border"));
     let radial = parse_radial(raw.get("radialTransform"));
 
-    let text = if matches!(ty, BbNodeType::WidgetTextField) {
+    let text = if matches!(ty, BbNodeType::WidgetTextField | BbNodeType::WidgetText) {
         Some(parse_text(raw))
     } else {
         None
     };
 
-    let icon = if matches!(ty, BbNodeType::WidgetIcon) {
+    let icon = if matches!(ty, BbNodeType::WidgetIcon | BbNodeType::WidgetImage) {
         Some(parse_icon(raw))
     } else {
         None
@@ -719,6 +719,7 @@ fn parse_text(node: &serde_json::Value) -> BbText {
     // Font record — not present in current fixtures but captured if available.
     let font_record = node
         .get("fontRecord")
+        .or_else(|| node.get("FontStyleRecord"))
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
@@ -726,6 +727,7 @@ fn parse_text(node: &serde_json::Value) -> BbText {
     // Font size — use a sensible default when absent.
     let font_size = node
         .get("fontSize")
+        .or_else(|| node.get("FontSize"))
         .map(|v| parse_bb_value(Some(v)))
         .unwrap_or(BbValue::Fixed(12.0));
 
@@ -743,7 +745,13 @@ fn parse_icon(node: &serde_json::Value) -> BbIcon {
         .and_then(|ip| ip.get("customIcon"))
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
-        .map(str::to_owned);
+        .map(str::to_owned)
+        .or_else(|| {
+            node.get("imagePath")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        });
 
     // Tint colour — not present in current fixtures but captured if available.
     let tint_colour = node

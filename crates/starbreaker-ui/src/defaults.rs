@@ -167,6 +167,7 @@ impl DefaultValueRegistry {
         // Intentionally empty / placeholder keys
         loc.insert("loc_empty".into(), String::new());
         loc.insert("loc_placeholder".into(), String::new());
+
         reg.set_localization(loc);
 
         reg

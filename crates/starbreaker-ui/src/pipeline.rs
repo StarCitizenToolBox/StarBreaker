@@ -229,35 +229,40 @@ pub fn compile_ir_for_binding(inputs: &PipelineInputs<'_>) -> Result<UiIrDocumen
     )
     .map_err(UiError::RenderError)?;
 
+    let mut defaults = DefaultValueRegistry::with_well_known_path_defaults();
+    if let Some(loc_map) = inputs.localization_map.clone() {
+        if !loc_map.is_empty() {
+            defaults.merge_localization(loc_map);
+        }
+    }
+    defaults.insert_localization("loc_placeholder", String::new());
+    defaults.insert_localization("loc_empty", String::new());
+
     let mut resolved_asset_refs = Vec::new();
     let mut missing_asset_refs = Vec::new();
     let mut seen_assets = std::collections::BTreeSet::new();
     for node in scene.nodes.values() {
-        let asset_ref = node
-            .icon
-            .as_ref()
-            .and_then(|i| i.image_record.as_deref())
-            .or_else(|| node.background.as_ref().and_then(|bg| bg.svg_fill_path.as_deref()));
-        let Some(asset_ref) = asset_ref else {
-            continue;
-        };
-        if !seen_assets.insert(asset_ref.to_string()) {
-            continue;
-        }
-        let resolved = inputs.asset_fetcher.fetch_image_bytes(asset_ref).is_some()
-            || inputs.asset_fetcher.fetch_svg_bytes(asset_ref).is_some();
-        if resolved {
-            resolved_asset_refs.push(asset_ref.to_string());
-        } else {
-            missing_asset_refs.push(asset_ref.to_string());
+        for asset_ref in crate::ui_ir::collect_node_asset_refs(node) {
+            if !seen_assets.insert(asset_ref.clone()) {
+                continue;
+            }
+            let resolved = inputs.asset_fetcher.fetch_image_bytes(&asset_ref).is_some()
+                || inputs.asset_fetcher.fetch_svg_bytes(&asset_ref).is_some();
+            if resolved {
+                resolved_asset_refs.push(asset_ref);
+            } else {
+                missing_asset_refs.push(asset_ref);
+            }
         }
     }
 
     Ok(crate::ui_ir::compile_ui_ir_from_scene(
         &scene,
+        Some(inputs.canvas_fetcher),
         effective_guid,
         canvas_name,
         inputs.target_size,
+        &defaults,
         selected_style_source,
         &[],
         resolved_asset_refs,

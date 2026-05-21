@@ -7,8 +7,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
+use crate::bb_bindings::BindingResolver;
 use crate::bb_layout;
-use crate::bb_scene::{BbNodeType, BbScene, BbValue};
+use crate::bb_scene::{BbNode, BbNodeType, BbScene, BbValue};
+use crate::defaults::DefaultValueRegistry;
+use crate::pipeline::CanvasFetcher;
 
 /// Current IR schema version.
 pub const UI_IR_SCHEMA_VERSION: u32 = 1;
@@ -63,7 +66,9 @@ pub struct UiIrNode {
     pub text_payload: Option<UiIrTextPayload>,
     pub text_style: Option<UiIrTextStyle>,
     pub asset_ref: Option<String>,
+    pub custom_shape: Option<UiIrCustomShape>,
     pub style_tag_uuids: Vec<String>,
+    pub resolved_style_tags: Vec<UiIrStyleTag>,
 }
 
 /// Typed representation of authored fixed/relative values.
@@ -97,9 +102,26 @@ pub enum UiIrTextPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UiIrTextStyle {
     pub font_record: Option<String>,
+    pub resolved_font_record: Option<serde_json::Value>,
     pub font_size: UiIrValue,
     pub alignment: String,
     pub colour: Option<[f32; 4]>,
+}
+
+/// Shape metadata for custom-shape widgets.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UiIrCustomShape {
+    pub shape_type: Option<String>,
+    pub shape: Option<String>,
+    pub svg_path: Option<String>,
+    pub render_shape: Option<bool>,
+}
+
+/// Resolved style-tag metadata from source `styleTags[]` entries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UiIrStyleTag {
+    pub uuid: String,
+    pub tag_name: Option<String>,
 }
 
 /// Validate required schema invariants for a UI IR document.
@@ -178,9 +200,11 @@ pub fn stable_hash_ui_ir(document: &UiIrDocument) -> Result<String, serde_json::
 /// Compile a canonical UI IR document from a resolved scene.
 pub fn compile_ui_ir_from_scene(
     scene: &BbScene,
+    canvas_fetcher: Option<&dyn CanvasFetcher>,
     canvas_guid: &str,
     canvas_name: Option<&str>,
     target_size: (u32, u32),
+    defaults: &DefaultValueRegistry,
     selected_style_source: Option<String>,
     unresolved_references: &[String],
     resolved_asset_refs: Vec<String>,
@@ -188,6 +212,7 @@ pub fn compile_ui_ir_from_scene(
     confidence: u8,
 ) -> UiIrDocument {
     let layout = bb_layout::layout(scene, target_size.0, target_size.1);
+    let binding_resolver = BindingResolver::from_operations(&scene.operations);
 
     let has_text = scene.nodes.values().any(|n| n.text.is_some());
     let has_custom_shape = scene
@@ -231,36 +256,142 @@ pub fn compile_ui_ir_from_scene(
     let mut nodes = Vec::with_capacity(scene.nodes.len());
     for (&id, node) in &scene.nodes {
         let rect = layout.rects.get(&id).copied().unwrap_or_default();
-        let text_payload = node.text.as_ref().map(|text| {
-            let trimmed = text.string.trim();
-            if trimmed.is_empty() {
-                UiIrTextPayload::Empty
-            } else if trimmed.starts_with('@') {
+        let text_payload = node.text.as_ref().map(|_| {
+            let resolved = binding_resolver.resolve_text_detailed(id, &node.raw, defaults);
+            let trimmed = resolved.text.trim();
+            if !trimmed.is_empty() {
+                if trimmed.starts_with('@') {
+                    if let Some(localized) = defaults.lookup_localization(trimmed) {
+                        if !localized.trim().is_empty() {
+                            UiIrTextPayload::Resolved {
+                                text: localized.trim().to_string(),
+                            }
+                        } else {
+                            UiIrTextPayload::UnresolvedKey {
+                                key: trimmed.to_string(),
+                            }
+                        }
+                    } else {
+                        UiIrTextPayload::UnresolvedKey {
+                            key: trimmed.to_string(),
+                        }
+                    }
+                } else {
+                    UiIrTextPayload::Resolved {
+                        text: trimmed.to_string(),
+                    }
+                }
+            } else if let Some(unresolved_key) = unresolved_text_key_from_raw(&node.raw) {
                 UiIrTextPayload::UnresolvedKey {
-                    key: trimmed.to_string(),
+                    key: unresolved_key,
                 }
             } else {
-                UiIrTextPayload::Resolved {
-                    text: trimmed.to_string(),
-                }
+                UiIrTextPayload::Empty
             }
         });
         let text_style = node.text.as_ref().map(|text| UiIrTextStyle {
             font_record: text.font_record.clone(),
-            font_size: convert_bb_value(&text.font_size),
+            resolved_font_record: text
+                .font_record
+                .as_deref()
+                .and_then(|record_ref| resolve_record(canvas_fetcher, &[record_ref])),
+            font_size: resolve_effective_font_size(node, text),
             alignment: text.alignment.clone(),
-            colour: text.colour,
+            colour: text.colour.or_else(|| fill_colour_from_raw_for_text(&node.raw)),
         });
 
-        let asset_ref = node
-            .icon
-            .as_ref()
-            .and_then(|i| i.image_record.clone())
+        let asset_ref = collect_node_asset_refs(node)
+            .into_iter()
+            .next()
             .or_else(|| {
-                node.background
-                    .as_ref()
-                    .and_then(|bg| bg.svg_fill_path.clone())
+                binding_resolver
+                    .resolve_string_binding(id)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
             });
+
+        let custom_shape = if node.ty == BbNodeType::WidgetCustomShape {
+            let shape_type = node
+                .raw
+                .get("shapeType")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
+            let shape = node
+                .raw
+                .get("shape")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
+            let svg_path = node
+                .raw
+                .get("svgFill")
+                .and_then(|sf| sf.get("svgPath"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
+            let render_shape = node
+                .raw
+                .get("svgFill")
+                .and_then(|sf| sf.get("renderShape"))
+                .and_then(|v| v.as_bool());
+            Some(UiIrCustomShape {
+                shape_type,
+                shape,
+                svg_path,
+                render_shape,
+            })
+        } else {
+            None
+        };
+
+        let resolved_style_tags = node
+            .raw
+            .get("styleTags")
+            .and_then(|v| v.as_array())
+            .map(|tags| {
+                tags
+                    .iter()
+                    .filter_map(|tag| {
+                        let uuid = tag
+                            .get("_RecordId_")
+                            .and_then(|v| v.as_str())
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned)?;
+
+                        let resolved_record = resolve_style_tag_record(
+                            canvas_fetcher,
+                            tag,
+                            tag.get("_RecordPath_")
+                                .and_then(|v| v.as_str())
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or(""),
+                            tag.get("_RecordName_")
+                                .and_then(|v| v.as_str())
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or(""),
+                            &uuid,
+                        );
+
+                        let tag_name = resolved_record
+                            .as_ref()
+                            .and_then(|record| record.get("_RecordValue_"))
+                            .and_then(|v| v.get("tagName"))
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned);
+
+                        Some(UiIrStyleTag {
+                            uuid,
+                            tag_name,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
 
         nodes.push(UiIrNode {
             id,
@@ -304,7 +435,9 @@ pub fn compile_ui_ir_from_scene(
             text_payload,
             text_style,
             asset_ref,
+            custom_shape,
             style_tag_uuids: node.style_tag_uuids.clone(),
+            resolved_style_tags,
         });
     }
 
@@ -323,6 +456,241 @@ pub fn compile_ui_ir_from_scene(
         missing_asset_refs,
         nodes,
     }
+}
+
+pub(crate) fn collect_node_asset_refs(node: &BbNode) -> Vec<String> {
+    let mut asset_refs = Vec::new();
+
+    push_asset_ref(
+        &mut asset_refs,
+        node.icon
+            .as_ref()
+            .and_then(|icon| icon.image_record.as_deref()),
+    );
+    push_asset_ref(
+        &mut asset_refs,
+        node.background
+            .as_ref()
+            .and_then(|background| background.svg_fill_path.as_deref()),
+    );
+    push_asset_ref(
+        &mut asset_refs,
+        node.raw
+            .get("ImagePath")
+            .and_then(|value| value.as_str()),
+    );
+    push_asset_ref(
+        &mut asset_refs,
+        node.raw
+            .get("SvgPath")
+            .and_then(|value| value.as_str()),
+    );
+
+    asset_refs
+}
+
+fn push_asset_ref(asset_refs: &mut Vec<String>, candidate: Option<&str>) {
+    let Some(candidate) = candidate.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    if asset_refs.iter().all(|existing| existing != candidate) {
+        asset_refs.push(candidate.to_string());
+    }
+}
+
+fn unresolved_text_key_from_raw(raw: &serde_json::Value) -> Option<String> {
+    let direct = raw.get("text").and_then(|v| v.as_str()).map(str::trim);
+    if let Some(key) = direct.filter(|s| s.starts_with('@') && !s.is_empty()) {
+        return Some(key.to_string());
+    }
+
+    let loc_string = raw
+        .get("locString")
+        .and_then(|v| v.as_str())
+        .map(str::trim);
+    if let Some(key) = loc_string.filter(|s| s.starts_with('@') && !s.is_empty()) {
+        return Some(key.to_string());
+    }
+
+    let label = raw
+        .get("labelProperties")
+        .and_then(|lp| lp.get("label"))
+        .and_then(|v| v.as_str())
+        .map(str::trim);
+    label
+        .filter(|s| s.starts_with('@') && !s.is_empty())
+        .map(ToString::to_string)
+}
+
+/// Extract `FillColor` from `node.raw` as a text foreground colour fallback.
+///
+/// `bb_brand_apply` stores brand-applied colours as `{r, g, b, a}` float objects
+/// in `node.raw["FillColor"]`. For text nodes, `FillColor` represents the text
+/// foreground colour. `parse_text` reads only `textColor`/`textColour` and misses
+/// brand-applied colours, so this provides the fallback.
+fn fill_colour_from_raw_for_text(raw: &serde_json::Value) -> Option<[f32; 4]> {
+    let obj = raw.get("FillColor")?.as_object()?;
+    let r = obj.get("r").and_then(|v| v.as_f64())? as f32;
+    let g = obj.get("g").and_then(|v| v.as_f64())? as f32;
+    let b = obj.get("b").and_then(|v| v.as_f64())? as f32;
+    let a = obj.get("a").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+    Some([r, g, b, a])
+}
+
+fn resolve_effective_font_size(node: &crate::bb_scene::BbNode, text: &crate::bb_scene::BbText) -> UiIrValue {
+    // Explicit `fontSize` field on the raw node wins (same check as compose.rs).
+    let has_explicit_font_size = node
+        .raw
+        .get("fontSize")
+        .or_else(|| node.raw.get("FontSize"))
+        .is_some();
+    if has_explicit_font_size {
+        return convert_bb_value(&text.font_size);
+    }
+
+    // `labelProperties.style` is the authoritative label preset for
+    // `WidgetTextField` nodes (e.g. "Heading1", "Caption"). Use the
+    // nominal-size table as the primary source when no explicit size is set.
+    if let Some(style_name) = node
+        .raw
+        .get("labelProperties")
+        .and_then(|lp| lp.get("style"))
+        .and_then(|v| v.as_str())
+    {
+        return UiIrValue::Fixed {
+            value: nominal_font_size_from_label_style(style_name),
+        };
+    }
+
+    // Fall through to whatever `parse_text` stored (may be the 12.0 default).
+    convert_bb_value(&text.font_size)
+}
+
+fn nominal_font_size_from_label_style(style: &str) -> f32 {
+    match style {
+        "Heading1" => 48.0,
+        "Heading2" => 36.0,
+        "Heading3" => 28.0,
+        "Heading4" => 22.0,
+        "Heading5" => 18.0,
+        "Heading6" => 16.0,
+        "Body" | "Body1" => 16.0,
+        "Body2" => 14.0,
+        "Caption" => 12.0,
+        _ => 18.0,
+    }
+}
+
+fn resolve_record(
+    canvas_fetcher: Option<&dyn CanvasFetcher>,
+    candidates: &[&str],
+) -> Option<serde_json::Value> {
+    let fetcher = canvas_fetcher?;
+    for candidate in candidates {
+        let key = candidate.trim();
+        if key.is_empty() {
+            continue;
+        }
+        if let Ok(record) = fetcher.fetch_canvas_by_path(key) {
+            return Some(record);
+        }
+        if let Ok(record) = fetcher.fetch_canvas_by_name(key) {
+            return Some(record);
+        }
+        if let Ok(record) = fetcher.fetch_canvas_json(key) {
+            return Some(record);
+        }
+    }
+    None
+}
+
+/// Resolve a style-tag record for IR emission.
+///
+/// Resolution order:
+/// 1. Direct record fetch by `_RecordPath_`, `_RecordName_`, and UUID.
+/// 2. If those fail and `_RecordPath_` points to `tagdatabase`, fetch the
+///    tag-database record and resolve the UUID from its nested `tags[]` tree.
+///
+/// This keeps tag resolution in the core IR pipeline instead of requiring
+/// dump-specific flattening/indexing steps.
+fn resolve_style_tag_record(
+    canvas_fetcher: Option<&dyn CanvasFetcher>,
+    tag_reference: &serde_json::Value,
+    record_path: &str,
+    record_name: &str,
+    tag_uuid: &str,
+) -> Option<serde_json::Value> {
+    let tag_db_path = record_path.trim();
+    let is_tag_database_path = !tag_db_path.is_empty()
+        && tag_db_path.to_ascii_lowercase().contains("tagdatabase");
+
+    if !is_tag_database_path {
+        if let Some(record) = resolve_record(canvas_fetcher, &[record_path, record_name, tag_uuid]) {
+            return Some(record);
+        }
+    }
+
+    let fetcher = canvas_fetcher?;
+    if !is_tag_database_path {
+        if let Some(record) = resolve_record(Some(fetcher), &[tag_uuid]) {
+            return Some(record);
+        }
+    }
+
+    if !is_tag_database_path {
+        return None;
+    }
+
+    let tag_db = fetcher.fetch_canvas_by_path(tag_db_path).ok()?;
+    let tags = tag_db
+        .get("_RecordValue_")
+        .and_then(|rv| rv.get("tags"))
+        .and_then(|v| v.as_array())?;
+
+    let tag_value = tags.iter().find_map(|tag| find_tag_in_tree(tag, tag_uuid))?;
+    let resolved_record_name = tag_reference
+        .get("_RecordName_")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("Tag.{tag_uuid}"));
+
+    Some(serde_json::json!({
+        "_RecordId_": tag_uuid,
+        "_RecordName_": resolved_record_name,
+        "_RecordPath_": tag_db_path,
+        "_Type_": "Tag",
+        "_RecordValue_": trim_tag_tree_to_matched_tag(tag_value),
+    }))
+}
+
+fn find_tag_in_tree<'a>(value: &'a serde_json::Value, tag_uuid: &str) -> Option<&'a serde_json::Value> {
+    let object = value.as_object()?;
+    let matches = object
+        .get("_RecordId_")
+        .and_then(|v| v.as_str())
+        .is_some_and(|id| id == tag_uuid);
+    if matches {
+        return Some(value);
+    }
+
+    object
+        .get("children")
+        .and_then(|v| v.as_array())
+        .and_then(|children| children.iter().find_map(|child| find_tag_in_tree(child, tag_uuid)))
+}
+
+fn trim_tag_tree_to_matched_tag(tag_value: &serde_json::Value) -> serde_json::Value {
+    let Some(object) = tag_value.as_object() else {
+        return tag_value.clone();
+    };
+
+    let mut trimmed = serde_json::Map::with_capacity(object.len());
+    for (key, value) in object {
+        if key != "children" {
+            trimmed.insert(key.clone(), value.clone());
+        }
+    }
+    serde_json::Value::Object(trimmed)
 }
 
 fn convert_bb_value(value: &BbValue) -> UiIrValue {
@@ -357,6 +725,236 @@ fn node_type_name(node_type: &BbNodeType) -> &str {
 mod tests {
     use super::*;
 
+    struct TestCanvasFetcher {
+        by_guid: std::collections::HashMap<String, serde_json::Value>,
+        by_path: std::collections::HashMap<String, serde_json::Value>,
+    }
+
+    impl CanvasFetcher for TestCanvasFetcher {
+        fn fetch_canvas_json(&self, guid: &str) -> Result<serde_json::Value, crate::UiError> {
+            self.by_guid
+                .get(guid)
+                .cloned()
+                .ok_or_else(|| crate::UiError::RenderError(format!("missing guid: {guid}")))
+        }
+
+        fn fetch_canvas_by_name(
+            &self,
+            record_name: &str,
+        ) -> Result<serde_json::Value, crate::UiError> {
+            self.by_guid
+                .values()
+                .chain(self.by_path.values())
+                .find(|value| {
+                    value
+                        .get("_RecordName_")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|name| name == record_name)
+                })
+                .cloned()
+                .ok_or_else(|| crate::UiError::RenderError(format!("missing name: {record_name}")))
+        }
+
+        fn fetch_canvas_by_path(&self, path: &str) -> Result<serde_json::Value, crate::UiError> {
+            self.by_path
+                .get(path)
+                .cloned()
+                .ok_or_else(|| crate::UiError::RenderError(format!("missing path: {path}")))
+        }
+    }
+
+    fn defaults() -> crate::defaults::DefaultValueRegistry {
+        crate::defaults::DefaultValueRegistry::with_well_known_path_defaults()
+    }
+
+    #[test]
+    fn resolve_style_tag_record_uses_matched_tag_instead_of_full_database() {
+        let tag_db_path = "libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json";
+        let fetcher = TestCanvasFetcher {
+            by_guid: std::collections::HashMap::new(),
+            by_path: std::collections::HashMap::from([(tag_db_path.to_string(), serde_json::json!({
+                "_RecordId_": "66ee5bfc-d90b-41bd-ad2e-e0a2b3efe359",
+                "_RecordName_": "TagDatabase.TagDatabase",
+                "_RecordValue_": {
+                    "_Type_": "TagDatabase",
+                    "tags": [
+                        {
+                            "_RecordId_": "parent-tag",
+                            "tagName": "Parent",
+                            "children": [
+                                {
+                                    "_RecordId_": "target-tag",
+                                    "tagName": "Target",
+                                    "children": [
+                                        {
+                                            "_RecordId_": "descendant-tag",
+                                            "tagName": "Descendant"
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }))]),
+        };
+
+        let tag_reference = serde_json::json!({
+            "_RecordId_": "target-tag",
+            "_RecordName_": "Tag.target-tag",
+            "_RecordPath_": tag_db_path,
+        });
+
+        let resolved = resolve_style_tag_record(
+            Some(&fetcher),
+            &tag_reference,
+            tag_db_path,
+            "Tag.target-tag",
+            "target-tag",
+        )
+        .expect("tag should resolve");
+
+        assert_eq!(resolved.get("_Type_").and_then(|v| v.as_str()), Some("Tag"));
+        assert_eq!(resolved.get("_RecordId_").and_then(|v| v.as_str()), Some("target-tag"));
+
+        let record_value = resolved.get("_RecordValue_").expect("record value");
+        assert_eq!(record_value.get("_RecordId_").and_then(|v| v.as_str()), Some("target-tag"));
+        assert_eq!(record_value.get("tagName").and_then(|v| v.as_str()), Some("Target"));
+        assert!(record_value.get("tags").is_none(), "full tag database leaked into record");
+        assert!(record_value.get("children").is_none(), "descendant tags leaked into record");
+    }
+
+    #[test]
+    fn compile_ir_style_tags_are_compact() {
+        let tag_db_path = "libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json";
+        let fetcher = TestCanvasFetcher {
+            by_guid: std::collections::HashMap::new(),
+            by_path: std::collections::HashMap::from([(tag_db_path.to_string(), serde_json::json!({
+                "_RecordId_": "66ee5bfc-d90b-41bd-ad2e-e0a2b3efe359",
+                "_RecordName_": "TagDatabase.TagDatabase",
+                "_RecordValue_": {
+                    "_Type_": "TagDatabase",
+                    "tags": [
+                        {
+                            "_RecordId_": "target-tag",
+                            "tagName": "Target"
+                        }
+                    ]
+                }
+            }))]),
+        };
+
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestTags",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetCanvas",
+                        "name": "root",
+                        "isActive": true,
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 100.0},
+                            "height": {"behavior": "Fixed", "value": 100.0}
+                        },
+                        "styleTags": [
+                            {
+                                "_RecordId_": "target-tag",
+                                "_RecordName_": "Tag.target-tag",
+                                "_RecordPath_": tag_db_path
+                            }
+                        ]
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            Some(&fetcher),
+            "guid-tags",
+            Some("BuildingBlocks_Canvas.TestTags"),
+            (100, 100),
+            &defaults(),
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let actual = serde_json::to_value(ir).expect("serialize ir");
+        let style_tag = actual
+            .get("nodes")
+            .and_then(|v| v.as_array())
+            .and_then(|nodes| nodes.first())
+            .and_then(|node| node.get("resolved_style_tags"))
+            .and_then(|v| v.as_array())
+            .and_then(|tags| tags.first())
+            .and_then(|v| v.as_object())
+            .expect("resolved style tag object");
+
+        assert_eq!(style_tag.get("uuid").and_then(|v| v.as_str()), Some("target-tag"));
+        assert_eq!(style_tag.get("tag_name").and_then(|v| v.as_str()), Some("Target"));
+        assert_eq!(style_tag.len(), 2, "resolved style tags should serialize only essential fields");
+    }
+
+    #[test]
+    fn collect_node_asset_refs_includes_brand_applied_paths() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestAssets",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetImage",
+                        "name": "asset_node",
+                        "isActive": true,
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 100.0},
+                            "height": {"behavior": "Fixed", "value": 100.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let mut scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let node = scene.nodes.values_mut().next().expect("node");
+        node.raw
+            .as_object_mut()
+            .expect("raw object")
+            .insert(
+                "ImagePath".to_string(),
+                serde_json::Value::String(
+                    "UI/Textures/I_InteractiveScreens/Med/i_med_bioc_bottom-bar.tif".to_string(),
+                ),
+            );
+        node.raw
+            .as_object_mut()
+            .expect("raw object")
+            .insert(
+                "SvgPath".to_string(),
+                serde_json::Value::String(
+                    "UI/Textures/Vector/General/BrandLogos/logo_bioticorp_a.svg".to_string(),
+                ),
+            );
+
+        let asset_refs = collect_node_asset_refs(node);
+        assert_eq!(
+            asset_refs,
+            vec![
+                "UI/Textures/I_InteractiveScreens/Med/i_med_bioc_bottom-bar.tif".to_string(),
+                "UI/Textures/Vector/General/BrandLogos/logo_bioticorp_a.svg".to_string(),
+            ]
+        );
+    }
+
     #[test]
     fn compile_ir_emits_schema_and_nodes() {
         let canvas = serde_json::json!({
@@ -384,9 +982,11 @@ mod tests {
         let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
         let ir = compile_ui_ir_from_scene(
             &scene,
+            None,
             "guid-1",
             Some("BuildingBlocks_Canvas.Test"),
             (200, 100),
+            &defaults(),
             None,
             &[],
             Vec::new(),
@@ -428,9 +1028,11 @@ mod tests {
         let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
         let ir1 = compile_ui_ir_from_scene(
             &scene,
+            None,
             "guid-2",
             None,
             (128, 128),
+            &defaults(),
             None,
             &[],
             Vec::new(),
@@ -439,9 +1041,11 @@ mod tests {
         );
         let ir2 = compile_ui_ir_from_scene(
             &scene,
+            None,
             "guid-2",
             None,
             (128, 128),
+            &defaults(),
             None,
             &[],
             Vec::new(),
@@ -502,7 +1106,9 @@ mod tests {
                 text_payload: None,
                 text_style: None,
                 asset_ref: None,
+                custom_shape: None,
                 style_tag_uuids: Vec::new(),
+                resolved_style_tags: Vec::new(),
             }],
         };
 
@@ -538,9 +1144,11 @@ mod tests {
         let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
         let ir = compile_ui_ir_from_scene(
             &scene,
+            None,
             "guid-3",
             None,
             (100, 100),
+            &defaults(),
             None,
             &[],
             Vec::new(),

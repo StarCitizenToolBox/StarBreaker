@@ -76,9 +76,22 @@ pub fn apply_brand_modifiers(
         }
         apply_inline_color_overlay(node, brand.raw);
         resolve_node_background_color(node, brand.raw);
-        for entry in matching_entries {
+        for entry in &matching_entries {
             apply_entry_modifiers(entry, node, brand.raw, loc_fetcher);
+            record_applied_style_entry(node, entry);
         }
+    }
+}
+
+fn record_applied_style_entry(node: &mut BbNode, entry: &serde_json::Value) {
+    let Some(obj) = node.raw.as_object_mut() else {
+        return;
+    };
+    let slot = obj
+        .entry("__AppliedStyleEntries".to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    if let serde_json::Value::Array(items) = slot {
+        items.push(entry.clone());
     }
 }
 

@@ -7,6 +7,7 @@
   "nodes": [
     {
       "asset_ref": null,
+      "custom_shape": null,
       "alpha": 1.0,
       "anchor": [
         0.0,
@@ -57,6 +58,7 @@
       ],
       "parent_id": null,
       "style_tag_uuids": [],
+      "resolved_style_tags": [],
       "background_fill_colour": null,
       "text_payload": {
         "state": "resolved",
@@ -66,6 +68,7 @@
         "alignment": "Left",
         "colour": null,
         "font_record": null,
+        "resolved_font_record": null,
         "font_size": {
           "kind": "fixed",
           "value": 12.0
