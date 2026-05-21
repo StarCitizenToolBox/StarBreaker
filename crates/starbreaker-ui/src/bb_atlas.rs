@@ -12,7 +12,7 @@
 
 use std::{collections::HashMap, sync::RwLock};
 
-use image::{RgbaImage, imageops};
+use image::{GenericImageView, RgbaImage, imageops};
 use log::{debug, warn};
 use tiny_skia_011 as tiny_skia;
 
@@ -130,6 +130,18 @@ impl<'a> AtlasLibrary<'a> {
         self.fetch_with_mfd_fallback(&canonical)
     }
 
+    /// Return the intrinsic pixel dimensions for `raw_path` without resizing.
+    pub fn source_dimensions(&self, raw_path: &str) -> Option<(u32, u32)> {
+        let canonical = canonicalise_path(raw_path);
+        if canonical.is_empty() {
+            return None;
+        }
+
+        let ext = extension_of(&canonical);
+        let bytes = self.fetch_with_mfd_fallback(&canonical)?;
+        source_dimensions(&bytes, ext)
+    }
+
     fn fetch_and_decode(&self, canonical: &str, target_w: u32, target_h: u32) -> Option<RgbaImage> {
         let ext = extension_of(canonical);
         let bytes = self.fetch_with_mfd_fallback(canonical)?;
@@ -234,6 +246,42 @@ fn decode_dds(bytes: &[u8]) -> Option<RgbaImage> {
         })
         .ok()?;
     RgbaImage::from_raw(w, h, rgba)
+}
+
+fn source_dimensions(bytes: &[u8], ext: &str) -> Option<(u32, u32)> {
+    match ext {
+        "dds" => {
+            let dds = starbreaker_dds::DdsFile::from_bytes(bytes)
+                .map_err(|e| {
+                    warn!("atlas: DDS dimension read failed: {}", e);
+                    e
+                })
+                .ok()?;
+            Some(dds.dimensions(0))
+        }
+        "svg" => {
+            let opts = usvg::Options::default();
+            let tree = usvg::Tree::from_data(bytes, &opts)
+                .map_err(|e| {
+                    warn!("atlas: SVG parse failed: {}", e);
+                    e
+                })
+                .ok()?;
+            let size = tree.size();
+            let w = size.width().round().max(1.0) as u32;
+            let h = size.height().round().max(1.0) as u32;
+            Some((w, h))
+        }
+        _ => {
+            let dyn_img = image::load_from_memory(bytes)
+                .map_err(|e| {
+                    warn!("atlas: image dimension read failed: {}", e);
+                    e
+                })
+                .ok()?;
+            Some(dyn_img.dimensions())
+        }
+    }
 }
 
 fn resize_to(img: RgbaImage, w: u32, h: u32) -> RgbaImage {

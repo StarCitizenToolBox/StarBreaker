@@ -27,7 +27,7 @@ use crate::bb_atlas::AtlasLibrary;
 use crate::bb_assets::UiAssetResolver;
 use crate::bb_bindings::BindingResolver;
 use crate::bb_layout::{self, Rect};
-use crate::bb_scene::{BbBorder, BbNode, BbNodeType, BbScene, BbValue};
+use crate::bb_scene::{BbBorder, BbNode, BbNodeId, BbNodeType, BbScene, BbValue};
 use crate::canvas::ResolvedCanvas;
 use crate::defaults::DefaultValueRegistry;
 use crate::error::UiError;
@@ -128,7 +128,7 @@ pub fn render_bb_scene_pass1(
         if rect.w < 0.5 || rect.h < 0.5 {
             continue;
         }
-        draw_node(node, rect, &resolver, ctx, atlas, &mut pixmap);
+        draw_node(node, rect, &resolver, ctx, atlas, &mut pixmap, scene, &layout.rects);
     }
 
     // Convert premultiplied tiny-skia pixmap → straight-alpha RgbaImage.
@@ -244,6 +244,8 @@ fn draw_node(
     ctx: &ComposeContext<'_>,
     atlas: &AtlasLibrary<'_>,
     pixmap: &mut Pixmap,
+    scene: &BbScene,
+    layout_rects: &std::collections::BTreeMap<BbNodeId, Rect>,
 ) {
     let Some(tsk_rect) = TskRect::from_xywh(rect.x, rect.y, rect.w, rect.h) else {
         return;
@@ -310,10 +312,11 @@ fn draw_node(
                 // style-branded texture naming for the base gradient.
                 let brand = node_brand_slug(node, ctx);
                 let med_brand = med_texture_brand_slug(&brand);
-                let candidates = [format!(
+                let mut drew_any = false;
+                let gradient_candidates = [format!(
                     "UI/Textures/I_InteractiveScreens/Med/i_med_{med_brand}_bg_gradient.tif"
                 )];
-                for raw_path in candidates {
+                for raw_path in gradient_candidates {
                     let norm = UiAssetResolver::normalise_path(&raw_path);
                     if image_probe {
                         log::info!(
@@ -332,11 +335,11 @@ fn draw_node(
                         blit_atlas_image(
                             pixmap,
                             &img,
-                            body_rect.x as i32,
+                            0,
                             body_rect.y as i32,
                             alpha,
                         );
-                        return;
+                        drew_any = true;
                     } else if image_probe {
                         log::info!(
                             "A3-image-probe: body-bg atlas_miss node={} id=ptr:{} norm={:?}",
@@ -345,6 +348,100 @@ fn draw_node(
                             norm
                         );
                     }
+                }
+
+                let measure_candidates = [format!(
+                    "UI/Textures/I_InteractiveScreens/Med/i_med_{med_brand}_measure_vert.tif"
+                )];
+                for raw_path in measure_candidates {
+                    let norm = UiAssetResolver::normalise_path(&raw_path);
+                    if image_probe {
+                        log::info!(
+                            "A3-image-probe: body-bg measure node={} id=ptr:{} raw={:?} norm={:?}",
+                            node.name,
+                            node.id,
+                            raw_path,
+                            norm
+                        );
+                    }
+                    if UiAssetResolver::is_reference_overlay(&norm) {
+                        continue;
+                    }
+                    let Some((source_w, source_h)) = atlas.source_dimensions(&norm) else {
+                        if image_probe {
+                            log::info!(
+                                "A3-image-probe: body-bg measure dimensions unavailable node={} id=ptr:{} norm={:?}",
+                                node.name,
+                                node.id,
+                                norm
+                            );
+                        }
+                        continue;
+                    };
+                    // Use authored container viewport ratio to apply inverse vertical scale.
+                    // Prefer BGDots (visual content container), fallback to MainMenuCanvas.
+                    let target_rect = scene
+                        .nodes
+                        .values()
+                        .find(|n| n.name.eq_ignore_ascii_case("BGDots"))
+                        .and_then(|dots_node| layout_rects.get(&dots_node.id))
+                        .copied()
+                        .or_else(|| {
+                            scene
+                                .nodes
+                                .values()
+                                .find(|n| n.name.eq_ignore_ascii_case("MainMenuCanvas"))
+                                .and_then(|menu_node| layout_rects.get(&menu_node.id))
+                                .copied()
+                        });
+                    let target_h = target_rect
+                        .map(|r| {
+                            let scale_y = (body_rect.h / r.h.max(1.0)).max(1.0);
+                            (source_h as f32 * scale_y).round().max(1.0) as u32
+                        })
+                        .unwrap_or(source_h);
+                    if let Some(img) = atlas.resolve(&norm, source_w, target_h) {
+                        if let Some(target_rect) = target_rect {
+                            if image_probe {
+                                log::info!(
+                                    "A3-image-probe: body-bg measure scale node={} id=ptr:{} target_rect=({}, {}, {}, {}) draw=({}, {}) source={}x{} scaled={}x{}",
+                                    node.name,
+                                    node.id,
+                                    target_rect.x as i32,
+                                    target_rect.y as i32,
+                                    target_rect.w as i32,
+                                    target_rect.h as i32,
+                                    body_rect.x as i32,
+                                    body_rect.y as i32,
+                                    source_w,
+                                    source_h,
+                                    img.width(),
+                                    img.height()
+                                );
+                            }
+                            blit_atlas_image(pixmap, &img, body_rect.x as i32, body_rect.y as i32, alpha);
+                        } else {
+                            blit_atlas_image(
+                                pixmap,
+                                &img,
+                                body_rect.x as i32,
+                                body_rect.y as i32,
+                                alpha,
+                            );
+                        }
+                        drew_any = true;
+                    } else if image_probe {
+                        log::info!(
+                            "A3-image-probe: body-bg measure atlas_miss node={} id=ptr:{} norm={:?}",
+                            node.name,
+                            node.id,
+                            norm
+                        );
+                    }
+                }
+
+                if drew_any {
+                    return;
                 }
             }
 
