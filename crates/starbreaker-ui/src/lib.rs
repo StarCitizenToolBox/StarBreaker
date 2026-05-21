@@ -36,13 +36,14 @@ pub mod style;
 pub mod swf_assets;
 pub mod swf_render;
 pub mod text;
+pub mod ui_ir;
 
 pub use error::UiError;
 
 // Re-export pipeline entry point.
 pub use pipeline::{
     CanvasFetcher, PipelineInputs, StyleFetcher, SwfFetcher, UiBindingView,
-    render_for_binding,
+    compile_ir_for_binding, render_for_binding,
 };
 
 pub use canvas::{
@@ -61,3 +62,10 @@ pub use compose::{ComposeContext, ComposeTarget, encode_png, render_canvas, rend
 
 // Re-export post-process API.
 pub use postprocess::{PostProcessOptions, PostProcessor};
+
+// Re-export canonical UI IR schema/compiler.
+pub use ui_ir::{
+    UI_IR_SCHEMA_VERSION, UiIrDocument, UiIrNode, UiIrRect, UiIrTextPayload, UiIrValue,
+    UiIrTextStyle, UiRendererHint, compile_ui_ir_from_scene, stable_hash_ui_ir,
+    validate_ui_ir_document,
+};

@@ -32,6 +32,7 @@ use crate::error::UiError;
 use crate::postprocess::PostProcessOptions;
 use crate::style::{ManufacturerStyle, StyleLoader};
 use crate::swf_assets::SwfAssetLibrary;
+use crate::ui_ir::UiIrDocument;
 
 pub use crate::bb_atlas::AssetFetcher;
 
@@ -157,6 +158,52 @@ pub struct UiRenderDiagnostics {
 pub struct UiRenderOutput {
     pub png: Vec<u8>,
     pub diagnostics: UiRenderDiagnostics,
+}
+
+/// Compile canonical UI IR for the binding described by `inputs`.
+///
+/// This uses the same canvas-guid selection and BuildingBlocks scene resolve
+/// path as [`render_for_binding`], but stops before rasterization.
+pub fn compile_ir_for_binding(inputs: &PipelineInputs<'_>) -> Result<UiIrDocument, UiError> {
+    let b = inputs.binding;
+
+    let effective_guid = b
+        .content_canvas_guid
+        .filter(|g| !g.is_empty())
+        .or_else(|| b.canvas_guid.filter(|g| !g.is_empty()))
+        .ok_or_else(|| {
+            UiError::RenderError(format!(
+                "no canvas GUID available for helper {:?} (kind {:?})",
+                b.helper_name, b.binding_kind,
+            ))
+        })?;
+
+    let raw_root_json = inputs.canvas_fetcher.fetch_canvas_json(effective_guid)?;
+    let canvas_name = raw_root_json
+        .get("_RecordName_")
+        .and_then(|v| v.as_str());
+
+    let scene = crate::bb_resolve::resolve_canvas_graph_with_loc(
+        &raw_root_json,
+        b.manufacturer_id,
+        &|p| {
+            inputs
+                .canvas_fetcher
+                .fetch_canvas_by_path(p)
+                .map_err(|e| e.to_string())
+        },
+        inputs.loc_fetcher,
+    )
+    .map_err(UiError::RenderError)?;
+
+    Ok(crate::ui_ir::compile_ui_ir_from_scene(
+        &scene,
+        effective_guid,
+        canvas_name,
+        inputs.target_size,
+        &[],
+        100,
+    ))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

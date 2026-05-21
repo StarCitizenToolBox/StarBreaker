@@ -1,0 +1,80 @@
+{
+  "canvas_guid": "content-guid",
+  "canvas_name": "BuildingBlocks_Canvas.TestRoot",
+  "confidence": 100,
+  "nodes": [
+    {
+      "asset_ref": null,
+      "alpha": 1.0,
+      "anchor": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        10.0,
+        20.0
+      ],
+      "authored_size": [
+        {
+          "kind": "fixed",
+          "value": 60.0
+        },
+        {
+          "kind": "fixed",
+          "value": 20.0
+        }
+      ],
+      "children": [],
+      "computed_rect": {
+        "h": 20.0,
+        "w": 60.0,
+        "x": 60.0,
+        "y": 20.0
+      },
+      "id": 1,
+      "icon_tint_colour": null,
+      "is_active": true,
+      "layer": 0,
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "name": "status_text",
+      "node_type": "widget_text_field",
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "parent_id": null,
+      "style_tag_uuids": [],
+      "background_fill_colour": null,
+      "text_payload": {
+        "state": "resolved",
+        "text": "READY"
+      },
+      "text_style": {
+        "alignment": "Left",
+        "colour": null,
+        "font_record": null,
+        "font_size": {
+          "kind": "fixed",
+          "value": 12.0
+        }
+      }
+    }
+  ],
+  "renderer_hint": "bb",
+  "schema_version": 1,
+  "target_height": 100,
+  "target_width": 200,
+  "unresolved_references": [],
+  "warnings": []
+}
