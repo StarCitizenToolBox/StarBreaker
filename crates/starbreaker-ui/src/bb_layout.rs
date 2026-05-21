@@ -37,6 +37,8 @@ use log::warn;
 
 use crate::bb_scene::{BbNodeId, BbNodeType, BbScene, BbValue};
 
+const SYNTHETIC_NODE_ID_BASE: BbNodeId = 0x8000_0000;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Public types
 // ─────────────────────────────────────────────────────────────────────────────
@@ -295,10 +297,19 @@ fn layout_node_with_rect(
     }
 
     // ── 5. Recurse into children ─────────────────────────────────────────────
-    // Sort by layer only (stable) so authored sibling order is preserved for
-    // nodes sharing the same layer.
+    // If the sibling set includes synthetic node IDs (pointerless authored
+    // nodes), keep authored order for equal layers. Otherwise keep the prior
+    // deterministic (layer, id) order.
     let mut children: Vec<BbNodeId> = node.children.clone();
-    children.sort_by_key(|&child_id| scene.nodes.get(&child_id).map(|n| n.layer).unwrap_or(0));
+    let has_synthetic = children.iter().any(|id| *id >= SYNTHETIC_NODE_ID_BASE);
+    if has_synthetic {
+        children.sort_by_key(|&child_id| scene.nodes.get(&child_id).map(|n| n.layer).unwrap_or(0));
+    } else {
+        children.sort_by_key(|&child_id| {
+            let layer = scene.nodes.get(&child_id).map(|n| n.layer).unwrap_or(0);
+            (layer, child_id)
+        });
+    }
 
     // Detect FlexContainer layout policy — if present, use flex layout instead
     // of overlay for child positioning.

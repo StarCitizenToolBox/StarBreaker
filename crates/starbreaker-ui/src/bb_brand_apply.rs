@@ -52,9 +52,46 @@ pub fn apply_brand_modifiers(
             continue;
         };
         apply_inline_color_overlay(node, brand.raw);
+        resolve_node_background_color(node, brand.raw);
         for entry in matching_entries {
             apply_entry_modifiers(entry, node, brand.raw, loc_fetcher);
         }
+    }
+}
+
+fn resolve_node_background_color(node: &mut BbNode, palette_source: &serde_json::Value) {
+    if node
+        .background
+        .as_ref()
+        .and_then(|bg| bg.fill_colour)
+        .is_some()
+    {
+        return;
+    }
+
+    let background_color_value = node.raw.get("BackgroundColor");
+    let style_color_value = node
+        .raw
+        .get("background")
+        .and_then(|bg| bg.get("color"))
+        .filter(|v| {
+            v.get("_Type_")
+                .and_then(|ty| ty.as_str())
+                .is_some_and(|ty| ty == "BuildingBlocks_ColorStyle")
+        });
+
+    let Some(color_value) = background_color_value.or(style_color_value) else {
+        return;
+    };
+    let Some(color) = parse_color_value(color_value, palette_source) else {
+        return;
+    };
+
+    if node.background.is_none() {
+        node.background = Some(Default::default());
+    }
+    if let Some(bg) = node.background.as_mut() {
+        bg.fill_colour = Some(color);
     }
 }
 

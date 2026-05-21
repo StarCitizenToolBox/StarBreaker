@@ -61,29 +61,16 @@ impl<'a> UiAssetResolver<'a> {
 
     /// Return `true` when `raw` refers to a designer-time reference overlay.
     ///
-    /// Two structural signals are recognised, both derived from the **asset
+    /// One structural signal is recognised, derived from the **asset
     /// path itself** (never from widget names):
     ///
     /// * Paths containing the `_references` directory — the engine's
     ///   convention for designer-time overlay sources.
-    /// * UI texture paths whose filename declares itself a `mockup` (e.g.
-    ///   `Data/UI/Textures/I_InteractiveScreens/Med/i_med_bioc_mockupImage.tif`).
-    ///   These are semi-transparent layout-example overlays placed on parent
-    ///   canvases by designers; they are not part of the production composed
-    ///   output. The check is scoped to `\UI\` paths so legitimate
-    ///   `mockup_*` building-set geometry (`Data\Objects\buildingsets\…`) is
-    ///   unaffected.
     ///
     /// The check is path-prefix agnostic and case-insensitive.
     pub fn is_reference_overlay(raw: &str) -> bool {
         let s = raw.to_lowercase().replace('/', "\\");
-        if s.contains("\\_references\\") {
-            return true;
-        }
-        if (s.contains("\\ui\\") || s.starts_with("ui\\")) && s.contains("mockup") {
-            return true;
-        }
-        false
+        s.contains("\\_references\\")
     }
 
     /// Fetch SVG bytes for `raw_path` from the P4K archive.
@@ -191,11 +178,11 @@ mod tests {
     }
 
     #[test]
-    fn reference_overlay_true_for_ui_mockup_path() {
-        assert!(UiAssetResolver::is_reference_overlay(
+    fn reference_overlay_false_for_ui_mockup_path() {
+        assert!(!UiAssetResolver::is_reference_overlay(
             r"Data\UI\Textures\I_InteractiveScreens\Med\i_med_bioc_mockupImage.dds"
         ));
-        assert!(UiAssetResolver::is_reference_overlay(
+        assert!(!UiAssetResolver::is_reference_overlay(
             "UI/Textures/I_InteractiveScreens/Med/i_med_bioc_mockupimage.tif"
         ));
     }
