@@ -517,6 +517,22 @@ fn layout_flex_no_grow_children(
     let mut total_main = 0.0f32;
     for &child_id in children {
         let Some(node) = scene.nodes.get(&child_id) else { continue };
+        if !node.is_active {
+            continue;
+        }
+        if node
+            .raw
+            .get("affectsLayout")
+            .and_then(|v| v.as_bool())
+            == Some(false)
+        {
+            continue;
+        }
+        if (node.name.is_empty() || node.name == "<unnamed>")
+            && matches!(&node.ty, BbNodeType::Other(kind) if kind == "BuildingBlocks_WidgetLinearProgressMeter")
+        {
+            continue;
+        }
         let mut w = resolve_value(&node.sizing.width, container.w, container.h, csx, true);
         let mut h = resolve_value(&node.sizing.height, container.h, container.w, csy, false);
         if matches!(node.sizing.width, BbValue::Other { ref behavior, .. } if behavior == "PercentOfY")
@@ -558,38 +574,97 @@ fn layout_flex_no_grow_children(
     };
     let mut cursor = if is_row { container.x + main_offset } else { container.y + main_offset };
     if wrap_enabled {
-        let mut cursor_x = container.x;
-        let mut cursor_y = container.y;
-        let mut line_cross = 0.0f32;
-        for (id, w, h, auto_main) in sizes {
+        // Build wrapped lines first so axis justification (e.g. Center) can be
+        // applied per line instead of always starting at the container edge.
+        let mut lines: Vec<Vec<(BbNodeId, f32, f32, bool)>> = Vec::new();
+        let mut current: Vec<(BbNodeId, f32, f32, bool)> = Vec::new();
+        let mut current_main = 0.0f32;
+        let avail_main = if is_row { container.w } else { container.h };
+        for item in sizes {
+            let (_, w, h, auto_main) = item;
             if auto_main {
-                layout_node(id, container, scene, csx, csy, rects, draw_order);
+                // Keep auto-main nodes on the current line; they are laid out
+                // with their own pass and do not consume wrapping width here.
+                current.push(item);
                 continue;
             }
             let main = if is_row { w } else { h };
-            let cross = if is_row { h } else { w };
-            if is_row {
-                if cursor_x > container.x && cursor_x + w > container.x + container.w + 0.5 {
-                    cursor_x = container.x;
-                    cursor_y += line_cross + cross_spacing;
-                    line_cross = 0.0;
-                }
-                let ch = if cross_just.eq_ignore_ascii_case("stretch") { container.h } else { h };
-                let rect = Rect { x: cursor_x, y: cursor_y, w, h: ch };
-                layout_node_with_rect(id, rect, scene, csx, csy, rects, draw_order);
-                cursor_x += main + item_spacing;
+            let proposed = if current.is_empty() {
+                main
             } else {
-                if cursor_y > container.y && cursor_y + h > container.y + container.h + 0.5 {
-                    cursor_y = container.y;
-                    cursor_x += line_cross + cross_spacing;
-                    line_cross = 0.0;
-                }
-                let cw = if cross_just.eq_ignore_ascii_case("stretch") { container.w } else { w };
-                let rect = Rect { x: cursor_x, y: cursor_y, w: cw, h };
-                layout_node_with_rect(id, rect, scene, csx, csy, rects, draw_order);
-                cursor_y += main + item_spacing;
+                current_main + item_spacing + main
+            };
+            if !current.is_empty() && proposed > avail_main + 0.5 {
+                lines.push(current);
+                current = Vec::new();
+                current_main = 0.0;
             }
-            line_cross = line_cross.max(cross.max(0.0));
+            current_main = if current.is_empty() {
+                main
+            } else {
+                current_main + item_spacing + main
+            };
+            current.push(item);
+        }
+        if !current.is_empty() {
+            lines.push(current);
+        }
+
+        let mut line_cross_cursor = if is_row { container.y } else { container.x };
+        for line in lines {
+            let mut line_main = 0.0f32;
+            let mut line_cross = 0.0f32;
+            let mut line_items = 0usize;
+            for &(_, w, h, auto_main) in &line {
+                if auto_main {
+                    continue;
+                }
+                line_main += if is_row { w } else { h };
+                line_cross = line_cross.max(if is_row { h } else { w });
+                line_items += 1;
+            }
+            if line_items > 1 {
+                line_main += item_spacing * (line_items - 1) as f32;
+            }
+            let line_main_offset = match axis_just.to_ascii_lowercase().as_str() {
+                "center" => ((avail_main - line_main) * 0.5).max(0.0),
+                "end" | "right" | "bottom" => (avail_main - line_main).max(0.0),
+                _ => 0.0,
+            };
+            let mut line_main_cursor = if is_row {
+                container.x + line_main_offset
+            } else {
+                container.y + line_main_offset
+            };
+
+            for (id, w, h, auto_main) in line {
+                if auto_main {
+                    layout_node(id, container, scene, csx, csy, rects, draw_order);
+                    continue;
+                }
+                let rect = if is_row {
+                    let y = match cross_just.to_ascii_lowercase().as_str() {
+                        "center" => line_cross_cursor + (line_cross - h) * 0.5,
+                        "end" | "right" | "bottom" => line_cross_cursor + (line_cross - h),
+                        _ => line_cross_cursor,
+                    };
+                    let ch = if cross_just.eq_ignore_ascii_case("stretch") { line_cross } else { h };
+                    Rect { x: line_main_cursor, y, w, h: ch }
+                } else {
+                    let x = match cross_just.to_ascii_lowercase().as_str() {
+                        "center" => line_cross_cursor + (line_cross - w) * 0.5,
+                        "end" | "right" | "bottom" => line_cross_cursor + (line_cross - w),
+                        _ => line_cross_cursor,
+                    };
+                    let cw = if cross_just.eq_ignore_ascii_case("stretch") { line_cross } else { w };
+                    Rect { x, y: line_main_cursor, w: cw, h }
+                };
+                layout_node_with_rect(id, rect, scene, csx, csy, rects, draw_order);
+                line_main_cursor += if is_row { w } else { h };
+                line_main_cursor += item_spacing;
+            }
+
+            line_cross_cursor += line_cross + cross_spacing;
         }
         return;
     }
