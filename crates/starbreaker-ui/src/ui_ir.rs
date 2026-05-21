@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 
 use crate::bb_layout;
 use crate::bb_scene::{BbNodeType, BbScene, BbValue};
@@ -29,10 +30,13 @@ pub struct UiIrDocument {
     pub canvas_name: Option<String>,
     pub target_width: u32,
     pub target_height: u32,
+    pub selected_style_source: Option<String>,
     pub renderer_hint: UiRendererHint,
     pub confidence: u8,
     pub warnings: Vec<String>,
     pub unresolved_references: Vec<String>,
+    pub resolved_asset_refs: Vec<String>,
+    pub missing_asset_refs: Vec<String>,
     pub nodes: Vec<UiIrNode>,
 }
 
@@ -101,6 +105,7 @@ pub struct UiIrTextStyle {
 /// Validate required schema invariants for a UI IR document.
 pub fn validate_ui_ir_document(document: &UiIrDocument) -> Result<(), Vec<String>> {
     let mut errors = Vec::new();
+    let mut seen_ids = HashSet::new();
 
     if document.schema_version != UI_IR_SCHEMA_VERSION {
         errors.push(format!(
@@ -122,6 +127,9 @@ pub fn validate_ui_ir_document(document: &UiIrDocument) -> Result<(), Vec<String
     }
 
     for node in &document.nodes {
+        if !seen_ids.insert(node.id) {
+            errors.push(format!("duplicate node id {}", node.id));
+        }
         if node.name.trim().is_empty() {
             errors.push(format!("node {} has empty name", node.id));
         }
@@ -133,6 +141,19 @@ pub fn validate_ui_ir_document(document: &UiIrDocument) -> Result<(), Vec<String
                 "node {} has negative computed size ({}, {})",
                 node.id, node.computed_rect.w, node.computed_rect.h
             ));
+        }
+    }
+
+    for node in &document.nodes {
+        if let Some(parent_id) = node.parent_id {
+            if !seen_ids.contains(&parent_id) {
+                errors.push(format!("node {} references missing parent {}", node.id, parent_id));
+            }
+        }
+        for child_id in &node.children {
+            if !seen_ids.contains(child_id) {
+                errors.push(format!("node {} references missing child {}", node.id, child_id));
+            }
         }
     }
 
@@ -160,7 +181,10 @@ pub fn compile_ui_ir_from_scene(
     canvas_guid: &str,
     canvas_name: Option<&str>,
     target_size: (u32, u32),
+    selected_style_source: Option<String>,
     unresolved_references: &[String],
+    resolved_asset_refs: Vec<String>,
+    missing_asset_refs: Vec<String>,
     confidence: u8,
 ) -> UiIrDocument {
     let layout = bb_layout::layout(scene, target_size.0, target_size.1);
@@ -195,6 +219,12 @@ pub fn compile_ui_ir_from_scene(
         warnings.push(format!(
             "{} unresolved text key(s) present in scene",
             unresolved_count
+        ));
+    }
+    if !missing_asset_refs.is_empty() {
+        warnings.push(format!(
+            "{} asset reference(s) could not be resolved",
+            missing_asset_refs.len()
         ));
     }
 
@@ -284,10 +314,13 @@ pub fn compile_ui_ir_from_scene(
         canvas_name: canvas_name.map(str::to_string),
         target_width: target_size.0,
         target_height: target_size.1,
+        selected_style_source,
         renderer_hint,
         confidence: computed_confidence,
         warnings,
         unresolved_references: unresolved_references.to_vec(),
+        resolved_asset_refs,
+        missing_asset_refs,
         nodes,
     }
 }
@@ -354,7 +387,10 @@ mod tests {
             "guid-1",
             Some("BuildingBlocks_Canvas.Test"),
             (200, 100),
+            None,
             &[],
+            Vec::new(),
+            Vec::new(),
             90,
         );
 
@@ -390,8 +426,28 @@ mod tests {
         });
 
         let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
-        let ir1 = compile_ui_ir_from_scene(&scene, "guid-2", None, (128, 128), &[], 100);
-        let ir2 = compile_ui_ir_from_scene(&scene, "guid-2", None, (128, 128), &[], 100);
+        let ir1 = compile_ui_ir_from_scene(
+            &scene,
+            "guid-2",
+            None,
+            (128, 128),
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+        let ir2 = compile_ui_ir_from_scene(
+            &scene,
+            "guid-2",
+            None,
+            (128, 128),
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
 
         let s1 = serde_json::to_string(&ir1).expect("serialize ir1");
         let s2 = serde_json::to_string(&ir2).expect("serialize ir2");
@@ -410,10 +466,13 @@ mod tests {
             canvas_name: None,
             target_width: 0,
             target_height: 0,
+            selected_style_source: None,
             renderer_hint: UiRendererHint::Bb,
             confidence: 101,
             warnings: Vec::new(),
             unresolved_references: Vec::new(),
+            resolved_asset_refs: Vec::new(),
+            missing_asset_refs: Vec::new(),
             nodes: vec![UiIrNode {
                 id: 1,
                 parent_id: None,
@@ -477,7 +536,17 @@ mod tests {
         });
 
         let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
-        let ir = compile_ui_ir_from_scene(&scene, "guid-3", None, (100, 100), &[], 100);
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            "guid-3",
+            None,
+            (100, 100),
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
         let node = &ir.nodes[0];
         assert_eq!(node.alpha, 0.5);
         assert_eq!(node.anchor, [0.25, 0.75]);

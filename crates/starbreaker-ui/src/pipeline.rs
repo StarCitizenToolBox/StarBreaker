@@ -183,6 +183,39 @@ pub fn compile_ir_for_binding(inputs: &PipelineInputs<'_>) -> Result<UiIrDocumen
         .get("_RecordName_")
         .and_then(|v| v.as_str());
 
+    let manufacturer_id = b.manufacturer_id.unwrap_or("drak");
+    let selected_style_source = raw_root_json
+        .get("_RecordValue_")
+        .and_then(|rv| rv.get("style"))
+        .and_then(|v| v.as_str())
+        .map(crate::pipeline::extract_record_name)
+        .and_then(|style_name| {
+            match inputs.canvas_fetcher.fetch_canvas_by_name(&style_name) {
+                Ok(_) => Some(format!("canvas:{style_name}")),
+                Err(e) => {
+                    log::warn!(
+                        "pipeline: failed to fetch canvas-level style record '{}': {}",
+                        style_name,
+                        e
+                    );
+                    None
+                }
+            }
+        })
+        .or_else(|| {
+            match inputs.style_fetcher.fetch_manufacturer_style(manufacturer_id) {
+                Ok(_) => Some(format!("manufacturer:{manufacturer_id}")),
+                Err(e) => {
+                    log::warn!(
+                        "pipeline: manufacturer style fetch failed for '{}': {}",
+                        manufacturer_id,
+                        e
+                    );
+                    None
+                }
+            }
+        });
+
     let scene = crate::bb_resolve::resolve_canvas_graph_with_loc(
         &raw_root_json,
         b.manufacturer_id,
@@ -196,12 +229,39 @@ pub fn compile_ir_for_binding(inputs: &PipelineInputs<'_>) -> Result<UiIrDocumen
     )
     .map_err(UiError::RenderError)?;
 
+    let mut resolved_asset_refs = Vec::new();
+    let mut missing_asset_refs = Vec::new();
+    let mut seen_assets = std::collections::BTreeSet::new();
+    for node in scene.nodes.values() {
+        let asset_ref = node
+            .icon
+            .as_ref()
+            .and_then(|i| i.image_record.as_deref())
+            .or_else(|| node.background.as_ref().and_then(|bg| bg.svg_fill_path.as_deref()));
+        let Some(asset_ref) = asset_ref else {
+            continue;
+        };
+        if !seen_assets.insert(asset_ref.to_string()) {
+            continue;
+        }
+        let resolved = inputs.asset_fetcher.fetch_image_bytes(asset_ref).is_some()
+            || inputs.asset_fetcher.fetch_svg_bytes(asset_ref).is_some();
+        if resolved {
+            resolved_asset_refs.push(asset_ref.to_string());
+        } else {
+            missing_asset_refs.push(asset_ref.to_string());
+        }
+    }
+
     Ok(crate::ui_ir::compile_ui_ir_from_scene(
         &scene,
         effective_guid,
         canvas_name,
         inputs.target_size,
+        selected_style_source,
         &[],
+        resolved_asset_refs,
+        missing_asset_refs,
         100,
     ))
 }
