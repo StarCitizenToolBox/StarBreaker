@@ -18,3 +18,4 @@ __pycache__/
 Thumbs.db
 blender_addon/starbreaker_addon/resources/material_templates.blend1
 docs/audit_tmp/
+.github/copilot-steering.md
