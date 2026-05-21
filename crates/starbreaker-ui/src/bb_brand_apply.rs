@@ -335,7 +335,8 @@ fn apply_inline_color_overlay(node: &mut BbNode, palette_source: &serde_json::Va
         .get("color")
         .or_else(|| node.raw.get("svgFill").and_then(|v| v.get("color")));
     if let Some(color) = color_value.and_then(|value| parse_color_value(value, palette_source)) {
-        apply_color_field("FillColor", color, node);
+        let token = color_value.and_then(color_style_token).map(str::to_owned);
+        apply_color_field("FillColor", color, token.as_deref(), node);
     }
 }
 
@@ -371,8 +372,9 @@ fn apply_modifier(
         }
         "BuildingBlocks_FieldModifierColor" => {
             if let Some(value) = value {
+                let token = color_style_token(value).map(str::to_owned);
                 if let Some(color) = parse_color_value(value, palette_source) {
-                    apply_color_field(field_name, color, node);
+                    apply_color_field(field_name, color, token.as_deref(), node);
                 }
             }
         }
@@ -551,7 +553,7 @@ fn apply_number_field(field_name: &str, value: f64, node: &mut BbNode) {
 }
 
 /// Apply a color-typed modifier field.
-fn apply_color_field(field_name: &str, color: [f32; 4], node: &mut BbNode) {
+fn apply_color_field(field_name: &str, color: [f32; 4], token: Option<&str>, node: &mut BbNode) {
     match field_name {
         "FillColor" | "StrokeColor" | "BackgroundColor" => {
             // Update node.background if it exists.
@@ -560,6 +562,7 @@ fn apply_color_field(field_name: &str, color: [f32; 4], node: &mut BbNode) {
             }
             // Also write to raw for non-typed cases.
             write_color_to_raw(field_name, color, node);
+            write_color_token_to_raw(field_name, token, node);
         }
         "BorderColor" => {
             ensure_border(node);
@@ -569,30 +572,35 @@ fn apply_color_field(field_name: &str, color: [f32; 4], node: &mut BbNode) {
                 border.bottom.colour = Some(color);
                 border.left.colour = Some(color);
             }
+            write_color_token_to_raw(field_name, token, node);
         }
         "BorderColorTop" => {
             ensure_border(node);
             if let Some(border) = &mut node.border {
                 border.top.colour = Some(color);
             }
+            write_color_token_to_raw(field_name, token, node);
         }
         "BorderColorRight" => {
             ensure_border(node);
             if let Some(border) = &mut node.border {
                 border.right.colour = Some(color);
             }
+            write_color_token_to_raw(field_name, token, node);
         }
         "BorderColorBottom" => {
             ensure_border(node);
             if let Some(border) = &mut node.border {
                 border.bottom.colour = Some(color);
             }
+            write_color_token_to_raw(field_name, token, node);
         }
         "BorderColorLeft" => {
             ensure_border(node);
             if let Some(border) = &mut node.border {
                 border.left.colour = Some(color);
             }
+            write_color_token_to_raw(field_name, token, node);
         }
         _ => {
             // Generic fallback → write to raw.
@@ -602,6 +610,7 @@ fn apply_color_field(field_name: &str, color: [f32; 4], node: &mut BbNode) {
                 color
             );
             write_color_to_raw(field_name, color, node);
+            write_color_token_to_raw(field_name, token, node);
         }
     }
 }
@@ -719,7 +728,7 @@ fn parse_literal_color(color_obj: &serde_json::Map<String, serde_json::Value>) -
 }
 
 fn parse_named_color(value: &serde_json::Value, palette_source: &serde_json::Value) -> Option<[f32; 4]> {
-    let name = value.get("color")?.as_str()?;
+    let name = color_style_token(value)?;
     let alpha = value.get("alpha").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
     let slot = color_style_slot_index(name)?;
     let color_styles = palette_source
@@ -755,6 +764,13 @@ fn color_style_slot_index(name: &str) -> Option<usize> {
     }
 }
 
+fn color_style_token(value: &serde_json::Value) -> Option<&str> {
+    value
+        .get("color")
+        .and_then(|v| v.as_str())
+        .filter(|name| !name.trim().is_empty())
+}
+
 /// Ensure `node.border` is `Some(…)`, initializing to default if `None`.
 fn ensure_border(node: &mut BbNode) {
     if node.border.is_none() {
@@ -773,6 +789,18 @@ fn write_color_to_raw(field_name: &str, color: [f32; 4], node: &mut BbNode) {
     node.raw
         .as_object_mut()
         .and_then(|obj| obj.insert(field_name.to_string(), color_obj));
+}
+
+fn write_color_token_to_raw(field_name: &str, token: Option<&str>, node: &mut BbNode) {
+    let Some(token) = token.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    node.raw.as_object_mut().and_then(|obj| {
+        obj.insert(
+            format!("{field_name}Token"),
+            serde_json::Value::String(token.to_string()),
+        )
+    });
 }
 
 #[cfg(test)]
@@ -1402,6 +1430,35 @@ mod tests {
         assert!((fill[1] - 198.0 / 255.0).abs() < 0.001);
         assert!((fill[2] - 254.0 / 255.0).abs() < 0.001);
         assert_eq!(fill[3], 1.0);
+    }
+
+    #[test]
+    fn named_fill_color_preserves_token_in_raw() {
+        let palette = json!({
+            "colorStyles": [
+                {"color": {"r": 1.0, "g": 0.5, "b": 0.25, "a": 1.0}}
+            ]
+        });
+
+        let modifier = json!({
+            "_Type_": "BuildingBlocks_FieldModifierColor",
+            "field": "FillColor",
+            "color": {
+                "_Type_": "BuildingBlocks_ColorStyle",
+                "color": "Accent1",
+                "alpha": 1.0
+            }
+        });
+
+        let mut scene = make_test_scene();
+        let node = scene.nodes.get_mut(&1).expect("test node");
+        apply_modifier(&modifier, node, &palette, None);
+
+        assert_eq!(
+            node.raw.get("FillColorToken").and_then(|value| value.as_str()),
+            Some("Accent1")
+        );
+        assert!(node.raw.get("FillColor").is_some(), "resolved rgba should still be present");
     }
 
     #[test]
