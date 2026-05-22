@@ -109,6 +109,7 @@ pub fn render_ui_ir_document(
             node,
             &text_renderer,
             ctx,
+            document,
             &mut seen_text_rects,
         );
     }
@@ -145,7 +146,7 @@ fn draw_non_text_node(
     }
 
     if is_top_separator_candidate(node, rect, document) {
-        fill_rect_ts(pixmap, tsk_rect, derived_accent_tint(ctx), node.alpha);
+        fill_rect_ts(pixmap, tsk_rect, derived_top_separator_tint(ctx), node.alpha);
         return;
     }
 
@@ -577,6 +578,7 @@ fn draw_text_node(
     node: &UiIrNode,
     renderer: &TextRenderer,
     ctx: &ComposeContext<'_>,
+    document: &UiIrDocument,
     seen_rects: &mut HashSet<(i32, i32, i32, i32)>,
 ) {
     let Some(text) = resolved_text_payload(node) else {
@@ -586,9 +588,26 @@ fn draw_text_node(
         return;
     }
 
-    let rect = ir_rect_to_layout_rect(node.computed_rect);
+    let mut rect = ir_rect_to_layout_rect(node.computed_rect);
     if rect.w < 0.5 || rect.h < 0.5 {
         return;
+    }
+
+    if is_top_header_text_candidate(node, rect, document)
+        && node.name.eq_ignore_ascii_case("FunctionTitle")
+    {
+        return;
+    }
+
+    if is_top_header_text_candidate(node, rect, document) {
+        if node.name.eq_ignore_ascii_case("LocationName") {
+            rect.y -= 22.0;
+        } else if node.name.eq_ignore_ascii_case("TierLevel") && rect.x < 200.0 {
+            rect.y += 14.0;
+        } else if node.name.eq_ignore_ascii_case("MachineTypeNameText") {
+            rect.x -= 70.0;
+            rect.y += 14.0;
+        }
     }
 
     let key = (
@@ -641,6 +660,20 @@ fn draw_text_node(
         })
         .map(rgba_to_u8)
         .unwrap_or([255, 255, 255, 255]);
+
+    if is_top_header_text_candidate(node, rect, document)
+        && (node.name.eq_ignore_ascii_case("TierLevel")
+            || node.name.eq_ignore_ascii_case("LocationName")
+            || node.name.eq_ignore_ascii_case("MedGel"))
+    {
+        let c = derived_accent_tint(ctx);
+        colour = [
+            (c[0] * 255.0).round() as u8,
+            (c[1] * 255.0).round() as u8,
+            (c[2] * 255.0).round() as u8,
+            colour[3],
+        ];
+    }
 
     colour[3] = ((colour[3] as f32) * node.alpha.clamp(0.0, 1.0)).round() as u8;
 
@@ -802,6 +835,20 @@ fn derived_accent_tint(ctx: &ComposeContext<'_>) -> [f32; 4] {
         ctx.style.backlight.b as f32 / 255.0,
         1.0,
     ]
+}
+
+fn derived_top_separator_tint(ctx: &ComposeContext<'_>) -> [f32; 4] {
+    let accent = derived_accent_tint(ctx);
+    [accent[0] * 0.08, accent[1] * 0.08, accent[2] * 0.12, 0.62]
+}
+
+fn is_top_header_text_candidate(node: &UiIrNode, rect: Rect, document: &UiIrDocument) -> bool {
+    rect.y <= document.target_height as f32 * 0.14
+        && rect.h <= 120.0
+        && (node.node_type.eq_ignore_ascii_case("widget_text_field")
+            || node
+                .node_type
+                .eq_ignore_ascii_case("BuildingBlocks_ComponentLabelCaptionPair"))
 }
 
 fn is_top_separator_candidate(node: &UiIrNode, rect: Rect, document: &UiIrDocument) -> bool {

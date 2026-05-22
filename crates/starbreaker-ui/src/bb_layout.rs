@@ -206,15 +206,15 @@ fn layout_node(
     // opposite dimension. This handles the common "square icon" idiom
     // (e.g. `width: Percent(0.8), height: PercentOfX(1.0)`) correctly while
     // remaining a no-op for non-cross-axis sizing.
-    let naive_w = resolve_value(&node.sizing.width, parent_inner.w, parent_inner.h, csx, true);
-    let naive_h = resolve_value(&node.sizing.height, parent_inner.h, parent_inner.w, csy, false);
+    let naive_w = resolve_value_for_node(node, &node.sizing.width, parent_inner.w, parent_inner.h, csx, true);
+    let naive_h = resolve_value_for_node(node, &node.sizing.height, parent_inner.h, parent_inner.w, csy, false);
     let outer_w = if matches!(node.sizing.width, BbValue::Other { ref behavior, .. } if behavior == "PercentOfY") {
-        resolve_value(&node.sizing.width, parent_inner.w, naive_h, csx, true)
+        resolve_value_for_node(node, &node.sizing.width, parent_inner.w, naive_h, csx, true)
     } else {
         naive_w
     };
     let outer_h = if matches!(node.sizing.height, BbValue::Other { ref behavior, .. } if behavior == "PercentOfX") {
-        resolve_value(&node.sizing.height, parent_inner.h, naive_w, csy, false)
+        resolve_value_for_node(node, &node.sizing.height, parent_inner.h, naive_w, csy, false)
     } else {
         naive_h
     };
@@ -736,6 +736,27 @@ fn resolve_value(v: &BbValue, primary_dim: f32, cross_dim: f32, canvas_scale: f3
                 }
             }
         }
+    }
+}
+
+fn resolve_value_for_node(
+    node: &crate::bb_scene::BbNode,
+    v: &BbValue,
+    primary_dim: f32,
+    cross_dim: f32,
+    canvas_scale: f32,
+    is_width: bool,
+) -> f32 {
+    if matches!(node.ty, BbNodeType::WidgetText)
+        && let BbValue::Other { value, behavior } = v
+        && behavior == "Auto"
+    {
+        // Text widgets authored with Auto typically carry a small content-fit
+        // hint (for example 64). Treat that hint as size instead of filling
+        // the parent, which causes header/label overlap in medical canvases.
+        *value * canvas_scale
+    } else {
+        resolve_value(v, primary_dim, cross_dim, canvas_scale, is_width)
     }
 }
 
