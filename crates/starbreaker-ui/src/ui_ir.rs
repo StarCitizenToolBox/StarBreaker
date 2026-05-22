@@ -34,6 +34,8 @@ pub struct UiIrDocument {
     pub target_width: u32,
     pub target_height: u32,
     pub selected_style_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_swf_source: Option<String>,
     pub renderer_hint: UiRendererHint,
     pub confidence: u8,
     pub warnings: Vec<String>,
@@ -242,6 +244,7 @@ pub fn compile_ui_ir_from_scene(
     target_size: (u32, u32),
     defaults: &DefaultValueRegistry,
     selected_style_source: Option<String>,
+    selected_swf_source: Option<String>,
     unresolved_references: &[String],
     resolved_asset_refs: Vec<String>,
     missing_asset_refs: Vec<String>,
@@ -255,9 +258,10 @@ pub fn compile_ui_ir_from_scene(
         .nodes
         .values()
         .any(|n| n.ty == BbNodeType::WidgetCustomShape);
-    let renderer_hint = match (has_text, has_custom_shape) {
-        (true, true) => UiRendererHint::Hybrid,
-        (false, true) => UiRendererHint::Swf,
+    let has_selected_swf_source = selected_swf_source.is_some();
+    let renderer_hint = match (has_selected_swf_source, has_text, has_custom_shape) {
+        (true, true, true) => UiRendererHint::Hybrid,
+        (true, false, true) => UiRendererHint::Swf,
         _ => UiRendererHint::Bb,
     };
 
@@ -288,12 +292,20 @@ pub fn compile_ui_ir_from_scene(
             missing_asset_refs.len()
         ));
     }
+    if has_custom_shape && !has_selected_swf_source {
+        warnings.push(
+            "custom-shape content present but no SWF source was resolved; using BB renderer"
+                .to_string(),
+        );
+    }
 
     let mut nodes = Vec::with_capacity(scene.nodes.len());
     for (&id, node) in &scene.nodes {
         let rect = layout.rects.get(&id).copied().unwrap_or_default();
-        let text_payload = node.text.as_ref().map(|_| {
-            let resolved = binding_resolver.resolve_text_detailed(id, &node.raw, defaults);
+        let has_text_intent = node_has_text_intent(node);
+        let resolved_text = has_text_intent
+            .then(|| binding_resolver.resolve_text_detailed(id, &node.raw, defaults));
+        let text_payload = resolved_text.as_ref().map(|resolved| {
             let trimmed = resolved.text.trim();
             if !trimmed.is_empty() {
                 if trimmed.starts_with('@') {
@@ -325,17 +337,51 @@ pub fn compile_ui_ir_from_scene(
                 UiIrTextPayload::Empty
             }
         });
-        let text_style = node.text.as_ref().map(|text| UiIrTextStyle {
-            font_record: text.font_record.clone(),
-            resolved_font_record: text
-                .font_record
-                .as_deref()
-                .and_then(|record_ref| resolve_record(canvas_fetcher, &[record_ref])),
-            font_size: resolve_effective_font_size(node, text),
-            alignment: text.alignment.clone(),
-            colour: text.colour.or_else(|| fill_colour_from_raw_for_text(&node.raw)),
-            colour_token: text_colour_token_from_raw(&node.raw),
-        });
+        let text_style = if let Some(text) = node.text.as_ref() {
+            Some(UiIrTextStyle {
+                font_record: text.font_record.clone(),
+                resolved_font_record: text
+                    .font_record
+                    .as_deref()
+                    .and_then(|record_ref| resolve_record(canvas_fetcher, &[record_ref])),
+                font_size: resolve_effective_font_size(node, text),
+                alignment: text.alignment.clone(),
+                colour: text.colour.or_else(|| fill_colour_from_raw_for_text(&node.raw)),
+                colour_token: text_colour_token_from_raw(&node.raw),
+            })
+        } else if text_payload.is_some() {
+            let alignment = node
+                .raw
+                .get("textAlignment")
+                .and_then(|v| v.as_str())
+                .or_else(|| {
+                    node.raw
+                        .get("labelProperties")
+                        .and_then(|lp| lp.get("textAlignment"))
+                        .and_then(|v| v.as_str())
+                })
+                .unwrap_or("Left")
+                .to_string();
+
+            let font_size = node
+                .raw
+                .get("labelProperties")
+                .and_then(|lp| lp.get("style"))
+                .and_then(|v| v.as_str())
+                .map(nominal_font_size_from_label_style)
+                .unwrap_or(18.0);
+
+            Some(UiIrTextStyle {
+                font_record: None,
+                resolved_font_record: None,
+                font_size: UiIrValue::Fixed { value: font_size },
+                alignment,
+                colour: fill_colour_from_raw_for_text(&node.raw),
+                colour_token: text_colour_token_from_raw(&node.raw),
+            })
+        } else {
+            None
+        };
 
         let asset_ref = collect_node_asset_refs(node)
             .into_iter()
@@ -496,6 +542,7 @@ pub fn compile_ui_ir_from_scene(
         target_width: target_size.0,
         target_height: target_size.1,
         selected_style_source,
+        selected_swf_source,
         renderer_hint,
         confidence: computed_confidence,
         warnings,
@@ -530,7 +577,26 @@ pub(crate) fn collect_node_asset_refs(node: &BbNode) -> Vec<String> {
     push_asset_ref(
         &mut asset_refs,
         node.raw
+            .get("imagePath")
+            .and_then(|value| value.as_str()),
+    );
+    push_asset_ref(
+        &mut asset_refs,
+        node.raw
             .get("SvgPath")
+            .and_then(|value| value.as_str()),
+    );
+    push_asset_ref(
+        &mut asset_refs,
+        node.raw
+            .get("svgPath")
+            .and_then(|value| value.as_str()),
+    );
+    push_asset_ref(
+        &mut asset_refs,
+        node.raw
+            .get("svgFill")
+            .and_then(|value| value.get("svgPath"))
             .and_then(|value| value.as_str()),
     );
 
@@ -568,6 +634,13 @@ fn unresolved_text_key_from_raw(raw: &serde_json::Value) -> Option<String> {
     label
         .filter(|s| s.starts_with('@') && !s.is_empty())
         .map(ToString::to_string)
+}
+
+fn node_has_text_intent(node: &BbNode) -> bool {
+    node.text.is_some()
+        || node.raw.get("text").is_some()
+        || node.raw.get("locString").is_some()
+        || node.raw.get("labelProperties").is_some()
 }
 
 fn background_fill_colour_token_from_raw(raw: &serde_json::Value) -> Option<String> {
@@ -1054,6 +1127,7 @@ mod tests {
             (100, 100),
             &defaults(),
             None,
+            None,
             &[],
             Vec::new(),
             Vec::new(),
@@ -1192,6 +1266,7 @@ mod tests {
             (100, 100),
             &defaults(),
             None,
+            None,
             &[],
             Vec::new(),
             Vec::new(),
@@ -1253,6 +1328,7 @@ mod tests {
             (100, 100),
             &defaults(),
             None,
+            None,
             &[],
             Vec::new(),
             Vec::new(),
@@ -1309,6 +1385,7 @@ mod tests {
             (100, 100),
             &defaults(),
             None,
+            None,
             &[],
             Vec::new(),
             Vec::new(),
@@ -1351,6 +1428,7 @@ mod tests {
             Some("BuildingBlocks_Canvas.Test"),
             (200, 100),
             &defaults(),
+            None,
             None,
             &[],
             Vec::new(),
@@ -1398,6 +1476,7 @@ mod tests {
             (128, 128),
             &defaults(),
             None,
+            None,
             &[],
             Vec::new(),
             Vec::new(),
@@ -1410,6 +1489,7 @@ mod tests {
             None,
             (128, 128),
             &defaults(),
+            None,
             None,
             &[],
             Vec::new(),
@@ -1435,6 +1515,7 @@ mod tests {
             target_width: 0,
             target_height: 0,
             selected_style_source: None,
+            selected_swf_source: None,
             renderer_hint: UiRendererHint::Bb,
             confidence: 101,
             warnings: Vec::new(),
@@ -1521,6 +1602,7 @@ mod tests {
             (100, 100),
             &defaults(),
             None,
+            None,
             &[],
             Vec::new(),
             Vec::new(),
@@ -1531,5 +1613,111 @@ mod tests {
         assert_eq!(node.anchor, [0.25, 0.75]);
         assert_eq!(node.pivot, [0.5, 0.5]);
         assert_eq!(node.style_tag_uuids.len(), 1);
+    }
+
+    #[test]
+    fn compile_ir_without_selected_swf_source_uses_bb_renderer_hint() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.CustomShapeNoSwf",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "label",
+                        "text": "READY",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 30.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetCustomShape",
+                        "name": "shape",
+                        "shapeType": "line",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 20.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-custom-shape-no-swf",
+            Some("BuildingBlocks_Canvas.CustomShapeNoSwf"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        assert_eq!(ir.renderer_hint, UiRendererHint::Bb);
+        assert!(ir
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("no SWF source was resolved")));
+    }
+
+    #[test]
+    fn compile_ir_with_selected_swf_source_preserves_hybrid_renderer_hint() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.CustomShapeWithSwf",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "label",
+                        "text": "READY",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 30.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetCustomShape",
+                        "name": "shape",
+                        "shapeType": "line",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 20.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-custom-shape-with-swf",
+            Some("BuildingBlocks_Canvas.CustomShapeWithSwf"),
+            (100, 100),
+            &defaults(),
+            None,
+            Some("Data\\UI\\ShipInterface\\assets\\SWF\\test.swf".to_string()),
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        assert_eq!(ir.renderer_hint, UiRendererHint::Hybrid);
     }
 }

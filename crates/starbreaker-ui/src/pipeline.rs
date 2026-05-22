@@ -29,10 +29,12 @@ use crate::canvas::{CanvasRecord, CanvasWidgetTreeResolver, ResolvedCanvas, Scen
 use crate::compose::{ComposeContext, ComposeTarget, encode_png, render_canvas_with_postprocess};
 use crate::defaults::DefaultValueRegistry;
 use crate::error::UiError;
+use crate::hybrid_compose::render_ui_ir_with_swf_overlay;
+use crate::ir_compose::render_ui_ir_document;
 use crate::postprocess::PostProcessOptions;
 use crate::style::{ManufacturerStyle, StyleLoader};
 use crate::swf_assets::SwfAssetLibrary;
-use crate::ui_ir::UiIrDocument;
+use crate::ui_ir::{UiIrDocument, UiRendererHint};
 
 pub use crate::bb_atlas::AssetFetcher;
 
@@ -179,6 +181,10 @@ pub fn compile_ir_for_binding(inputs: &PipelineInputs<'_>) -> Result<UiIrDocumen
         })?;
 
     let raw_root_json = inputs.canvas_fetcher.fetch_canvas_json(effective_guid)?;
+    let resolver = CanvasWidgetTreeResolver::new();
+    let resolved = resolver.resolve(effective_guid, |guid| {
+        inputs.canvas_fetcher.fetch_canvas_json(guid)
+    })?;
     let canvas_name = raw_root_json
         .get("_RecordName_")
         .and_then(|v| v.as_str());
@@ -229,6 +235,13 @@ pub fn compile_ir_for_binding(inputs: &PipelineInputs<'_>) -> Result<UiIrDocumen
     )
     .map_err(UiError::RenderError)?;
 
+    let selected_swf_source = select_swf_source(
+        &raw_root_json,
+        &resolved,
+        b.manufacturer_id.unwrap_or("drak"),
+        inputs.swf_fetcher,
+    );
+
     let mut defaults = DefaultValueRegistry::with_well_known_path_defaults();
     if let Some(loc_map) = inputs.localization_map.clone() {
         if !loc_map.is_empty() {
@@ -264,11 +277,75 @@ pub fn compile_ir_for_binding(inputs: &PipelineInputs<'_>) -> Result<UiIrDocumen
         inputs.target_size,
         &defaults,
         selected_style_source,
+        selected_swf_source,
         &[],
         resolved_asset_refs,
         missing_asset_refs,
         100,
     ))
+}
+
+/// Render a UI binding by first compiling canonical IR and then consuming only IR.
+///
+/// This entrypoint is the Phase 2 bridge toward deterministic IR consumption:
+/// it shares binding/canvas resolution with [`compile_ir_for_binding`] and then
+/// renders from [`UiIrDocument`] without consulting raw BB scene records.
+pub fn render_for_binding_ir(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiError> {
+    let ir = compile_ir_for_binding(inputs)?;
+
+    let style = load_style_for_ir(&ir, inputs)?;
+    let mut defaults = DefaultValueRegistry::with_well_known_path_defaults();
+    if let Some(loc_map) = inputs.localization_map.clone()
+        && !loc_map.is_empty()
+    {
+        defaults.merge_localization(loc_map);
+    }
+    defaults.insert_localization("loc_placeholder", String::new());
+    defaults.insert_localization("loc_empty", String::new());
+
+    let swf_paths = ir
+        .selected_swf_source
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let assets = load_first_swf(&swf_paths, inputs.swf_fetcher);
+    let ctx = ComposeContext {
+        style: &style,
+        defaults: &defaults,
+        assets: &assets,
+    };
+    let atlas = crate::bb_atlas::AtlasLibrary::new(
+        inputs.asset_fetcher,
+        inputs.binding.manufacturer_id,
+    );
+
+    let image = match ir.renderer_hint {
+        UiRendererHint::Bb => render_ui_ir_document(&ir, &ctx, &atlas)?,
+        UiRendererHint::Swf | UiRendererHint::Hybrid => render_ui_ir_with_swf_overlay(
+            &ir,
+            &ctx,
+            &atlas,
+            ir.selected_swf_source.as_ref().map(|_| &assets),
+        )?,
+    };
+    encode_png(&image)
+}
+
+fn load_style_for_ir(
+    ir: &UiIrDocument,
+    inputs: &PipelineInputs<'_>,
+) -> Result<ManufacturerStyle, UiError> {
+    if let Some(style_name) = ir
+        .selected_style_source
+        .as_deref()
+        .and_then(|source| source.strip_prefix("canvas:"))
+    {
+        let style_record = inputs.canvas_fetcher.fetch_canvas_by_name(style_name)?;
+        let loader = StyleLoader::for_manufacturer(inputs.binding.manufacturer_id.unwrap_or("drak"));
+        return loader.parse_buildingblocks_style_record(&style_record);
+    }
+
+    Ok(load_style(inputs.binding.manufacturer_id, inputs.style_fetcher))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -280,6 +357,9 @@ pub fn compile_ir_for_binding(inputs: &PipelineInputs<'_>) -> Result<UiIrDocumen
 /// Prefers `content_canvas_guid` over `canvas_guid` when both are present.
 /// Returns [`UiError::RenderError`] when no canvas GUID is available.
 pub fn render_for_binding(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiError> {
+    return render_for_binding_ir(inputs);
+
+    #[allow(unreachable_code)]
     let b = inputs.binding;
 
     let effective_guid = b
@@ -751,6 +831,38 @@ fn load_first_swf(paths: &[String], fetcher: &dyn SwfFetcher) -> SwfAssetLibrary
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ];
     SwfAssetLibrary::new(minimal).expect("minimal SWF is always valid")
+}
+
+fn select_swf_source(
+    raw_root_json: &serde_json::Value,
+    resolved: &ResolvedCanvas,
+    manufacturer_id: &str,
+    fetcher: &dyn SwfFetcher,
+) -> Option<String> {
+    let flash_source = if canvas_has_flash_renderer(raw_root_json) {
+        let record_name = canvas_record_name(raw_root_json).unwrap_or("");
+        let candidates = flash_swf_candidates(record_name, manufacturer_id);
+        pick_first_valid_swf_source(&candidates, fetcher)
+    } else {
+        None
+    };
+
+    flash_source.or_else(|| {
+        let swf_paths = collect_swf_paths(resolved);
+        pick_first_valid_swf_source(&swf_paths, fetcher)
+    })
+}
+
+fn pick_first_valid_swf_source(paths: &[String], fetcher: &dyn SwfFetcher) -> Option<String> {
+    for path in paths {
+        let Ok(bytes) = fetcher.fetch_swf_bytes(path) else {
+            continue;
+        };
+        if SwfAssetLibrary::new(bytes).is_ok() {
+            return Some(path.clone());
+        }
+    }
+    None
 }
 
 fn bb_value_dimension(value: &crate::bb_scene::BbValue) -> f32 {

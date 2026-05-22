@@ -30,6 +30,8 @@ pub mod canvas;
 pub mod compose;
 pub mod defaults;
 pub mod error;
+pub mod hybrid_compose;
+pub mod ir_compose;
 pub mod pipeline;
 pub mod postprocess;
 pub mod style;
@@ -43,7 +45,7 @@ pub use error::UiError;
 // Re-export pipeline entry point.
 pub use pipeline::{
     CanvasFetcher, PipelineInputs, StyleFetcher, SwfFetcher, UiBindingView,
-    compile_ir_for_binding, render_for_binding,
+    compile_ir_for_binding, render_for_binding, render_for_binding_ir,
 };
 
 pub use canvas::{
@@ -59,6 +61,8 @@ pub use style::{CrtParams, ManufacturerStyle, StyleLoader};
 
 // Re-export composer API.
 pub use compose::{ComposeContext, ComposeTarget, encode_png, render_canvas, render_canvas_with_postprocess};
+
+pub use ir_compose::render_ui_ir_document;
 
 // Re-export post-process API.
 pub use postprocess::{PostProcessOptions, PostProcessor};
