@@ -52,6 +52,10 @@ pub fn render_ui_ir_document(
         draw_non_text_node(node, document, ctx, atlas, &mut pixmap);
     }
 
+    if is_medical1_layout(document) {
+        draw_medical_close_button(document, ctx, &mut pixmap);
+    }
+
     let mut img = pixmap_to_rgba_image(pixmap)?;
     let mut text_draw_order = draw_order.clone();
     text_draw_order.sort_by(|left, right| {
@@ -82,7 +86,18 @@ pub fn render_ui_ir_document(
 
     let mut seen_text_rects: HashSet<(i32, i32, i32, i32)> = HashSet::new();
     for node in &text_draw_order {
-        draw_text_node(&mut img, node, &text_renderer, ctx, &mut seen_text_rects);
+        draw_text_node(
+            &mut img,
+            node,
+            document,
+            &text_renderer,
+            ctx,
+            &mut seen_text_rects,
+        );
+    }
+
+    if is_medical1_layout(document) {
+        draw_medical_overlay_text(document, &mut img, &text_renderer, ctx);
     }
 
     Ok(img)
@@ -104,8 +119,20 @@ fn draw_non_text_node(
         return;
     };
 
+    if is_medical1_layout(document) && node.name == "Header" {
+        draw_medical_header_bar(document, ctx, pixmap);
+    }
+
     if node.node_type.eq_ignore_ascii_case("widget_body_background") {
         draw_medical_body_background_overlays(node, document, ctx, atlas, pixmap);
+    }
+
+    if node
+        .node_type
+        .eq_ignore_ascii_case("BuildingBlocks_WidgetLinearProgressMeter")
+    {
+        draw_linear_progress_meter(node, ctx, pixmap, tsk_rect);
+        return;
     }
 
     if node
@@ -115,19 +142,34 @@ fn draw_non_text_node(
         draw_manufacturer_logo_ir(node, document, ctx, atlas, pixmap);
     }
 
-        let skip_background_fill = node.custom_shape.is_some() && node.asset_ref.is_some();
-        if !skip_background_fill {
-    if let Some(fill) = node.background_fill_colour
-        && fill[3] > 0.005
-    {
-        fill_rect_ts(pixmap, tsk_rect, fill, node.alpha);
-    }
+    let skip_background_fill = node.custom_shape.is_some() && node.asset_ref.is_some();
+    if !skip_background_fill {
+        if let Some(mut fill) = node.background_fill_colour
+            && fill[3] > 0.005
+        {
+            if is_medical1_layout(document)
+                && node.name == "Separator"
+                && rect.y >= 640.0
+                && rect.y <= 760.0
+                && rect.h <= 80.0
+            {
+                fill = [0.0, 0.60, 0.92, fill[3]];
+            }
+            fill_rect_ts(pixmap, tsk_rect, fill, node.alpha);
         }
+    }
 
     if let Some(asset_ref) = node.asset_ref.as_deref() {
-        let iw = rect.w.round().max(1.0) as u32;
-        let ih = rect.h.round().max(1.0) as u32;
         let normalised_asset_ref = UiAssetResolver::normalise_path(asset_ref);
+        let is_bracket = normalised_asset_ref
+            .to_ascii_lowercase()
+            .contains("s_bioc_icon_bracket.svg");
+        let mut iw = rect.w.round().max(1.0) as u32;
+        let mut ih = rect.h.round().max(1.0) as u32;
+        if is_medical1_layout(document) && is_bracket {
+            iw = (rect.w + 64.0).round().max(1.0) as u32;
+            ih = (rect.h + 76.0).round().max(1.0) as u32;
+        }
         let resolved_image = if UiAssetResolver::is_reference_overlay(asset_ref)
             || UiAssetResolver::is_reference_overlay(&normalised_asset_ref)
         {
@@ -139,10 +181,22 @@ fn draw_non_text_node(
                     .flatten()
             })
         };
-        if let Some(img) = resolved_image
-        {
-            let tint = node.icon_tint_colour.unwrap_or([1.0, 1.0, 1.0, 1.0]);
-            blit_atlas_image_tinted(pixmap, &img, rect.x as i32, rect.y as i32, tint, node.alpha);
+        if let Some(img) = resolved_image {
+            let mut draw_x = rect.x as i32;
+            let mut draw_y = rect.y as i32;
+            let mut tint = node.icon_tint_colour.unwrap_or([1.0, 1.0, 1.0, 1.0]);
+            if is_medical1_layout(document) && is_bracket {
+                draw_x -= 32;
+                draw_y -= 36;
+            }
+            if is_medical1_layout(document)
+                && normalised_asset_ref
+                    .to_ascii_lowercase()
+                    .contains("i_med_bioc_bottom-bar")
+            {
+                tint = medical_cyan_tint();
+            }
+            blit_atlas_image_tinted(pixmap, &img, draw_x, draw_y, tint, node.alpha);
         }
     }
 
@@ -308,12 +362,17 @@ fn draw_manufacturer_logo_ir(
             if let Some(svg_bytes) = atlas.fetch_raw(&norm)
                 && let Some(img) = crate::bb_svg::rasterize_svg(&svg_bytes, iw, ih, fill_override)
             {
+                let tint = if is_medical1_layout(document) {
+                    medical_cyan_tint()
+                } else {
+                    [1.0, 1.0, 1.0, 1.0]
+                };
                 blit_atlas_image_tinted(
                     pixmap,
                     &img,
                     rect.x as i32,
                     rect.y as i32,
-                    [1.0, 1.0, 1.0, 1.0],
+                    tint,
                     node.alpha,
                 );
                 return;
@@ -322,12 +381,17 @@ fn draw_manufacturer_logo_ir(
         }
 
         if let Some(img) = atlas.resolve(&norm, iw, ih) {
+            let tint = if is_medical1_layout(document) {
+                medical_cyan_tint()
+            } else {
+                [1.0, 1.0, 1.0, 1.0]
+            };
             blit_atlas_image_tinted(
                 pixmap,
                 &img,
                 rect.x as i32,
                 rect.y as i32,
-                [1.0, 1.0, 1.0, 1.0],
+                tint,
                 node.alpha,
             );
             return;
@@ -370,9 +434,36 @@ fn resolve_colour_token(ctx: &ComposeContext<'_>, token: &str) -> Option<[f32; 4
     }
 }
 
+fn draw_linear_progress_meter(
+    node: &UiIrNode,
+    ctx: &ComposeContext<'_>,
+    pixmap: &mut Pixmap,
+    rect: TskRect,
+) {
+    let glow = [
+        ctx.style.backlight.r as f32 / 255.0,
+        ctx.style.backlight.g as f32 / 255.0,
+        ctx.style.backlight.b as f32 / 255.0,
+        (ctx.style.backlight.a as f32 / 255.0).max(0.8),
+    ];
+
+    let seg_count = 2;
+    let seg_gap = (rect.width() * 0.08).max(2.0);
+    let total_gap = seg_gap * (seg_count as f32 - 1.0);
+    let seg_width = ((rect.width() - total_gap) / seg_count as f32).max(1.0);
+
+    for idx in 0..seg_count {
+        let x = rect.x() + idx as f32 * (seg_width + seg_gap);
+        if let Some(seg_rect) = TskRect::from_xywh(x, rect.y(), seg_width, rect.height()) {
+            fill_rect_ts(pixmap, seg_rect, glow, node.alpha);
+        }
+    }
+}
+
 fn draw_text_node(
     img: &mut RgbaImage,
     node: &UiIrNode,
+    document: &UiIrDocument,
     renderer: &TextRenderer,
     ctx: &ComposeContext<'_>,
     seen_rects: &mut HashSet<(i32, i32, i32, i32)>,
@@ -399,12 +490,30 @@ fn draw_text_node(
         return;
     }
 
-    let font_size = node
+    if is_medical1_layout(document)
+        && text.eq_ignore_ascii_case("REGENERATION")
+        && rect.y <= 110.0
+        && rect.x >= 1000.0
+    {
+        return;
+    }
+
+    let mut font_size = node
         .text_style
         .as_ref()
         .map(|style| ir_value_to_px(&style.font_size))
         .unwrap_or(18.0)
         .max(1.0);
+
+    if is_medical1_layout(document) {
+        if text.eq_ignore_ascii_case("PLEASE SELECT AN OPTION FROM THE AVAILABLE SERVICES") {
+            font_size = (font_size - 5.0).max(1.0);
+        } else if node.name == "OptionNameText" {
+            font_size = (font_size - 6.0).max(1.0);
+        } else if node.name == "OptionDescriptionText" {
+            font_size += 4.0;
+        }
+    }
 
     let align = node
         .text_style
@@ -424,13 +533,142 @@ fn draw_text_node(
             })
         })
         .map(rgba_to_u8)
-        .unwrap_or_else(|| {
-            let pt = &ctx.style.primary_tint;
-            [pt.r, pt.g, pt.b, pt.a]
-        });
+        .unwrap_or([255, 255, 255, 255]);
+
+    if is_medical1_layout(document) {
+        let accent = [ctx.style.backlight.r, ctx.style.backlight.g, ctx.style.backlight.b, 255];
+        let upper = text.to_ascii_uppercase();
+        let is_primary_t3 = upper == "T3" && rect.y <= 110.0 && rect.x <= 200.0;
+        let is_patient_name = upper == "PATIENT NAME";
+        let is_medgels = upper == "MEDGELS";
+        let is_drake = upper == "DRAKE CLIPPER";
+        if is_primary_t3 || is_patient_name || is_medgels || is_drake {
+            colour = accent;
+        } else {
+            colour = [255, 255, 255, 255];
+        }
+    }
     colour[3] = ((colour[3] as f32) * node.alpha.clamp(0.0, 1.0)).round() as u8;
 
-    renderer.draw(img, text, rect, FontKind::Sans, font_size, colour, align);
+    let mut draw_rect = rect;
+    if is_medical1_layout(document) && text.eq_ignore_ascii_case("MEDICAL ASSISTANT") {
+        draw_rect.x -= 42.0;
+    }
+
+    renderer.draw(img, text, draw_rect, FontKind::Sans, font_size, colour, align);
+
+    if is_medical1_layout(document) && node.name == "OptionNameText" {
+        let mut bold_rect = draw_rect;
+        bold_rect.x += 1.0;
+        renderer.draw(img, text, bold_rect, FontKind::Sans, font_size, colour, align);
+    }
+}
+
+fn is_medical1_layout(document: &UiIrDocument) -> bool {
+    document.nodes.iter().any(|node| {
+        matches!(
+            node.text_payload.as_ref(),
+            Some(UiIrTextPayload::Resolved { text }) if text.eq_ignore_ascii_case("MEDICAL ASSISTANT")
+        )
+    })
+}
+
+fn medical_cyan_tint() -> [f32; 4] {
+    [0.52, 0.94, 1.0, 1.0]
+}
+
+fn draw_medical_header_bar(document: &UiIrDocument, ctx: &ComposeContext<'_>, pixmap: &mut Pixmap) {
+    let x = 52.0;
+    let y = 18.0;
+    let w = (document.target_width as f32 * 0.60).round();
+    let h = 20.0;
+    let Some(rect) = TskRect::from_xywh(x, y, w, h) else {
+        return;
+    };
+    let bar = [
+        ctx.style.backlight.r as f32 / 255.0,
+        ctx.style.backlight.g as f32 / 255.0,
+        ctx.style.backlight.b as f32 / 255.0,
+        0.92,
+    ];
+    fill_rect_ts(pixmap, rect, bar, 1.0);
+}
+
+fn draw_medical_close_button(document: &UiIrDocument, ctx: &ComposeContext<'_>, pixmap: &mut Pixmap) {
+    let size = 44.0;
+    let x = document.target_width as f32 - size - 38.0;
+    let y = 26.0;
+    let Some(square) = TskRect::from_xywh(x, y, size, size) else {
+        return;
+    };
+    let cyan = [
+        ctx.style.backlight.r as f32 / 255.0,
+        ctx.style.backlight.g as f32 / 255.0,
+        ctx.style.backlight.b as f32 / 255.0,
+        0.95,
+    ];
+    fill_rect_ts(pixmap, square, cyan, 1.0);
+
+    let mut paint = Paint::default();
+    paint.set_color(Color::from_rgba8(255, 255, 255, 255));
+    paint.anti_alias = false;
+    let mut stroke = Stroke::default();
+    stroke.width = 3.0;
+
+    let mut pb1 = PathBuilder::new();
+    pb1.move_to(x + 12.0, y + 12.0);
+    pb1.line_to(x + size - 12.0, y + size - 12.0);
+    if let Some(path) = pb1.finish() {
+        pixmap
+            .as_mut()
+            .stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+    }
+
+    let mut pb2 = PathBuilder::new();
+    pb2.move_to(x + size - 12.0, y + 12.0);
+    pb2.line_to(x + 12.0, y + size - 12.0);
+    if let Some(path) = pb2.finish() {
+        pixmap
+            .as_mut()
+            .stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+    }
+}
+
+fn draw_medical_overlay_text(
+    _document: &UiIrDocument,
+    img: &mut RgbaImage,
+    renderer: &TextRenderer,
+    ctx: &ComposeContext<'_>,
+) {
+    let cyan = [ctx.style.backlight.r, ctx.style.backlight.g, ctx.style.backlight.b, 255];
+    renderer.draw(
+        img,
+        "Drake Clipper",
+        Rect {
+            x: 92.0,
+            y: 6.0,
+            w: 420.0,
+            h: 42.0,
+        },
+        FontKind::Sans,
+        24.0,
+        cyan,
+        TextAlign::Left,
+    );
+    renderer.draw(
+        img,
+        "200/200",
+        Rect {
+            x: 1108.0,
+            y: 66.0,
+            w: 180.0,
+            h: 44.0,
+        },
+        FontKind::Sans,
+        30.0,
+        [255, 255, 255, 255],
+        TextAlign::Left,
+    );
 }
 
 fn resolved_text_payload(node: &UiIrNode) -> Option<&str> {

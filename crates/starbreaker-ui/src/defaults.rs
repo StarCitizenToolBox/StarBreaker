@@ -114,6 +114,16 @@ impl DefaultValueRegistry {
         // view; operations add +1 to the min tier, so seed inputs as 2.
         reg.insert_path("CloneLocationInfo/MedicalTier", Value::Int(2));
         reg.insert_path("Bed/MedBed/MedBedStatus/MedicalTier", Value::Int(2));
+        // Header medgel counters (top-right gauge and 200/200 label cluster).
+        reg.insert_path("Bed/MedBed/MedBedStatus/containerOccupancy", Value::Int(200));
+        reg.insert_path("Bed/MedBed/MedBedStatus/containerCapacity", Value::Int(200));
+        // Base-screen state flags used by medical header title switching.
+        reg.insert_path("state.BaseScreens.Heal", Value::Bool(false));
+        reg.insert_path("state.BaseScreens.PerformingSurgery", Value::Bool(false));
+        reg.insert_path("state.BaseScreens.ConfirmMoreInjuries", Value::Bool(false));
+        reg.insert_path("state.BaseScreens.ConfirmNoInjuries", Value::Bool(false));
+        reg.insert_path("state.BaseScreens.CloneMe", Value::Bool(false));
+        reg.insert_path("state.BaseScreens.Admin", Value::Bool(false));
 
         // ── Static localization fallback ─────────────────────────────────────
         //
