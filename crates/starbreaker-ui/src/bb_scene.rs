@@ -282,6 +282,8 @@ pub struct BbText {
 pub struct BbIcon {
     /// Custom icon path from `iconProperties.customIcon`, if non-empty.
     pub image_record: Option<String>,
+    /// Built-in icon preset from `iconProperties.iconPreset`.
+    pub icon_preset: Option<String>,
     /// Tint colour [r, g, b, a] in 0–1 range, if parseable.
     pub tint_colour: Option<[f32; 4]>,
 }
@@ -485,7 +487,13 @@ fn parse_node_with_id(raw: &serde_json::Value, id: BbNodeId) -> Result<BbNode, S
         None
     };
 
-    let icon = if matches!(ty, BbNodeType::WidgetIcon | BbNodeType::WidgetImage) {
+    let icon = if matches!(
+        ty,
+        BbNodeType::WidgetIcon
+            | BbNodeType::WidgetImage
+            | BbNodeType::ComponentGeneralButton
+            | BbNodeType::ComponentGeneralButtonSecondary
+    ) {
         Some(parse_icon(raw))
     } else {
         None
@@ -759,7 +767,19 @@ fn parse_icon(node: &serde_json::Value) -> BbIcon {
         .and_then(|ip| ip.get("color"))
         .and_then(|c| parse_colour(Some(c)));
 
-    BbIcon { image_record, tint_colour }
+    let icon_preset = node
+        .get("iconProperties")
+        .and_then(|ip| ip.get("iconPreset"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+
+    BbIcon {
+        image_record,
+        icon_preset,
+        tint_colour,
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

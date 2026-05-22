@@ -78,7 +78,15 @@ pub struct UiIrNode {
     pub icon_tint_colour: Option<[f32; 4]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon_tint_colour_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon_preset: Option<String>,
     pub text_payload: Option<UiIrTextPayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secondary_text_payload: Option<UiIrTextPayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secondary_text_style: Option<UiIrTextStyle>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meter_progress: Option<f32>,
     pub text_style: Option<UiIrTextStyle>,
     pub asset_ref: Option<String>,
     pub custom_shape: Option<UiIrCustomShape>,
@@ -383,6 +391,60 @@ pub fn compile_ui_ir_from_scene(
             None
         };
 
+        let secondary_text_payload = if node_type_name(&node.ty)
+            .eq_ignore_ascii_case("BuildingBlocks_ComponentLabelCaptionPair")
+        {
+            binding_resolver
+                .resolve_field_text(id, "ParamInput1", defaults)
+                .map(|text| UiIrTextPayload::Resolved { text })
+        } else {
+            None
+        };
+
+        let secondary_text_style = if secondary_text_payload.is_some() {
+            let alignment = node
+                .raw
+                .get("captionProperties")
+                .and_then(|cp| cp.get("textAlignment"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("Left")
+                .to_string();
+            let font_size = node
+                .raw
+                .get("captionProperties")
+                .and_then(|cp| cp.get("style"))
+                .and_then(|v| v.as_str())
+                .map(nominal_font_size_from_label_style)
+                .unwrap_or(18.0);
+
+            Some(UiIrTextStyle {
+                font_record: None,
+                resolved_font_record: None,
+                font_size: UiIrValue::Fixed { value: font_size },
+                alignment,
+                colour: None,
+                colour_token: None,
+            })
+        } else {
+            None
+        };
+
+        let meter_progress = if node_type_name(&node.ty)
+            .eq_ignore_ascii_case("BuildingBlocks_WidgetLinearProgressMeter")
+        {
+            binding_resolver
+                .resolve_field_number(id, "ParamInput0", defaults)
+                .map(|v| v.clamp(0.0, 1.0) as f32)
+                .or_else(|| {
+                    node.raw
+                        .get("progress")
+                        .and_then(|value| value.as_f64())
+                        .map(|value| value.clamp(0.0, 1.0) as f32)
+                })
+        } else {
+            None
+        };
+
         let asset_ref = collect_node_asset_refs(node)
             .into_iter()
             .next()
@@ -526,7 +588,11 @@ pub fn compile_ui_ir_from_scene(
             stroke_extent: node.raw.get("strokeExtent").and_then(|value| value.as_f64()).map(|value| value as f32),
             icon_tint_colour: node.icon.as_ref().and_then(|i| i.tint_colour),
             icon_tint_colour_token: icon_tint_colour_token_from_raw(&node.raw),
+            icon_preset: node.icon.as_ref().and_then(|i| i.icon_preset.clone()),
             text_payload,
+            secondary_text_payload,
+            secondary_text_style,
+            meter_progress,
             text_style,
             asset_ref,
             custom_shape,
@@ -1555,7 +1621,11 @@ mod tests {
                 stroke_extent: None,
                 icon_tint_colour: None,
                 icon_tint_colour_token: None,
+                icon_preset: None,
                 text_payload: None,
+                secondary_text_payload: None,
+                secondary_text_style: None,
+                meter_progress: None,
                 text_style: None,
                 asset_ref: None,
                 custom_shape: None,

@@ -30,6 +30,9 @@ pub struct BindingResolver {
     /// widget_node_id → ordered candidate input operation pointers from *Field
     /// ops (highest-priority first: LocalizedField > StringField > others).
     widget_to_input_ptrs: HashMap<BbNodeId, Vec<BbNodeId>>,
+    /// (widget_node_id, field_name) → ordered candidate input operation
+    /// pointers from matching *Field ops.
+    widget_field_to_input_ptrs: HashMap<(BbNodeId, String), Vec<BbNodeId>>,
     /// op pointer → raw operation object.
     ptr_to_op: HashMap<BbNodeId, serde_json::Value>,
     /// op pointer (Variable ops) → binding path.
@@ -105,6 +108,8 @@ impl BindingResolver {
         let mut widget_to_loc_key: HashMap<BbNodeId, String> = HashMap::new();
         let mut widget_to_string: HashMap<BbNodeId, String> = HashMap::new();
         let mut widget_to_input_prio_ptrs: HashMap<BbNodeId, Vec<(u8, BbNodeId)>> = HashMap::new();
+        let mut widget_field_to_input_prio_ptrs: HashMap<(BbNodeId, String), Vec<(u8, BbNodeId)>> =
+            HashMap::new();
         for op in operations {
             let type_str = op.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
             if type_str == "_SynthLocalizedWidget_" {
@@ -138,6 +143,11 @@ impl BindingResolver {
                 let widget_ptr = parse_points_to_or_ptr(op.get("widget"));
                 let input_ptr = parse_points_to_or_ptr(op.get("input"));
                 if let (Some(w), Some(inp)) = (widget_ptr, input_ptr) {
+                    let field_name = op
+                        .get("field")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned)
+                        .unwrap_or_default();
                     let prio = if type_str.contains("LocalizedField") {
                         3
                     } else if type_str.contains("StringField") {
@@ -146,6 +156,12 @@ impl BindingResolver {
                         1
                     };
                     widget_to_input_prio_ptrs.entry(w).or_default().push((prio, inp));
+                    if !field_name.is_empty() {
+                        widget_field_to_input_prio_ptrs
+                            .entry((w, field_name))
+                            .or_default()
+                            .push((prio, inp));
+                    }
                     if let Some(path) = ptr_to_path.get(&inp) {
                         widget_to_path.insert(w, path.clone());
                     }
@@ -167,10 +183,24 @@ impl BindingResolver {
             widget_to_input_ptrs.insert(widget, ordered);
         }
 
+        let mut widget_field_to_input_ptrs: HashMap<(BbNodeId, String), Vec<BbNodeId>> =
+            HashMap::new();
+        for (key, mut pairs) in widget_field_to_input_prio_ptrs {
+            pairs.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            let mut ordered: Vec<BbNodeId> = Vec::new();
+            for (_, ptr) in pairs {
+                if !ordered.contains(&ptr) {
+                    ordered.push(ptr);
+                }
+            }
+            widget_field_to_input_ptrs.insert(key, ordered);
+        }
+
         Self {
             widget_to_path,
             widget_to_loc_key,
             widget_to_input_ptrs,
+            widget_field_to_input_ptrs,
             ptr_to_op,
             ptr_to_path,
             widget_to_string,
@@ -202,6 +232,64 @@ impl BindingResolver {
     /// Resolve non-text string bindings for a widget (e.g. ImagePath fields).
     pub fn resolve_string_binding(&self, node_id: BbNodeId) -> Option<&str> {
         self.widget_to_string.get(&node_id).map(|s| s.as_str())
+    }
+
+    /// Resolve a localized/string display value for a specific widget field
+    /// (for example `ParamInput1` on label-caption components).
+    pub fn resolve_field_text(
+        &self,
+        node_id: BbNodeId,
+        field: &str,
+        defaults: &DefaultValueRegistry,
+    ) -> Option<String> {
+        let input_ptrs = self
+            .widget_field_to_input_ptrs
+            .get(&(node_id, field.to_string()))?;
+
+        for &input_ptr in input_ptrs {
+            let mut seen = std::collections::HashSet::new();
+            if let Some(s) = self.eval_localized_ptr(input_ptr, defaults, &mut seen)
+                && !s.is_empty()
+            {
+                let cleaned = s.replace("//", "/");
+                return Some(cleaned);
+            }
+
+            let mut seen_num = std::collections::HashSet::new();
+            if let Some(n) = self.eval_number_ptr(input_ptr, defaults, &mut seen_num) {
+                return Some(number_to_compact_string(n));
+            }
+
+            let mut seen_int = std::collections::HashSet::new();
+            if let Some(i) = self.eval_integer_ptr(input_ptr, defaults, &mut seen_int) {
+                return Some(i.to_string());
+            }
+        }
+
+        None
+    }
+
+    /// Resolve a numeric value for a specific widget field.
+    pub fn resolve_field_number(
+        &self,
+        node_id: BbNodeId,
+        field: &str,
+        defaults: &DefaultValueRegistry,
+    ) -> Option<f64> {
+        let input_ptrs = self
+            .widget_field_to_input_ptrs
+            .get(&(node_id, field.to_string()))?;
+        for &input_ptr in input_ptrs {
+            let mut seen_num = std::collections::HashSet::new();
+            if let Some(n) = self.eval_number_ptr(input_ptr, defaults, &mut seen_num) {
+                return Some(n);
+            }
+            let mut seen_int = std::collections::HashSet::new();
+            if let Some(i) = self.eval_integer_ptr(input_ptr, defaults, &mut seen_int) {
+                return Some(i as f64);
+            }
+        }
+        None
     }
 
     /// Resolve display text with provenance for downstream formatting.
@@ -793,6 +881,15 @@ fn value_to_string(v: &Value) -> String {
     }
 }
 
+fn number_to_compact_string(n: f64) -> String {
+    if (n.fract()).abs() < f64::EPSILON {
+        format!("{:.0}", n)
+    } else {
+        let s = format!("{:.3}", n);
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
 fn parse_ptr(s: &str) -> Option<BbNodeId> {
     s.strip_prefix("ptr:").and_then(|n| n.parse().ok())
 }
@@ -823,6 +920,7 @@ mod tests {
             widget_to_path: Default::default(),
             widget_to_loc_key: Default::default(),
             widget_to_input_ptrs: Default::default(),
+            widget_field_to_input_ptrs: Default::default(),
             ptr_to_op: Default::default(),
             ptr_to_path: Default::default(),
             widget_to_string: Default::default(),

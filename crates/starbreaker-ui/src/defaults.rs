@@ -117,6 +117,11 @@ impl DefaultValueRegistry {
         // Header medgel counters (top-right gauge and 200/200 label cluster).
         reg.insert_path("Bed/MedBed/MedBedStatus/containerOccupancy", Value::Int(200));
         reg.insert_path("Bed/MedBed/MedBedStatus/containerCapacity", Value::Int(200));
+        // Header location binding used by the med-bed kiosk title row.
+        reg.insert_path(
+            "CloneLocationInfo/CurrentLocation/LocationName",
+            Value::Str("Drake Clipper".into()),
+        );
         // Base-screen state flags used by medical header title switching.
         reg.insert_path("state.BaseScreens.Heal", Value::Bool(false));
         reg.insert_path("state.BaseScreens.PerformingSurgery", Value::Bool(false));
@@ -124,6 +129,8 @@ impl DefaultValueRegistry {
         reg.insert_path("state.BaseScreens.ConfirmNoInjuries", Value::Bool(false));
         reg.insert_path("state.BaseScreens.CloneMe", Value::Bool(false));
         reg.insert_path("state.BaseScreens.Admin", Value::Bool(false));
+        // Popup state controls top-right close button visibility.
+        reg.insert_path("Popup/IsActive", Value::Bool(true));
 
         // ── Static localization fallback ─────────────────────────────────────
         //
