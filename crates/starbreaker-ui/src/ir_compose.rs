@@ -7,6 +7,7 @@
 
 use image::RgbaImage;
 use std::collections::HashSet;
+use std::sync::OnceLock;
 use tiny_skia::{Color, LineJoin, Paint, PathBuilder, Pixmap, PixmapPaint, Rect as TskRect, Stroke, Transform};
 
 use crate::bb_atlas::AtlasLibrary;
@@ -15,7 +16,13 @@ use crate::bb_layout::Rect;
 use crate::compose::ComposeContext;
 use crate::error::UiError;
 use crate::text::{FontKind, TextAlign, TextRenderer};
+use crate::swf_assets::FontGlyphSet;
 use crate::ui_ir::{UiIrBorder, UiIrDocument, UiIrNode, UiIrRect, UiIrTextPayload, UiIrValue, validate_ui_ir_document};
+
+// BB/Flash nominal font sizes render visually smaller with the bundled DejaVu
+// fallback fonts. Calibrate at compose time to match measured output.
+const TEXT_RENDER_SIZE_CALIBRATION: f32 = 1.5;
+const SWF_TEXT_RENDER_SIZE_CALIBRATION: f32 = 0.84;
 
 /// Render a generic BuildingBlocks IR document without consulting raw BB data.
 ///
@@ -562,12 +569,13 @@ fn draw_text_node(
         return;
     }
 
-    let font_size = node
+    let nominal_font_size = node
         .text_style
         .as_ref()
         .map(|style| ir_value_to_px(&style.font_size))
         .unwrap_or(18.0)
         .max(1.0);
+    let fallback_font_size = (nominal_font_size * TEXT_RENDER_SIZE_CALIBRATION).max(1.0);
 
     let align = node
         .text_style
@@ -591,31 +599,138 @@ fn draw_text_node(
 
     colour[3] = ((colour[3] as f32) * node.alpha.clamp(0.0, 1.0)).round() as u8;
 
-    renderer.draw(img, text, rect, FontKind::Sans, font_size, colour, align);
+    let selected_font = select_imported_ui_font(ctx, node);
+    let used_swf_font = selected_font.is_some_and(|(_, swf_font)| {
+        renderer.draw_swf_font(
+            img,
+            text,
+            rect,
+            swf_font,
+            (nominal_font_size * SWF_TEXT_RENDER_SIZE_CALIBRATION).max(1.0),
+            colour,
+            align,
+        )
+    });
+    if font_telemetry_enabled() {
+        if let Some((symbol, _)) = selected_font {
+            eprintln!(
+                "text-font node='{}' symbol='{}' swf_used={} text='{}'",
+                node.name,
+                symbol,
+                used_swf_font,
+                text
+            );
+        } else {
+            eprintln!(
+                "text-font node='{}' symbol='<none>' swf_used=false text='{}'",
+                node.name,
+                text
+            );
+        }
+    }
+    if !used_swf_font {
+        renderer.draw(img, text, rect, FontKind::Sans, fallback_font_size, colour, align);
+    }
 
     if let Some(UiIrTextPayload::Resolved { text: secondary }) = node.secondary_text_payload.as_ref() {
-        let secondary_font_size = node
+        let secondary_nominal_font_size = node
             .secondary_text_style
             .as_ref()
             .map(|style| ir_value_to_px(&style.font_size))
-            .unwrap_or(font_size)
+            .unwrap_or(nominal_font_size)
             .max(1.0);
+        let secondary_fallback_font_size =
+            (secondary_nominal_font_size * TEXT_RENDER_SIZE_CALIBRATION).max(1.0);
         let secondary_rect = Rect {
             x: rect.x + rect.w * 0.24,
             y: rect.y,
             w: rect.w * 0.30,
             h: rect.h,
         };
-        renderer.draw(
-            img,
-            secondary,
-            secondary_rect,
-            FontKind::Sans,
-            secondary_font_size,
-            [255, 255, 255, colour[3]],
-            TextAlign::Left,
-        );
+        let secondary_used_swf = selected_font.is_some_and(|(_, swf_font)| {
+            renderer.draw_swf_font(
+                img,
+                secondary,
+                secondary_rect,
+                swf_font,
+                (secondary_nominal_font_size * SWF_TEXT_RENDER_SIZE_CALIBRATION).max(1.0),
+                [255, 255, 255, colour[3]],
+                TextAlign::Left,
+            )
+        });
+        if !secondary_used_swf {
+            renderer.draw(
+                img,
+                secondary,
+                secondary_rect,
+                FontKind::Sans,
+                secondary_fallback_font_size,
+                [255, 255, 255, colour[3]],
+                TextAlign::Left,
+            );
+        }
     }
+}
+
+fn font_telemetry_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("SB_UI_FONT_TELEMETRY")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
+            .unwrap_or(false)
+    })
+}
+
+fn select_imported_ui_font<'a>(
+    ctx: &'a ComposeContext<'_>,
+    node: &UiIrNode,
+) -> Option<(&'static str, &'a FontGlyphSet)> {
+    // Prefer non-manufacturer-branded UI fonts first; keep branded Drake as a
+    // fallback only when generic text families are unavailable.
+    let preferred_symbols: &[&str] = if node
+        .name
+        .to_ascii_lowercase()
+        .contains("title")
+    {
+        &["$Text1Med", "$Text1Bold", "$OutfitRegular", "$OutfitBold", "$CIGDrake"]
+    } else {
+        &["$Text1Book", "$Text1Med", "$OutfitRegular", "$Opensans", "$CIGDrake"]
+    };
+
+    for symbol in preferred_symbols {
+        if let Some(id) = ctx.assets.lookup_export(symbol)
+            && let Some(font) = ctx.assets.get_font(id)
+        {
+            return Some((symbol, font));
+        }
+    }
+
+    let preferred_font_names: &[(&str, &str)] = if node
+        .name
+        .to_ascii_lowercase()
+        .contains("title")
+    {
+        &[
+            ("Blender Pro Bold", "Blender Pro Bold"),
+            ("Blender Pro Medium", "Blender Pro Medium"),
+            ("Outfit", "Outfit"),
+            ("CIG Drake Font", "CIGDrake"),
+        ]
+    } else {
+        &[
+            ("Blender Pro Medium", "Blender Pro Medium"),
+            ("Blender Pro Book", "Blender Pro Book"),
+            ("Outfit", "Outfit"),
+            ("Open Sans", "Open Sans"),
+            ("CIG Drake Font", "CIGDrake"),
+        ]
+    };
+    for (query, label) in preferred_font_names {
+        if let Some(font) = ctx.assets.find_font_by_name(query) {
+            return Some((label, font));
+        }
+    }
+    None
 }
 
 fn derived_accent_tint(ctx: &ComposeContext<'_>) -> [f32; 4] {

@@ -590,6 +590,22 @@ impl SwfAssetLibrary {
         })
     }
 
+    /// Merge additional SWF bytes into this library.
+    ///
+    /// Useful for `ImportAssets` dependency chains where one SWF references
+    /// symbols (notably fonts) hosted in another SWF.
+    pub fn merge_swf_bytes(&mut self, swf_bytes: &[u8]) -> Result<(), UiError> {
+        self.bitmaps.extend(extract_bitmaps(swf_bytes)?);
+        self.shapes.extend(extract_shapes(swf_bytes)?);
+        self.fonts.extend(extract_fonts(swf_bytes)?);
+
+        for (name, id) in extract_exported_symbols(swf_bytes)? {
+            self.exports.entry(name).or_insert(id);
+        }
+
+        Ok(())
+    }
+
     /// SHA-256 of the raw SWF bytes (hex-encoded).
     ///
     /// Suitable for use as a content-addressed cache key shared across canvases that
@@ -611,6 +627,14 @@ impl SwfAssetLibrary {
     /// Retrieve a font glyph set by character id.
     pub fn get_font(&self, id: CharacterId) -> Option<&FontGlyphSet> {
         self.fonts.get(&id)
+    }
+
+    /// Lookup a font by case-insensitive name match.
+    pub fn find_font_by_name(&self, query: &str) -> Option<&FontGlyphSet> {
+        let q = query.to_ascii_lowercase();
+        self.fonts
+            .values()
+            .find(|font| font.name.eq_ignore_ascii_case(&q) || font.name.to_ascii_lowercase().contains(&q))
     }
 
     /// Resolve a linkage name (from `ExportAssets` or `SymbolClass`) to a character id.

@@ -5,11 +5,11 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::bb_bindings::BindingResolver;
 use crate::bb_layout;
-use crate::bb_scene::{BbNode, BbNodeType, BbScene, BbValue};
+use crate::bb_scene::{BbNode, BbNodeId, BbNodeType, BbScene, BbValue};
 use crate::defaults::DefaultValueRegistry;
 use crate::pipeline::CanvasFetcher;
 
@@ -285,6 +285,7 @@ pub fn compile_ui_ir_from_scene(
         .min(100);
 
     let mut warnings = Vec::new();
+    let style_font_sizes = collect_style_font_sizes(scene);
     if scene.roots.is_empty() {
         warnings.push("scene has no root nodes".to_string());
     }
@@ -352,7 +353,15 @@ pub fn compile_ui_ir_from_scene(
                     .font_record
                     .as_deref()
                     .and_then(|record_ref| resolve_record(canvas_fetcher, &[record_ref])),
-                font_size: resolve_effective_font_size(node, text),
+                font_size: resolve_effective_font_size(
+                    id,
+                    node,
+                    text,
+                    scene,
+                    &binding_resolver,
+                    defaults,
+                    &style_font_sizes,
+                ),
                 alignment: text.alignment.clone(),
                 colour: text.colour.or_else(|| fill_colour_from_raw_for_text(&node.raw)),
                 colour_token: text_colour_token_from_raw(&node.raw),
@@ -371,12 +380,14 @@ pub fn compile_ui_ir_from_scene(
                 .unwrap_or("Left")
                 .to_string();
 
-            let font_size = node
-                .raw
-                .get("fontSize")
-                .or_else(|| node.raw.get("FontSize"))
-                .and_then(|v| v.as_f64())
-                .map(|value| value as f32)
+            let font_size = hardcoded_textfield_font_size_exception(node)
+                .or_else(|| {
+                    node.raw
+                        .get("fontSize")
+                        .or_else(|| node.raw.get("FontSize"))
+                        .and_then(|v| v.as_f64())
+                        .map(|value| value as f32)
+                })
                 .unwrap_or(18.0);
 
             Some(UiIrTextStyle {
@@ -850,19 +861,181 @@ fn fill_colour_from_raw_for_text(raw: &serde_json::Value) -> Option<[f32; 4]> {
     Some([r, g, b, a])
 }
 
-fn resolve_effective_font_size(node: &crate::bb_scene::BbNode, text: &crate::bb_scene::BbText) -> UiIrValue {
-    // Explicit `fontSize` field on the raw node wins (same check as compose.rs).
-    let has_explicit_font_size = node
+fn resolve_effective_font_size(
+    node_id: BbNodeId,
+    node: &crate::bb_scene::BbNode,
+    text: &crate::bb_scene::BbText,
+    scene: &BbScene,
+    binding_resolver: &BindingResolver,
+    defaults: &DefaultValueRegistry,
+    style_font_sizes: &HashMap<String, f32>,
+) -> UiIrValue {
+    if let Some(exception_font_size) = hardcoded_textfield_font_size_exception(node) {
+        return UiIrValue::Fixed {
+            value: exception_font_size,
+        };
+    }
+
+    // Prefer the latest raw font size because style/brand modifiers are applied
+    // after parse_text and can update FontSize without mutating BbText.
+    if let Some(raw_font_size) = font_size_from_raw(node) {
+        return raw_font_size;
+    }
+
+    // Numeric binding operations can drive FontSize without mutating node.raw.
+    if let Some(bound_font_size) = binding_resolver.resolve_field_number(node_id, "FontSize", defaults) {
+        if bound_font_size.is_finite() && bound_font_size > 0.0 {
+            return UiIrValue::Fixed {
+                value: bound_font_size as f32,
+            };
+        }
+    }
+
+    // If this node has no explicit size, borrow the scene-derived size for its
+    // label style (when any sibling with the same style has an authored FontSize).
+    if let Some(style_name) = label_style_name_from_node_or_ancestors(node_id, node, scene) {
+        if let Some(size) = style_font_sizes.get(style_name.as_str()) {
+            return UiIrValue::Fixed { value: *size };
+        }
+    }
+
+    // Fall through to whatever parse_text stored.
+    convert_bb_value(&text.font_size)
+}
+
+fn font_size_from_raw(node: &crate::bb_scene::BbNode) -> Option<UiIrValue> {
+    let value = node
         .raw
         .get("fontSize")
         .or_else(|| node.raw.get("FontSize"))
-        .is_some();
-    if has_explicit_font_size {
-        return convert_bb_value(&text.font_size);
+        .or_else(|| {
+            node.raw
+                .get("modifiers")
+                .and_then(|mods| mods.get("fontSize").or_else(|| mods.get("FontSize")))
+        })?;
+
+    if let Some(number) = value.as_f64() {
+        return Some(UiIrValue::Fixed {
+            value: number as f32,
+        });
     }
 
-    // Fall through to whatever `parse_text` stored.
-    convert_bb_value(&text.font_size)
+    let obj = value.as_object()?;
+    let raw_value = obj.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let behavior = obj
+        .get("behavior")
+        .and_then(|b| b.as_str())
+        .unwrap_or("Fixed");
+    Some(match behavior {
+        "Fixed" => UiIrValue::Fixed { value: raw_value },
+        "Percent" => UiIrValue::Percent { value: raw_value },
+        other => UiIrValue::Other {
+            value: raw_value,
+            behavior: other.to_owned(),
+        },
+    })
+}
+
+fn font_size_fixed_value_from_raw(node: &crate::bb_scene::BbNode) -> Option<f32> {
+    match font_size_from_raw(node)? {
+        UiIrValue::Fixed { value } => Some(value),
+        _ => None,
+    }
+}
+
+fn label_style_name_from_raw(node: &crate::bb_scene::BbNode) -> Option<String> {
+    node.raw
+        .get("labelProperties")
+        .and_then(|v| v.get("style"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+fn node_has_style_tag_uuid(node: &crate::bb_scene::BbNode, needle: &str) -> bool {
+    node.raw
+        .get("styleTags")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter().any(|tag| {
+                tag.get("_RecordId_")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|id| id.eq_ignore_ascii_case(needle))
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn hardcoded_textfield_font_size_exception(node: &crate::bb_scene::BbNode) -> Option<f32> {
+    // User-approved temporary exception while preset/tag-driven text sizing is
+    // reconstructed from source data end-to-end.
+    let style = label_style_name_from_raw(node)?;
+    match style.as_str() {
+        "Title4" => Some(56.0),
+        "Heading3" => Some(21.0),
+        "Heading2" => Some(18.0),
+        "Heading6" => {
+            if node_has_style_tag_uuid(node, "e6003a83-9795-4478-a61c-349f14016e5b") {
+                Some(18.0)
+            } else {
+                None
+            }
+        }
+        "Heading1" => {
+            if node_has_style_tag_uuid(node, "0964d22f-3a22-4052-92e4-eaf77f975423") {
+                Some(28.0)
+            } else {
+                Some(37.0)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn label_style_name_from_node_or_ancestors(
+    node_id: BbNodeId,
+    node: &crate::bb_scene::BbNode,
+    scene: &BbScene,
+) -> Option<String> {
+    if let Some(style) = label_style_name_from_raw(node) {
+        return Some(style);
+    }
+
+    let mut current = scene.nodes.get(&node_id).and_then(|n| n.parent);
+    while let Some(parent_id) = current {
+        let parent = scene.nodes.get(&parent_id)?;
+        if let Some(style) = label_style_name_from_raw(parent) {
+            return Some(style);
+        }
+        current = parent.parent;
+    }
+    None
+}
+
+fn collect_style_font_sizes(scene: &BbScene) -> HashMap<String, f32> {
+    let mut values_by_style: HashMap<String, Vec<f32>> = HashMap::new();
+
+    for node in scene.nodes.values() {
+        let Some(style_name) = label_style_name_from_raw(node) else {
+            continue;
+        };
+        let Some(value) = font_size_fixed_value_from_raw(node) else {
+            continue;
+        };
+        if value > 0.0 {
+            values_by_style.entry(style_name).or_default().push(value);
+        }
+    }
+
+    values_by_style
+        .into_iter()
+        .map(|(style, mut values)| {
+            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let median = values[values.len() / 2];
+            (style, median)
+        })
+        .collect()
 }
 
 fn resolve_record(
@@ -1654,6 +1827,270 @@ mod tests {
         assert_eq!(node.anchor, [0.25, 0.75]);
         assert_eq!(node.pivot, [0.5, 0.5]);
         assert_eq!(node.style_tag_uuids.len(), 1);
+    }
+
+    #[test]
+    fn compile_ir_prefers_raw_font_size_over_stale_parsed_text_size() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.RawFontSize",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "label",
+                        "text": "READY",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 30.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let mut scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let node = scene.nodes.get_mut(&1).expect("node 1");
+        node.raw["FontSize"] = serde_json::Value::from(42.0);
+
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-raw-font-size",
+            None,
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = &ir.nodes[0];
+        let style = node.text_style.as_ref().expect("text style");
+        assert_eq!(style.font_size, UiIrValue::Fixed { value: 42.0 });
+    }
+
+    #[test]
+    fn compile_ir_uses_scene_style_font_size_when_node_font_size_is_missing() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.StyleFontSizeFallback",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "reference",
+                        "text": "REF",
+                        "FontSize": 40.0,
+                        "labelProperties": {"style": "Heading1"},
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 40.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "target",
+                        "text": "TARGET",
+                        "labelProperties": {"style": "Heading1"},
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 40.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-style-font-size-fallback",
+            None,
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let target = ir
+            .nodes
+            .iter()
+            .find(|node| node.name == "target")
+            .expect("target node");
+        let style = target.text_style.as_ref().expect("text style");
+        assert_eq!(style.font_size, UiIrValue::Fixed { value: 40.0 });
+    }
+
+    #[test]
+    fn compile_ir_reads_font_size_from_modifiers_projection() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.ModifierFontSize",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "label",
+                        "text": "READY",
+                        "modifiers": {"FontSize": 50.0},
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 30.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-modifier-font-size",
+            None,
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = &ir.nodes[0];
+        let style = node.text_style.as_ref().expect("text style");
+        assert_eq!(style.font_size, UiIrValue::Fixed { value: 50.0 });
+    }
+
+    #[test]
+    fn compile_ir_inherits_label_style_from_ancestor_for_font_size_fallback() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.AncestorStyleFallback",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "reference",
+                        "text": "REF",
+                        "FontSize": 40.0,
+                        "labelProperties": {"style": "Heading1"},
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 40.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_ComponentDisplayWidget",
+                        "name": "parent",
+                        "labelProperties": {"style": "Heading1"},
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 40.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:3",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "target",
+                        "text": "TARGET",
+                        "parent": "_PointsTo_:ptr:2",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 40.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-ancestor-style-fallback",
+            None,
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let target = ir
+            .nodes
+            .iter()
+            .find(|node| node.name == "target")
+            .expect("target node");
+        let style = target.text_style.as_ref().expect("text style");
+        assert_eq!(style.font_size, UiIrValue::Fixed { value: 40.0 });
+    }
+
+    #[test]
+    fn compile_ir_applies_hardcoded_textfield_font_size_exception() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.FontSizeException",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "label",
+                        "text": "READY",
+                        "labelProperties": {"style": "Heading3"},
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 30.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-font-size-exception",
+            None,
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = &ir.nodes[0];
+        let style = node.text_style.as_ref().expect("text style");
+        assert_eq!(style.font_size, UiIrValue::Fixed { value: 21.0 });
     }
 
     #[test]

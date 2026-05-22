@@ -66,6 +66,17 @@ const DRAW_METHODS: &[&str] = &[
     "createEmptyMovieClip",
 ];
 
+const TEXT_METHODS: &[&str] = &[
+    "defaultTextFormat",
+    "setTextFormat",
+    "textFormat",
+    "htmlText",
+    "text",
+    "font",
+    "size",
+    "autoSize",
+];
+
 // ── Stack-value category for static analysis ────────────────────────────────
 
 /// Coarse category of a value on the simulated AVM1 stack.
@@ -78,6 +89,10 @@ enum StackVal {
     /// Anything that requires runtime evaluation: register, variable,
     /// member access, arithmetic result, etc.
     Dynamic,
+    /// Symbolic origin for unresolved but named values (e.g. variables/members).
+    Symbol(String),
+    /// Tracked object identity for InitObject/NewObject flows.
+    ObjectRef(u32),
 }
 
 impl StackVal {
@@ -110,6 +125,22 @@ struct FnCtx<'a> {
     calls: Vec<CallSite>,
     /// Nested functions discovered (name → body bytes).
     nested_fns: Vec<(String, &'a [u8])>,
+    /// Simple variable environment for SetVariable/GetVariable.
+    variables: HashMap<String, StackVal>,
+    /// Tracked object storage keyed by synthetic object id.
+    objects: HashMap<u32, HashMap<String, StackVal>>,
+    /// Register values tracked via StoreRegister and Push(Register).
+    registers: HashMap<u8, StackVal>,
+    /// Next synthetic object id.
+    next_object_id: u32,
+    /// Static member writes observed via SetMember (field, value).
+    static_member_writes: Vec<(String, String)>,
+    /// Text-related SetMember writes (field, value-kind/value) including dynamic.
+    interesting_member_writes: Vec<(String, String)>,
+    /// Focused capture for writes that may influence text size flow.
+    font_size_related_writes: Vec<(String, String)>,
+    /// Variable writes that may feed text-size logic.
+    font_size_related_var_writes: Vec<(String, String)>,
     /// SWF version (needed to construct nested readers).
     version: u8,
 }
@@ -121,8 +152,23 @@ impl<'a> FnCtx<'a> {
             stack: vec![],
             calls: vec![],
             nested_fns: vec![],
+            variables: HashMap::new(),
+            objects: HashMap::new(),
+            registers: HashMap::new(),
+            next_object_id: 1,
+            static_member_writes: vec![],
+            interesting_member_writes: vec![],
+            font_size_related_writes: vec![],
+            font_size_related_var_writes: vec![],
             version,
         }
+    }
+
+    fn alloc_object(&mut self, seed: HashMap<String, StackVal>) -> u32 {
+        let id = self.next_object_id;
+        self.next_object_id += 1;
+        self.objects.insert(id, seed);
+        id
     }
 
     /// Resolve a `Value` to a `StackVal` given the current constant pool.
@@ -143,7 +189,11 @@ impl<'a> FnCtx<'a> {
             Value::Bool(_) => StackVal::Dynamic,
             Value::Undefined => StackVal::Dynamic,
             Value::Null => StackVal::Dynamic,
-            Value::Register(_) => StackVal::Dynamic,
+            Value::Register(reg) => self
+                .registers
+                .get(reg)
+                .cloned()
+                .unwrap_or(StackVal::Dynamic),
         }
     }
 
@@ -232,26 +282,115 @@ impl<'a> FnCtx<'a> {
 
             // ── Variable access — Dynamic ──────────────────────────────────
             Action::GetVariable => {
-                self.pop(); // variable name
-                self.push(StackVal::Dynamic);
+                let name = self.pop(); // variable name
+                if let StackVal::LiteralStr(name) = name {
+                    if let Some(value) = self.variables.get(name.as_str()) {
+                        self.push(value.clone());
+                    } else {
+                        self.push(StackVal::Symbol(format!("var:{name}")));
+                    }
+                } else {
+                    self.push(StackVal::Dynamic);
+                }
             }
 
             Action::SetVariable => {
-                self.pop(); // value
-                self.pop(); // name
+                let value = self.pop();
+                let name = self.pop();
+                if let StackVal::LiteralStr(name) = name {
+                    let lower = name.to_ascii_lowercase();
+                    if lower.contains("fontsize") || lower.contains("heading") || lower.contains("style") {
+                        let rendered = match &value {
+                            StackVal::LiteralNum(n) => format!("{n}"),
+                            StackVal::LiteralStr(s) => format!("\"{s}\""),
+                            StackVal::Symbol(s) => format!("SYM({s})"),
+                            StackVal::ObjectRef(id) => format!("OBJ#{id}"),
+                            StackVal::Dynamic => "DYN".to_string(),
+                        };
+                        self.font_size_related_var_writes.push((name.clone(), rendered));
+                    }
+                    self.variables.insert(name, value);
+                }
             }
 
             // ── Member access — Dynamic ────────────────────────────────────
             Action::GetMember => {
-                self.pop(); // member name
-                self.pop(); // object
-                self.push(StackVal::Dynamic);
+                let member = self.pop(); // member name
+                let object = self.pop(); // object
+                match (object, member) {
+                    (StackVal::ObjectRef(object_id), StackVal::LiteralStr(member_name)) => {
+                        let value = self
+                            .objects
+                            .get(&object_id)
+                            .and_then(|obj| obj.get(member_name.as_str()))
+                            .cloned()
+                            .unwrap_or(StackVal::Dynamic);
+                        self.push(value);
+                    }
+                    (StackVal::Symbol(obj), StackVal::LiteralStr(member_name)) => {
+                        self.push(StackVal::Symbol(format!("{obj}.{member_name}")));
+                    }
+                    (_, StackVal::LiteralStr(member_name)) => {
+                        self.push(StackVal::Symbol(format!("member:{member_name}")));
+                    }
+                    _ => self.push(StackVal::Dynamic),
+                }
             }
 
             Action::SetMember => {
-                self.pop(); // value
-                self.pop(); // member name
-                self.pop(); // object
+                let value = self.pop();
+                let member = self.pop();
+                let object = self.pop(); // object
+
+                if let (StackVal::ObjectRef(object_id), StackVal::LiteralStr(member_name)) =
+                    (&object, &member)
+                {
+                    if let Some(obj) = self.objects.get_mut(object_id) {
+                        obj.insert(member_name.clone(), value.clone());
+                    }
+                }
+
+                if let StackVal::LiteralStr(member_name) = member {
+                    let lower = member_name.to_ascii_lowercase();
+                    let rendered = match &value {
+                        StackVal::LiteralNum(n) => format!("{n}"),
+                        StackVal::LiteralStr(s) => format!("\"{s}\""),
+                        StackVal::Symbol(s) => format!("SYM({s})"),
+                        StackVal::ObjectRef(id) => format!("OBJ#{id}"),
+                        StackVal::Dynamic => "DYN".to_string(),
+                    };
+
+                    if lower.contains("fontsize")
+                        || lower == "size"
+                        || lower == "defaulttextformat"
+                    {
+                        self.font_size_related_writes
+                            .push((member_name.clone(), rendered.clone()));
+                    }
+
+                    if matches!(
+                        lower.as_str(),
+                        "size" | "font" | "textformat" | "defaulttextformat" | "autosize"
+                    ) {
+                        self.interesting_member_writes.push((member_name.clone(), rendered.clone()));
+                        if rendered != "DYN" {
+                            self.static_member_writes.push((member_name, rendered));
+                        }
+                    }
+
+                    if lower == "defaulttextformat" {
+                        if let StackVal::ObjectRef(format_object_id) = value {
+                            if let Some(format_obj) = self.objects.get(&format_object_id) {
+                                if let Some(StackVal::LiteralNum(size)) = format_obj.get("size") {
+                                    self.static_member_writes.push((
+                                        "defaultTextFormat.size".to_string(),
+                                        format!("{size}"),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // ── CallMethod — primary detection point ───────────────────────
@@ -282,6 +421,8 @@ impl<'a> FnCtx<'a> {
                     arg_kinds.push(match &arg {
                         StackVal::LiteralNum(n) => format!("{n}"),
                         StackVal::LiteralStr(s) => format!("\"{s}\""),
+                        StackVal::Symbol(s) => format!("SYM({s})"),
+                        StackVal::ObjectRef(id) => format!("OBJ#{id}"),
                         StackVal::Dynamic => "DYN".to_string(),
                     });
                 }
@@ -302,7 +443,10 @@ impl<'a> FnCtx<'a> {
                 let is_draw = DRAW_METHODS
                     .iter()
                     .any(|&m| m.eq_ignore_ascii_case(&method_name));
-                if is_draw || method_name == "<dynamic_method>" {
+                let is_text = TEXT_METHODS
+                    .iter()
+                    .any(|&m| m.eq_ignore_ascii_case(&method_name));
+                if is_draw || is_text || method_name == "<dynamic_method>" {
                     self.calls.push(CallSite {
                         method: method_name,
                         all_static,
@@ -352,8 +496,13 @@ impl<'a> FnCtx<'a> {
                 for _ in 0..arg_count.min(32) {
                     self.pop();
                 }
-                let _class_name = self.pop();
-                self.push(StackVal::Dynamic);
+                let class_name = self.pop();
+                let mut seed = HashMap::new();
+                if let StackVal::LiteralStr(class_name) = class_name {
+                    seed.insert("__class__".to_string(), StackVal::LiteralStr(class_name));
+                }
+                let id = self.alloc_object(seed);
+                self.push(StackVal::ObjectRef(id));
             }
 
             // ── DefineFunction / DefineFunction2 — recurse ─────────────────
@@ -368,9 +517,10 @@ impl<'a> FnCtx<'a> {
             }
 
             // ── StoreRegister ──────────────────────────────────────────────
-            Action::StoreRegister(_) => {
+            Action::StoreRegister(reg) => {
                 // Peek (doesn't consume the stack; the value is also stored).
-                // We don't track register contents, just leave top-of-stack as-is.
+                let value = self.peek();
+                self.registers.insert(reg.register, value);
             }
 
             // ── Object/array init ──────────────────────────────────────────
@@ -380,11 +530,20 @@ impl<'a> FnCtx<'a> {
                     StackVal::LiteralNum(n) => n as usize,
                     _ => 0,
                 };
+                let mut fields: Vec<(String, StackVal)> = Vec::new();
                 for _ in 0..count {
-                    self.pop(); // value
-                    self.pop(); // key
+                    let value = self.pop();
+                    let key = self.pop();
+                    if let StackVal::LiteralStr(key) = key {
+                        fields.push((key, value));
+                    }
                 }
-                self.push(StackVal::Dynamic);
+                let mut seed = HashMap::new();
+                for (key, value) in fields.into_iter().rev() {
+                    seed.insert(key, value);
+                }
+                let id = self.alloc_object(seed);
+                self.push(StackVal::ObjectRef(id));
             }
 
             Action::InitArray => {
@@ -517,6 +676,10 @@ impl<'a> FnCtx<'a> {
 struct FnResult {
     name: String,
     call_sites: Vec<CallSite>,
+    static_member_writes: Vec<(String, String)>,
+    interesting_member_writes: Vec<(String, String)>,
+    font_size_related_writes: Vec<(String, String)>,
+    font_size_related_var_writes: Vec<(String, String)>,
     children: Vec<FnResult>,
 }
 
@@ -555,6 +718,10 @@ fn analyse_action_block<'a>(
     FnResult {
         name: name.to_string(),
         call_sites: ctx.calls,
+        static_member_writes: ctx.static_member_writes,
+        interesting_member_writes: ctx.interesting_member_writes,
+        font_size_related_writes: ctx.font_size_related_writes,
+        font_size_related_var_writes: ctx.font_size_related_var_writes,
         children,
     }
 }
@@ -729,7 +896,11 @@ fn print_fn_result(result: &FnResult, depth: usize) {
         (t, d)
     };
 
-    if total == 0 && result.children.is_empty() {
+    let has_text_write_signals = !result.static_member_writes.is_empty()
+        || !result.interesting_member_writes.is_empty()
+        || !result.font_size_related_writes.is_empty();
+
+    if total == 0 && result.children.is_empty() && !has_text_write_signals {
         return;
     }
 
@@ -755,8 +926,48 @@ fn print_fn_result(result: &FnResult, depth: usize) {
                 println!("{indent}          stack args: {}", args.join(", "));
             }
         }
-    } else if !result.children.is_empty() {
-        println!("{indent}fn {fn_label}: (no draw calls, has children)");
+    } else if !result.children.is_empty() || has_text_write_signals {
+        println!("{indent}fn {fn_label}: (no draw calls, has nested/text signals)");
+    }
+
+    if !result.static_member_writes.is_empty() {
+        println!(
+            "{indent}  static text member writes: {}",
+            result.static_member_writes.len()
+        );
+        for (member, value) in result.static_member_writes.iter().take(16) {
+            println!("{indent}    {} = {}", member, value);
+        }
+    }
+
+    if !result.interesting_member_writes.is_empty() {
+        println!(
+            "{indent}  interesting text member writes (incl. dynamic): {}",
+            result.interesting_member_writes.len()
+        );
+        for (member, value) in result.interesting_member_writes.iter().take(16) {
+            println!("{indent}    {} := {}", member, value);
+        }
+    }
+
+    if !result.font_size_related_writes.is_empty() {
+        println!(
+            "{indent}  font-size related writes: {}",
+            result.font_size_related_writes.len()
+        );
+        for (member, value) in result.font_size_related_writes.iter().take(24) {
+            println!("{indent}    {} ~~ {}", member, value);
+        }
+    }
+
+    if !result.font_size_related_var_writes.is_empty() {
+        println!(
+            "{indent}  font-size related variable writes: {}",
+            result.font_size_related_var_writes.len()
+        );
+        for (name, value) in result.font_size_related_var_writes.iter().take(24) {
+            println!("{indent}    var {} ~~ {}", name, value);
+        }
     }
 
     for child in &result.children {
