@@ -6,7 +6,8 @@ use std::sync::Arc;
 use starbreaker_p4k::MappedP4k;
 use starbreaker_ui::pipeline::AssetFetcher;
 use starbreaker_ui::{
-    CanvasFetcher, PipelineInputs, StyleFetcher, SwfFetcher, UiBindingView, UiError,
+    CanvasFetcher, ManufacturerStyle, PipelineInputs, StyleFetcher, StyleLoader, SwfFetcher,
+    UiBindingView, UiError,
     render_for_binding,
 };
 
@@ -62,14 +63,44 @@ impl AssetFetcher for P4kFileFetcher {
     }
 }
 
-struct DummyStyleFetcher;
+struct FsStyleFetcher {
+    styles_root: PathBuf,
+}
 
-impl StyleFetcher for DummyStyleFetcher {
+impl FsStyleFetcher {
+    fn load_style_for_manufacturer(
+        &self,
+        manufacturer_id: &str,
+    ) -> Result<ManufacturerStyle, UiError> {
+        let id = manufacturer_id.to_ascii_lowercase();
+        let candidates = [
+            self.styles_root.join(format!("{id}.json")),
+            self.styles_root.join(format!("s_{id}_hud.json")),
+            self.styles_root.join(format!("s_{id}_env.json")),
+        ];
+
+        for path in candidates {
+            if !path.is_file() {
+                continue;
+            }
+            let record_json = load_canvas_json_from_path(&path)
+                .map_err(|e| UiError::RenderError(format!("failed to parse {}: {e}", path.display())))?;
+            return StyleLoader::for_manufacturer(&id).parse_buildingblocks_style_record(&record_json);
+        }
+
+        Err(UiError::RenderError(format!(
+            "missing BuildingBlocks style record for manufacturer '{manufacturer_id}' under {}",
+            self.styles_root.display()
+        )))
+    }
+}
+
+impl StyleFetcher for FsStyleFetcher {
     fn fetch_manufacturer_style(
         &self,
-        _manufacturer_id: &str,
-    ) -> Result<starbreaker_ui::ManufacturerStyle, UiError> {
-        Ok(starbreaker_ui::StyleLoader::for_manufacturer("drak").drake_amber_fallback())
+        manufacturer_id: &str,
+    ) -> Result<ManufacturerStyle, UiError> {
+        self.load_style_for_manufacturer(manufacturer_id)
     }
 }
 
@@ -229,7 +260,9 @@ fn main() -> Result<(), String> {
         }
     };
 
-    let style_fetcher = DummyStyleFetcher;
+    let style_fetcher = FsStyleFetcher {
+        styles_root: workspace.join("ships/dcb_canvas/libs/foundry/records/ui/buildingblocks/styles"),
+    };
     let file_fetcher = p4k.as_ref().map(|p4k| P4kFileFetcher { p4k: Arc::clone(p4k) });
 
     let medical1_guid = "534bab84-299b-479a-a4af-4469df112ea7";
