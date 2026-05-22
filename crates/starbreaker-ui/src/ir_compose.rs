@@ -7,7 +7,7 @@
 
 use image::RgbaImage;
 use std::collections::HashSet;
-use tiny_skia::{Color, Paint, PathBuilder, Pixmap, PixmapPaint, Rect as TskRect, Stroke, Transform};
+use tiny_skia::{Color, LineJoin, Paint, PathBuilder, Pixmap, PixmapPaint, Rect as TskRect, Stroke, Transform};
 
 use crate::bb_atlas::AtlasLibrary;
 use crate::bb_assets::UiAssetResolver;
@@ -100,7 +100,6 @@ pub fn render_ui_ir_document(
         draw_text_node(
             &mut img,
             node,
-            document,
             &text_renderer,
             ctx,
             &mut seen_text_rects,
@@ -126,12 +125,8 @@ fn draw_non_text_node(
         return;
     };
 
-    if is_medical1_layout(document) && node.name == "Header" {
-        draw_medical_header_bar(document, ctx, pixmap);
-    }
-
     if node.node_type.eq_ignore_ascii_case("widget_body_background") {
-        draw_medical_body_background_overlays(node, document, ctx, atlas, pixmap);
+        draw_clinic_body_background_overlays(node, document, ctx, atlas, pixmap);
     }
 
     if node
@@ -139,6 +134,11 @@ fn draw_non_text_node(
         .eq_ignore_ascii_case("BuildingBlocks_WidgetLinearProgressMeter")
     {
         draw_linear_progress_meter(node, ctx, pixmap, tsk_rect);
+        return;
+    }
+
+    if is_top_separator_candidate(node, rect, document) {
+        fill_rect_ts(pixmap, tsk_rect, derived_accent_tint(ctx), node.alpha);
         return;
     }
 
@@ -166,18 +166,18 @@ fn draw_non_text_node(
         if let Some(mut fill) = node.background_fill_colour
             && fill[3] > 0.005
         {
-            if is_medical1_layout(document)
-                && node.name == "Separator"
-                && rect.y >= 640.0
-                && rect.y <= 760.0
-                && rect.h <= 80.0
-            {
+            if is_header_canvas_candidate(node, rect, document) {
+                fill = [0.0, 0.0, 0.0, 0.0];
+            }
+            if is_header_root_overlay_candidate(node, rect, document) {
+                fill = [0.0, 0.0, 0.0, 0.0];
+            }
+            if is_footer_separator_candidate(node, rect, document) {
                 fill = [0.0, 0.60, 0.92, fill[3]];
             }
             fill_rect_ts(pixmap, tsk_rect, fill, node.alpha);
         }
-        if is_medical1_layout(document)
-            && node.name == "DescriptionBackground"
+        if is_description_background_candidate(node, rect, document)
             && node.background_fill_colour.is_none()
         {
             fill_rect_ts(pixmap, tsk_rect, [0.0, 0.0, 0.0, 0.28], node.alpha);
@@ -186,17 +186,16 @@ fn draw_non_text_node(
 
     if let Some(asset_ref) = node.asset_ref.as_deref() {
         let normalised_asset_ref = UiAssetResolver::normalise_path(asset_ref);
-        let is_bracket = normalised_asset_ref
-            .to_ascii_lowercase()
-            .contains("s_bioc_icon_bracket.svg");
+        let is_bracket = is_card_bracket_candidate(node, rect, document);
         let mut iw = rect.w.round().max(1.0) as u32;
         let mut ih = rect.h.round().max(1.0) as u32;
-        if is_medical1_layout(document) && is_bracket {
-            iw = (rect.w + 40.0).round().max(1.0) as u32;
-            ih = (rect.h + 48.0).round().max(1.0) as u32;
+        if is_bracket {
+            iw = (rect.w + 24.0).round().max(1.0) as u32;
+            ih = (rect.h + 28.0).round().max(1.0) as u32;
         }
         let resolved_image = if UiAssetResolver::is_reference_overlay(asset_ref)
             || UiAssetResolver::is_reference_overlay(&normalised_asset_ref)
+            || is_fullscreen_overlay_candidate(node, rect, document)
         {
             None
         } else {
@@ -210,16 +209,18 @@ fn draw_non_text_node(
             let mut draw_x = rect.x as i32;
             let mut draw_y = rect.y as i32;
             let mut tint = node.icon_tint_colour.unwrap_or([1.0, 1.0, 1.0, 1.0]);
-            if is_medical1_layout(document) && is_bracket {
-                draw_x -= 20;
-                draw_y -= 24;
+            if is_bracket {
+                draw_x -= 12;
+                draw_y -= 14;
             }
-            if is_medical1_layout(document)
-                && normalised_asset_ref
-                    .to_ascii_lowercase()
-                    .contains("i_med_bioc_bottom-bar")
+            if is_footer_brand_bar_candidate(node, rect, document) {
+                tint = derived_accent_tint(ctx);
+            }
+            if node
+                .node_type
+                .eq_ignore_ascii_case("BuildingBlocks_WidgetManufacturerLogo")
             {
-                tint = medical_cyan_tint();
+                tint = derived_accent_tint(ctx);
             }
             blit_atlas_image_tinted(pixmap, &img, draw_x, draw_y, tint, node.alpha);
         }
@@ -242,21 +243,25 @@ fn draw_non_text_node(
     }
 }
 
-fn draw_medical_body_background_overlays(
+fn draw_clinic_body_background_overlays(
     node: &UiIrNode,
     document: &UiIrDocument,
     ctx: &ComposeContext<'_>,
     atlas: &AtlasLibrary<'_>,
     pixmap: &mut Pixmap,
 ) {
-    let body_rect = Rect {
+    let full_rect = Rect {
         x: 0.0,
         y: 0.0,
         w: document.target_width as f32,
         h: document.target_height as f32,
     };
-    let body_iw = body_rect.w.round().max(1.0) as u32;
-    let body_ih = body_rect.h.round().max(1.0) as u32;
+    let body_rect = ir_rect_to_layout_rect(node.computed_rect);
+    if body_rect.w < 1.0 || body_rect.h < 1.0 {
+        return;
+    }
+    let gradient_iw = full_rect.w.round().max(1.0) as u32;
+    let gradient_ih = full_rect.h.round().max(1.0) as u32;
 
     let ir_brand_slug = brand_slug_from_ir(document, ctx);
     let med_brand = med_texture_brand_slug(&ir_brand_slug);
@@ -265,13 +270,13 @@ fn draw_medical_body_background_overlays(
     );
     let gradient_norm = UiAssetResolver::normalise_path(&gradient_path);
     if !UiAssetResolver::is_reference_overlay(&gradient_norm)
-        && let Some(img) = atlas.resolve(&gradient_norm, body_iw, body_ih)
+        && let Some(img) = atlas.resolve(&gradient_norm, gradient_iw, gradient_ih)
     {
         blit_atlas_image_tinted(
             pixmap,
             &img,
-            body_rect.x as i32,
-            body_rect.y as i32,
+            full_rect.x as i32,
+            full_rect.y as i32,
             [1.0, 1.0, 1.0, 1.0],
             node.alpha,
         );
@@ -289,22 +294,11 @@ fn draw_medical_body_background_overlays(
         return;
     };
 
-    let target_rect = document
-        .nodes
-        .iter()
-        .find(|candidate| candidate.name.eq_ignore_ascii_case("BGDots"))
-        .map(|candidate| ir_rect_to_layout_rect(candidate.computed_rect))
-        .or_else(|| {
-            document
-                .nodes
-                .iter()
-                .find(|candidate| candidate.name.eq_ignore_ascii_case("MainMenuCanvas"))
-                .map(|candidate| ir_rect_to_layout_rect(candidate.computed_rect))
-        });
+    let target_rect = content_scale_anchor_rect(document);
 
     let target_h = target_rect
         .map(|rect| {
-            let scale_y = (body_rect.h / rect.h.max(1.0)).max(1.0);
+            let scale_y = (full_rect.h / rect.h.max(1.0)).max(1.0);
             (source_h as f32 * scale_y).round().max(1.0) as u32
         })
         .unwrap_or(source_h);
@@ -322,35 +316,23 @@ fn draw_medical_body_background_overlays(
 }
 
 fn brand_slug_from_ir(document: &UiIrDocument, ctx: &ComposeContext<'_>) -> String {
-    let source = document
-        .selected_style_source
-        .as_deref()
-        .unwrap_or(&ctx.style.name)
+    let source = document.selected_style_source.as_deref().unwrap_or(&ctx.style.name);
+    let token = source
+        .split(':')
+        .next_back()
+        .unwrap_or(source)
+        .trim()
+        .trim_start_matches("s_")
         .to_ascii_lowercase();
 
-    if source.contains("s_bioc") || source.contains("bioc") {
-        "bioticorp".to_string()
-    } else if source.contains("s_rsi") || source.contains("rsi") {
-        "rsi".to_string()
-    } else if source.contains("s_aegs") || source.contains("aegs") {
-        "aegs".to_string()
-    } else if source.contains("s_drak") || source.contains("drak") {
-        "drak".to_string()
-    } else {
-        source
-            .split(':')
-            .next_back()
-            .unwrap_or("drak")
-            .trim_start_matches("s_")
-            .to_string()
-    }
+    token
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+        .collect::<String>()
 }
 
 fn med_texture_brand_slug(brand_slug: &str) -> &str {
-    match brand_slug {
-        "bioticorp" => "bioc",
-        other => other,
-    }
+    brand_slug
 }
 
 fn draw_manufacturer_logo_ir(
@@ -387,11 +369,7 @@ fn draw_manufacturer_logo_ir(
             if let Some(svg_bytes) = atlas.fetch_raw(&norm)
                 && let Some(img) = crate::bb_svg::rasterize_svg(&svg_bytes, iw, ih, fill_override)
             {
-                let tint = if is_medical1_layout(document) {
-                    medical_cyan_tint()
-                } else {
-                    [1.0, 1.0, 1.0, 1.0]
-                };
+                let tint = derived_accent_tint(ctx);
                 blit_atlas_image_tinted(
                     pixmap,
                     &img,
@@ -406,11 +384,7 @@ fn draw_manufacturer_logo_ir(
         }
 
         if let Some(img) = atlas.resolve(&norm, iw, ih) {
-            let tint = if is_medical1_layout(document) {
-                medical_cyan_tint()
-            } else {
-                [1.0, 1.0, 1.0, 1.0]
-            };
+            let tint = derived_accent_tint(ctx);
             blit_atlas_image_tinted(
                 pixmap,
                 &img,
@@ -475,14 +449,20 @@ fn draw_linear_progress_meter(
     let seg_count = 14;
     let progress = node.meter_progress.unwrap_or(1.0).clamp(0.0, 1.0);
     let mut active_count = ((seg_count as f32) * progress).round() as usize;
-    if node.name == "MedGelFillMeter" && active_count == 0 {
+    let rect_layout = Rect {
+        x: rect.x(),
+        y: rect.y(),
+        w: rect.width(),
+        h: rect.height(),
+    };
+    if is_compact_header_meter(node, rect_layout) && active_count == 0 {
         active_count = seg_count;
     }
     let seg_gap = (rect.width() * 0.02).max(1.0);
     let total_gap = seg_gap * (seg_count as f32 - 1.0);
     let seg_width = ((rect.width() - total_gap) / seg_count as f32).max(1.0);
-    let y = if node.name == "MedGelFillMeter" {
-        rect.y() - 48.0
+    let y = if is_compact_header_meter(node, rect_layout) {
+        rect.y() - 42.0
     } else {
         rect.y()
     };
@@ -498,9 +478,20 @@ fn draw_linear_progress_meter(
     }
 }
 
+fn is_compact_header_meter(node: &UiIrNode, rect: Rect) -> bool {
+    node.node_type
+        .eq_ignore_ascii_case("BuildingBlocks_WidgetLinearProgressMeter")
+        && rect.y <= 220.0
+        && rect.w <= 220.0
+        && rect.h <= 24.0
+}
+
 fn draw_general_x_button(ctx: &ComposeContext<'_>, pixmap: &mut Pixmap, rect: TskRect, alpha: f32) {
     let draw_rect = if rect.width() > 120.0 || rect.height() > 120.0 {
-        TskRect::from_xywh(rect.x() + rect.width() - 44.0, rect.y(), 44.0, 44.0).unwrap_or(rect)
+        let side = rect.width().min(rect.height()).clamp(36.0, 72.0);
+        let x = rect.x() + rect.width() - side;
+        let y = rect.y() + (rect.height() - side) * 0.5;
+        TskRect::from_xywh(x, y, side, side).unwrap_or(rect)
     } else {
         rect
     };
@@ -511,20 +502,38 @@ fn draw_general_x_button(ctx: &ComposeContext<'_>, pixmap: &mut Pixmap, rect: Ts
         ctx.style.backlight.b as f32 / 255.0,
         1.0,
     ];
-    draw_rect_stroke_ts(pixmap, draw_rect, cyan, 2.0, alpha);
+    let mut frame_pb = PathBuilder::new();
+    frame_pb.push_rect(draw_rect);
+    if let Some(frame_path) = frame_pb.finish() {
+        let mut frame_paint = Paint::default();
+        frame_paint.set_color(to_skia_color(cyan, alpha));
+        frame_paint.anti_alias = true;
 
-    let inset = (draw_rect.width().min(draw_rect.height()) * 0.28).max(6.0);
+        let mut frame_stroke = Stroke::default();
+        frame_stroke.width = (draw_rect.width() * 0.032).max(1.5);
+        frame_stroke.line_join = LineJoin::Round;
+
+        pixmap.as_mut().stroke_path(
+            &frame_path,
+            &frame_paint,
+            &frame_stroke,
+            Transform::identity(),
+            None,
+        );
+    }
+
+    let inset = (draw_rect.width().min(draw_rect.height()) * 0.24).max(4.0);
     let x0 = draw_rect.x() + inset;
     let y0 = draw_rect.y() + inset;
     let x1 = draw_rect.x() + draw_rect.width() - inset;
     let y1 = draw_rect.y() + draw_rect.height() - inset;
 
     let mut paint = Paint::default();
-    paint.set_color(to_skia_color(cyan, alpha));
-    paint.anti_alias = false;
+    paint.set_color(Color::from_rgba8(255, 255, 255, (alpha.clamp(0.0, 1.0) * 255.0) as u8));
+    paint.anti_alias = true;
 
     let mut stroke = Stroke::default();
-    stroke.width = 2.0;
+    stroke.width = (draw_rect.width() * 0.042).max(2.0);
 
     let mut pb1 = PathBuilder::new();
     pb1.move_to(x0, y0);
@@ -548,7 +557,6 @@ fn draw_general_x_button(ctx: &ComposeContext<'_>, pixmap: &mut Pixmap, rect: Ts
 fn draw_text_node(
     img: &mut RgbaImage,
     node: &UiIrNode,
-    document: &UiIrDocument,
     renderer: &TextRenderer,
     ctx: &ComposeContext<'_>,
     seen_rects: &mut HashSet<(i32, i32, i32, i32)>,
@@ -575,32 +583,12 @@ fn draw_text_node(
         return;
     }
 
-    if is_medical1_layout(document)
-        && text.eq_ignore_ascii_case("REGENERATION")
-        && rect.y <= 110.0
-        && rect.x >= 1000.0
-    {
-        return;
-    }
-
-    let mut font_size = node
+    let font_size = node
         .text_style
         .as_ref()
         .map(|style| ir_value_to_px(&style.font_size))
         .unwrap_or(18.0)
         .max(1.0);
-
-    if is_medical1_layout(document) {
-        if text.eq_ignore_ascii_case("PLEASE SELECT AN OPTION FROM THE AVAILABLE SERVICES") {
-            font_size = (font_size - 9.0).max(1.0);
-        } else if node.name == "OptionNameText" {
-            font_size = (font_size - 9.0).max(1.0);
-        } else if node.name == "OptionDescriptionText" {
-            font_size += 6.0;
-        } else if node.name == "LocationName" {
-            font_size = (font_size - 8.0).max(1.0);
-        }
-    }
 
     let align = node
         .text_style
@@ -622,36 +610,9 @@ fn draw_text_node(
         .map(rgba_to_u8)
         .unwrap_or([255, 255, 255, 255]);
 
-    if is_medical1_layout(document) {
-        let accent = [ctx.style.backlight.r, ctx.style.backlight.g, ctx.style.backlight.b, 255];
-        let upper = text.to_ascii_uppercase();
-        let is_primary_t3 = upper == "T3" && rect.y <= 110.0 && rect.x <= 200.0;
-        let is_patient_name = upper == "PATIENT NAME";
-        let is_medgels = upper == "MEDGELS";
-        let is_drake = upper == "DRAKE CLIPPER";
-        if is_primary_t3 || is_patient_name || is_medgels || is_drake {
-            colour = accent;
-        } else {
-            colour = [255, 255, 255, 255];
-        }
-    }
     colour[3] = ((colour[3] as f32) * node.alpha.clamp(0.0, 1.0)).round() as u8;
 
-    let mut draw_rect = rect;
-    if is_medical1_layout(document) && text.eq_ignore_ascii_case("MEDICAL ASSISTANT") {
-        draw_rect.x -= 56.0;
-    }
-    if is_medical1_layout(document) && node.name == "LocationName" {
-        draw_rect.y -= 30.0;
-    }
-
-    renderer.draw(img, text, draw_rect, FontKind::Sans, font_size, colour, align);
-
-    if is_medical1_layout(document) && node.name == "OptionNameText" {
-        let mut bold_rect = draw_rect;
-        bold_rect.x += 1.0;
-        renderer.draw(img, text, bold_rect, FontKind::Sans, font_size, colour, align);
-    }
+    renderer.draw(img, text, rect, FontKind::Sans, font_size, colour, align);
 
     if let Some(UiIrTextPayload::Resolved { text: secondary }) = node.secondary_text_payload.as_ref() {
         let secondary_font_size = node
@@ -678,34 +639,112 @@ fn draw_text_node(
     }
 }
 
-fn is_medical1_layout(document: &UiIrDocument) -> bool {
-    document.nodes.iter().any(|node| {
-        matches!(
-            node.text_payload.as_ref(),
-            Some(UiIrTextPayload::Resolved { text }) if text.eq_ignore_ascii_case("MEDICAL ASSISTANT")
-        )
-    })
-}
-
-fn medical_cyan_tint() -> [f32; 4] {
-    [0.52, 0.94, 1.0, 1.0]
-}
-
-fn draw_medical_header_bar(document: &UiIrDocument, ctx: &ComposeContext<'_>, pixmap: &mut Pixmap) {
-    let x = 52.0;
-    let y = 18.0;
-    let w = (document.target_width as f32 * 0.60).round();
-    let h = 16.0;
-    let Some(rect) = TskRect::from_xywh(x, y, w, h) else {
-        return;
-    };
-    let bar = [
+fn derived_accent_tint(ctx: &ComposeContext<'_>) -> [f32; 4] {
+    [
         ctx.style.backlight.r as f32 / 255.0,
         ctx.style.backlight.g as f32 / 255.0,
         ctx.style.backlight.b as f32 / 255.0,
-        0.72,
-    ];
-    fill_rect_ts(pixmap, rect, bar, 1.0);
+        1.0,
+    ]
+}
+
+fn is_top_separator_candidate(node: &UiIrNode, rect: Rect, document: &UiIrDocument) -> bool {
+    node.node_type
+        .eq_ignore_ascii_case("BuildingBlocks_WidgetSeparator")
+        && rect.y <= 40.0
+        && rect.h <= 24.0
+        && rect.w >= document.target_width as f32 * 0.45
+}
+
+fn is_header_root_overlay_candidate(node: &UiIrNode, rect: Rect, document: &UiIrDocument) -> bool {
+    node.parent_id.is_some()
+        && rect.y <= 2.0
+        && rect.h <= 120.0
+        && rect.w >= document.target_width as f32 * 0.95
+        && node.node_type.eq_ignore_ascii_case("display_widget")
+}
+
+fn is_fullscreen_overlay_candidate(node: &UiIrNode, rect: Rect, document: &UiIrDocument) -> bool {
+    node.node_type.eq_ignore_ascii_case("widget_image")
+        && node.parent_id.is_none()
+        && rect.x <= 1.0
+        && rect.y <= 1.0
+        && rect.w >= document.target_width as f32 * 0.95
+        && rect.h >= document.target_height as f32 * 0.95
+        && document
+            .nodes
+            .iter()
+            .any(|candidate| candidate.node_type.eq_ignore_ascii_case("widget_body_background"))
+}
+
+fn is_footer_brand_bar_candidate(node: &UiIrNode, rect: Rect, document: &UiIrDocument) -> bool {
+    let target_h = document.target_height as f32;
+    let target_w = document.target_width as f32;
+    node.node_type.eq_ignore_ascii_case("widget_image")
+        && rect.y >= target_h * 0.88
+        && rect.h <= target_h * 0.10
+        && rect.w >= target_w * 0.40
+        && rect.w <= target_w * 0.70
+}
+
+fn is_card_bracket_candidate(node: &UiIrNode, rect: Rect, document: &UiIrDocument) -> bool {
+    let target_w = document.target_width as f32;
+    let target_h = document.target_height as f32;
+    node.custom_shape.is_some()
+        && node.asset_ref.is_some()
+        && rect.w >= target_w * 0.30
+        && rect.h >= target_h * 0.10
+        && rect.h <= target_h * 0.30
+        && rect.y >= target_h * 0.15
+        && rect.y <= target_h * 0.85
+}
+
+fn is_header_canvas_candidate(node: &UiIrNode, rect: Rect, document: &UiIrDocument) -> bool {
+    node.node_type.eq_ignore_ascii_case("widget_canvas")
+        && rect.y <= 2.0
+        && rect.w >= document.target_width as f32 * 0.95
+        && rect.h <= document.target_height as f32 * 0.15
+}
+
+fn is_footer_separator_candidate(node: &UiIrNode, rect: Rect, document: &UiIrDocument) -> bool {
+    node.node_type.eq_ignore_ascii_case("display_widget")
+        && rect.y >= document.target_height as f32 * 0.58
+        && rect.y <= document.target_height as f32 * 0.75
+        && rect.h <= document.target_height as f32 * 0.08
+        && rect.w >= document.target_width as f32 * 0.35
+}
+
+fn is_description_background_candidate(node: &UiIrNode, rect: Rect, document: &UiIrDocument) -> bool {
+    node.node_type.eq_ignore_ascii_case("display_widget")
+        && rect.y >= document.target_height as f32 * 0.20
+        && rect.y <= document.target_height as f32 * 0.85
+        && rect.h >= document.target_height as f32 * 0.06
+        && rect.h <= document.target_height as f32 * 0.30
+        && rect.w >= document.target_width as f32 * 0.25
+}
+
+fn content_scale_anchor_rect(document: &UiIrDocument) -> Option<Rect> {
+    let target_w = document.target_width as f32;
+    let target_h = document.target_height as f32;
+
+    document
+        .nodes
+        .iter()
+        .filter(|node| node.node_type.eq_ignore_ascii_case("widget_canvas"))
+        .map(|node| ir_rect_to_layout_rect(node.computed_rect))
+        .filter(|rect| {
+            rect.w >= target_w * 0.25
+                && rect.h >= target_h * 0.12
+                && rect.w <= target_w * 0.98
+                && rect.h <= target_h * 0.98
+        })
+        .max_by(|left, right| {
+            let left_area = left.w * left.h;
+            let right_area = right.w * right.h;
+            left_area
+                .partial_cmp(&right_area)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
 }
 
 fn resolved_text_payload(node: &UiIrNode) -> Option<&str> {
@@ -1195,5 +1234,31 @@ mod tests {
         assert_eq!(img_a.get_pixel(1, 1).0, [48, 32, 16, 255], "background pixel should remain style background");
         assert!(img_a.get_pixel(5, 6).0[0] > 200 && img_a.get_pixel(5, 6).0[1] > 200, "border origin should be yellow");
         assert!(img_a.get_pixel(12, 10).0[2] > 200, "panel interior should render blue fill at the authored position");
+    }
+
+    #[test]
+    fn compose_source_does_not_reintroduce_forbidden_hardcoded_markers() {
+        let source = include_str!("ir_compose.rs");
+        let forbidden = [
+            ["is_", "med", "ical1_layout"].concat(),
+            ["med", "ical_", "cyan_tint"].concat(),
+            ["Top_", "seperator"].concat(),
+            ["MedGel", "FillMeter"].concat(),
+            ["s_", "bioc"].concat(),
+            ["s_", "rsi"].concat(),
+            ["s_", "aegs"].concat(),
+            ["s_", "drak"].concat(),
+            ["mockup", "image"].concat(),
+            ["i_med_bioc_", "bottom-bar"].concat(),
+            ["BG", "Dots"].concat(),
+            ["MainMenu", "Canvas"].concat(),
+        ];
+
+        for marker in forbidden {
+            assert!(
+                !source.contains(marker.as_str()),
+                "ir_compose hardcoding marker reintroduced: {marker}"
+            );
+        }
     }
 }
