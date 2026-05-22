@@ -1385,4 +1385,24 @@ mod tests {
         .expect_err("should reject 0 width");
         assert!(matches!(err, UiError::RenderError(_)));
     }
+
+    #[test]
+    fn compose_source_does_not_reintroduce_forbidden_hardcoded_markers() {
+        let source = include_str!("compose.rs");
+        let forbidden = [
+            ["base_", "animatedelements"].concat(),
+            ["BG", "Dots"].concat(),
+            ["MainMenu", "Canvas"].concat(),
+            ["s_", "bioc"].concat(),
+            ["s_", "rsi"].concat(),
+            ["s_", "aegs"].concat(),
+        ];
+
+        for marker in forbidden {
+            assert!(
+                !source.contains(marker.as_str()),
+                "compose hardcoding marker reintroduced: {marker}"
+            );
+        }
+    }
 }
