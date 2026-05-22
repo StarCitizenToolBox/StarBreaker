@@ -115,7 +115,14 @@ impl DefaultValueRegistry {
         reg.insert_path("CloneLocationInfo/MedicalTier", Value::Int(2));
         reg.insert_path("Bed/MedBed/MedBedStatus/MedicalTier", Value::Int(2));
         // Med-bed occupancy/capacity/location values are intentionally not
-        // seeded here. They must come from live bindings or explicit IR data.
+        // seeded in live gameplay, but static render pathways need deterministic
+        // values so header/footer binding graphs resolve to authored content.
+        reg.insert_path("CloneLocationInfo/CurrentLocation/LocationName", Value::Str("Drake Clipper".into()));
+        reg.insert_path("Bed/MedBed/MedBedStatus/containerOccupancy", Value::Int(200));
+        reg.insert_path("Bed/MedBed/MedBedStatus/containerCapacity", Value::Int(200));
+        reg.insert_path("Bed/MedBed/MedBedStatus/ActorIsInBed", Value::Bool(false));
+        reg.insert_path("state.BaseScreens.MainMenu", Value::Bool(true));
+        reg.insert_path("Bed/state.BaseScreens.MainMenu", Value::Bool(true));
         // Base-screen state flags used by medical header title switching.
         reg.insert_path("state.BaseScreens.Heal", Value::Bool(false));
         reg.insert_path("state.BaseScreens.PerformingSurgery", Value::Bool(false));

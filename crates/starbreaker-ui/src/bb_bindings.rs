@@ -462,8 +462,14 @@ impl BindingResolver {
             "BindingsOperations_LocalizationCombine" => {
                 let value_key = op.get("value").and_then(|v| v.as_str()).unwrap_or("");
                 let base = defaults.lookup_localization(value_key).unwrap_or(value_key);
-                let left_ptr = op.get("inputL").and_then(|v| v.as_str()).and_then(parse_points_to);
-                let right_ptr = op.get("inputR").and_then(|v| v.as_str()).and_then(parse_points_to);
+                let left_ptr = op
+                    .get("inputL")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_points_to_or_ptr_str);
+                let right_ptr = op
+                    .get("inputR")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_points_to_or_ptr_str);
                 let left = left_ptr
                     .and_then(|p| self.eval_localized_ptr(p, defaults, seen))
                     .or_else(|| left_ptr.and_then(|p| self.eval_integer_ptr(p, defaults, seen)).map(|v| v.to_string()))
@@ -611,7 +617,7 @@ impl BindingResolver {
         defaults: &DefaultValueRegistry,
         seen: &mut std::collections::HashSet<BbNodeId>,
     ) -> Option<i64> {
-        let ptr = field.and_then(parse_points_to)?;
+        let ptr = field.and_then(parse_points_to_or_ptr_str)?;
         self.eval_integer_ptr(ptr, defaults, seen)
     }
 
@@ -621,7 +627,9 @@ impl BindingResolver {
         defaults: &DefaultValueRegistry,
         seen: &mut std::collections::HashSet<BbNodeId>,
     ) -> Option<String> {
-        let ptr = field.and_then(|v| v.as_str()).and_then(parse_points_to)?;
+        let ptr = field
+            .and_then(|v| v.as_str())
+            .and_then(parse_points_to_or_ptr_str)?;
         self.eval_localized_ptr(ptr, defaults, seen)
     }
 
@@ -631,7 +639,9 @@ impl BindingResolver {
         defaults: &DefaultValueRegistry,
         seen: &mut std::collections::HashSet<BbNodeId>,
     ) -> Option<bool> {
-        let ptr = field.and_then(|v| v.as_str()).and_then(parse_points_to)?;
+        let ptr = field
+            .and_then(|v| v.as_str())
+            .and_then(parse_points_to_or_ptr_str)?;
         self.eval_bool_ptr(ptr, defaults, seen)
     }
 
@@ -666,14 +676,17 @@ impl BindingResolver {
                 }
             }
             "BuildingBlocks_BindingsBooleanInvert" => {
-                let inp = op.get("input").and_then(|v| v.as_str()).and_then(parse_points_to)?;
+                let inp = op
+                    .get("input")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_points_to_or_ptr_str)?;
                 self.eval_bool_ptr(inp, defaults, seen).map(|v| !v)
             }
             "BuildingBlocks_BindingsBooleanEvaluateOr" => {
                 let inputs = op.get("inputs").and_then(|v| v.as_array())?;
                 let mut out = false;
                 for input in inputs {
-                    let ptr = input.as_str().and_then(parse_points_to)?;
+                    let ptr = input.as_str().and_then(parse_points_to_or_ptr_str)?;
                     out |= self.eval_bool_ptr(ptr, defaults, seen).unwrap_or(false);
                 }
                 Some(out)
@@ -682,7 +695,7 @@ impl BindingResolver {
                 let inputs = op.get("inputs").and_then(|v| v.as_array())?;
                 let mut out = true;
                 for input in inputs {
-                    let ptr = input.as_str().and_then(parse_points_to)?;
+                    let ptr = input.as_str().and_then(parse_points_to_or_ptr_str)?;
                     out &= self.eval_bool_ptr(ptr, defaults, seen).unwrap_or(false);
                 }
                 Some(out)
@@ -713,6 +726,16 @@ impl BindingResolver {
             "BuildingBlocks_BindingsIntegerArithmatic" => {
                 let kind = op.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 let amount = op.get("amount").and_then(|v| v.as_i64()).unwrap_or(0);
+                let has_explicit_rhs = op
+                    .get("inputR")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_points_to_or_ptr_str)
+                    .is_some()
+                    || op
+                        .get("inputB")
+                        .and_then(|v| v.as_str())
+                        .and_then(parse_points_to_or_ptr_str)
+                        .is_some();
                 let l = self
                     .eval_integer_ptr_from_field(op.get("inputL").and_then(|v| v.as_str()), defaults, seen)
                     .or_else(|| self.eval_integer_ptr_from_field(op.get("input").and_then(|v| v.as_str()), defaults, seen))
@@ -722,7 +745,14 @@ impl BindingResolver {
                     .or_else(|| self.eval_integer_ptr_from_field(op.get("inputB").and_then(|v| v.as_str()), defaults, seen))
                     .unwrap_or(amount);
                 Some(match kind {
-                    "Add" => l + amount,
+                    // BB Add uses RHS when present; `amount` is the fallback constant.
+                    "Add" => {
+                        if has_explicit_rhs {
+                            l + r
+                        } else {
+                            l + amount
+                        }
+                    }
                     "Min" => l.min(r),
                     "Max" => l.max(r),
                     "Sub" => l - r,
@@ -753,20 +783,36 @@ impl BindingResolver {
                 }
             }
             "BuildingBlocks_BindingsNumberFromInteger" => {
-                let inp = op.get("input").and_then(|v| v.as_str()).and_then(parse_points_to)?;
+                let inp = op
+                    .get("input")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_points_to_or_ptr_str)?;
                 self.eval_integer_ptr(inp, defaults, seen).map(|v| v as f64)
             }
             "BuildingBlocks_BindingsNumberArithmatic" => {
                 let kind = op.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 let amount = op.get("amount").and_then(|v| v.as_f64()).unwrap_or(1.0);
-                let input = op.get("input").and_then(|v| v.as_str()).and_then(parse_points_to);
-                let input_b = op.get("inputB").and_then(|v| v.as_str()).and_then(parse_points_to);
+                let input = op
+                    .get("input")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_points_to_or_ptr_str);
+                let input_b = op
+                    .get("inputB")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_points_to_or_ptr_str);
+                let has_explicit_rhs = input_b.is_some();
                 let a = input.and_then(|p| self.eval_number_ptr(p, defaults, seen)).unwrap_or(0.0);
                 let b = input_b
                     .and_then(|p| self.eval_number_ptr(p, defaults, seen))
                     .unwrap_or(amount);
                 Some(match kind {
-                    "Add" => a + amount,
+                    "Add" => {
+                        if has_explicit_rhs {
+                            a + b
+                        } else {
+                            a + amount
+                        }
+                    }
                     "Sub" => a - b,
                     "Mul" => a * b,
                     "Div" => {
@@ -896,6 +942,10 @@ fn parse_ptr(s: &str) -> Option<BbNodeId> {
 
 fn parse_points_to(s: &str) -> Option<BbNodeId> {
     s.strip_prefix("_PointsTo_:").and_then(parse_ptr)
+}
+
+fn parse_points_to_or_ptr_str(s: &str) -> Option<BbNodeId> {
+    parse_points_to(s).or_else(|| parse_ptr(s))
 }
 
 fn parse_points_to_or_ptr(value: Option<&serde_json::Value>) -> Option<BbNodeId> {

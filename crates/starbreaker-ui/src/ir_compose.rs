@@ -180,7 +180,8 @@ fn draw_non_text_node(
                 fill = [0.0, 0.0, 0.0, 0.0];
             }
             if is_footer_separator_candidate(node, rect, document) {
-                fill = [0.0, 0.60, 0.92, fill[3]];
+                let accent = derived_accent_tint(ctx);
+                fill = [accent[0], accent[1], accent[2], 1.0];
             }
             fill_rect_ts(pixmap, tsk_rect, fill, node.alpha);
         }
@@ -349,22 +350,24 @@ fn draw_manufacturer_logo_ir(
     atlas: &AtlasLibrary<'_>,
     pixmap: &mut Pixmap,
 ) {
-    let rect = ir_rect_to_layout_rect(node.computed_rect);
-    if rect.w < 0.5 || rect.h < 0.5 {
+    let draw_rect = ir_rect_to_layout_rect(node.computed_rect);
+    if draw_rect.w < 0.5 || draw_rect.h < 0.5 {
         return;
     }
 
     let brand = brand_slug_from_ir(document, ctx);
-    let brand_title = brand_title(&brand);
+    let logo_brand = brand_logo_slug(&brand);
+    let brand_title = brand_title(logo_brand);
     let candidates = [
-        format!("UI/Textures/Vector/General/BrandLogos/logo_{brand}_a.svg"),
-        format!("UI/Textures/Signs/Brands/{brand}/{brand_title}_logo.dds"),
-        format!("UI/Textures/Signs/Brands/{brand}/{brand_title}_logo.svg"),
+        format!("UI/Textures/Signs/Brands/{logo_brand}/{brand_title}_logo.svg"),
+        format!("UI/Textures/Vector/General/BrandLogos/logo_{logo_brand}_a.svg"),
+        format!("UI/Textures/Signs/Brands/{logo_brand}/{brand_title}_logo.dds"),
     ];
 
-    let iw = rect.w.round().max(1.0) as u32;
-    let ih = rect.h.round().max(1.0) as u32;
-    let fill_override = node.icon_tint_colour.or(node.background_fill_colour);
+    let iw = draw_rect.w.round().max(1.0) as u32;
+    let ih = draw_rect.h.round().max(1.0) as u32;
+    let accent = derived_accent_tint(ctx);
+    let fill_override = Some(accent);
 
     for raw_path in candidates {
         let norm = UiAssetResolver::normalise_path(&raw_path);
@@ -376,13 +379,13 @@ fn draw_manufacturer_logo_ir(
             if let Some(svg_bytes) = atlas.fetch_raw(&norm)
                 && let Some(img) = crate::bb_svg::rasterize_svg(&svg_bytes, iw, ih, fill_override)
             {
-                let tint = derived_accent_tint(ctx);
+                let draw_y = draw_rect.y as i32 - vertical_alpha_balance_offset(&img);
                 blit_atlas_image_tinted(
                     pixmap,
                     &img,
-                    rect.x as i32,
-                    rect.y as i32,
-                    tint,
+                    draw_rect.x as i32,
+                    draw_y,
+                    [1.0, 1.0, 1.0, 1.0],
                     node.alpha,
                 );
                 return;
@@ -391,17 +394,46 @@ fn draw_manufacturer_logo_ir(
         }
 
         if let Some(img) = atlas.resolve(&norm, iw, ih) {
-            let tint = derived_accent_tint(ctx);
             blit_atlas_image_tinted(
                 pixmap,
                 &img,
-                rect.x as i32,
-                rect.y as i32,
-                tint,
+                draw_rect.x as i32,
+                draw_rect.y as i32,
+                accent,
                 node.alpha,
             );
             return;
         }
+    }
+}
+
+fn vertical_alpha_balance_offset(img: &RgbaImage) -> i32 {
+    let mut top = 0i32;
+    let mut bottom = 0i32;
+
+    for y in 0..img.height() {
+        let has_alpha = (0..img.width()).any(|x| img.get_pixel(x, y)[3] > 0);
+        if has_alpha {
+            break;
+        }
+        top += 1;
+    }
+
+    for y in (0..img.height()).rev() {
+        let has_alpha = (0..img.width()).any(|x| img.get_pixel(x, y)[3] > 0);
+        if has_alpha {
+            break;
+        }
+        bottom += 1;
+    }
+
+    (top - bottom) / 2
+}
+
+fn brand_logo_slug(slug: &str) -> &str {
+    match slug {
+        "bioc" => "bioticorp",
+        other => other,
     }
 }
 
@@ -576,6 +608,19 @@ fn draw_text_node(
         .unwrap_or(18.0)
         .max(1.0);
     let fallback_font_size = (nominal_font_size * TEXT_RENDER_SIZE_CALIBRATION).max(1.0);
+    let is_label_caption_pair = node
+        .node_type
+        .eq_ignore_ascii_case("BuildingBlocks_ComponentLabelCaptionPair");
+    let primary_rect = if is_label_caption_pair && node.secondary_text_payload.is_some() {
+        Rect {
+            x: rect.x,
+            y: rect.y,
+            w: rect.w,
+            h: rect.h * 0.52,
+        }
+    } else {
+        rect
+    };
 
     let align = node
         .text_style
@@ -604,7 +649,7 @@ fn draw_text_node(
         renderer.draw_swf_font(
             img,
             text,
-            rect,
+            primary_rect,
             swf_font,
             (nominal_font_size * SWF_TEXT_RENDER_SIZE_CALIBRATION).max(1.0),
             colour,
@@ -629,7 +674,15 @@ fn draw_text_node(
         }
     }
     if !used_swf_font {
-        renderer.draw(img, text, rect, FontKind::Sans, fallback_font_size, colour, align);
+        renderer.draw(
+            img,
+            text,
+            primary_rect,
+            FontKind::Sans,
+            fallback_font_size,
+            colour,
+            align,
+        );
     }
 
     if let Some(UiIrTextPayload::Resolved { text: secondary }) = node.secondary_text_payload.as_ref() {
@@ -641,11 +694,20 @@ fn draw_text_node(
             .max(1.0);
         let secondary_fallback_font_size =
             (secondary_nominal_font_size * TEXT_RENDER_SIZE_CALIBRATION).max(1.0);
-        let secondary_rect = Rect {
-            x: rect.x + rect.w * 0.24,
-            y: rect.y,
-            w: rect.w * 0.30,
-            h: rect.h,
+        let secondary_rect = if is_label_caption_pair {
+            Rect {
+                x: rect.x,
+                y: rect.y + rect.h * 0.52,
+                w: rect.w,
+                h: rect.h * 0.48,
+            }
+        } else {
+            Rect {
+                x: rect.x + rect.w * 0.24,
+                y: rect.y,
+                w: rect.w * 0.30,
+                h: rect.h,
+            }
         };
         let secondary_used_swf = selected_font.is_some_and(|(_, swf_font)| {
             renderer.draw_swf_font(
@@ -775,10 +837,9 @@ fn is_footer_brand_bar_candidate(node: &UiIrNode, rect: Rect, document: &UiIrDoc
     let target_h = document.target_height as f32;
     let target_w = document.target_width as f32;
     node.node_type.eq_ignore_ascii_case("widget_image")
-        && rect.y >= target_h * 0.88
-        && rect.h <= target_h * 0.10
-        && rect.w >= target_w * 0.40
-        && rect.w <= target_w * 0.70
+    && rect.y >= target_h * 0.85
+    && rect.h <= target_h * 0.15
+    && (rect.w <= 1.5 || (rect.w >= target_w * 0.30 && rect.w <= target_w * 0.90))
 }
 
 fn is_card_bracket_candidate(node: &UiIrNode, rect: Rect, document: &UiIrDocument) -> bool {
