@@ -407,7 +407,24 @@ pub fn compile_ui_ir_from_scene(
         {
             binding_resolver
                 .resolve_field_text(id, "ParamInput1", defaults)
-                .map(|text| UiIrTextPayload::Resolved { text })
+                .map(|text| {
+                    let trimmed = text.trim();
+                    if trimmed.starts_with('@') {
+                        if let Some(localized) = defaults.lookup_localization(trimmed) {
+                            UiIrTextPayload::Resolved {
+                                text: localized.trim().to_string(),
+                            }
+                        } else {
+                            UiIrTextPayload::UnresolvedKey {
+                                key: trimmed.to_string(),
+                            }
+                        }
+                    } else {
+                        UiIrTextPayload::Resolved {
+                            text: trimmed.to_string(),
+                        }
+                    }
+                })
         } else {
             None
         };

@@ -120,7 +120,8 @@ impl DefaultValueRegistry {
         reg.insert_path("CloneLocationInfo/CurrentLocation/LocationName", Value::Str("Drake Clipper".into()));
         reg.insert_path("Bed/MedBed/MedBedStatus/containerOccupancy", Value::Int(200));
         reg.insert_path("Bed/MedBed/MedBedStatus/containerCapacity", Value::Int(200));
-        reg.insert_path("Bed/MedBed/MedBedStatus/ActorIsInBed", Value::Bool(false));
+        reg.insert_path("Bed/MedBed/MedBedStatus/ActorIsInBed", Value::Bool(true));
+        reg.insert_path("bed/playerinfo/name", Value::Str("@med_Start_NoPatient".into()));
         reg.insert_path("state.BaseScreens.MainMenu", Value::Bool(true));
         reg.insert_path("Bed/state.BaseScreens.MainMenu", Value::Bool(true));
         // Base-screen state flags used by medical header title switching.
