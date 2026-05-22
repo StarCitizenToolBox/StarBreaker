@@ -53,8 +53,35 @@ pub fn render_ui_ir_document(
     }
 
     let mut img = pixmap_to_rgba_image(pixmap)?;
+    let mut text_draw_order = draw_order.clone();
+    text_draw_order.sort_by(|left, right| {
+        let left_rect = ir_rect_to_layout_rect(left.computed_rect);
+        let right_rect = ir_rect_to_layout_rect(right.computed_rect);
+        let left_key = (
+            left_rect.x.round() as i32,
+            left_rect.y.round() as i32,
+            left_rect.w.round() as i32,
+            left_rect.h.round() as i32,
+        );
+        let right_key = (
+            right_rect.x.round() as i32,
+            right_rect.y.round() as i32,
+            right_rect.w.round() as i32,
+            right_rect.h.round() as i32,
+        );
+        let left_len = resolved_text_payload(left).map(|text| text.len()).unwrap_or(usize::MAX);
+        let right_len = resolved_text_payload(right)
+            .map(|text| text.len())
+            .unwrap_or(usize::MAX);
+
+        left_key
+            .cmp(&right_key)
+            .then(left_len.cmp(&right_len))
+            .then(left.id.cmp(&right.id))
+    });
+
     let mut seen_text_rects: HashSet<(i32, i32, i32, i32)> = HashSet::new();
-    for node in &draw_order {
+    for node in &text_draw_order {
         draw_text_node(&mut img, node, &text_renderer, ctx, &mut seen_text_rects);
     }
 
@@ -81,11 +108,21 @@ fn draw_non_text_node(
         draw_medical_body_background_overlays(node, document, ctx, atlas, pixmap);
     }
 
+    if node
+        .node_type
+        .eq_ignore_ascii_case("BuildingBlocks_WidgetManufacturerLogo")
+    {
+        draw_manufacturer_logo_ir(node, document, ctx, atlas, pixmap);
+    }
+
+        let skip_background_fill = node.custom_shape.is_some() && node.asset_ref.is_some();
+        if !skip_background_fill {
     if let Some(fill) = node.background_fill_colour
         && fill[3] > 0.005
     {
         fill_rect_ts(pixmap, tsk_rect, fill, node.alpha);
     }
+        }
 
     if let Some(asset_ref) = node.asset_ref.as_deref() {
         let iw = rect.w.round().max(1.0) as u32;
@@ -237,6 +274,102 @@ fn med_texture_brand_slug(brand_slug: &str) -> &str {
     }
 }
 
+fn draw_manufacturer_logo_ir(
+    node: &UiIrNode,
+    document: &UiIrDocument,
+    ctx: &ComposeContext<'_>,
+    atlas: &AtlasLibrary<'_>,
+    pixmap: &mut Pixmap,
+) {
+    let rect = ir_rect_to_layout_rect(node.computed_rect);
+    if rect.w < 0.5 || rect.h < 0.5 {
+        return;
+    }
+
+    let brand = brand_slug_from_ir(document, ctx);
+    let brand_title = brand_title(&brand);
+    let candidates = [
+        format!("UI/Textures/Vector/General/BrandLogos/logo_{brand}_a.svg"),
+        format!("UI/Textures/Signs/Brands/{brand}/{brand_title}_logo.dds"),
+        format!("UI/Textures/Signs/Brands/{brand}/{brand_title}_logo.svg"),
+    ];
+
+    let iw = rect.w.round().max(1.0) as u32;
+    let ih = rect.h.round().max(1.0) as u32;
+    let fill_override = node.icon_tint_colour.or(node.background_fill_colour);
+
+    for raw_path in candidates {
+        let norm = UiAssetResolver::normalise_path(&raw_path);
+        if UiAssetResolver::is_reference_overlay(&norm) {
+            continue;
+        }
+
+        if norm.ends_with(".svg") {
+            if let Some(svg_bytes) = atlas.fetch_raw(&norm)
+                && let Some(img) = crate::bb_svg::rasterize_svg(&svg_bytes, iw, ih, fill_override)
+            {
+                blit_atlas_image_tinted(
+                    pixmap,
+                    &img,
+                    rect.x as i32,
+                    rect.y as i32,
+                    [1.0, 1.0, 1.0, 1.0],
+                    node.alpha,
+                );
+                return;
+            }
+            continue;
+        }
+
+        if let Some(img) = atlas.resolve(&norm, iw, ih) {
+            blit_atlas_image_tinted(
+                pixmap,
+                &img,
+                rect.x as i32,
+                rect.y as i32,
+                [1.0, 1.0, 1.0, 1.0],
+                node.alpha,
+            );
+            return;
+        }
+    }
+}
+
+fn brand_title(slug: &str) -> String {
+    let mut chars = slug.chars();
+    match chars.next() {
+        Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+fn resolve_colour_token(ctx: &ComposeContext<'_>, token: &str) -> Option<[f32; 4]> {
+    let key = token.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return None;
+    }
+
+    match key.as_str() {
+        "base" | "bright" | "primarytext" | "text" | "white" => Some([1.0, 1.0, 1.0, 1.0]),
+        "background" => Some([
+            ctx.style.background.r as f32 / 255.0,
+            ctx.style.background.g as f32 / 255.0,
+            ctx.style.background.b as f32 / 255.0,
+            ctx.style.background.a as f32 / 255.0,
+        ]),
+        "secondary" => ctx.style.secondary_tint.as_ref().map(|colour| {
+            [
+                colour.r as f32 / 255.0,
+                colour.g as f32 / 255.0,
+                colour.b as f32 / 255.0,
+                colour.a as f32 / 255.0,
+            ]
+        }),
+        "critical" => Some([1.0, 0.2, 0.2, 1.0]),
+        _ => None,
+    }
+}
+
 fn draw_text_node(
     img: &mut RgbaImage,
     node: &UiIrNode,
@@ -244,12 +377,8 @@ fn draw_text_node(
     ctx: &ComposeContext<'_>,
     seen_rects: &mut HashSet<(i32, i32, i32, i32)>,
 ) {
-    let Some(payload) = &node.text_payload else {
+    let Some(text) = resolved_text_payload(node) else {
         return;
-    };
-    let text = match payload {
-        UiIrTextPayload::Resolved { text } => text.as_str(),
-        UiIrTextPayload::Empty | UiIrTextPayload::UnresolvedKey { .. } => return,
     };
     if text.is_empty() {
         return;
@@ -286,7 +415,14 @@ fn draw_text_node(
     let mut colour = node
         .text_style
         .as_ref()
-        .and_then(|style| style.colour)
+        .and_then(|style| {
+            style.colour.or_else(|| {
+                style
+                    .colour_token
+                    .as_deref()
+                    .and_then(|token| resolve_colour_token(ctx, token))
+            })
+        })
         .map(rgba_to_u8)
         .unwrap_or_else(|| {
             let pt = &ctx.style.primary_tint;
@@ -295,6 +431,14 @@ fn draw_text_node(
     colour[3] = ((colour[3] as f32) * node.alpha.clamp(0.0, 1.0)).round() as u8;
 
     renderer.draw(img, text, rect, FontKind::Sans, font_size, colour, align);
+}
+
+fn resolved_text_payload(node: &UiIrNode) -> Option<&str> {
+    let payload = node.text_payload.as_ref()?;
+    match payload {
+        UiIrTextPayload::Resolved { text } => Some(text.as_str()),
+        UiIrTextPayload::Empty | UiIrTextPayload::UnresolvedKey { .. } => None,
+    }
 }
 
 fn draw_ir_border(
