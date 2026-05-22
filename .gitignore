@@ -7,7 +7,7 @@ exports/
 mcp/starbreaker-mcp.exe
 mcp/starbreaker-mcp
 research/
-scripts/
+/scripts/
 docs-local/
 .claude/
 ships/

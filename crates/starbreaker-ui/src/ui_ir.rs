@@ -1761,4 +1761,22 @@ mod tests {
 
         assert_eq!(ir.renderer_hint, UiRendererHint::Hybrid);
     }
+
+    #[test]
+    fn ui_ir_source_does_not_reintroduce_forbidden_hardcoded_markers() {
+        let source = include_str!("ui_ir.rs");
+        let forbidden = [
+            ["nominal_font_size_", "from_label_style"].concat(),
+            ["BG", "Dots"].concat(),
+            ["MainMenu", "Canvas"].concat(),
+            ["base_", "animatedelements"].concat(),
+        ];
+
+        for marker in forbidden {
+            assert!(
+                !source.contains(marker.as_str()),
+                "ui_ir hardcoding marker reintroduced: {marker}"
+            );
+        }
+    }
 }

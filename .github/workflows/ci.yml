@@ -69,5 +69,9 @@ jobs:
           shared-key: cache-test-${{ matrix.platform }}
           cache-on-failure: true
 
+      - name: UI hardcoding guard
+        shell: bash
+        run: bash .github/scripts/check_ui_hardcoding.sh
+
       - name: Test workspace
         run: cargo test --workspace --locked
