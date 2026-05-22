@@ -373,10 +373,10 @@ pub fn compile_ui_ir_from_scene(
 
             let font_size = node
                 .raw
-                .get("labelProperties")
-                .and_then(|lp| lp.get("style"))
-                .and_then(|v| v.as_str())
-                .map(nominal_font_size_from_label_style)
+                .get("fontSize")
+                .or_else(|| node.raw.get("FontSize"))
+                .and_then(|v| v.as_f64())
+                .map(|value| value as f32)
                 .unwrap_or(18.0);
 
             Some(UiIrTextStyle {
@@ -411,10 +411,10 @@ pub fn compile_ui_ir_from_scene(
                 .to_string();
             let font_size = node
                 .raw
-                .get("captionProperties")
-                .and_then(|cp| cp.get("style"))
-                .and_then(|v| v.as_str())
-                .map(nominal_font_size_from_label_style)
+                .get("fontSize")
+                .or_else(|| node.raw.get("FontSize"))
+                .and_then(|v| v.as_f64())
+                .map(|value| value as f32)
                 .unwrap_or(18.0);
 
             Some(UiIrTextStyle {
@@ -861,37 +861,8 @@ fn resolve_effective_font_size(node: &crate::bb_scene::BbNode, text: &crate::bb_
         return convert_bb_value(&text.font_size);
     }
 
-    // `labelProperties.style` is the authoritative label preset for
-    // `WidgetTextField` nodes (e.g. "Heading1", "Caption"). Use the
-    // nominal-size table as the primary source when no explicit size is set.
-    if let Some(style_name) = node
-        .raw
-        .get("labelProperties")
-        .and_then(|lp| lp.get("style"))
-        .and_then(|v| v.as_str())
-    {
-        return UiIrValue::Fixed {
-            value: nominal_font_size_from_label_style(style_name),
-        };
-    }
-
-    // Fall through to whatever `parse_text` stored (may be the 12.0 default).
+    // Fall through to whatever `parse_text` stored.
     convert_bb_value(&text.font_size)
-}
-
-fn nominal_font_size_from_label_style(style: &str) -> f32 {
-    match style {
-        "Heading1" => 48.0,
-        "Heading2" => 36.0,
-        "Heading3" => 28.0,
-        "Heading4" => 22.0,
-        "Heading5" => 18.0,
-        "Heading6" => 16.0,
-        "Body" | "Body1" => 16.0,
-        "Body2" => 14.0,
-        "Caption" => 12.0,
-        _ => 18.0,
-    }
 }
 
 fn resolve_record(

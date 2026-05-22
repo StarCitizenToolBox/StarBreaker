@@ -448,24 +448,11 @@ fn draw_linear_progress_meter(
 
     let seg_count = 14;
     let progress = node.meter_progress.unwrap_or(1.0).clamp(0.0, 1.0);
-    let mut active_count = ((seg_count as f32) * progress).round() as usize;
-    let rect_layout = Rect {
-        x: rect.x(),
-        y: rect.y(),
-        w: rect.width(),
-        h: rect.height(),
-    };
-    if is_compact_header_meter(node, rect_layout) && active_count == 0 {
-        active_count = seg_count;
-    }
+    let active_count = ((seg_count as f32) * progress).round() as usize;
     let seg_gap = (rect.width() * 0.02).max(1.0);
     let total_gap = seg_gap * (seg_count as f32 - 1.0);
     let seg_width = ((rect.width() - total_gap) / seg_count as f32).max(1.0);
-    let y = if is_compact_header_meter(node, rect_layout) {
-        rect.y() - 42.0
-    } else {
-        rect.y()
-    };
+    let y = rect.y();
 
     for idx in 0..seg_count {
         if idx as usize >= active_count {
@@ -476,14 +463,6 @@ fn draw_linear_progress_meter(
             fill_rect_ts(pixmap, seg_rect, glow, node.alpha);
         }
     }
-}
-
-fn is_compact_header_meter(node: &UiIrNode, rect: Rect) -> bool {
-    node.node_type
-        .eq_ignore_ascii_case("BuildingBlocks_WidgetLinearProgressMeter")
-        && rect.y <= 220.0
-        && rect.w <= 220.0
-        && rect.h <= 24.0
 }
 
 fn draw_general_x_button(ctx: &ComposeContext<'_>, pixmap: &mut Pixmap, rect: TskRect, alpha: f32) {

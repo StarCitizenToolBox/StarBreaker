@@ -254,11 +254,6 @@ fn draw_node(
     let iw = rect.w.round().max(1.0) as u32;
     let ih = rect.h.round().max(1.0) as u32;
 
-    // Static snapshot exports should not include decorative animated strips.
-    if node.name.eq_ignore_ascii_case("base_animatedelements") {
-        return;
-    }
-
     match &node.ty {
         // DisplayWidget is documented as a layout container, but BB authors
         // routinely attach background fill, raw SVG paths, atlas-backed
@@ -379,21 +374,8 @@ fn draw_node(
                         continue;
                     };
                     // Use authored container viewport ratio to apply inverse vertical scale.
-                    // Prefer BGDots (visual content container), fallback to MainMenuCanvas.
-                    let target_rect = scene
-                        .nodes
-                        .values()
-                        .find(|n| n.name.eq_ignore_ascii_case("BGDots"))
-                        .and_then(|dots_node| layout_rects.get(&dots_node.id))
-                        .copied()
-                        .or_else(|| {
-                            scene
-                                .nodes
-                                .values()
-                                .find(|n| n.name.eq_ignore_ascii_case("MainMenuCanvas"))
-                                .and_then(|menu_node| layout_rects.get(&menu_node.id))
-                                .copied()
-                        });
+                    // Anchor on the largest authored widget-canvas viewport.
+                    let target_rect = content_scale_anchor_rect(scene, layout_rects);
                     let target_h = target_rect
                         .map(|r| {
                             let scale_y = (body_rect.h / r.h.max(1.0)).max(1.0);
@@ -789,13 +771,12 @@ fn draw_manufacturer_logo(
 }
 
 fn brand_slug(identifier: &str) -> String {
-    match identifier.to_ascii_lowercase().as_str() {
-        "bioc" | "s_bioc" => "bioticorp".to_string(),
-        "s_drak" => "drak".to_string(),
-        "s_rsi" => "rsi".to_string(),
-        "s_aegs" => "aegs".to_string(),
-        other => other.trim_start_matches("s_").to_string(),
-    }
+    identifier
+        .to_ascii_lowercase()
+        .trim_start_matches("s_")
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+        .collect::<String>()
 }
 
 fn node_brand_slug(node: &BbNode, ctx: &ComposeContext<'_>) -> String {
@@ -807,10 +788,29 @@ fn node_brand_slug(node: &BbNode, ctx: &ComposeContext<'_>) -> String {
 }
 
 fn med_texture_brand_slug(brand_slug: &str) -> &str {
-    match brand_slug {
-        "bioticorp" => "bioc",
-        other => other,
-    }
+    brand_slug
+}
+
+fn content_scale_anchor_rect(
+    scene: &BbScene,
+    layout_rects: &std::collections::BTreeMap<BbNodeId, Rect>,
+) -> Option<Rect> {
+    layout_rects
+        .iter()
+        .filter_map(|(node_id, rect)| {
+            scene
+                .nodes
+                .get(node_id)
+                .filter(|node| matches!(node.ty, BbNodeType::WidgetCanvas))
+                .map(|_| *rect)
+        })
+        .max_by(|left, right| {
+            let left_area = left.w * left.h;
+            let right_area = right.w * right.h;
+            left_area
+                .partial_cmp(&right_area)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
 }
 
 fn brand_title(slug: &str) -> String {
