@@ -548,13 +548,42 @@ fn layout_flex_no_grow_children(
         // We do not have content measurement here, so treat it as zero so fixed/
         // percent children can still be axis-justified (instead of Auto filling
         // the whole container and pushing everything out of view).
-        let auto_main = if is_row {
+        let mut auto_main = if is_row {
             matches!(node.sizing.width, BbValue::Other { ref behavior, .. } if behavior == "Auto")
         } else {
             matches!(node.sizing.height, BbValue::Other { ref behavior, .. } if behavior == "Auto")
         };
         if auto_main {
-            if is_row {
+            let normalized_auto = if is_row {
+                match &node.sizing.width {
+                    BbValue::Other { value, behavior } if behavior == "Auto" && *value > 0.0 && *value < 1.0 => Some(*value),
+                    _ => None,
+                }
+            } else {
+                match &node.sizing.height {
+                    BbValue::Other { value, behavior } if behavior == "Auto" && *value > 0.0 && *value < 1.0 => Some(*value),
+                    _ => None,
+                }
+            };
+            let is_label_caption_pair = matches!(
+                &node.ty,
+                BbNodeType::Other(kind) if kind.eq_ignore_ascii_case("BuildingBlocks_ComponentLabelCaptionPair")
+            );
+            if let Some(auto_ratio) = normalized_auto {
+                if is_row {
+                    w = container.w * auto_ratio;
+                } else {
+                    h = container.h * auto_ratio;
+                }
+                auto_main = false;
+            } else if is_label_caption_pair {
+                if is_row {
+                    w = (container.w * 0.22).max(96.0 * csx);
+                } else {
+                    h = (container.h * 0.22).max(48.0 * csy);
+                }
+                auto_main = false;
+            } else if is_row {
                 w = 0.0;
             } else {
                 h = 0.0;
@@ -617,9 +646,7 @@ fn layout_flex_no_grow_children(
             let mut line_cross = 0.0f32;
             let mut line_items = 0usize;
             for &(_, w, h, auto_main) in &line {
-                if auto_main {
-                    continue;
-                }
+                if auto_main { continue; }
                 line_main += if is_row { w } else { h };
                 line_cross = line_cross.max(if is_row { h } else { w });
                 line_items += 1;
@@ -639,10 +666,7 @@ fn layout_flex_no_grow_children(
             };
 
             for (id, w, h, auto_main) in line {
-                if auto_main {
-                    layout_node(id, container, scene, csx, csy, rects, draw_order);
-                    continue;
-                }
+                if auto_main { layout_node(id, container, scene, csx, csy, rects, draw_order); continue; }
                 let rect = if is_row {
                     let y = match cross_just.to_ascii_lowercase().as_str() {
                         "center" => line_cross_cursor + (line_cross - h) * 0.5,
@@ -718,14 +742,12 @@ fn resolve_value(v: &BbValue, primary_dim: f32, cross_dim: f32, canvas_scale: f3
                 // Cross-axis percent: width as % of parent height, or vice-versa.
                 "PercentOfY" if is_width => cross_dim * value,
                 "PercentOfX" if !is_width => cross_dim * value,
-                // "Auto": numeric value here is typically a content-fit hint
-                // baked at author time, but we do not yet have a proper
-                // content-measurement pass. Containers and text widgets both
-                // produced more reference-matching results when Auto falls
-                // back to "fill parent" — text is then free-positioned by
-                // its anchor/pivot/position inside a parent that owns the
-                // visible area. Children that needed tighter bounds will be
-                // revisited when content-measurement lands.
+                // "Auto" is overloaded in authored data:
+                // - values in (0, 1] often behave like normalized extents,
+                //   especially for flex/header containers.
+                // - larger values are content hints but we currently lack
+                //   robust measurement, so keep prior fill behavior there.
+                "Auto" if *value > 0.0 && *value <= 1.0 => primary_dim * *value,
                 "Auto" => primary_dim,
                 other => {
                     warn!(
@@ -925,15 +947,15 @@ mod tests {
 
     /// R5.I-A: `PercentOfX` height (and `PercentOfY` width) must be evaluated
     /// against THIS NODE's OWN other-axis dimension, not the parent's other
-    /// dimension. A square icon authored as
-    /// `width: Percent(0.8), height: PercentOfX(1.0)` inside a 200×400 parent
-    /// must be 160×160, not 160×200.
+    /// dimension.
     #[test]
     fn percent_of_x_uses_own_width_not_parent() {
         use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
 
         let parent = BbNode {
-            id: 1, parent: None, children: vec![2],
+            id: 1,
+            parent: None,
+            children: vec![2],
             ty: BbNodeType::DisplayWidget, name: "parent".into(),
             style_tag_uuids: vec![], is_active: true, layer: 0, alpha: 1.0,
             position: Vec3::default(), position_offset: Vec3::default(),

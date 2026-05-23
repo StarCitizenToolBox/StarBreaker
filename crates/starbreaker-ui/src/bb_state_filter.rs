@@ -98,7 +98,24 @@ pub fn instantiated_false_widgets_with_param_inputs(
     record_value: &serde_json::Value,
     param_inputs: &[serde_json::Value],
 ) -> HashSet<BbNodeId> {
+    instantiated_false_widgets_with_param_inputs_and_inherited_bindings(
+        record_value,
+        param_inputs,
+        &HashMap::new(),
+    )
+}
+
+/// Like [`instantiated_false_widgets_with_param_inputs`] but also accepts
+/// inherited boolean binding values from parent canvases.
+pub fn instantiated_false_widgets_with_param_inputs_and_inherited_bindings(
+    record_value: &serde_json::Value,
+    param_inputs: &[serde_json::Value],
+    inherited_bindings: &HashMap<String, bool>,
+) -> HashSet<BbNodeId> {
     let mut static_vals = parse_static_variables(record_value);
+    for (binding, value) in inherited_bindings {
+        static_vals.entry(binding.clone()).or_insert(*value);
+    }
     let param_overrides = parse_boolean_param_inputs(param_inputs);
     let ops = match record_value.get("operations").and_then(|v| v.as_array()) {
         Some(a) => a,
@@ -210,6 +227,51 @@ pub fn instantiated_false_widgets_with_param_inputs(
         }
     }
     false_set
+}
+
+/// Resolve all boolean variable bindings available in this canvas under the
+/// same static-default semantics used by state filtering.
+pub fn resolved_boolean_variable_bindings_with_param_inputs_and_inherited(
+    record_value: &serde_json::Value,
+    param_inputs: &[serde_json::Value],
+    inherited_bindings: &HashMap<String, bool>,
+) -> HashMap<String, bool> {
+    let mut out = HashMap::new();
+    let mut static_vals = parse_static_variables(record_value);
+    for (binding, value) in inherited_bindings {
+        static_vals.entry(binding.clone()).or_insert(*value);
+    }
+
+    let param_overrides = parse_boolean_param_inputs(param_inputs);
+    let Some(ops) = record_value.get("operations").and_then(|v| v.as_array()) else {
+        return out;
+    };
+
+    apply_idle_defaults(ops, &mut static_vals);
+    let ptr_vals = evaluate_bool_ops(ops, &static_vals, &param_overrides);
+
+    for op in ops {
+        if op.get("_Type_").and_then(|v| v.as_str())
+            != Some("BuildingBlocks_BindingsBooleanVariable")
+        {
+            continue;
+        }
+        let Some(ptr) = op
+            .get("_Pointer_")
+            .and_then(|v| v.as_str())
+            .and_then(parse_ptr_id)
+        else {
+            continue;
+        };
+        let Some(binding) = op.get("binding").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if let Some(value) = ptr_vals.get(&ptr).copied() {
+            out.entry(binding.to_owned()).or_insert(value);
+        }
+    }
+
+    out
 }
 
 fn parse_boolean_param_inputs(param_inputs: &[serde_json::Value]) -> HashMap<String, bool> {
