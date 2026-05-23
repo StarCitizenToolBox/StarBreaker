@@ -46,6 +46,196 @@ use crate::bb_scene::{BbNodeId, BbNodeType, BbScene, BbValue, parse_bb_canvas};
 use crate::bb_brand_style;
 use crate::pipeline::extract_record_name;
 
+fn is_linear_progress_meter(node: &crate::bb_scene::BbNode) -> bool {
+    matches!(
+        &node.ty,
+        BbNodeType::Other(kind)
+            if kind.eq_ignore_ascii_case("BuildingBlocks_WidgetLinearProgressMeter")
+    )
+}
+
+fn modular_linearprogress_style_path(style_identifier: &str) -> Option<String> {
+    let normalized = style_identifier.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let module_id = if let Some(rest) = normalized.strip_prefix("s_") {
+        format!("sk_{}", rest)
+    } else if normalized.starts_with("sk_") {
+        normalized
+    } else {
+        return None;
+    };
+
+    Some(format!(
+        "file://./../../../../../../../libs/foundry/records/ui/buildingblocks/styles/modularkitstyles/{0}/{0}_linearprogressmeterstyles.json",
+        module_id
+    ))
+}
+
+fn collect_style_condition_tags(
+    condition: &serde_json::Value,
+    out: &mut Vec<(String, Option<String>, Option<String>)>,
+) {
+    if let Some(tag) = condition.get("tag") {
+        let tag_id = tag
+            .get("_RecordId_")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .or_else(|| {
+                tag.as_str().and_then(|s| {
+                    s.strip_prefix("Tag.")
+                        .map(str::to_owned)
+                        .or_else(|| Some(s.to_owned()))
+                })
+            });
+
+        if let Some(tag_id) = tag_id {
+            let tag_record_name = tag
+                .get("_RecordName_")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+                .or_else(|| Some(format!("Tag.{tag_id}")));
+            let tag_record_path = tag
+                .get("_RecordPath_")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            out.push((tag_id, tag_record_name, tag_record_path));
+        }
+    }
+
+    if let Some(conditions) = condition.get("conditions").and_then(|v| v.as_array()) {
+        for nested in conditions {
+            collect_style_condition_tags(nested, out);
+        }
+    }
+    if let Some(break_conditions) = condition.get("breakConditions").and_then(|v| v.as_array()) {
+        for nested in break_conditions {
+            collect_style_condition_tags(nested, out);
+        }
+    }
+}
+
+fn find_tag_name_in_tree(tags: &[serde_json::Value], tag_id: &str) -> Option<String> {
+    for tag in tags {
+        if tag
+            .get("_RecordId_")
+            .and_then(|v| v.as_str())
+            .is_some_and(|id| id.eq_ignore_ascii_case(tag_id))
+        {
+            return tag
+                .get("tagName")
+                .and_then(|v| v.as_str())
+                .map(|name| name.to_ascii_lowercase());
+        }
+
+        if let Some(children) = tag.get("children").and_then(|v| v.as_array()) {
+            if let Some(name) = find_tag_name_in_tree(children, tag_id) {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+fn resolve_tag_name(
+    tag_id: &str,
+    tag_record_name: Option<&str>,
+    tag_record_path: Option<&str>,
+    fetch_by_path: &dyn Fn(&str) -> Result<serde_json::Value, String>,
+) -> Option<String> {
+    if let Some(record_name) = tag_record_name {
+        if let Ok(tag_record) = fetch_by_path(record_name) {
+            if let Some(tag_name) = tag_record
+                .get("_RecordValue_")
+                .and_then(|v| v.get("tagName"))
+                .and_then(|v| v.as_str())
+            {
+                return Some(tag_name.to_ascii_lowercase());
+            }
+        }
+    }
+
+    if let Some(record_path) = tag_record_path {
+        if let Ok(tag_database_record) = fetch_by_path(record_path) {
+            if let Some(tags) = tag_database_record
+                .get("_RecordValue_")
+                .and_then(|v| v.get("tags"))
+                .and_then(|v| v.as_array())
+            {
+                return find_tag_name_in_tree(tags, tag_id);
+            }
+        }
+    }
+
+    None
+}
+
+fn seed_implicit_linearprogress_style_tags(
+    scene: &mut BbScene,
+    style_entries: &[serde_json::Value],
+    fetch_by_path: &dyn Fn(&str) -> Result<serde_json::Value, String>,
+) {
+    let mut implicit_tags: Vec<(String, String)> = Vec::new();
+
+    for entry in style_entries {
+        let Some(condition_lists) = entry.get("conditionsList").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for list in condition_lists {
+            let Some(conditions) = list.get("conditions").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            for condition in conditions {
+                let mut found = Vec::new();
+                collect_style_condition_tags(condition, &mut found);
+                for (tag_id, tag_record_name, tag_record_path) in found {
+                    let tag_name = resolve_tag_name(
+                        &tag_id,
+                        tag_record_name.as_deref(),
+                        tag_record_path.as_deref(),
+                        fetch_by_path,
+                    );
+                    if let Some(tag_name) = tag_name {
+                        implicit_tags.push((tag_id.clone(), tag_name));
+                    }
+                }
+            }
+        }
+    }
+
+    for (tag_id, tag_name) in implicit_tags {
+        match tag_name.as_str() {
+            "meter-element-instance" => {
+                for node in scene.nodes.values_mut() {
+                    if is_linear_progress_meter(node)
+                        && !node.style_tag_uuids.iter().any(|id| id == &tag_id)
+                    {
+                        node.style_tag_uuids.push(tag_id.clone());
+                    }
+                }
+            }
+            "progress-meter-state-active" => {
+                for node in scene.nodes.values_mut() {
+                    let is_active_progress = is_linear_progress_meter(node)
+                        && node
+                            .raw
+                            .get("progress")
+                            .and_then(|v| v.as_f64())
+                            .map(|v| v > 0.0)
+                            .unwrap_or(false);
+                    if is_active_progress && !node.style_tag_uuids.iter().any(|id| id == &tag_id)
+                    {
+                        node.style_tag_uuids.push(tag_id.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Maximum total nesting depth across both passes.
 ///
 /// The real MFD hierarchy has at least four levels:
@@ -465,6 +655,42 @@ fn resolve_canvas_graph_inner(
             raw: palette_source,
         };
         crate::bb_brand_apply::apply_brand_modifiers(&mut scene, &brand, loc_fetcher);
+    }
+
+    if let Some(style_id) = local_style_identifier.as_deref() {
+        if let Some(module_path) = modular_linearprogress_style_path(style_id) {
+            match fetch_by_path(&module_path) {
+                Ok(module_style_json) => {
+                    let module_style_value = module_style_json
+                        .get("_RecordValue_")
+                        .unwrap_or(&module_style_json);
+                    if let Some(entries) = module_style_value.get("entries").and_then(|v| v.as_array()) {
+                        seed_implicit_linearprogress_style_tags(
+                            &mut scene,
+                            entries,
+                            fetch_by_path,
+                        );
+                        let brand = bb_brand_style::BrandStyle {
+                            identifier: extract_record_name(&module_path),
+                            entries: entries.as_slice(),
+                            raw: module_style_value,
+                        };
+                        crate::bb_brand_apply::apply_brand_modifiers(
+                            &mut scene,
+                            &brand,
+                            loc_fetcher,
+                        );
+                    }
+                }
+                Err(e) => {
+                    log::debug!(
+                        "bb_resolve: no modular linear-progress style for '{}': {}",
+                        style_id,
+                        e
+                    );
+                }
+            }
+        }
     }
 
     let animated_roots: std::collections::HashSet<BbNodeId> = scene
@@ -1037,6 +1263,7 @@ fn inject_param_overrides(
     let mut param_to_string: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     let mut param_to_bool: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+    let mut param_to_int: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     for entry in param_inputs {
         let ty = entry
             .get("_Type_")
@@ -1069,9 +1296,25 @@ fn inject_param_overrides(
             if let Some(v) = entry.get("value").and_then(|v| v.as_bool()) {
                 param_to_bool.insert(param.to_ascii_lowercase(), v);
             }
+        } else if ty.eq_ignore_ascii_case("BuildingBlocks_ComponentParameterInputInteger") {
+            if let Some(v) = entry.get("value").and_then(|v| v.as_i64()) {
+                param_to_int.insert(param.to_ascii_lowercase(), v);
+            }
+        } else if ty.eq_ignore_ascii_case("BuildingBlocks_ComponentParameterInputNumber") {
+            if let Some(v) = entry
+                .get("value")
+                .and_then(|v| v.as_f64())
+                .map(|v| v.round() as i64)
+            {
+                param_to_int.insert(param.to_ascii_lowercase(), v);
+            }
         }
     }
-    if param_to_loc.is_empty() && param_to_string.is_empty() && param_to_bool.is_empty() {
+    if param_to_loc.is_empty()
+        && param_to_string.is_empty()
+        && param_to_bool.is_empty()
+        && param_to_int.is_empty()
+    {
         return;
     }
 
@@ -1119,6 +1362,15 @@ fn inject_param_overrides(
                 "_Type_": "_SynthBooleanParam_",
                 "_Pointer_": ptr_str,
                 "resolvedBool": value,
+            }));
+        } else if ty.eq_ignore_ascii_case("BuildingBlocks_BindingsIntegerComponentParameter") {
+            let Some(value) = param_to_int.get(&param_name_lc) else {
+                continue;
+            };
+            synthetics.push(serde_json::json!({
+                "_Type_": "_SynthIntegerParam_",
+                "_Pointer_": ptr_str,
+                "resolvedInt": value,
             }));
         }
     }

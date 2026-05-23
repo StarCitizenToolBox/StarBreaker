@@ -1,14 +1,16 @@
 //! Canonical UI IR renderer for generic BuildingBlocks output.
+//! GOLDEN RULE: No hard-coding, heuristic workarounds, no procedural fallbacks. Find the root cause and fix issues instead. Find the source data even it means doing things the hard way. This is intended to be a pipeline that is completely generic that can work for any UI on any ship and must not have targetted hacks that won't fix the issue in other places. This will keep the code lean and generic. Think how the game-engine would implement it.
 //!
 //! This module is the first Phase 2 step toward deterministic renderer
 //! consumption of [`crate::ui_ir::UiIrDocument`]. It renders the generic BB
 //! path directly from IR fields that were materialized in Phase 1: layout,
 //! fill colours, borders, asset references, and resolved text payload/style.
+//!
 
 use image::RgbaImage;
 use std::collections::HashSet;
 use std::sync::OnceLock;
-use tiny_skia::{Color, LineJoin, Paint, PathBuilder, Pixmap, PixmapPaint, Rect as TskRect, Stroke, Transform};
+use tiny_skia::{Color, Paint, PathBuilder, Pixmap, PixmapPaint, Rect as TskRect, Stroke, Transform};
 
 use crate::bb_atlas::AtlasLibrary;
 use crate::bb_assets::UiAssetResolver;
@@ -61,10 +63,7 @@ pub fn render_ui_ir_document(
 
     // Keep progress meters on top of base chrome/background fills.
     for node in &draw_order {
-        if !node
-            .node_type
-            .eq_ignore_ascii_case("BuildingBlocks_WidgetLinearProgressMeter")
-        {
+        if node.meter_progress.is_none() {
             continue;
         }
         let rect = ir_rect_to_layout_rect(node.computed_rect);
@@ -137,10 +136,7 @@ fn draw_non_text_node(
         draw_clinic_body_background_overlays(node, document, ctx, atlas, pixmap);
     }
 
-    if node
-        .node_type
-        .eq_ignore_ascii_case("BuildingBlocks_WidgetLinearProgressMeter")
-    {
+    if node.meter_progress.is_some() {
         draw_linear_progress_meter(node, ctx, pixmap, tsk_rect);
         return;
     }
@@ -153,7 +149,7 @@ fn draw_non_text_node(
             .as_deref()
             .is_some_and(|preset| preset.eq_ignore_ascii_case("GeneralX"))
     {
-        draw_general_x_button(ctx, pixmap, tsk_rect, node.alpha);
+        draw_secondary_close_button(ctx, pixmap, tsk_rect, node.alpha);
         return;
     }
 
@@ -461,51 +457,91 @@ fn draw_linear_progress_meter(
         (ctx.style.backlight.a as f32 / 255.0).max(0.8),
     ];
 
-    let seg_count = 14;
     let progress = node.meter_progress.unwrap_or(1.0).clamp(0.0, 1.0);
-    let active_count = ((seg_count as f32) * progress).round() as usize;
-    let seg_gap = (rect.width() * 0.02).max(1.0);
-    let total_gap = seg_gap * (seg_count as f32 - 1.0);
-    let seg_width = ((rect.width() - total_gap) / seg_count as f32).max(1.0);
-    let y = rect.y();
+    if progress <= 0.0 {
+        return;
+    }
 
-    for idx in 0..seg_count {
-        if idx as usize >= active_count {
-            break;
+    if let Some(segmented_fill) = node.segmented_fill.as_ref().filter(|fill| fill.enabled) {
+        let segment_width = if segmented_fill.segment_spacing_size > 0.0 {
+            segmented_fill.segment_spacing_size
+        } else {
+            segmented_fill.segment_size
         }
-        let x = rect.x() + idx as f32 * (seg_width + seg_gap);
-        if let Some(seg_rect) = TskRect::from_xywh(x, y, seg_width, rect.height()) {
-            fill_rect_ts(pixmap, seg_rect, glow, node.alpha);
+        .max(0.0);
+        let segment_gap = segmented_fill.segment_size.max(0.0);
+        let segment_stride = segment_width + segment_gap;
+        let segment_count = segmented_count_for_width(rect.width(), segment_width, segment_gap);
+        if segment_count > 0 && segment_stride > 0.0 {
+            let active_width = rect.width() * progress;
+            let segment_colour = segmented_fill.segment_colour.unwrap_or(glow);
+            for idx in 0..segment_count {
+                let x = rect.x() + segmented_fill.segment_x_offset + (idx as f32 * segment_stride);
+                if x >= rect.right() {
+                    break;
+                }
+                let right = (x + segment_width).min(rect.right());
+                if right <= x {
+                    continue;
+                }
+                let segment_end = right - rect.x();
+                if segment_end <= active_width {
+                    if let Some(segment_rect) =
+                        TskRect::from_xywh(x, rect.y(), right - x, rect.height())
+                    {
+                        fill_rect_ts(pixmap, segment_rect, segment_colour, node.alpha);
+                    }
+                }
+            }
+            return;
         }
+    }
+
+    let filled_w = (rect.width() * progress).max(1.0);
+    if let Some(fill_rect) = TskRect::from_xywh(rect.x(), rect.y(), filled_w, rect.height()) {
+        fill_rect_ts(pixmap, fill_rect, glow, node.alpha);
     }
 }
 
-fn draw_general_x_button(ctx: &ComposeContext<'_>, pixmap: &mut Pixmap, rect: TskRect, alpha: f32) {
-    let draw_rect = if rect.width() > 120.0 || rect.height() > 120.0 {
-        let side = rect.width().min(rect.height()).clamp(36.0, 72.0);
-        let x = rect.x() + rect.width() - side;
-        let y = rect.y() + (rect.height() - side) * 0.5;
-        TskRect::from_xywh(x, y, side, side).unwrap_or(rect)
-    } else {
-        rect
-    };
+fn segmented_count_for_width(total_width: f32, segment_width: f32, segment_gap: f32) -> usize {
+    if total_width <= 0.0 || segment_width <= 0.0 {
+        return 0;
+    }
+    let stride = segment_width + segment_gap.max(0.0);
+    if stride <= 0.0 {
+        return 0;
+    }
+    (total_width / stride).floor().max(0.0) as usize
+}
 
-    let cyan = [
-        ctx.style.backlight.r as f32 / 255.0,
-        ctx.style.backlight.g as f32 / 255.0,
-        ctx.style.backlight.b as f32 / 255.0,
-        1.0,
-    ];
+fn draw_secondary_close_button(
+    ctx: &ComposeContext<'_>,
+    pixmap: &mut Pixmap,
+    rect: TskRect,
+    alpha: f32,
+) {
+    let side = rect.width().min(rect.height()).clamp(40.0, 72.0);
+    let x = rect.x() + rect.width() - side;
+    let y = rect.y() + (rect.height() - side) * 0.5;
+    let draw_rect = TskRect::from_xywh(x, y, side, side).unwrap_or(rect);
+
+    let accent = derived_accent_tint(ctx);
+    fill_rect_ts(
+        pixmap,
+        draw_rect,
+        [accent[0] * 0.10, accent[1] * 0.10, accent[2] * 0.10, 0.30],
+        alpha,
+    );
+
     let mut frame_pb = PathBuilder::new();
     frame_pb.push_rect(draw_rect);
     if let Some(frame_path) = frame_pb.finish() {
         let mut frame_paint = Paint::default();
-        frame_paint.set_color(to_skia_color(cyan, alpha));
+        frame_paint.set_color(to_skia_color([accent[0], accent[1], accent[2], 1.0], alpha));
         frame_paint.anti_alias = true;
 
         let mut frame_stroke = Stroke::default();
         frame_stroke.width = (draw_rect.width() * 0.032).max(1.5);
-        frame_stroke.line_join = LineJoin::Round;
 
         pixmap.as_mut().stroke_path(
             &frame_path,
@@ -1350,5 +1386,10 @@ mod tests {
                 "ir_compose hardcoding marker reintroduced: {marker}. This is a hard rule: do not work around this guard by renaming tokens. Keep composition generic for all screens and manageable in scope by fixing the structural root cause instead of reintroducing marker-based hardcoding."
             );
         }
+    }
+
+    #[test]
+    fn segmented_count_matches_medgel_source_geometry() {
+        assert_eq!(segmented_count_for_width(115.0, 3.0, 5.0), 14);
     }
 }

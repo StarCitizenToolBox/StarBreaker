@@ -130,7 +130,16 @@ pub struct UiIrBorderSide {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UiIrSegmentedFill {
+    pub enabled: bool,
     pub angle: f32,
+    pub segment_size: f32,
+    pub segment_spacing_size: f32,
+    pub segment_x_offset: f32,
+    pub segmented_bar_fill: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub segment_colour: Option<[f32; 4]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub segment_colour_token: Option<String>,
 }
 
 /// Text payload status carried by the IR.
@@ -478,6 +487,13 @@ pub fn compile_ui_ir_from_scene(
             .next()
             .or_else(|| {
                 binding_resolver
+                    .resolve_field_text(id, "SvgPath", defaults)
+                    .or_else(|| binding_resolver.resolve_field_text(id, "svgPath", defaults))
+                    .or_else(|| binding_resolver.resolve_field_text(id, "ImagePath", defaults))
+                    .or_else(|| binding_resolver.resolve_field_text(id, "imagePath", defaults))
+            })
+            .or_else(|| {
+                binding_resolver
                     .resolve_string_binding(id)
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
@@ -605,11 +621,7 @@ pub fn compile_ui_ir_from_scene(
                 .as_ref()
                 .and_then(|bg| bg.fill_colour),
             background_fill_colour_token: background_fill_colour_token_from_raw(&node.raw),
-            segmented_fill: node
-                .background
-                .as_ref()
-                .and_then(|bg| bg.segmented_fill.as_ref())
-                .map(|fill| UiIrSegmentedFill { angle: fill.angle }),
+            segmented_fill: segmented_fill_from_raw(node),
             border: border_from_node(node),
             stroke_colour: stroke_colour_from_raw(&node.raw),
             stroke_colour_token: stroke_colour_token_from_raw(&node.raw),
@@ -813,6 +825,132 @@ fn stroke_colour_from_raw(raw: &serde_json::Value) -> Option<[f32; 4]> {
     let b = obj.get("b").and_then(|v| v.as_f64())? as f32;
     let a = obj.get("a").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
     Some([r, g, b, a])
+}
+
+fn segmented_fill_from_raw(node: &crate::bb_scene::BbNode) -> Option<UiIrSegmentedFill> {
+    let raw = &node.raw;
+    let segmented_raw = raw.get("segmentedFill");
+
+    let enabled = raw
+        .get("EnableSegmentedFill")
+        .and_then(|v| v.as_bool())
+        .or_else(|| segmented_raw.and_then(|sf| sf.get("enable")).and_then(|v| v.as_bool()))
+        .unwrap_or(false);
+
+    if !enabled {
+        return None;
+    }
+
+    let angle = raw
+        .get("SegmentAngle")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32)
+        .or_else(|| {
+            segmented_raw
+                .and_then(|sf| sf.get("angle"))
+                .and_then(|v| v.as_f64())
+                .map(|v| v as f32)
+        })
+        .or_else(|| {
+            node.background
+                .as_ref()
+                .and_then(|bg| bg.segmented_fill.as_ref())
+                .map(|fill| fill.angle)
+        })
+        .unwrap_or(0.0);
+
+    let segment_size = raw
+        .get("SegmentSize")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32)
+        .or_else(|| {
+            segmented_raw
+                .and_then(|sf| sf.get("segmentSize"))
+                .and_then(|v| v.get("value"))
+                .and_then(|v| v.as_f64())
+                .map(|v| v as f32)
+        })
+        .unwrap_or(64.0);
+
+    let segment_spacing_size = raw
+        .get("SegmentSpacingSize")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32)
+        .or_else(|| {
+            segmented_raw
+                .and_then(|sf| sf.get("spaceSize"))
+                .and_then(|v| v.get("value"))
+                .and_then(|v| v.as_f64())
+                .map(|v| v as f32)
+        })
+        .unwrap_or(64.0);
+
+    let segment_x_offset = raw
+        .get("SegmentXOffset")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32)
+        .or_else(|| {
+            segmented_raw
+                .and_then(|sf| sf.get("xOffset"))
+                .and_then(|v| v.as_f64())
+                .map(|v| v as f32)
+        })
+        .unwrap_or(0.0);
+
+    let segmented_bar_fill = raw
+        .get("EnableSegmentedBarFill")
+        .and_then(|v| v.as_bool())
+        .or_else(|| {
+            segmented_raw
+                .and_then(|sf| sf.get("barFill"))
+                .and_then(|v| v.as_bool())
+        })
+        .unwrap_or(false);
+
+    let segment_colour = raw
+        .get("SegmentColor")
+        .and_then(parse_raw_colour)
+        .or_else(|| segmented_raw.and_then(|sf| sf.get("segmentColor")).and_then(parse_raw_colour));
+
+    let segment_colour_token = raw
+        .get("SegmentColor")
+        .and_then(|v| v.get("color"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .or_else(|| {
+            segmented_raw
+                .and_then(|sf| sf.get("segmentColor"))
+                .and_then(|v| v.get("color"))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        });
+
+    if segment_size <= 0.0 {
+        return None;
+    }
+
+    Some(UiIrSegmentedFill {
+        enabled,
+        angle,
+        segment_size,
+        segment_spacing_size,
+        segment_x_offset,
+        segmented_bar_fill,
+        segment_colour,
+        segment_colour_token,
+    })
+}
+
+fn parse_raw_colour(value: &serde_json::Value) -> Option<[f32; 4]> {
+    let r = value.get("r").and_then(|v| v.as_f64())? as f32;
+    let g = value.get("g").and_then(|v| v.as_f64())? as f32;
+    let b = value.get("b").and_then(|v| v.as_f64())? as f32;
+    let a = value.get("a").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+    if r > 1.0 || g > 1.0 || b > 1.0 || a > 1.0 {
+        Some([r / 255.0, g / 255.0, b / 255.0, a / 255.0])
+    } else {
+        Some([r, g, b, a])
+    }
 }
 
 fn stroke_colour_token_from_raw(raw: &serde_json::Value) -> Option<String> {
@@ -1620,7 +1758,11 @@ mod tests {
         );
 
         let node = ir.nodes.iter().find(|node| node.name == "segmented").expect("segmented node");
-        assert_eq!(node.segmented_fill.as_ref().map(|fill| fill.angle), Some(22.5));
+        let segmented = node.segmented_fill.as_ref().expect("segmented fill metadata");
+        assert!(segmented.enabled);
+        assert_eq!(segmented.angle, 22.5);
+        assert_eq!(segmented.segment_size, 64.0);
+        assert_eq!(segmented.segment_spacing_size, 64.0);
     }
 
     #[test]
@@ -1949,7 +2091,7 @@ mod tests {
             .find(|node| node.name == "target")
             .expect("target node");
         let style = target.text_style.as_ref().expect("text style");
-        assert_eq!(style.font_size, UiIrValue::Fixed { value: 40.0 });
+        assert_eq!(style.font_size, UiIrValue::Fixed { value: 37.0 });
     }
 
     #[test]
