@@ -254,6 +254,17 @@ fn condition_matches_node(
         return false;
     }
 
+    if cond_type.ends_with("ConditionAnyOfTag") {
+        let Some(tags) = condition.get("tags").and_then(|v| v.as_array()) else {
+            return false;
+        };
+        return tags.iter().filter_map(tag_ref_id).any(|tag_id| {
+            node.style_tag_uuids
+                .iter()
+                .any(|node_tag| node_tag == tag_id)
+        });
+    }
+
     if cond_type.ends_with("ConditionTag") || condition.get("tag").is_some() {
         return condition_tag_id(condition)
             .map(|tag_id| node.style_tag_uuids.iter().any(|tag| tag == tag_id))
@@ -273,6 +284,10 @@ fn condition_matches_node(
 
 fn condition_tag_id(condition: &serde_json::Value) -> Option<&str> {
     let tag = condition.get("tag")?;
+    tag_ref_id(tag)
+}
+
+fn tag_ref_id(tag: &serde_json::Value) -> Option<&str> {
     tag.get("_RecordId_")
         .and_then(|v| v.as_str())
         .or_else(|| tag.as_str())
@@ -433,6 +448,10 @@ fn modifier_parts(modifier: &serde_json::Value) -> Option<(&str, &str, Option<&s
             let field_name = field
                 .get("field")
                 .and_then(|v| v.as_str())
+                .or_else(|| match type_str {
+                    "BuildingBlocks_FieldModifierRecordRefTypeFontStyleRecord" => Some("FontStyleRecord"),
+                    _ => None,
+                })
                 .unwrap_or("");
             let value = field
                 .get("value")
@@ -1462,6 +1481,29 @@ mod tests {
     }
 
     #[test]
+    fn record_ref_font_style_object_field_maps_to_font_style_record() {
+        let palette = json!({});
+        let modifier = json!({
+            "_Type_": "BuildingBlocks_FieldModifierRecordRef",
+            "field": {
+                "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeFontStyleRecord",
+                "value": "file://./../../fontstyles/blenderpro-bold.json"
+            }
+        });
+
+        let mut scene = make_test_scene();
+        let node = scene.nodes.get_mut(&1).expect("test node");
+        apply_modifier(&modifier, node, &palette, None);
+
+        assert_eq!(
+            node.raw
+                .get("FontStyleRecord")
+                .and_then(|value| value.as_str()),
+            Some("file://./../../fontstyles/blenderpro-bold.json")
+        );
+    }
+
+    #[test]
     fn test_mixed_type_and_tag_condition_tag_mismatch() {
         // Mixed AllOf: type matches but tag doesn't → should NOT apply.
         let mut scene = make_test_scene(); // WidgetImage, tag = "tag-uuid-1"
@@ -1568,5 +1610,73 @@ mod tests {
         assert!((fill[1] - 0.5).abs() < 0.001);
         assert!((fill[2] - 0.75).abs() < 0.001);
         assert!((fill[3] - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_condition_any_of_tag_matches_when_any_tag_matches() {
+        let mut scene = make_test_scene();
+
+        let brand = BrandStyle {
+            identifier: "test_brand".to_string(),
+            entries: &[json!({
+                "conditionsList": [{
+                    "conditions": [{
+                        "_Type_": "BuildingBlocks_StyleSelectorConditionAnyOfTag",
+                        "tags": [
+                            { "_RecordId_": "wrong-tag" },
+                            { "_RecordId_": "tag-uuid-1" }
+                        ]
+                    }]
+                }],
+                "modifiers": [{
+                    "_Type_": "BuildingBlocks_FieldModifierString",
+                    "field": "ImagePath",
+                    "value": "UI/Textures/any_of_tag_hit.tif"
+                }]
+            })],
+            raw: &json!({}),
+        };
+
+        apply_brand_modifiers(&mut scene, &brand, None);
+
+        let node = scene.nodes.get(&1).expect("test node");
+        assert_eq!(
+            node.raw.get("ImagePath").and_then(|value| value.as_str()),
+            Some("UI/Textures/any_of_tag_hit.tif")
+        );
+    }
+
+    #[test]
+    fn test_condition_any_of_tag_no_match_when_no_tags_match() {
+        let mut scene = make_test_scene();
+
+        let brand = BrandStyle {
+            identifier: "test_brand".to_string(),
+            entries: &[json!({
+                "conditionsList": [{
+                    "conditions": [{
+                        "_Type_": "BuildingBlocks_StyleSelectorConditionAnyOfTag",
+                        "tags": [
+                            { "_RecordId_": "wrong-tag-a" },
+                            { "_RecordId_": "wrong-tag-b" }
+                        ]
+                    }]
+                }],
+                "modifiers": [{
+                    "_Type_": "BuildingBlocks_FieldModifierString",
+                    "field": "ImagePath",
+                    "value": "UI/Textures/any_of_tag_should_not_apply.tif"
+                }]
+            })],
+            raw: &json!({}),
+        };
+
+        apply_brand_modifiers(&mut scene, &brand, None);
+
+        let node = scene.nodes.get(&1).expect("test node");
+        assert!(
+            node.raw.get("ImagePath").is_none(),
+            "ConditionAnyOfTag should not match when node has none of the tags"
+        );
     }
 }

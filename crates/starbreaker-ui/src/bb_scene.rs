@@ -463,7 +463,11 @@ fn parse_node_with_id(raw: &serde_json::Value, id: BbNodeId) -> Result<BbNode, S
         .to_owned();
 
     let style_tag_uuids = parse_style_tags(raw.get("styleTags"));
-    let is_active = raw.get("isActive").and_then(|v| v.as_bool()).unwrap_or(true);
+    let authored_is_active = raw.get("isActive").and_then(|v| v.as_bool()).unwrap_or(true);
+    let export_node = raw.get("exportNode").and_then(|v| v.as_bool()).unwrap_or(true);
+    // `exportNode=false` marks helper/template widgets that should not be
+    // emitted into the exported scene render.
+    let is_active = authored_is_active && export_node;
     let layer = raw.get("layer").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
     // BB JSON convention: missing `alpha` means fully opaque (1.0), not transparent (0.0).
     let alpha_raw = raw.get("alpha").and_then(|v| v.as_f64());

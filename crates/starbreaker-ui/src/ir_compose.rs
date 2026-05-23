@@ -1,5 +1,5 @@
 //! Canonical UI IR renderer for generic BuildingBlocks output.
-//! GOLDEN RULE: No hard-coding, heuristic workarounds, no procedural fallbacks. Find the root cause and fix issues instead. Find the source data even it means doing things the hard way. This is intended to be a pipeline that is completely generic that can work for any UI on any ship and must not have targetted hacks that won't fix the issue in other places. This will keep the code lean and generic. Think how the game-engine would implement it.
+//! GOLDEN RULE: No hard-coding, heuristic workarounds, no procedural fallbacks. Avoid targetted scoping. Find the root cause and fix issues instead. Find the source data even it means doing things the hard way. This is intended to be a pipeline that is completely generic that can work for any UI on any ship and must not have targetted hacks that won't fix the issue in other places. This will keep the code lean and generic. Think how the game-engine would implement it.
 //!
 //! This module is the first Phase 2 step toward deterministic renderer
 //! consumption of [`crate::ui_ir::UiIrDocument`]. It renders the generic BB
@@ -17,7 +17,7 @@ use crate::bb_assets::UiAssetResolver;
 use crate::bb_layout::Rect;
 use crate::compose::ComposeContext;
 use crate::error::UiError;
-use crate::text::{FontKind, TextAlign, TextRenderer};
+use crate::text::{FontKind, TextAlign, TextRenderer, VerticalAlign};
 use crate::swf_assets::FontGlyphSet;
 use crate::ui_ir::{UiIrBorder, UiIrDocument, UiIrNode, UiIrRect, UiIrTextPayload, UiIrValue, validate_ui_ir_document};
 
@@ -589,7 +589,7 @@ fn draw_text_node(
     node: &UiIrNode,
     renderer: &TextRenderer,
     ctx: &ComposeContext<'_>,
-    document: &UiIrDocument,
+    _document: &UiIrDocument,
     seen_rects: &mut HashSet<(i32, i32, i32, i32)>,
 ) {
     let Some(text) = resolved_text_payload(node) else {
@@ -599,24 +599,13 @@ fn draw_text_node(
         return;
     }
 
-    let mut rect = ir_rect_to_layout_rect(node.computed_rect);
+    let rect = ir_rect_to_layout_rect(node.computed_rect);
     if rect.w < 0.5 || rect.h < 0.5 {
         return;
     }
 
     if node.name.eq_ignore_ascii_case("FunctionTitle") {
         return;
-    }
-
-    if rect.y <= document.target_height as f32 * 0.14 {
-        if node.name.eq_ignore_ascii_case("LocationName") {
-            rect.y -= 22.0;
-        } else if node.name.eq_ignore_ascii_case("TierLevel") && rect.x < 200.0 {
-            rect.y += 14.0;
-        } else if node.name.eq_ignore_ascii_case("MachineTypeNameText") {
-            rect.x -= 70.0;
-            rect.y += 14.0;
-        }
     }
 
     let key = (
@@ -655,6 +644,11 @@ fn draw_text_node(
         .as_ref()
         .map(|style| TextAlign::from_bb_str(&style.alignment))
         .unwrap_or(TextAlign::Left);
+    let vertical_align = node
+        .text_style
+        .as_ref()
+        .map(|style| VerticalAlign::from_bb_str(&style.vertical_alignment))
+        .unwrap_or(VerticalAlign::Centre);
 
     let mut colour = node
         .text_style
@@ -695,6 +689,7 @@ fn draw_text_node(
             (nominal_font_size * SWF_TEXT_RENDER_SIZE_CALIBRATION).max(1.0),
             colour,
             align,
+            vertical_align,
         )
     });
     if font_telemetry_enabled() {
@@ -723,6 +718,7 @@ fn draw_text_node(
             fallback_font_size,
             colour,
             align,
+            vertical_align,
         );
     }
 
@@ -759,6 +755,7 @@ fn draw_text_node(
                 (secondary_nominal_font_size * SWF_TEXT_RENDER_SIZE_CALIBRATION).max(1.0),
                 [255, 255, 255, colour[3]],
                 TextAlign::Left,
+                VerticalAlign::Centre,
             )
         });
         if !secondary_used_swf {
@@ -770,6 +767,7 @@ fn draw_text_node(
                 secondary_fallback_font_size,
                 [255, 255, 255, colour[3]],
                 TextAlign::Left,
+                VerticalAlign::Centre,
             );
         }
     }

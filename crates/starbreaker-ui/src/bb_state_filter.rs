@@ -206,9 +206,6 @@ pub fn instantiated_false_widgets_with_param_inputs(
             );
         }
         if !val {
-            if is_framing_hidden_set_field(input_ref, widget, ops) {
-                continue;
-            }
             false_set.insert(widget);
         }
     }
@@ -572,6 +569,7 @@ fn scene_widget_boolean_param_count(
     count
 }
 
+#[allow(dead_code)]
 fn is_framing_hidden_set_field(
     input_ref: &serde_json::Value,
     widget_ptr: BbNodeId,
@@ -1326,13 +1324,13 @@ mod tests {
 
 
     /// If an `Invert(Or(...))` gate names directly-gated sibling canvases,
-    /// the first Or operand is still the idle overlay, but the framing canvas
-    /// itself remains visible so chrome/text can coexist with that overlay.
+    /// the first Or operand remains the idle overlay and the framing canvas
+    /// follows its evaluated `Instantiated` value (hidden when false).
     #[test]
-    fn idle_gate_or_keeps_direct_sibling_framing_visible() {
+    fn idle_gate_or_filters_framing_canvas_when_false() {
         // Mirrors the wall medbay shape:
         // ptr:3 = Attract, ptr:4 = LogIn, ptr:19 = Or(3, 4), ptr:6 = NOT(19)
-        // ptr:5 (Header) bound to ptr:6 → kept visible as framing chrome
+        // ptr:5 (Header) bound to ptr:6 → hidden when Attract is cold-default
         // ptr:11 (LogInCanvas) bound to ptr:4 → hidden
         // ptr:8 (AttractCanvas) bound to ptr:3 → shown as first Or operand
         let rv = make_record_value(
@@ -1357,7 +1355,7 @@ mod tests {
             ],
         );
         let result = instantiated_false_widgets(&rv);
-        assert!(!result.contains(&5), "Header (ptr:5) shown as framing chrome despite Attract=true");
+        assert!(result.contains(&5), "Header (ptr:5) hidden when Invert(Or(...)) evaluates false");
         assert!(result.contains(&11), "LogInCanvas (ptr:11) hidden (LogIn=false)");
         assert!(!result.contains(&8), "AttractCanvas (ptr:8) shown (first Or operand)");
     }

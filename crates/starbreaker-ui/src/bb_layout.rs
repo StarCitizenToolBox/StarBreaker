@@ -292,9 +292,10 @@ fn layout_node_with_rect(
     rects.insert(node_id, outer_rect);
 
     // Add to draw order only when the node is active.
-    if node.is_active {
-        draw_order.push(node_id);
+    if !node.is_active {
+        return;
     }
+    draw_order.push(node_id);
 
     // ── 5. Recurse into children ─────────────────────────────────────────────
     // If the sibling set includes synthetic node IDs (pointerless authored

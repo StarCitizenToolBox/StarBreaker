@@ -127,16 +127,6 @@ fn open_p4k() -> Result<Arc<MappedP4k>, String> {
         .map_err(|e| format!("failed to open Data.p4k: {e}"))
 }
 
-fn existing_output_fallback(workspace: &Path, output_path: &Path) -> Result<(), String> {
-    let existing = workspace.join("ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_i_med_medicalbed_a.png");
-    if existing.is_file() {
-        fs::copy(&existing, output_path)
-            .map_err(|e| format!("failed to copy fallback {}: {e}", existing.display()))?;
-        return Ok(());
-    }
-    Err("medical1 render failed and no existing generated fallback image was found".to_string())
-}
-
 fn collect_json_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
@@ -239,15 +229,63 @@ fn load_localization_map(workspace_root: &Path) -> Option<HashMap<String, String
     }
 }
 
+fn render_medical(
+    output_path: &Path,
+    guid: &'static str,
+    helper_name: &'static str,
+    fetcher: &FsCanvasFetcher,
+    style_fetcher: &FsStyleFetcher,
+    file_fetcher: &P4kFileFetcher,
+    localization_map: Option<HashMap<String, String>>,
+) -> Result<(), String> {
+    let binding = UiBindingView {
+        canvas_guid: Some(guid),
+        content_canvas_guid: Some(guid),
+        binding_kind: Some("mfd"),
+        manufacturer_id: Some("drak"),
+        helper_name: Some(helper_name),
+        default_view_index: None,
+        default_screen_slot: None,
+    };
+
+    let inputs = PipelineInputs {
+        binding: &binding,
+        canvas_fetcher: fetcher,
+        swf_fetcher: file_fetcher,
+        style_fetcher,
+        asset_fetcher: file_fetcher,
+        target_size: (1920, 1080),
+        apply_postprocess: false,
+        localization_map,
+        loc_fetcher: None,
+    };
+
+    let png = render_for_binding(&inputs).map_err(|e| {
+        format!(
+            "failed to render {} ({}): {e}",
+            output_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("medical output"),
+            guid
+        )
+    })?;
+
+    fs::write(output_path, png)
+        .map_err(|e| format!("failed to write {}: {e}", output_path.display()))?;
+
+    Ok(())
+}
+
 fn main() -> Result<(), String> {
     let workspace = PathBuf::from("/home/tom/projects/scorg_tools");
     let canvas_root = workspace.join("ships/dcb_canvas/libs/foundry/records");
     let localization_map = load_localization_map(&workspace);
     let fetcher = load_canvas_index(&canvas_root)?;
 
-    let output_path = workspace
+    let output_dir = workspace
         .join("docs/StarBreaker/ui-rework-artifacts/phase-2/comparison/medical1-current.png");
-    if let Some(parent) = output_path.parent() {
+    if let Some(parent) = output_dir.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
     }
@@ -263,46 +301,35 @@ fn main() -> Result<(), String> {
     let style_fetcher = FsStyleFetcher {
         styles_root: workspace.join("ships/dcb_canvas/libs/foundry/records/ui/buildingblocks/styles"),
     };
-    let file_fetcher = p4k.as_ref().map(|p4k| P4kFileFetcher { p4k: Arc::clone(p4k) });
+    let file_fetcher = p4k
+        .as_ref()
+        .map(|p4k| P4kFileFetcher { p4k: Arc::clone(p4k) })
+        .ok_or_else(|| "P4K-backed fetcher unavailable".to_string())?;
 
-    let medical1_guid = "534bab84-299b-479a-a4af-4469df112ea7";
-    let binding = UiBindingView {
-        canvas_guid: Some(medical1_guid),
-        content_canvas_guid: Some(medical1_guid),
-        binding_kind: Some("mfd"),
-        manufacturer_id: Some("drak"),
-        helper_name: Some("medical1-phase2-render"),
-        default_view_index: None,
-        default_screen_slot: None,
-    };
+    let comparison_dir = workspace.join("docs/StarBreaker/ui-rework-artifacts/phase-2/comparison");
+    let medical1_output = comparison_dir.join("medical1-current.png");
+    let medical2_output = comparison_dir.join("medical2-current.png");
 
-    let inputs = PipelineInputs {
-        binding: &binding,
-        canvas_fetcher: &fetcher,
-        swf_fetcher: file_fetcher
-            .as_ref()
-            .ok_or_else(|| "P4K-backed SWF fetcher unavailable".to_string())?,
-        style_fetcher: &style_fetcher,
-        asset_fetcher: file_fetcher
-            .as_ref()
-            .ok_or_else(|| "P4K-backed asset fetcher unavailable".to_string())?,
-        target_size: (1920, 1080),
-        apply_postprocess: false,
+    render_medical(
+        &medical1_output,
+        "534bab84-299b-479a-a4af-4469df112ea7",
+        "medical1-phase2-render",
+        &fetcher,
+        &style_fetcher,
+        &file_fetcher,
+        localization_map.clone(),
+    )?;
+    render_medical(
+        &medical2_output,
+        "e9ad809d-ebcf-43a3-bb20-120f64556aef",
+        "medical2-phase2-render",
+        &fetcher,
+        &style_fetcher,
+        &file_fetcher,
         localization_map,
-        loc_fetcher: None,
-    };
+    )?;
 
-    match render_for_binding(&inputs) {
-        Ok(png) => {
-            fs::write(&output_path, png)
-                .map_err(|e| format!("failed to write {}: {e}", output_path.display()))?;
-        }
-        Err(e) => {
-            eprintln!("warning: failed to render medical1 through current pipeline: {e}");
-            existing_output_fallback(&workspace, &output_path)?;
-        }
-    }
-
-    println!("Wrote {}", output_path.display());
+    println!("Wrote {}", medical1_output.display());
+    println!("Wrote {}", medical2_output.display());
     Ok(())
 }

@@ -158,9 +158,25 @@ pub struct UiIrTextStyle {
     pub resolved_font_record: Option<serde_json::Value>,
     pub font_size: UiIrValue,
     pub alignment: String,
+    #[serde(default = "default_vertical_alignment")]
+    pub vertical_alignment: String,
     pub colour: Option<[f32; 4]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub colour_token: Option<String>,
+}
+
+fn default_vertical_alignment() -> String {
+    "Center".to_string()
+}
+
+fn effective_font_record(node: &BbNode) -> Option<String> {
+    node.raw
+    .get("FontStyleRecord")
+    .or_else(|| node.raw.get("fontRecord"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| node.text.as_ref().and_then(|text| text.font_record.clone()))
 }
 
 /// Shape metadata for custom-shape widgets.
@@ -355,11 +371,11 @@ pub fn compile_ui_ir_from_scene(
                 UiIrTextPayload::Empty
             }
         });
+        let font_record = effective_font_record(node);
         let text_style = if let Some(text) = node.text.as_ref() {
             Some(UiIrTextStyle {
-                font_record: text.font_record.clone(),
-                resolved_font_record: text
-                    .font_record
+                font_record: font_record.clone(),
+                resolved_font_record: font_record
                     .as_deref()
                     .and_then(|record_ref| resolve_record(canvas_fetcher, &[record_ref])),
                 font_size: resolve_effective_font_size(
@@ -372,6 +388,12 @@ pub fn compile_ui_ir_from_scene(
                     &style_font_sizes,
                 ),
                 alignment: text.alignment.clone(),
+                vertical_alignment: node
+                    .raw
+                    .get("verticalTextAlignment")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Center")
+                    .to_string(),
                 colour: text.colour.or_else(|| fill_colour_from_raw_for_text(&node.raw)),
                 colour_token: text_colour_token_from_raw(&node.raw),
             })
@@ -400,10 +422,18 @@ pub fn compile_ui_ir_from_scene(
                 .unwrap_or(18.0);
 
             Some(UiIrTextStyle {
-                font_record: None,
-                resolved_font_record: None,
+                font_record: font_record.clone(),
+                resolved_font_record: font_record
+                    .as_deref()
+                    .and_then(|record_ref| resolve_record(canvas_fetcher, &[record_ref])),
                 font_size: UiIrValue::Fixed { value: font_size },
                 alignment,
+                vertical_alignment: node
+                    .raw
+                    .get("verticalTextAlignment")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Center")
+                    .to_string(),
                 colour: fill_colour_from_raw_for_text(&node.raw),
                 colour_token: text_colour_token_from_raw(&node.raw),
             })
@@ -459,6 +489,12 @@ pub fn compile_ui_ir_from_scene(
                 resolved_font_record: None,
                 font_size: UiIrValue::Fixed { value: font_size },
                 alignment,
+                vertical_alignment: node
+                    .raw
+                    .get("verticalTextAlignment")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Center")
+                    .to_string(),
                 colour: None,
                 colour_token: None,
             })
@@ -2032,6 +2068,57 @@ mod tests {
         let node = &ir.nodes[0];
         let style = node.text_style.as_ref().expect("text style");
         assert_eq!(style.font_size, UiIrValue::Fixed { value: 42.0 });
+    }
+
+    #[test]
+    fn compile_ir_prefers_raw_font_record_over_stale_parsed_text_font_record() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.RawFontRecord",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "label",
+                        "text": "READY",
+                        "fontRecord": "file://./old-font.json",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 30.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let mut scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let node = scene.nodes.get_mut(&1).expect("node 1");
+        node.raw["FontStyleRecord"] =
+            serde_json::Value::from("file://./styled-font.json");
+
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-raw-font-record",
+            None,
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = &ir.nodes[0];
+        let style = node.text_style.as_ref().expect("text style");
+        assert_eq!(
+            style.font_record.as_deref(),
+            Some("file://./styled-font.json")
+        );
     }
 
     #[test]

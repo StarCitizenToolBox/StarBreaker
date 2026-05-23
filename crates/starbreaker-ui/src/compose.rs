@@ -35,7 +35,7 @@ use crate::postprocess::PostProcessOptions;
 use crate::style::ManufacturerStyle;
 use crate::swf_assets::SwfAssetLibrary;
 use crate::swf_render;
-use crate::text::{FontKind, TextAlign, TextRenderer};
+use crate::text::{FontKind, TextAlign, TextRenderer, VerticalAlign};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public types
@@ -1069,7 +1069,16 @@ fn draw_text_node(
     };
     colour[3] = ((colour[3] as f32) * node.alpha.clamp(0.0, 1.0)).clamp(0.0, 255.0) as u8;
 
-    renderer.draw(img, text, rect, FontKind::Sans, size_px, colour, align);
+    renderer.draw(
+        img,
+        text,
+        rect,
+        FontKind::Sans,
+        size_px,
+        colour,
+        align,
+        VerticalAlign::Centre,
+    );
 }
 
 /// Map BB `labelProperties.style` string to a nominal pixel size in authored space.

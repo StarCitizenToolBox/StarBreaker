@@ -1,4 +1,5 @@
 //! Text renderer using `rusttype` and bundled DejaVu fonts.
+//! GOLDEN RULE: No hard-coding, heuristic workarounds, no procedural fallbacks. Avoid targetted scoping. Find the root cause and fix issues instead. Find the source data even it means doing things the hard way. This is intended to be a pipeline that is completely generic that can work for any UI on any ship and must not have targetted hacks that won't fix the issue in other places. This will keep the code lean and generic. Think how the game-engine would implement it.
 //!
 //! Renders word-wrapped, aligned text onto a mutable [`RgbaImage`] using
 //! sub-pixel-quality rasterisation. Font data is `include_bytes!` embedded at
@@ -28,6 +29,26 @@ pub enum TextAlign {
     Left,
     Centre,
     Right,
+}
+
+/// Vertical text alignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerticalAlign {
+    Top,
+    Centre,
+    Bottom,
+}
+
+impl VerticalAlign {
+    /// Parse the string as it appears in BB `verticalTextAlignment`.
+    pub fn from_bb_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "top" => Self::Top,
+            "bottom" => Self::Bottom,
+            "center" | "centre" => Self::Centre,
+            _ => Self::Centre,
+        }
+    }
 }
 
 impl TextAlign {
@@ -86,6 +107,7 @@ impl TextRenderer {
         size_px: f32,
         colour: [u8; 4],
         align: TextAlign,
+        vertical_align: VerticalAlign,
     ) {
         if text.is_empty() || rect.w < 1.0 || rect.h < 1.0 || size_px < 1.0 {
             return;
@@ -98,7 +120,12 @@ impl TextRenderer {
 
         let lines = wrap_lines(font, text, scale, rect.w);
         let total_h = lines.len() as f32 * line_h;
-        let start_baseline = rect.y + ((rect.h - total_h) * 0.5).max(0.0) + v_metrics.ascent;
+        let block_top = match vertical_align {
+            VerticalAlign::Top => rect.y,
+            VerticalAlign::Centre => rect.y + ((rect.h - total_h) * 0.5).max(0.0),
+            VerticalAlign::Bottom => rect.y + (rect.h - total_h).max(0.0),
+        };
+        let start_baseline = block_top + v_metrics.ascent;
 
         let img_w = img.width() as i32;
         let img_h = img.height() as i32;
@@ -164,6 +191,7 @@ impl TextRenderer {
         size_px: f32,
         colour: [u8; 4],
         align: TextAlign,
+        vertical_align: VerticalAlign,
     ) -> bool {
         if text.is_empty() || rect.w < 1.0 || rect.h < 1.0 || size_px < 1.0 {
             return false;
@@ -189,7 +217,7 @@ impl TextRenderer {
             width_px: f32,
             runs: Vec<GlyphRun>,
             min_y_units: f32,
-            height_px: f32,
+            max_y_units: f32,
         }
 
         let scale = size_px / units_per_em;
@@ -200,7 +228,6 @@ impl TextRenderer {
             let mut runs = Vec::new();
             let mut min_y_units = f32::INFINITY;
             let mut max_y_units = f32::NEG_INFINITY;
-
             for ch in line.chars() {
                 if ch == ' ' {
                     pen_x += (size_px * 0.33).max(1.0);
@@ -226,39 +253,55 @@ impl TextRenderer {
                 pen_x += adv.max(1.0);
             }
 
-            if !min_y_units.is_finite() || !max_y_units.is_finite() {
-                min_y_units = 0.0;
-                max_y_units = units_per_em;
+            if !min_y_units.is_finite() || !max_y_units.is_finite() || max_y_units <= min_y_units {
+                min_y_units = descent;
+                max_y_units = ascent;
             }
-            let glyph_h_px = ((max_y_units - min_y_units).abs() * scale).max(size_px * 0.7);
+
             layouts.push(LineLayout {
                 width_px: pen_x,
                 runs,
                 min_y_units,
-                height_px: glyph_h_px.max(nominal_line_h),
+                max_y_units,
             });
         }
 
-        let interline_px = (size_px * 0.12).max(1.0);
-        let total_h = layouts
+        let measured_line_h = layouts
             .iter()
-            .map(|l| l.height_px)
-            .sum::<f32>()
+            .map(|layout| (layout.max_y_units - layout.min_y_units).abs() * scale)
+            .fold(0.0f32, f32::max);
+        let line_step = nominal_line_h.max(measured_line_h.max(1.0));
+        let interline_px = (size_px * 0.45).max(1.0);
+        let total_h = line_step * layouts.len() as f32
             + interline_px * (layouts.len().saturating_sub(1) as f32);
-        let mut line_top = rect.y + ((rect.h - total_h) * 0.5).max(0.0);
+        let align_total_h = if matches!(vertical_align, VerticalAlign::Centre)
+            && layouts.len() == 1
+            && rect.h >= size_px * 2.5
+            && rect.h <= size_px * 4.0
+        {
+            nominal_line_h.min(total_h)
+        } else {
+            total_h
+        };
+        let block_top = match vertical_align {
+            VerticalAlign::Top => rect.y,
+            VerticalAlign::Centre => rect.y + ((rect.h - align_total_h) * 0.5).max(0.0),
+            VerticalAlign::Bottom => rect.y + (rect.h - total_h).max(0.0),
+        };
+        let start_baseline = block_top + (ascent * scale);
 
         let mut pixmap = match Pixmap::new(img.width(), img.height()) {
             Some(pm) => pm,
             None => return false,
         };
 
-        for layout in &layouts {
+        for (line_index, layout) in layouts.iter().enumerate() {
             let start_x = match align {
                 TextAlign::Left => rect.x,
                 TextAlign::Centre => rect.x + ((rect.w - layout.width_px) * 0.5).max(0.0),
                 TextAlign::Right => rect.x + (rect.w - layout.width_px).max(0.0),
             };
-            let y_offset = line_top - layout.min_y_units * scale;
+            let baseline_y = start_baseline + line_index as f32 * (line_step + interline_px);
 
             for run in &layout.runs {
                 let transform = Transform::from_row(
@@ -267,7 +310,7 @@ impl TextRenderer {
                     0.0,
                     scale,
                     start_x + run.x_px,
-                    y_offset,
+                    baseline_y,
                 );
 
                 let mut paint = Paint::default();
@@ -275,7 +318,6 @@ impl TextRenderer {
                 pixmap.fill_path(&run.path, &paint, FillRule::Winding, transform, None);
             }
 
-            line_top += layout.height_px + interline_px;
         }
 
         blend_pixmap_onto_image(&pixmap, img, rect);
@@ -488,7 +530,16 @@ mod tests {
         let r = TextRenderer::new();
         let mut img = make_img(128, 32);
         let rect = Rect { x: 2.0, y: 2.0, w: 120.0, h: 28.0 };
-        r.draw(&mut img, "HI", rect, FontKind::Sans, 14.0, [255, 255, 255, 255], TextAlign::Left);
+        r.draw(
+            &mut img,
+            "HI",
+            rect,
+            FontKind::Sans,
+            14.0,
+            [255, 255, 255, 255],
+            TextAlign::Left,
+            VerticalAlign::Centre,
+        );
         let changed = img.pixels().any(|p| p[0] > 0 || p[1] > 0 || p[2] > 0);
         assert!(changed, "no pixels changed after draw");
     }
@@ -499,7 +550,16 @@ mod tests {
         let mut img = make_img(64, 16);
         let before: Vec<_> = img.pixels().copied().collect();
         let rect = Rect { x: 0.0, y: 0.0, w: 64.0, h: 16.0 };
-        r.draw(&mut img, "", rect, FontKind::Sans, 12.0, [255, 0, 0, 255], TextAlign::Left);
+        r.draw(
+            &mut img,
+            "",
+            rect,
+            FontKind::Sans,
+            12.0,
+            [255, 0, 0, 255],
+            TextAlign::Left,
+            VerticalAlign::Centre,
+        );
         let after: Vec<_> = img.pixels().copied().collect();
         assert_eq!(before, after, "draw of empty string mutated the image");
     }
