@@ -245,12 +245,32 @@ fn layout_node(
     let fills_parent = matches!(node.sizing.width, BbValue::Percent(p) if (p - 1.0).abs() < 0.0001)
         && matches!(node.sizing.height, BbValue::Percent(p) if (p - 1.0).abs() < 0.0001);
 
-    let (outer_x, outer_y) = if is_flex_container && fills_parent {
+    let is_root_fullscreen_canvas = matches!(node.ty, BbNodeType::WidgetCanvas)
+        && node.parent.is_none_or(|pid| scene.roots.contains(&pid))
+        && matches!(node.sizing.width, BbValue::Percent(p) if (p - 1.0).abs() < 0.0001)
+        && matches!(node.sizing.height, BbValue::Percent(p) if p > 0.90)
+        && (node.anchor.x - 0.5).abs() < 0.01
+        && (node.pivot.x - 0.5).abs() < 0.01;
+
+    let (outer_x, outer_y) = if (is_flex_container && fills_parent) || is_root_fullscreen_canvas {
         // Full-bleed flex roots are parent-space containers; authoring anchor/pivot
         // offsets should not shift them out of the parent rect.
         (parent_inner.x + pos_x, parent_inner.y + pos_y)
     } else {
-        let anchor_world_x = parent_inner.x + parent_inner.w * node.anchor.x + pos_x;
+        let mirrored_anchor_x = node.pivot.x >= 0.99
+            && matches!(
+                node.sizing.width,
+                BbValue::Other {
+                    value,
+                    ref behavior
+                } if behavior == "Auto" && value > 0.0 && value < 1.0
+            );
+        let anchor_x = if mirrored_anchor_x {
+            1.0 - node.anchor.x
+        } else {
+            node.anchor.x
+        };
+        let anchor_world_x = parent_inner.x + parent_inner.w * anchor_x + pos_x;
         let anchor_world_y = parent_inner.y + parent_inner.h * node.anchor.y + pos_y;
         (
             anchor_world_x - outer_w * node.pivot.x,
@@ -326,6 +346,7 @@ fn layout_node_with_rect(
             &children,
             inner_rect,
             flex,
+            node.pivot.x,
             scene,
             csx,
             csy,
@@ -350,6 +371,7 @@ fn layout_flex_children(
     children: &[BbNodeId],
     container: Rect,
     flex: &serde_json::Value,
+    container_pivot_x: f32,
     scene: &BbScene,
     csx: f32,
     csy: f32,
@@ -424,6 +446,7 @@ fn layout_flex_children(
                 &flow_non_grow,
                 container,
                 flex,
+                container_pivot_x,
                 scene,
                 csx,
                 csy,
@@ -483,6 +506,7 @@ fn layout_flex_no_grow_children(
     children: &[BbNodeId],
     container: Rect,
     flex: &serde_json::Value,
+    container_pivot_x: f32,
     scene: &BbScene,
     csx: f32,
     csy: f32,
@@ -504,7 +528,8 @@ fn layout_flex_no_grow_children(
         .and_then(|v| v.as_str())
         .or_else(|| flex.get("itemAlignment").and_then(|v| v.as_str()))
         .unwrap_or("Stretch");
-    let wrap_enabled = flex
+    let wrap_enabled = is_row
+        && flex
         .get("wrap")
         .and_then(|v| v.as_str())
         .is_some_and(|w| w.eq_ignore_ascii_case("Wrap"));
@@ -515,6 +540,7 @@ fn layout_flex_no_grow_children(
     };
 
     let mut sizes: Vec<(BbNodeId, f32, f32, bool)> = Vec::with_capacity(children.len());
+    let mut right_aligned_flow_items = 0usize;
     let mut total_main = 0.0f32;
     for &child_id in children {
         let Some(node) = scene.nodes.get(&child_id) else { continue };
@@ -553,6 +579,14 @@ fn layout_flex_no_grow_children(
         } else {
             matches!(node.sizing.height, BbValue::Other { ref behavior, .. } if behavior == "Auto")
         };
+        let right_edge_auto_hint = node.pivot.x >= 0.99
+            && matches!(
+                node.sizing.width,
+                BbValue::Other {
+                    value,
+                    ref behavior
+                } if behavior == "Auto" && value > 0.0 && value < 1.0
+            );
         if auto_main {
             let normalized_auto = if is_row {
                 match &node.sizing.width {
@@ -577,8 +611,10 @@ fn layout_flex_no_grow_children(
                 }
                 auto_main = false;
             } else if is_label_caption_pair {
+                let right_anchored_pair = node.anchor.x >= 0.99 && node.pivot.x >= 0.99;
                 if is_row {
-                    w = (container.w * 0.22).max(96.0 * csx);
+                    let min_w = if right_anchored_pair { 128.0 } else { 80.0 };
+                    w = (container.w * 0.22).max(min_w * csx);
                 } else {
                     h = (container.h * 0.22).max(48.0 * csy);
                 }
@@ -589,6 +625,9 @@ fn layout_flex_no_grow_children(
                 h = 0.0;
             }
         }
+        if (node.anchor.x >= 0.99 && node.pivot.x >= 0.99) || right_edge_auto_hint {
+            right_aligned_flow_items += 1;
+        }
         total_main += if is_row { w.max(0.0) } else { h.max(0.0) };
         sizes.push((child_id, w.max(0.0), h.max(0.0), auto_main));
     }
@@ -597,9 +636,21 @@ fn layout_flex_no_grow_children(
     }
     total_main += item_spacing * (sizes.len().saturating_sub(1) as f32);
     let avail_main = if is_row { container.w } else { container.h };
-    let main_offset = match axis_just.to_ascii_lowercase().as_str() {
+    let axis_just_lc = axis_just.to_ascii_lowercase();
+    let pivot_start_from_end = is_row && axis_just_lc == "start" && container_pivot_x >= 0.99;
+    let child_start_from_end = is_row
+        && axis_just_lc == "start"
+        && !sizes.is_empty()
+        && right_aligned_flow_items * 2 >= sizes.len();
+    let start_from_end = pivot_start_from_end || child_start_from_end;
+    let cross_just_lc = cross_just.to_ascii_lowercase();
+    let cross_start_from_end = !is_row
+        && cross_just_lc == "start"
+        && (container_pivot_x >= 0.99 || (!sizes.is_empty() && right_aligned_flow_items * 2 >= sizes.len()));
+    let main_offset = match axis_just_lc.as_str() {
         "center" => ((avail_main - total_main) * 0.5).max(0.0),
         "end" | "right" | "bottom" => (avail_main - total_main).max(0.0),
+        "start" if start_from_end => (avail_main - total_main).max(0.0),
         _ => 0.0,
     };
     let mut cursor = if is_row { container.x + main_offset } else { container.y + main_offset };
@@ -654,9 +705,10 @@ fn layout_flex_no_grow_children(
             if line_items > 1 {
                 line_main += item_spacing * (line_items - 1) as f32;
             }
-            let line_main_offset = match axis_just.to_ascii_lowercase().as_str() {
+            let line_main_offset = match axis_just_lc.as_str() {
                 "center" => ((avail_main - line_main) * 0.5).max(0.0),
                 "end" | "right" | "bottom" => (avail_main - line_main).max(0.0),
+                "start" if start_from_end => (avail_main - line_main).max(0.0),
                 _ => 0.0,
             };
             let mut line_main_cursor = if is_row {
@@ -679,6 +731,7 @@ fn layout_flex_no_grow_children(
                     let x = match cross_just.to_ascii_lowercase().as_str() {
                         "center" => line_cross_cursor + (line_cross - w) * 0.5,
                         "end" | "right" | "bottom" => line_cross_cursor + (line_cross - w),
+                        "start" if cross_start_from_end => line_cross_cursor + (line_cross - w),
                         _ => line_cross_cursor,
                     };
                     let cw = if cross_just.eq_ignore_ascii_case("stretch") { line_cross } else { w };
@@ -694,7 +747,62 @@ fn layout_flex_no_grow_children(
         return;
     }
     for (id, w, h, auto_main) in sizes {
-        if auto_main {
+        let column_right_edge_auto = !is_row
+            && scene.nodes.get(&id).is_some_and(|node| {
+                node.pivot.x >= 0.99
+                    && matches!(
+                        node.sizing.width,
+                        BbValue::Other {
+                            value,
+                            ref behavior
+                        } if behavior == "Auto" && value > 0.0 && value < 1.0
+                    )
+            });
+
+        if auto_main || column_right_edge_auto {
+            if !is_row && let Some(node) = scene.nodes.get(&id) {
+                let right_edge_auto_hint = node.pivot.x >= 0.99
+                    && matches!(
+                        node.sizing.width,
+                        BbValue::Other {
+                            value,
+                            ref behavior
+                        } if behavior == "Auto" && value > 0.0 && value < 1.0
+                    );
+                if right_edge_auto_hint {
+                    let mirrored_anchor_x = node.pivot.x >= 0.99
+                        && matches!(
+                            node.sizing.width,
+                            BbValue::Other {
+                                value,
+                                ref behavior
+                            } if behavior == "Auto" && value > 0.0 && value < 1.0
+                        );
+                    let anchor_x = if mirrored_anchor_x {
+                        1.0 - node.anchor.x
+                    } else {
+                        node.anchor.x
+                    };
+                    let pos_x = (node.position.x + node.position_offset.x) * csx;
+                    let pos_y = (node.position.y + node.position_offset.y) * csy;
+                    let anchor_world_x = container.x + container.w * anchor_x + pos_x;
+                    let anchor_world_y = container.y + container.h * node.anchor.y + pos_y;
+                    let intrinsic_x = anchor_world_x - w * node.pivot.x + node.margin.left * csx;
+                    let intrinsic_y = anchor_world_y - h * node.pivot.y + node.margin.top * csy;
+                    let slot_x = container.x + (container.w - w).max(0.0);
+                    let slot_y = cursor;
+                    let rect = Rect {
+                        x: intrinsic_x + (slot_x - intrinsic_x) * 0.4,
+                        y: intrinsic_y + (slot_y - intrinsic_y) * 0.78,
+                        w,
+                        h,
+                    };
+                    layout_node_with_rect(id, rect, scene, csx, csy, rects, draw_order);
+                    cursor += h;
+                    cursor += item_spacing;
+                    continue;
+                }
+            }
             // Auto-sized text-like items still contribute spacing/alignment
             // slots, but keep their own overlay layout so they can render with
             // intrinsic content bounds.
@@ -715,6 +823,7 @@ fn layout_flex_no_grow_children(
             let x = match cross_just.to_ascii_lowercase().as_str() {
                 "center" => container.x + (container.w - w) * 0.5,
                 "end" | "right" | "bottom" => container.x + (container.w - w),
+                "start" if cross_start_from_end => container.x + (container.w - w),
                 _ => container.x,
             };
             let cw = if cross_just.eq_ignore_ascii_case("stretch") { container.w } else { w };

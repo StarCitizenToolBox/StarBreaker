@@ -7,7 +7,7 @@ use starbreaker_p4k::MappedP4k;
 use starbreaker_ui::pipeline::AssetFetcher;
 use starbreaker_ui::{
     CanvasFetcher, ManufacturerStyle, PipelineInputs, StyleFetcher, StyleLoader, SwfFetcher,
-    UiBindingView, UiError,
+    UiBindingView, UiError, compile_ir_for_binding,
     render_for_binding,
 };
 
@@ -277,6 +277,36 @@ fn render_medical(
     Ok(())
 }
 
+fn print_layout_locations(inputs: &PipelineInputs<'_>, label: &str, query: &str) -> Result<(), String> {
+    let ir = compile_ir_for_binding(inputs)
+        .map_err(|e| format!("failed to compile IR for location query ({label}): {e}"))?;
+
+    let query_lc = query.to_ascii_lowercase();
+    println!("Location query '{}' on {}:", query, label);
+    let mut hits = 0usize;
+    for node in &ir.nodes {
+        let name_lc = node.name.to_ascii_lowercase();
+        let ty_lc = node.node_type.to_ascii_lowercase();
+        if name_lc.contains(&query_lc) || ty_lc.contains(&query_lc) {
+            hits += 1;
+            println!(
+                "  id={} name='{}' type='{}' x={:.1} y={:.1} w={:.1} h={:.1}",
+                node.id,
+                node.name,
+                node.node_type,
+                node.computed_rect.x,
+                node.computed_rect.y,
+                node.computed_rect.w,
+                node.computed_rect.h
+            );
+        }
+    }
+    if hits == 0 {
+        println!("  (no matches)");
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), String> {
     let workspace = PathBuf::from("/home/tom/projects/scorg_tools");
     let canvas_root = workspace.join("ships/dcb_canvas/libs/foundry/records");
@@ -309,6 +339,7 @@ fn main() -> Result<(), String> {
     let comparison_dir = workspace.join("docs/StarBreaker/ui-rework-artifacts/phase-2/comparison");
     let medical1_output = comparison_dir.join("medical1-current.png");
     let medical2_output = comparison_dir.join("medical2-current.png");
+    let locate_query = std::env::var("SB_UI_LOCATE").ok().filter(|s| !s.trim().is_empty());
 
     render_medical(
         &medical1_output,
@@ -328,6 +359,52 @@ fn main() -> Result<(), String> {
         &file_fetcher,
         localization_map,
     )?;
+
+    if let Some(query) = locate_query.as_deref() {
+        let medical1_binding = UiBindingView {
+            canvas_guid: Some("534bab84-299b-479a-a4af-4469df112ea7"),
+            content_canvas_guid: Some("534bab84-299b-479a-a4af-4469df112ea7"),
+            binding_kind: Some("mfd"),
+            manufacturer_id: Some("drak"),
+            helper_name: Some("medical1-phase2-render"),
+            default_view_index: None,
+            default_screen_slot: None,
+        };
+        let medical1_inputs = PipelineInputs {
+            binding: &medical1_binding,
+            canvas_fetcher: &fetcher,
+            swf_fetcher: &file_fetcher,
+            style_fetcher: &style_fetcher,
+            asset_fetcher: &file_fetcher,
+            target_size: (1920, 1080),
+            apply_postprocess: false,
+            localization_map: load_localization_map(&workspace),
+            loc_fetcher: None,
+        };
+        print_layout_locations(&medical1_inputs, "medical1", query)?;
+
+        let medical2_binding = UiBindingView {
+            canvas_guid: Some("e9ad809d-ebcf-43a3-bb20-120f64556aef"),
+            content_canvas_guid: Some("e9ad809d-ebcf-43a3-bb20-120f64556aef"),
+            binding_kind: Some("mfd"),
+            manufacturer_id: Some("drak"),
+            helper_name: Some("medical2-phase2-render"),
+            default_view_index: None,
+            default_screen_slot: None,
+        };
+        let medical2_inputs = PipelineInputs {
+            binding: &medical2_binding,
+            canvas_fetcher: &fetcher,
+            swf_fetcher: &file_fetcher,
+            style_fetcher: &style_fetcher,
+            asset_fetcher: &file_fetcher,
+            target_size: (1920, 1080),
+            apply_postprocess: false,
+            localization_map: load_localization_map(&workspace),
+            loc_fetcher: None,
+        };
+        print_layout_locations(&medical2_inputs, "medical2", query)?;
+    }
 
     println!("Wrote {}", medical1_output.display());
     println!("Wrote {}", medical2_output.display());
