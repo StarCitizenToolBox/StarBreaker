@@ -526,6 +526,32 @@ pub fn debug_linear_progress_meter_rect(node: &UiIrNode, document: &UiIrDocument
     })
 }
 
+pub fn debug_node_draw_rect(node: &UiIrNode, document: &UiIrDocument) -> Rect {
+    if let Some(meter_rect) = debug_linear_progress_meter_rect(node, document) {
+        return meter_rect;
+    }
+
+    let rect = ir_rect_to_layout_rect(node.computed_rect);
+    if node
+        .node_type
+        .eq_ignore_ascii_case("component_general_button_secondary")
+        && node
+            .icon_preset
+            .as_deref()
+            .is_some_and(|preset| preset.eq_ignore_ascii_case("GeneralX"))
+    {
+        let side = rect.w.min(rect.h).clamp(40.0, 72.0);
+        return Rect {
+            x: rect.x + rect.w - side,
+            y: rect.y + (rect.h - side) * 0.5,
+            w: side,
+            h: side,
+        };
+    }
+
+    rect
+}
+
 fn resolved_linear_progress_meter_rect(node: &UiIrNode, document: &UiIrDocument) -> Option<Rect> {
     if node.meter_progress.is_none() {
         return None;

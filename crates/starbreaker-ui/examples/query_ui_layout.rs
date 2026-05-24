@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 
 use starbreaker_ui::pipeline::{AssetFetcher, CanvasFetcher, PipelineInputs, StyleFetcher, SwfFetcher, UiBindingView};
 use starbreaker_ui::ir_compose::{
-    debug_linear_progress_meter_rect, debug_text_drawn_bounds, debug_text_rects,
+    debug_linear_progress_meter_rect, debug_node_draw_rect, debug_text_drawn_bounds,
+    debug_text_rects,
 };
 use starbreaker_ui::{ManufacturerStyle, StyleLoader, UiError, compile_ir_for_binding};
 
@@ -240,8 +241,9 @@ fn main() -> Result<(), String> {
         if name_lc.contains(&query_lc) || ty_lc.contains(&query_lc) {
             hits += 1;
             println!(
-                "id={} name='{}' type='{}' x={:.1} y={:.1} w={:.1} h={:.1}",
+                "id={} parent={:?} name='{}' type='{}' x={:.1} y={:.1} w={:.1} h={:.1}",
                 node.id,
+                node.parent_id,
                 node.name,
                 node.node_type,
                 node.computed_rect.x,
@@ -249,6 +251,26 @@ fn main() -> Result<(), String> {
                 node.computed_rect.w,
                 node.computed_rect.h
             );
+            let draw_rect = debug_node_draw_rect(node, &ir);
+            println!(
+                "  draw_rect x={:.1} y={:.1} w={:.1} h={:.1}",
+                draw_rect.x,
+                draw_rect.y,
+                draw_rect.w,
+                draw_rect.h
+            );
+            if let Some(asset_ref) = node.asset_ref.as_deref() {
+                println!("  asset_ref {}", asset_ref);
+            }
+            if let Some(custom_shape) = node.custom_shape.as_ref() {
+                println!(
+                    "  custom_shape type={:?} shape={:?} svg_path={:?} render_shape={:?}",
+                    custom_shape.shape_type,
+                    custom_shape.shape,
+                    custom_shape.svg_path,
+                    custom_shape.render_shape
+                );
+            }
             if let Some(text_rects) = debug_text_rects(node) {
                 println!(
                     "  primary_text_rect x={:.1} y={:.1} w={:.1} h={:.1}",
