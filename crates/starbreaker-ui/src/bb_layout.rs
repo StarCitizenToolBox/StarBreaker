@@ -251,26 +251,9 @@ fn layout_node(
         && matches!(node.sizing.height, BbValue::Percent(p) if p > 0.90)
         && (node.anchor.x - 0.5).abs() < 0.01
         && (node.pivot.x - 0.5).abs() < 0.01;
-    let is_non_layout_textfield_overlay = matches!(node.ty, BbNodeType::WidgetTextField)
-        && node
-            .raw
-            .get("affectsLayout")
-            .and_then(|v| v.as_bool())
-            == Some(false)
-        && node.parent.is_some_and(|parent_id| {
-            scene
-                .nodes
-                .get(&parent_id)
-                .is_some_and(|parent| matches!(parent.ty, BbNodeType::WidgetTextField))
-        });
-
-    let (outer_x, outer_y) = if (is_flex_container && fills_parent)
-        || is_root_fullscreen_canvas
-        || is_non_layout_textfield_overlay
-    {
-        // Full-bleed containers and non-layout textfield overlays are parent-space
-        // overlays; authoring anchor/pivot offsets should not shift them out of the
-        // parent rect.
+    let (outer_x, outer_y) = if (is_flex_container && fills_parent) || is_root_fullscreen_canvas {
+        // Full-bleed containers are parent-space overlays; authoring anchor/pivot
+        // offsets should not shift them out of the parent rect.
         // offsets should not shift them out of the parent rect.
         (parent_inner.x + pos_x, parent_inner.y + pos_y)
     } else {

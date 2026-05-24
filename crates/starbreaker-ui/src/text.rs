@@ -288,8 +288,9 @@ impl TextRenderer {
         }
 
         struct LineLayout {
-            width_px: f32,
             runs: Vec<GlyphRun>,
+            min_x_px: f32,
+            max_x_px: f32,
             min_y_units: f32,
             max_y_units: f32,
         }
@@ -300,6 +301,8 @@ impl TextRenderer {
         for line in &lines {
             let mut pen_x = 0.0f32;
             let mut runs = Vec::new();
+            let mut min_x_px = f32::INFINITY;
+            let mut max_x_px = f32::NEG_INFINITY;
             let mut min_y_units = f32::INFINITY;
             let mut max_y_units = f32::NEG_INFINITY;
             for ch in line.chars() {
@@ -318,6 +321,8 @@ impl TextRenderer {
                     && let Some(path) = pb.finish()
                 {
                     let bounds = path.bounds();
+                    min_x_px = min_x_px.min(pen_x + bounds.left() * scale_x);
+                    max_x_px = max_x_px.max(pen_x + bounds.right() * scale_x);
                     min_y_units = min_y_units.min(bounds.top());
                     max_y_units = max_y_units.max(bounds.bottom());
                     runs.push(GlyphRun { path, x_px: pen_x });
@@ -331,10 +336,15 @@ impl TextRenderer {
                 min_y_units = descent;
                 max_y_units = ascent;
             }
+            if !min_x_px.is_finite() || !max_x_px.is_finite() || max_x_px <= min_x_px {
+                min_x_px = 0.0;
+                max_x_px = pen_x;
+            }
 
             layouts.push(LineLayout {
-                width_px: pen_x,
                 runs,
+                min_x_px,
+                max_x_px,
                 min_y_units,
                 max_y_units,
             });
@@ -346,23 +356,25 @@ impl TextRenderer {
             .fold(0.0f32, f32::max);
         let line_step = nominal_line_h.max(measured_line_h.max(1.0));
         let interline_px = (size_px * 0.45).max(1.0);
-        let total_h = line_step * layouts.len() as f32
-            + interline_px * (layouts.len().saturating_sub(1) as f32);
-        let align_total_h = if matches!(vertical_align, VerticalAlign::Centre)
-            && layouts.len() == 1
-            && rect.h >= size_px * 2.5
-            && rect.h <= size_px * 4.0
-        {
-            nominal_line_h.min(total_h)
-        } else {
-            total_h
-        };
+        let baseline_step = line_step + interline_px;
+        let mut min_y_px = f32::INFINITY;
+        let mut max_y_px = f32::NEG_INFINITY;
+        for (line_index, layout) in layouts.iter().enumerate() {
+            let line_offset = line_index as f32 * baseline_step;
+            min_y_px = min_y_px.min(layout.min_y_units * scale + line_offset);
+            max_y_px = max_y_px.max(layout.max_y_units * scale + line_offset);
+        }
+        if !min_y_px.is_finite() || !max_y_px.is_finite() || max_y_px <= min_y_px {
+            min_y_px = descent * scale;
+            max_y_px = ascent * scale;
+        }
+        let total_h = (max_y_px - min_y_px).max(1.0);
         let block_top = match vertical_align {
             VerticalAlign::Top => rect.y,
-            VerticalAlign::Centre => rect.y + ((rect.h - align_total_h) * 0.5).max(0.0),
+            VerticalAlign::Centre => rect.y + ((rect.h - total_h) * 0.5).max(0.0),
             VerticalAlign::Bottom => rect.y + (rect.h - total_h).max(0.0),
         };
-        let start_baseline = block_top + (ascent * scale);
+        let start_baseline = block_top - min_y_px;
 
         let mut pixmap = match Pixmap::new(img.width(), img.height()) {
             Some(pm) => pm,
@@ -370,12 +382,13 @@ impl TextRenderer {
         };
 
         for (line_index, layout) in layouts.iter().enumerate() {
+            let line_drawn_w = (layout.max_x_px - layout.min_x_px).max(0.0);
             let start_x = match align {
-                TextAlign::Left => rect.x,
-                TextAlign::Centre => rect.x + ((rect.w - layout.width_px) * 0.5).max(0.0),
-                TextAlign::Right => rect.x + (rect.w - layout.width_px).max(0.0),
+                TextAlign::Left => rect.x - layout.min_x_px,
+                TextAlign::Centre => rect.x + ((rect.w - line_drawn_w) * 0.5).max(0.0) - layout.min_x_px,
+                TextAlign::Right => rect.x + (rect.w - line_drawn_w).max(0.0) - layout.min_x_px,
             };
-            let baseline_y = start_baseline + line_index as f32 * (line_step + interline_px);
+            let baseline_y = start_baseline + line_index as f32 * baseline_step;
 
             for run in &layout.runs {
                 let transform = Transform::from_row(
