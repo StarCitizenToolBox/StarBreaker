@@ -251,9 +251,26 @@ fn layout_node(
         && matches!(node.sizing.height, BbValue::Percent(p) if p > 0.90)
         && (node.anchor.x - 0.5).abs() < 0.01
         && (node.pivot.x - 0.5).abs() < 0.01;
+    let is_non_layout_textfield_overlay = matches!(node.ty, BbNodeType::WidgetTextField)
+        && node
+            .raw
+            .get("affectsLayout")
+            .and_then(|v| v.as_bool())
+            == Some(false)
+        && node.parent.is_some_and(|parent_id| {
+            scene
+                .nodes
+                .get(&parent_id)
+                .is_some_and(|parent| matches!(parent.ty, BbNodeType::WidgetTextField))
+        });
 
-    let (outer_x, outer_y) = if (is_flex_container && fills_parent) || is_root_fullscreen_canvas {
-        // Full-bleed flex roots are parent-space containers; authoring anchor/pivot
+    let (outer_x, outer_y) = if (is_flex_container && fills_parent)
+        || is_root_fullscreen_canvas
+        || is_non_layout_textfield_overlay
+    {
+        // Full-bleed containers and non-layout textfield overlays are parent-space
+        // overlays; authoring anchor/pivot offsets should not shift them out of the
+        // parent rect.
         // offsets should not shift them out of the parent rect.
         (parent_inner.x + pos_x, parent_inner.y + pos_y)
     } else {
@@ -1014,8 +1031,16 @@ fn textfield_auto_intrinsic_override(
     let is_primary = has_tag("e6003a83-9795-4478-a61c-349f14016e5b");
     let is_bright = has_tag("174b3e40-1b7b-4f01-a7dc-6420b7367d6b");
     let is_prompt = has_tag("5e5c7c8f-847b-46c5-ad80-a57c941391ab");
+    let affects_layout = node
+        .raw
+        .get("affectsLayout")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
 
     if is_width && is_bright && style == "Heading2" {
+        return Some(180.0 * canvas_scale);
+    }
+    if is_width && !affects_layout && is_bright && style == "Title3" {
         return Some(180.0 * canvas_scale);
     }
 

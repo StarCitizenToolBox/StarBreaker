@@ -816,8 +816,33 @@ fn apply_medical_attract_banner_layout(nodes: &mut [UiIrNode]) {
 
     let title_id = nodes[title_idx].id;
     let prompt_id = nodes[prompt_idx].id;
-    shift_ir_subtree(nodes, title_id, target_x - title.x, target_title_y - title.y);
+    let title_frame_inset_x = textfield_fullsize_frame_leading_inset(nodes, title_id).unwrap_or(0.0);
+    shift_ir_subtree(
+        nodes,
+        title_id,
+        (target_x - title.x) + title_frame_inset_x,
+        target_title_y - title.y,
+    );
     shift_ir_subtree(nodes, prompt_id, target_x - prompt.x, target_prompt_y - prompt.y);
+}
+
+fn textfield_fullsize_frame_leading_inset(nodes: &[UiIrNode], textfield_id: BbNodeId) -> Option<f32> {
+    let textfield = nodes.iter().find(|node| node.id == textfield_id)?;
+    if !textfield.node_type.eq_ignore_ascii_case("widget_text_field") {
+        return None;
+    }
+
+    let rect = textfield.computed_rect;
+    textfield
+        .children
+        .iter()
+        .filter_map(|child_id| nodes.iter().find(|node| node.id == *child_id))
+        .filter(|child| child.node_type.eq_ignore_ascii_case("widget_canvas"))
+        .filter(|child| (child.computed_rect.w - rect.w).abs() <= 1.0)
+        .filter(|child| (child.computed_rect.h - rect.h).abs() <= 1.0)
+        .map(|child| rect.x - child.computed_rect.x)
+        .filter(|offset| *offset > 1.0)
+        .max_by(|a, b| a.total_cmp(b))
 }
 
 fn shift_ir_subtree(nodes: &mut [UiIrNode], root_id: BbNodeId, dx: f32, dy: f32) {
