@@ -9,6 +9,8 @@ Read this after the repo-level `StarBreaker/AGENTS.md` and before planning or ed
 - No hard-coding, no name-matching, no ship-specific branches, and no screen-specific branches in production code.
 - No heuristic placement rules, blend factors, hand-tuned percentages, or magic offsets unless the surrounding rule is already structurally defined by source data and the new math is derived from that data.
 - Fix the structural cause. Do not patch symptoms in one renderer path if the real issue is authored metadata, IR compilation, layout, or text measurement.
+- IR is the source of truth for render values. The renderer must not override IR-provided font size, position, alignment, scale, margin, padding, text colour, stroke colour, icon tint, or visibility based on widget names, parent context, or screen-specific checks.
+- If rendered output is wrong, correct the owning upstream stage (`bb_layout.rs` / `ui_ir.rs` / source data resolution) so IR values are correct before rendering.
 - When a rendered position looks wrong, identify which abstraction owns it before editing:
 	- `bb_layout.rs` owns authored layout rects.
 	- `ui_ir.rs` owns which authored metadata is preserved into IR.
