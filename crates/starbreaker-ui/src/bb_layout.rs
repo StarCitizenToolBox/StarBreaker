@@ -640,41 +640,49 @@ fn layout_flex_no_grow_children(
                     // footprint from authored Auto sizing and child content.
                     // This avoids container-fraction heuristics that
                     // over-stretch compact metric labels.
-                    if let BbValue::Other { value, behavior } = &node.sizing.width
-                        && behavior == "Auto" && *value > 1.0
-                    {
-                        w = *value * csx;
-                    }
-                    if let BbValue::Other { value, behavior } = &node.sizing.height
-                        && behavior == "Auto" && *value > 1.0
-                    {
-                        h = *value * csy;
-                    }
-                    for child_id in &node.children {
-                        let Some(child) = scene.nodes.get(child_id) else {
-                            continue;
-                        };
-                        if !child.is_active {
-                            continue;
+                    let has_active_children = node.children.iter().any(|child_id| {
+                        scene
+                            .nodes
+                            .get(child_id)
+                            .is_some_and(|child| child.is_active)
+                    });
+                    if has_active_children {
+                        if let BbValue::Other { value, behavior } = &node.sizing.width
+                            && behavior == "Auto" && *value > 1.0
+                        {
+                            w = *value * csx;
                         }
-                        let child_w = resolve_value_for_node(
-                            child,
-                            &child.sizing.width,
-                            container.w,
-                            container.h,
-                            csx,
-                            true,
-                        );
-                        let child_h = resolve_value_for_node(
-                            child,
-                            &child.sizing.height,
-                            container.h,
-                            container.w,
-                            csy,
-                            false,
-                        );
-                        w = w.max(child_w.max(0.0));
-                        h = h.max(child_h.max(0.0));
+                        if let BbValue::Other { value, behavior } = &node.sizing.height
+                            && behavior == "Auto" && *value > 1.0
+                        {
+                            h = *value * csy;
+                        }
+                        for child_id in &node.children {
+                            let Some(child) = scene.nodes.get(child_id) else {
+                                continue;
+                            };
+                            if !child.is_active {
+                                continue;
+                            }
+                            let child_w = resolve_value_for_node(
+                                child,
+                                &child.sizing.width,
+                                container.w,
+                                container.h,
+                                csx,
+                                true,
+                            );
+                            let child_h = resolve_value_for_node(
+                                child,
+                                &child.sizing.height,
+                                container.h,
+                                container.w,
+                                csy,
+                                false,
+                            );
+                            w = w.max(child_w.max(0.0));
+                            h = h.max(child_h.max(0.0));
+                        }
                     }
                     auto_main = false;
                 } else {
