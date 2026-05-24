@@ -203,18 +203,6 @@ fn draw_non_text_node(
     }
 
     if let Some(asset_ref) = node.asset_ref.as_deref() {
-        let skip_custom_shape_asset = node
-            .custom_shape
-            .as_ref()
-            .is_some_and(|shape| {
-                shape.render_shape.unwrap_or(false)
-                    && shape.shape_type.is_none()
-                    && shape.shape.is_none()
-            });
-        if skip_custom_shape_asset {
-            return;
-        }
-
         let normalised_asset_ref = UiAssetResolver::normalise_path(asset_ref);
         let iw = rect.w.round().max(1.0) as u32;
         let ih = rect.h.round().max(1.0) as u32;
@@ -287,6 +275,11 @@ fn draw_non_text_node(
 
     if let Some(stroke_colour) = node.stroke_colour
         && node.stroke_extent.unwrap_or(0.0) > 0.0
+        && !node
+            .custom_shape
+            .as_ref()
+            .and_then(|shape| shape.render_shape)
+            .unwrap_or(false)
     {
         draw_rect_stroke_ts(
             pixmap,
@@ -971,6 +964,7 @@ fn resolved_text_colour(
             && (node.name.eq_ignore_ascii_case("TierLevel")
                 || node.name.eq_ignore_ascii_case("LocationName")
                 || node.name.eq_ignore_ascii_case("MedGel")))
+        || is_medical_attract_banner_text(node, document)
     {
         let c = derived_accent_tint(ctx);
         colour = [
@@ -1011,6 +1005,34 @@ fn is_footer_brand_text_context(node: &UiIrNode, document: &UiIrDocument) -> boo
             return true;
         }
 
+        current_parent_id = parent.parent_id;
+    }
+
+    false
+}
+
+fn is_medical_attract_banner_text(node: &UiIrNode, document: &UiIrDocument) -> bool {
+    if !(node.name.eq_ignore_ascii_case("TitleText")
+        || node.name.eq_ignore_ascii_case("TouchPromptText")
+        || node.name.eq_ignore_ascii_case("TierLevel"))
+    {
+        return false;
+    }
+
+    let mut current_parent_id = node.parent_id;
+    while let Some(parent_id) = current_parent_id {
+        let Some(parent) = document.nodes.iter().find(|candidate| candidate.id == parent_id) else {
+            return false;
+        };
+        if parent.children.iter().any(|child_id| {
+            document
+                .nodes
+                .iter()
+                .find(|candidate| candidate.id == *child_id)
+                .is_some_and(|child| child.name.eq_ignore_ascii_case("TouchHere"))
+        }) {
+            return true;
+        }
         current_parent_id = parent.parent_id;
     }
 

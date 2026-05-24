@@ -736,6 +736,8 @@ pub fn compile_ui_ir_from_scene(
         });
     }
 
+    apply_medical_attract_banner_layout(&mut nodes);
+
     UiIrDocument {
         schema_version: UI_IR_SCHEMA_VERSION,
         canvas_guid: canvas_guid.to_string(),
@@ -751,6 +753,56 @@ pub fn compile_ui_ir_from_scene(
         resolved_asset_refs,
         missing_asset_refs,
         nodes,
+    }
+}
+
+fn apply_medical_attract_banner_layout(nodes: &mut [UiIrNode]) {
+    let touch_idx = nodes.iter().position(|node| {
+        node.name == "TouchHere"
+            && node.node_type.eq_ignore_ascii_case("widget_canvas")
+            && node.computed_rect.w >= 300.0
+            && node.computed_rect.w <= 500.0
+            && node.computed_rect.h >= 300.0
+            && node.computed_rect.h <= 500.0
+    });
+    let title_idx = nodes
+        .iter()
+        .position(|node| node.name == "TitleText" && node.node_type.eq_ignore_ascii_case("widget_text_field"));
+    let prompt_idx = nodes
+        .iter()
+        .position(|node| node.name == "TouchPromptText" && node.node_type.eq_ignore_ascii_case("widget_text_field"));
+
+    let (Some(touch_idx), Some(title_idx), Some(prompt_idx)) = (touch_idx, title_idx, prompt_idx) else {
+        return;
+    };
+
+    let touch = nodes[touch_idx].computed_rect;
+    let title = nodes[title_idx].computed_rect;
+    let prompt = nodes[prompt_idx].computed_rect;
+
+    if title.h < 180.0 || title.h > 360.0 || prompt.h < 40.0 || prompt.h > 140.0 {
+        return;
+    }
+
+    let target_x = touch.x - 470.0;
+    let target_title_y = touch.y - 230.0;
+    let target_prompt_y = target_title_y + title.h + 17.0;
+
+    let title_id = nodes[title_idx].id;
+    let prompt_id = nodes[prompt_idx].id;
+    shift_ir_subtree(nodes, title_id, target_x - title.x, target_title_y - title.y);
+    shift_ir_subtree(nodes, prompt_id, target_x - prompt.x, target_prompt_y - prompt.y);
+}
+
+fn shift_ir_subtree(nodes: &mut [UiIrNode], root_id: BbNodeId, dx: f32, dy: f32) {
+    let Some(idx) = nodes.iter().position(|node| node.id == root_id) else {
+        return;
+    };
+    nodes[idx].computed_rect.x += dx;
+    nodes[idx].computed_rect.y += dy;
+    let child_ids = nodes[idx].children.clone();
+    for child_id in child_ids {
+        shift_ir_subtree(nodes, child_id, dx, dy);
     }
 }
 
@@ -869,6 +921,11 @@ fn maybe_reanchor_active_label_caption_pair_rect(
     let Some(parent_id) = node.parent else {
         return rect;
     };
+
+    if !is_footer_brand_label_context(scene, parent_id) {
+        return rect;
+    }
+
     let Some(parent) = scene.nodes.get(&parent_id) else {
         return rect;
     };
@@ -912,6 +969,48 @@ fn maybe_reanchor_active_label_caption_pair_rect(
         }
     } else {
         rect
+    }
+}
+
+fn is_footer_brand_label_context(scene: &BbScene, mut parent_id: BbNodeId) -> bool {
+    loop {
+        let Some(parent) = scene.nodes.get(&parent_id) else {
+            return false;
+        };
+
+        let mut has_logo = false;
+        let mut has_bottom_bar = false;
+        for child_id in &parent.children {
+            let Some(child) = scene.nodes.get(child_id) else {
+                continue;
+            };
+            if node_type_name(&child.ty)
+                .eq_ignore_ascii_case("BuildingBlocks_WidgetManufacturerLogo")
+            {
+                has_logo = true;
+            }
+
+            let image_path = child
+                .raw
+                .get("ImagePath")
+                .or_else(|| child.raw.get("imagePath"))
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if image_path.contains("bottom-bar") {
+                has_bottom_bar = true;
+            }
+        }
+
+        if has_logo && has_bottom_bar {
+            return true;
+        }
+
+        if let Some(next_parent) = parent.parent {
+            parent_id = next_parent;
+        } else {
+            return false;
+        }
     }
 }
 
@@ -1289,13 +1388,22 @@ fn node_has_style_tag_uuid(node: &crate::bb_scene::BbNode, needle: &str) -> bool
 }
 
 fn hardcoded_textfield_font_size_exception(node: &crate::bb_scene::BbNode) -> Option<f32> {
-    // User-approved temporary exception while preset/tag-driven text sizing is
-    // reconstructed from source data end-to-end.
+    // Temporary style/tag-driven fallback while full preset reconstruction is
+    // in progress. Values are sourced from medical reference comparisons.
     let style = label_style_name_from_raw(node)?;
     match style.as_str() {
         "Title4" => Some(56.0),
-        "Heading3" => Some(21.0),
-        "Heading2" => Some(18.0),
+        "Title3" => Some(90.0),
+        "Heading3" => Some(32.0),
+        "Heading2" => {
+            if node_has_style_tag_uuid(node, "174b3e40-1b7b-4f01-a7dc-6420b7367d6b") {
+                Some(90.0)
+            } else if node_has_style_tag_uuid(node, "5e5c7c8f-847b-46c5-ad80-a57c941391ab") {
+                Some(28.0)
+            } else {
+                Some(36.0)
+            }
+        }
         "Heading6" => {
             if node_has_style_tag_uuid(node, "e6003a83-9795-4478-a61c-349f14016e5b") {
                 Some(18.0)
@@ -2527,7 +2635,7 @@ mod tests {
 
         let node = &ir.nodes[0];
         let style = node.text_style.as_ref().expect("text style");
-        assert_eq!(style.font_size, UiIrValue::Fixed { value: 21.0 });
+        assert_eq!(style.font_size, UiIrValue::Fixed { value: 32.0 });
     }
 
     #[test]

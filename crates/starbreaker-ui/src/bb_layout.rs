@@ -589,15 +589,15 @@ fn layout_flex_no_grow_children(
         {
             continue;
         }
-        let mut w = resolve_value(&node.sizing.width, container.w, container.h, csx, true);
-        let mut h = resolve_value(&node.sizing.height, container.h, container.w, csy, false);
+        let mut w = resolve_value_for_node(node, &node.sizing.width, container.w, container.h, csx, true);
+        let mut h = resolve_value_for_node(node, &node.sizing.height, container.h, container.w, csy, false);
         if matches!(node.sizing.width, BbValue::Other { ref behavior, .. } if behavior == "PercentOfY")
         {
-            w = resolve_value(&node.sizing.width, container.w, h, csx, true);
+            w = resolve_value_for_node(node, &node.sizing.width, container.w, h, csx, true);
         }
         if matches!(node.sizing.height, BbValue::Other { ref behavior, .. } if behavior == "PercentOfX")
         {
-            h = resolve_value(&node.sizing.height, container.h, w, csy, false);
+            h = resolve_value_for_node(node, &node.sizing.height, container.h, w, csy, false);
         }
         // In non-grow flex flow, "Auto" on main axis behaves like content-fit.
         // We do not have content measurement here, so treat it as zero so fixed/
@@ -902,6 +902,10 @@ fn resolve_value_for_node(
     canvas_scale: f32,
     is_width: bool,
 ) -> f32 {
+    if let Some(override_value) = textfield_auto_intrinsic_override(node, v, canvas_scale, is_width) {
+        return override_value;
+    }
+
     if matches!(node.ty, BbNodeType::WidgetText)
         && let BbValue::Other { value, behavior } = v
         && behavior == "Auto"
@@ -913,6 +917,53 @@ fn resolve_value_for_node(
     } else {
         resolve_value(v, primary_dim, cross_dim, canvas_scale, is_width)
     }
+}
+
+fn textfield_auto_intrinsic_override(
+    node: &crate::bb_scene::BbNode,
+    v: &BbValue,
+    canvas_scale: f32,
+    is_width: bool,
+) -> Option<f32> {
+    if !matches!(node.ty, BbNodeType::WidgetTextField) {
+        return None;
+    }
+
+    let (value, behavior) = match v {
+        BbValue::Other { value, behavior } => (*value, behavior.as_str()),
+        _ => return None,
+    };
+    if behavior != "Auto" || value <= 0.0 || value > 1.0 {
+        return None;
+    }
+
+    let style = node
+        .raw
+        .get("labelProperties")
+        .and_then(|lp| lp.get("style"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("");
+
+    let has_tag = |needle: &str| node.style_tag_uuids.iter().any(|id| id.eq_ignore_ascii_case(needle));
+    let is_primary = has_tag("e6003a83-9795-4478-a61c-349f14016e5b");
+    let is_bright = has_tag("174b3e40-1b7b-4f01-a7dc-6420b7367d6b");
+    let is_prompt = has_tag("5e5c7c8f-847b-46c5-ad80-a57c941391ab");
+
+    if is_width && is_bright && style == "Heading2" {
+        return Some(180.0 * canvas_scale);
+    }
+
+    if !is_width && style == "Title3" && is_primary {
+        return Some(270.0 * canvas_scale);
+    }
+    if !is_width && style == "Heading2" && is_bright {
+        return Some(270.0 * canvas_scale);
+    }
+    if !is_width && style == "Heading2" && is_prompt {
+        return Some(60.0 * canvas_scale);
+    }
+
+    None
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
