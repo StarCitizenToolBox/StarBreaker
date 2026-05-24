@@ -770,30 +770,18 @@ fn layout_flex_no_grow_children(
                         } if behavior == "Auto" && value > 0.0 && value < 1.0
                     );
                 if right_edge_auto_hint {
-                    let mirrored_anchor_x = node.pivot.x >= 0.99
-                        && matches!(
-                            node.sizing.width,
-                            BbValue::Other {
-                                value,
-                                ref behavior
-                            } if behavior == "Auto" && value > 0.0 && value < 1.0
-                        );
-                    let anchor_x = if mirrored_anchor_x {
-                        1.0 - node.anchor.x
-                    } else {
-                        node.anchor.x
-                    };
-                    let pos_x = (node.position.x + node.position_offset.x) * csx;
                     let pos_y = (node.position.y + node.position_offset.y) * csy;
-                    let anchor_world_x = container.x + container.w * anchor_x + pos_x;
                     let anchor_world_y = container.y + container.h * node.anchor.y + pos_y;
-                    let intrinsic_x = anchor_world_x - w * node.pivot.x + node.margin.left * csx;
                     let intrinsic_y = anchor_world_y - h * node.pivot.y + node.margin.top * csy;
                     let slot_x = container.x + (container.w - w).max(0.0);
                     let slot_y = cursor;
+                    let anchor_x = node.anchor.x.clamp(0.0, 1.0);
+                    let anchor_y = node.anchor.y.clamp(0.0, 1.0);
+                    let resolved_x = container.x + (slot_x - container.x) * (1.0 - anchor_x);
+                    let resolved_y = slot_y + (intrinsic_y - slot_y) * (anchor_y * anchor_y);
                     let rect = Rect {
-                        x: intrinsic_x + (slot_x - intrinsic_x) * 0.4,
-                        y: intrinsic_y + (slot_y - intrinsic_y) * 0.78,
+                        x: resolved_x,
+                        y: resolved_y,
                         w,
                         h,
                     };
