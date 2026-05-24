@@ -1,6 +1,11 @@
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use image::RgbaImage;
+use starbreaker_p4k::MappedP4k;
+use starbreaker_ui::bb_atlas::AtlasLibrary;
 use starbreaker_ui::pipeline::{AssetFetcher, CanvasFetcher, PipelineInputs, StyleFetcher, SwfFetcher, UiBindingView};
 use starbreaker_ui::ir_compose::{
     debug_linear_progress_meter_rect, debug_node_draw_rect, debug_text_drawn_bounds,
@@ -80,6 +85,89 @@ impl AssetFetcher for NullAssetFetcher {
     }
 }
 
+struct P4kFileFetcher {
+    p4k: Arc<MappedP4k>,
+}
+
+impl AssetFetcher for P4kFileFetcher {
+    fn fetch_image_bytes(&self, p4k_path: &str) -> Option<Vec<u8>> {
+        read_p4k_path(&self.p4k, p4k_path).ok()
+    }
+}
+
+impl SwfFetcher for P4kFileFetcher {
+    fn fetch_swf_bytes(&self, p4k_path: &str) -> Result<Vec<u8>, UiError> {
+        read_p4k_path(&self.p4k, p4k_path)
+    }
+}
+
+fn normalize_p4k_path(path: &str) -> String {
+    let with_prefix = if path.to_ascii_lowercase().starts_with("data\\")
+        || path.to_ascii_lowercase().starts_with("data/")
+    {
+        path.to_string()
+    } else {
+        format!("Data\\{}", path)
+    };
+    with_prefix.replace('/', "\\")
+}
+
+fn read_p4k_path(p4k: &MappedP4k, path: &str) -> Result<Vec<u8>, UiError> {
+    let normalized = normalize_p4k_path(path);
+    p4k.read_file(&normalized)
+        .map_err(|e| UiError::RenderError(format!("failed to read '{}' from P4K: {e}", normalized)))
+}
+
+fn open_p4k() -> Result<Arc<MappedP4k>, String> {
+    starbreaker_p4k::open_p4k()
+        .map(Arc::new)
+        .map_err(|e| format!("failed to open Data.p4k: {e}"))
+}
+
+fn sanitize_for_filename(value: &str) -> String {
+    value.chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect()
+}
+
+fn save_asset_preview(
+    preview_dir: &Path,
+    node: &starbreaker_ui::ui_ir::UiIrNode,
+    draw_rect: starbreaker_ui::bb_layout::Rect,
+) -> Result<Option<PathBuf>, String> {
+    let Some(asset_ref) = node.asset_ref.as_deref() else {
+        return Ok(None);
+    };
+
+    fs::create_dir_all(preview_dir)
+        .map_err(|e| format!("failed to create {}: {e}", preview_dir.display()))?;
+    let p4k = open_p4k()?;
+    let fetcher = P4kFileFetcher { p4k };
+    let atlas = AtlasLibrary::new(&fetcher, None);
+    let image = atlas
+        .resolve(
+            asset_ref,
+            draw_rect.w.round().max(1.0) as u32,
+            draw_rect.h.round().max(1.0) as u32,
+        )
+        .ok_or_else(|| format!("failed to resolve asset preview for {}", asset_ref))?;
+
+    let file_name = format!(
+        "{}-{}-preview.png",
+        sanitize_for_filename(&node.name),
+        node.id
+    );
+    let output_path = preview_dir.join(file_name);
+    save_png(&output_path, &image)?;
+    Ok(Some(output_path))
+}
+
+fn save_png(path: &Path, image: &RgbaImage) -> Result<(), String> {
+    image
+        .save(path)
+        .map_err(|e| format!("failed to save {}: {e}", path.display()))
+}
+
 fn collect_json_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -156,6 +244,7 @@ fn main() -> Result<(), String> {
     let mut helper = String::from("layout-query");
     let mut width: u32 = 1920;
     let mut height: u32 = 1080;
+    let mut asset_preview_dir: Option<PathBuf> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -176,6 +265,9 @@ fn main() -> Result<(), String> {
                     .next()
                     .and_then(|v| v.parse::<u32>().ok())
                     .ok_or_else(|| "invalid --height".to_string())?;
+            }
+            "--asset-preview-dir" => {
+                asset_preview_dir = args.next().map(PathBuf::from);
             }
             _ => {
                 print_usage();
@@ -261,6 +353,13 @@ fn main() -> Result<(), String> {
             );
             if let Some(asset_ref) = node.asset_ref.as_deref() {
                 println!("  asset_ref {}", asset_ref);
+                if let Some(preview_dir) = asset_preview_dir.as_deref() {
+                    match save_asset_preview(preview_dir, node, draw_rect) {
+                        Ok(Some(path)) => println!("  asset_preview {}", path.display()),
+                        Ok(None) => {}
+                        Err(err) => println!("  asset_preview_error {}", err),
+                    }
+                }
             }
             if let Some(custom_shape) = node.custom_shape.as_ref() {
                 println!(

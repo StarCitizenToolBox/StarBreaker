@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::bb_bindings::BindingResolver;
 use crate::bb_layout;
+use crate::bb_layout::{LayoutResult, Rect};
 use crate::bb_scene::{BbNode, BbNodeId, BbNodeType, BbScene, BbValue};
 use crate::defaults::DefaultValueRegistry;
 use crate::pipeline::CanvasFetcher;
@@ -339,7 +340,7 @@ pub fn compile_ui_ir_from_scene(
 
     let mut nodes = Vec::with_capacity(scene.nodes.len());
     for (&id, node) in &scene.nodes {
-        let rect = layout.rects.get(&id).copied().unwrap_or_default();
+        let layout_rect = layout.rects.get(&id).copied().unwrap_or_default();
         let has_text_intent = node_has_text_intent(node);
         let resolved_text = has_text_intent
             .then(|| binding_resolver.resolve_text_detailed(id, &node.raw, defaults));
@@ -542,6 +543,24 @@ pub fn compile_ui_ir_from_scene(
             None
         };
 
+        let suppress_placeholder_only_label_caption_pair = node_type_name(&node.ty)
+            .eq_ignore_ascii_case("BuildingBlocks_ComponentLabelCaptionPair")
+            && secondary_text_payload
+                .as_ref()
+                .is_none_or(is_placeholder_or_empty_secondary_text_payload)
+            && node
+                .raw
+                .get("captionProperties")
+                .and_then(|cp| cp.get("caption"))
+                .and_then(|value| value.as_str())
+                .is_some_and(|caption| caption.trim().eq_ignore_ascii_case("@LOC_PLACEHOLDER"));
+
+        let rect = if suppress_placeholder_only_label_caption_pair {
+            layout_rect
+        } else {
+            maybe_reanchor_active_label_caption_pair_rect(scene, &layout, id, node, layout_rect)
+        };
+
         let meter_progress = if node_type_name(&node.ty)
             .eq_ignore_ascii_case("BuildingBlocks_WidgetLinearProgressMeter")
         {
@@ -664,7 +683,7 @@ pub fn compile_ui_ir_from_scene(
             children: node.children.clone(),
             node_type: node_type_name(&node.ty).to_string(),
             name: node.name.clone(),
-            is_active: node.is_active,
+            is_active: node.is_active && !suppress_placeholder_only_label_caption_pair,
             layer: node.layer,
             alpha: node.alpha,
             anchor: [node.anchor.x, node.anchor.y],
@@ -818,11 +837,82 @@ fn unresolved_text_key_from_raw(raw: &serde_json::Value) -> Option<String> {
         .map(ToString::to_string)
 }
 
+fn is_placeholder_or_empty_secondary_text_payload(payload: &UiIrTextPayload) -> bool {
+    match payload {
+        UiIrTextPayload::Empty => true,
+        UiIrTextPayload::Resolved { text } => text.trim().is_empty(),
+        UiIrTextPayload::UnresolvedKey { key } => key.trim().eq_ignore_ascii_case("@LOC_PLACEHOLDER"),
+    }
+}
+
 fn node_has_text_intent(node: &BbNode) -> bool {
     node.text.is_some()
         || node.raw.get("text").is_some()
         || node.raw.get("locString").is_some()
         || node.raw.get("labelProperties").is_some()
+}
+
+fn maybe_reanchor_active_label_caption_pair_rect(
+    scene: &BbScene,
+    layout: &LayoutResult,
+    node_id: BbNodeId,
+    node: &BbNode,
+    rect: Rect,
+) -> Rect {
+    if !node_type_name(&node.ty).eq_ignore_ascii_case("BuildingBlocks_ComponentLabelCaptionPair")
+        || node.anchor.x > 0.01
+        || node.pivot.x > 0.01
+    {
+        return rect;
+    }
+
+    let Some(parent_id) = node.parent else {
+        return rect;
+    };
+    let Some(parent) = scene.nodes.get(&parent_id) else {
+        return rect;
+    };
+
+    let mut has_placeholder_sibling = false;
+    let mut leftmost_x = rect.x;
+    for sibling_id in &parent.children {
+        let Some(sibling) = scene.nodes.get(sibling_id) else {
+            continue;
+        };
+        if !node_type_name(&sibling.ty)
+            .eq_ignore_ascii_case("BuildingBlocks_ComponentLabelCaptionPair")
+        {
+            continue;
+        }
+
+        if *sibling_id != node_id
+            && sibling
+                .raw
+                .get("captionProperties")
+                .and_then(|cp| cp.get("caption"))
+                .and_then(|value| value.as_str())
+                .is_some_and(|caption| caption.trim().eq_ignore_ascii_case("@LOC_PLACEHOLDER"))
+        {
+            has_placeholder_sibling = true;
+        }
+
+        if let Some(sibling_rect) = layout.rects.get(sibling_id)
+            && sibling_rect.x < leftmost_x
+        {
+            leftmost_x = sibling_rect.x;
+        }
+    }
+
+    if has_placeholder_sibling && leftmost_x < rect.x {
+        Rect {
+            x: leftmost_x,
+            y: rect.y,
+            w: rect.w,
+            h: rect.h,
+        }
+    } else {
+        rect
+    }
 }
 
 fn background_fill_colour_token_from_raw(raw: &serde_json::Value) -> Option<String> {
@@ -2062,6 +2152,67 @@ mod tests {
         assert_eq!(node.anchor, [0.25, 0.75]);
         assert_eq!(node.pivot, [0.5, 0.5]);
         assert_eq!(node.style_tag_uuids.len(), 1);
+    }
+
+    #[test]
+    fn compile_ir_suppresses_placeholder_only_label_caption_pairs() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.PlaceholderLabelCaption",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_ComponentLabelCaptionPair",
+                        "name": "OperatorName",
+                        "isActive": true,
+                        "labelProperties": {
+                            "label": "@med_Header_OperatorName",
+                            "style": "Heading3",
+                            "caseModifier": "Upper",
+                            "anchorToParentX": 0.5,
+                            "anchorToParentY": 0.5
+                        },
+                        "captionProperties": {
+                            "caption": "@LOC_PLACEHOLDER",
+                            "style": "Heading6",
+                            "caseModifier": "None"
+                        },
+                        "size": {
+                            "width": {"behavior": "Auto", "value": 64.0},
+                            "height": {"behavior": "Auto", "value": 64.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let mut defaults = defaults();
+        defaults.insert_localization("med_header_operatorname", "OPERATOR NAME".to_string());
+        defaults.insert_localization("loc_placeholder", String::new());
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-placeholder",
+            None,
+            (100, 100),
+            &defaults,
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        assert_eq!(ir.nodes.len(), 1);
+        let node = &ir.nodes[0];
+        assert!(!node.is_active, "placeholder-only label-caption pair should compile inactive");
+        assert!(matches!(node.text_payload, Some(UiIrTextPayload::Resolved { .. })));
+        assert!(node.secondary_text_payload.is_none());
     }
 
     #[test]

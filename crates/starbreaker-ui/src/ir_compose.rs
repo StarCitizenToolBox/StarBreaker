@@ -8,9 +8,9 @@
 //!
 
 use image::RgbaImage;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
-use tiny_skia::{Color, Paint, PathBuilder, Pixmap, PixmapPaint, Rect as TskRect, Stroke, Transform};
+use tiny_skia::{BlendMode, Color, Paint, PathBuilder, Pixmap, PixmapPaint, Rect as TskRect, Stroke, Transform};
 
 use crate::bb_atlas::AtlasLibrary;
 use crate::bb_assets::UiAssetResolver;
@@ -148,6 +148,15 @@ fn draw_non_text_node(
         return;
     };
 
+    if node
+        .node_type
+        .eq_ignore_ascii_case("BuildingBlocks_WidgetCircle")
+        || node.node_type.eq_ignore_ascii_case("widget_circle")
+    {
+        draw_widget_circle(node, pixmap, tsk_rect);
+        return;
+    }
+
     if node.node_type.eq_ignore_ascii_case("widget_body_background") {
         draw_clinic_body_background_overlays(node, document, ctx, atlas, pixmap);
     }
@@ -194,13 +203,35 @@ fn draw_non_text_node(
     }
 
     if let Some(asset_ref) = node.asset_ref.as_deref() {
+        let skip_custom_shape_asset = node
+            .custom_shape
+            .as_ref()
+            .is_some_and(|shape| {
+                shape.render_shape.unwrap_or(false)
+                    && shape.shape_type.is_none()
+                    && shape.shape.is_none()
+            });
+        if skip_custom_shape_asset {
+            return;
+        }
+
         let normalised_asset_ref = UiAssetResolver::normalise_path(asset_ref);
         let iw = rect.w.round().max(1.0) as u32;
         let ih = rect.h.round().max(1.0) as u32;
+        let fill_override = custom_shape_fill_override(node, ctx);
         let resolved_image = if UiAssetResolver::is_reference_overlay(asset_ref)
             || UiAssetResolver::is_reference_overlay(&normalised_asset_ref)
         {
             None
+        } else if normalised_asset_ref.ends_with(".svg") {
+            atlas
+                .fetch_raw(asset_ref)
+                .or_else(|| {
+                    (normalised_asset_ref != asset_ref)
+                        .then(|| atlas.fetch_raw(&normalised_asset_ref))
+                        .flatten()
+                })
+                .and_then(|svg_bytes| crate::bb_svg::rasterize_svg(&svg_bytes, iw, ih, fill_override))
         } else {
             atlas.resolve(asset_ref, iw, ih).or_else(|| {
                 (normalised_asset_ref != asset_ref)
@@ -208,7 +239,15 @@ fn draw_non_text_node(
                     .flatten()
             })
         };
-        if let Some(img) = resolved_image {
+        if let Some(mut img) = resolved_image {
+            if node
+                .custom_shape
+                .as_ref()
+                .and_then(|shape| shape.render_shape)
+                .unwrap_or(false)
+            {
+                img = strip_custom_shape_uniform_matte(&img);
+            }
             let draw_x = rect.x as i32;
             let draw_y = rect.y as i32;
             let mut tint = node.icon_tint_colour.unwrap_or([1.0, 1.0, 1.0, 1.0]);
@@ -218,7 +257,27 @@ fn draw_non_text_node(
             {
                 tint = derived_accent_tint(ctx);
             }
-            blit_atlas_image_tinted(pixmap, &img, draw_x, draw_y, tint, node.alpha);
+            if node
+                .asset_ref
+                .as_deref()
+                .is_some_and(|asset_ref| asset_ref.to_ascii_lowercase().contains("bottom-bar"))
+                && is_footer_brand_text_context(node, document)
+            {
+                tint = derived_accent_tint(ctx);
+            }
+
+            let blend_mode = if node
+                .custom_shape
+                .as_ref()
+                .and_then(|shape| shape.render_shape)
+                .unwrap_or(false)
+            {
+                BlendMode::Plus
+            } else {
+                BlendMode::SourceOver
+            };
+
+            blit_atlas_image_tinted_with_mode(pixmap, &img, draw_x, draw_y, tint, node.alpha, blend_mode);
         }
     }
 
@@ -460,6 +519,79 @@ fn resolve_colour_token(ctx: &ComposeContext<'_>, token: &str) -> Option<[f32; 4
     }
 }
 
+fn custom_shape_fill_override(node: &UiIrNode, ctx: &ComposeContext<'_>) -> Option<[f32; 4]> {
+    let render_shape = node
+        .custom_shape
+        .as_ref()
+        .and_then(|shape| shape.render_shape)
+        .unwrap_or(false);
+    if !render_shape {
+        return None;
+    }
+
+    node.stroke_colour
+        .or(node.icon_tint_colour)
+        .or_else(|| {
+            node.stroke_colour_token
+                .as_deref()
+                .and_then(|token| resolve_colour_token(ctx, token))
+        })
+        .or_else(|| {
+            node.icon_tint_colour_token
+                .as_deref()
+                .and_then(|token| resolve_colour_token(ctx, token))
+        })
+        .or_else(|| Some(derived_accent_tint(ctx)))
+}
+
+fn strip_custom_shape_uniform_matte(img: &RgbaImage) -> RgbaImage {
+    let mut opaque_counts: HashMap<[u8; 4], usize> = HashMap::new();
+    let mut transparent_count = 0usize;
+    for chunk in img.as_raw().chunks_exact(4) {
+        let px = [chunk[0], chunk[1], chunk[2], chunk[3]];
+        if px[3] == 0 {
+            transparent_count += 1;
+        }
+        if px[3] == 255 {
+            *opaque_counts.entry(px).or_insert(0) += 1;
+        }
+    }
+
+    if opaque_counts.is_empty() || transparent_count == 0 {
+        return img.clone();
+    }
+
+    let Some((matte_px, matte_count)) = opaque_counts
+        .iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(px, count)| (*px, *count))
+    else {
+        return img.clone();
+    };
+
+    let total_opaque: usize = opaque_counts.values().sum();
+    let matte_fraction = matte_count as f32 / total_opaque.max(1) as f32;
+    if matte_fraction < 0.85 {
+        return img.clone();
+    }
+
+    let mut out = img.clone();
+    for chunk in out.as_mut().chunks_exact_mut(4) {
+        if chunk[0] == matte_px[0]
+            && chunk[1] == matte_px[1]
+            && chunk[2] == matte_px[2]
+            && chunk[3] == matte_px[3]
+        {
+            chunk[0] = 0;
+            chunk[1] = 0;
+            chunk[2] = 0;
+            chunk[3] = 0;
+        }
+    }
+
+    out
+}
+
 fn draw_linear_progress_meter(
     node: &UiIrNode,
     ctx: &ComposeContext<'_>,
@@ -673,7 +805,7 @@ fn draw_text_node(
     node: &UiIrNode,
     renderer: &TextRenderer,
     ctx: &ComposeContext<'_>,
-    _document: &UiIrDocument,
+    document: &UiIrDocument,
     seen_rects: &mut HashSet<(i32, i32, i32, i32)>,
 ) {
     let Some(text) = resolved_text_payload(node) else {
@@ -738,32 +870,7 @@ fn draw_text_node(
         .map(|style| VerticalAlign::from_bb_str(&style.vertical_alignment))
         .unwrap_or(VerticalAlign::Centre);
 
-    let mut colour = node
-        .text_style
-        .as_ref()
-        .and_then(|style| {
-            style.colour.or_else(|| {
-                style
-                    .colour_token
-                    .as_deref()
-                    .and_then(|token| resolve_colour_token(ctx, token))
-            })
-        })
-        .map(rgba_to_u8)
-        .unwrap_or([255, 255, 255, 255]);
-
-    if node.name.eq_ignore_ascii_case("TierLevel")
-        || node.name.eq_ignore_ascii_case("LocationName")
-        || node.name.eq_ignore_ascii_case("MedGel")
-    {
-        let c = derived_accent_tint(ctx);
-        colour = [
-            (c[0] * 255.0).round() as u8,
-            (c[1] * 255.0).round() as u8,
-            (c[2] * 255.0).round() as u8,
-            colour[3],
-        ];
-    }
+    let mut colour = resolved_text_colour(node, node.text_style.as_ref(), ctx, document, true);
 
     colour[3] = ((colour[3] as f32) * node.alpha.clamp(0.0, 1.0)).round() as u8;
 
@@ -811,6 +918,8 @@ fn draw_text_node(
     }
 
     if let Some(UiIrTextPayload::Resolved { text: secondary }) = node.secondary_text_payload.as_ref() {
+        let mut secondary_colour = resolved_text_colour(node, node.secondary_text_style.as_ref(), ctx, document, false);
+        secondary_colour[3] = ((secondary_colour[3] as f32) * node.alpha.clamp(0.0, 1.0)).round() as u8;
         let secondary_used_swf = selected_font.is_some_and(|(_, swf_font)| {
             renderer.draw_swf_font(
                 img,
@@ -818,7 +927,7 @@ fn draw_text_node(
                 secondary_rect,
                 swf_font,
                 (secondary_nominal_font_size * SWF_TEXT_RENDER_SIZE_CALIBRATION).max(1.0),
-                [255, 255, 255, colour[3]],
+                secondary_colour,
                 TextAlign::Left,
                 VerticalAlign::Centre,
             )
@@ -830,12 +939,82 @@ fn draw_text_node(
                 secondary_rect,
                 FontKind::Sans,
                 secondary_fallback_font_size,
-                [255, 255, 255, colour[3]],
+                secondary_colour,
                 TextAlign::Left,
                 VerticalAlign::Centre,
             );
         }
     }
+}
+
+fn resolved_text_colour(
+    node: &UiIrNode,
+    style: Option<&crate::ui_ir::UiIrTextStyle>,
+    ctx: &ComposeContext<'_>,
+    document: &UiIrDocument,
+    is_primary: bool,
+) -> [u8; 4] {
+    let mut colour = style
+        .and_then(|style| {
+            style.colour.or_else(|| {
+                style
+                    .colour_token
+                    .as_deref()
+                    .and_then(|token| resolve_colour_token(ctx, token))
+            })
+        })
+        .map(rgba_to_u8)
+        .unwrap_or([255, 255, 255, 255]);
+
+    if is_footer_brand_text_context(node, document)
+        || (is_primary
+            && (node.name.eq_ignore_ascii_case("TierLevel")
+                || node.name.eq_ignore_ascii_case("LocationName")
+                || node.name.eq_ignore_ascii_case("MedGel")))
+    {
+        let c = derived_accent_tint(ctx);
+        colour = [
+            (c[0] * 255.0).round() as u8,
+            (c[1] * 255.0).round() as u8,
+            (c[2] * 255.0).round() as u8,
+            colour[3],
+        ];
+    }
+
+    colour
+}
+
+fn is_footer_brand_text_context(node: &UiIrNode, document: &UiIrDocument) -> bool {
+    let mut current_parent_id = node.parent_id;
+    while let Some(parent_id) = current_parent_id {
+        let Some(parent) = document.nodes.iter().find(|candidate| candidate.id == parent_id) else {
+            return false;
+        };
+
+        let child_ids = &parent.children;
+        let has_logo = child_ids.iter().any(|child_id| {
+            document
+                .nodes
+                .iter()
+                .find(|candidate| candidate.id == *child_id)
+                .is_some_and(|child| child.node_type.eq_ignore_ascii_case("BuildingBlocks_WidgetManufacturerLogo"))
+        });
+        let has_bottom_bar = child_ids.iter().any(|child_id| {
+            document
+                .nodes
+                .iter()
+                .find(|candidate| candidate.id == *child_id)
+                .and_then(|child| child.asset_ref.as_deref())
+                .is_some_and(|asset_ref| asset_ref.to_ascii_lowercase().contains("bottom-bar"))
+        });
+        if has_logo && has_bottom_bar {
+            return true;
+        }
+
+        current_parent_id = parent.parent_id;
+    }
+
+    false
 }
 
 pub fn debug_text_rects(node: &UiIrNode) -> Option<DebugTextRects> {
@@ -1218,6 +1397,36 @@ fn draw_border_side(pixmap: &mut Pixmap, rect: Rect, colour: [f32; 4], alpha: f3
     fill_rect_ts(pixmap, tsk_rect, colour, alpha);
 }
 
+fn draw_widget_circle(node: &UiIrNode, pixmap: &mut Pixmap, rect: TskRect) {
+    let stroke_colour = node.stroke_colour.or(node.background_fill_colour);
+    let Some(stroke_colour) = stroke_colour else {
+        return;
+    };
+
+    let cx = rect.x() + rect.width() * 0.5;
+    let cy = rect.y() + rect.height() * 0.5;
+    let radius = rect.width().min(rect.height()) * 0.5;
+    if radius <= 0.5 {
+        return;
+    }
+
+    let mut pb = PathBuilder::new();
+    pb.push_circle(cx, cy, radius - 0.5);
+    let Some(path) = pb.finish() else {
+        return;
+    };
+
+    let mut paint = Paint::default();
+    paint.set_color(to_skia_color(stroke_colour, node.alpha));
+    paint.anti_alias = true;
+
+    let mut stroke = Stroke::default();
+    stroke.width = node.stroke_extent.unwrap_or(1.5).max(0.5);
+    pixmap
+        .as_mut()
+        .stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+}
+
 fn draw_rect_stroke_ts(
     pixmap: &mut Pixmap,
     rect: TskRect,
@@ -1259,6 +1468,26 @@ fn blit_atlas_image_tinted(
     tint: [f32; 4],
     alpha: f32,
 ) {
+    blit_atlas_image_tinted_with_mode(
+        pixmap,
+        img,
+        dx,
+        dy,
+        tint,
+        alpha,
+        BlendMode::SourceOver,
+    );
+}
+
+fn blit_atlas_image_tinted_with_mode(
+    pixmap: &mut Pixmap,
+    img: &RgbaImage,
+    dx: i32,
+    dy: i32,
+    tint: [f32; 4],
+    alpha: f32,
+    blend_mode: BlendMode,
+) {
     let w = img.width();
     let h = img.height();
 
@@ -1283,6 +1512,7 @@ fn blit_atlas_image_tinted(
 
     let mut paint = PixmapPaint::default();
     paint.opacity = alpha.clamp(0.0, 1.0);
+    paint.blend_mode = blend_mode;
     pixmap
         .as_mut()
         .draw_pixmap(dx, dy, src_pixmap.as_ref(), &paint, Transform::identity(), None);

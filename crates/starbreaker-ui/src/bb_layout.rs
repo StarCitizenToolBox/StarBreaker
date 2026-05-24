@@ -539,6 +539,35 @@ fn layout_flex_no_grow_children(
         flex.get("columnSpacing").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32 * csx
     };
 
+    let auto_label_caption_pair_count = if is_row {
+        children
+            .iter()
+            .filter_map(|child_id| scene.nodes.get(child_id))
+            .filter(|node| {
+                node.is_active
+                    && node
+                        .raw
+                        .get("affectsLayout")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true)
+                    && matches!(
+                        &node.ty,
+                        BbNodeType::Other(kind)
+                            if kind.eq_ignore_ascii_case("BuildingBlocks_ComponentLabelCaptionPair")
+                    )
+                    && matches!(
+                        node.sizing.width,
+                        BbValue::Other {
+                            ref behavior,
+                            ..
+                        } if behavior == "Auto"
+                    )
+            })
+            .count()
+    } else {
+        0
+    };
+
     let mut sizes: Vec<(BbNodeId, f32, f32, bool)> = Vec::with_capacity(children.len());
     let mut right_aligned_flow_items = 0usize;
     let mut total_main = 0.0f32;
@@ -613,8 +642,14 @@ fn layout_flex_no_grow_children(
             } else if is_label_caption_pair {
                 let right_anchored_pair = node.anchor.x >= 0.99 && node.pivot.x >= 0.99;
                 if is_row {
-                    let min_w = if right_anchored_pair { 128.0 } else { 80.0 };
-                    w = (container.w * 0.22).max(min_w * csx);
+                    if !right_anchored_pair && auto_label_caption_pair_count > 1 {
+                        let total_spacing = item_spacing * (auto_label_caption_pair_count.saturating_sub(1) as f32);
+                        let available = (container.w - total_spacing).max(0.0);
+                        w = available / auto_label_caption_pair_count as f32;
+                    } else {
+                        let min_w = if right_anchored_pair { 128.0 } else { 80.0 };
+                        w = (container.w * 0.22).max(min_w * csx);
+                    }
                 } else {
                     h = (container.h * 0.22).max(48.0 * csy);
                 }
@@ -1236,6 +1271,87 @@ mod tests {
             r2.x,
             r2.y
         );
+    }
+
+    #[test]
+    fn flex_row_auto_label_caption_pairs_share_available_width() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let root = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![2, 3],
+            ty: BbNodeType::DisplayWidget,
+            name: "text-layout".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(604.8), height: BbValue::Fixed(108.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2 { x: 0.0, y: 0.5 },
+            anchor: Vec2 { x: 0.65, y: 0.5 },
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({
+                "layoutPolicy": {
+                    "_Type_": "BuildingBlocks_FlexContainer",
+                    "direction": "Row",
+                    "wrap": "NoWrap",
+                    "axisJustification": "Start",
+                    "crossAxisJustification": "Start",
+                    "itemAlignment": "Start",
+                    "columnSpacing": 30.0,
+                    "rowSpacing": 0.0
+                }
+            }),
+        };
+        let child = |id: u32, name: &str| BbNode {
+            id,
+            parent: Some(1),
+            children: vec![],
+            ty: BbNodeType::Other("BuildingBlocks_ComponentLabelCaptionPair".into()),
+            name: name.into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing {
+                width: BbValue::Other { value: 64.0, behavior: "Auto".into() },
+                height: BbValue::Other { value: 64.0, behavior: "Auto".into() },
+            },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, root);
+        nodes.insert(2, child(2, "operator"));
+        nodes.insert(3, child(3, "patient"));
+        let scene = BbScene { canvas_size: (604.8, 108.0), roots: vec![1], nodes, operations: vec![] };
+
+        let result = layout(&scene, 605, 108);
+        let r1 = result.rects[&2];
+        let r2 = result.rects[&3];
+        assert!((r1.w - 287.4).abs() < 1.0, "expected first pair width ≈ 287.4, got {}", r1.w);
+        assert!((r2.w - 287.4).abs() < 1.0, "expected second pair width ≈ 287.4, got {}", r2.w);
+        assert!((r2.x - (r1.x + r1.w + 30.0)).abs() < 1.0, "expected second pair after 30px spacing, got x={}", r2.x);
     }
 
     // ── A1.6 — fixture-based layout tests ────────────────────────────────────
