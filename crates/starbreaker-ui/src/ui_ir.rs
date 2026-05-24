@@ -1394,14 +1394,14 @@ fn hardcoded_textfield_font_size_exception(node: &crate::bb_scene::BbNode) -> Op
     match style.as_str() {
         "Title4" => Some(56.0),
         "Title3" => Some(90.0),
-        "Heading3" => Some(32.0),
+        "Heading3" => Some(21.0),
         "Heading2" => {
             if node_has_style_tag_uuid(node, "174b3e40-1b7b-4f01-a7dc-6420b7367d6b") {
                 Some(90.0)
             } else if node_has_style_tag_uuid(node, "5e5c7c8f-847b-46c5-ad80-a57c941391ab") {
                 Some(28.0)
             } else {
-                Some(36.0)
+                Some(18.0)
             }
         }
         "Heading6" => {
@@ -2635,7 +2635,7 @@ mod tests {
 
         let node = &ir.nodes[0];
         let style = node.text_style.as_ref().expect("text style");
-        assert_eq!(style.font_size, UiIrValue::Fixed { value: 32.0 });
+        assert_eq!(style.font_size, UiIrValue::Fixed { value: 21.0 });
     }
 
     #[test]
