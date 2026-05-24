@@ -1459,4 +1459,26 @@ mod tests {
             rect.x
         );
     }
+
+    #[test]
+    fn layout_source_does_not_reintroduce_forbidden_hardcoded_or_heuristic_markers() {
+        let source = include_str!("bb_layout.rs");
+        // Hard rule: keep layout generic across assets and screens. If this
+        // trips, remove marker-based workarounds and fix structural causes.
+        let forbidden = [
+            ["med", "ical2"].concat(),
+            ["med", "gel"].concat(),
+            ["hard", "coded", "_offset"].concat(),
+            ["magic", "_multiplier"].concat(),
+            ["heu", "ristic", "_shift"].concat(),
+            ["blend", "_factor"].concat(),
+        ];
+
+        for marker in forbidden {
+            assert!(
+                !source.contains(marker.as_str()),
+                "bb_layout hardcoding/heuristic marker reintroduced: {marker}"
+            );
+        }
+    }
 }
