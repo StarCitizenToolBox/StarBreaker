@@ -990,6 +990,7 @@ fn debug_text_rects_with_renderer(node: &UiIrNode, renderer: &TextRenderer) -> O
                 .map(|secondary| renderer.measure(secondary, FontKind::Sans, secondary_fallback_font_size).1)
                 .unwrap_or(secondary_fallback_font_size),
             node.text_style.as_ref().and_then(|style| style.anchor_to_parent_y),
+            node.anchor[0] >= 0.99 && node.pivot[0] >= 0.99,
         );
         let primary_align = node
             .text_style
@@ -1139,16 +1140,23 @@ fn stacked_label_caption_pair_text_rects(
     primary_text_h: f32,
     secondary_text_h: f32,
     primary_anchor_y: Option<f32>,
+    right_anchored_pair: bool,
 ) -> (Rect, Rect) {
     let primary_h = primary_text_h.max(1.0).min(rect.h.max(1.0));
     let secondary_h = secondary_text_h.max(1.0).min(rect.h.max(1.0));
+    let total_h = primary_h + secondary_h;
+    let max_top_padding = (rect.h - total_h).max(0.0);
     let anchor_y = primary_anchor_y.unwrap_or(0.0).clamp(0.0, 0.999);
-    let top_padding = if anchor_y > 0.0 {
+    let derived_top_padding = if anchor_y > 0.0 {
         ((anchor_y * (primary_h + secondary_h)) - (primary_h * 0.5)) / (1.0 - anchor_y)
     } else {
         0.0
-    }
-    .max(0.0);
+    };
+    let top_padding = if right_anchored_pair {
+        derived_top_padding.max(0.0)
+    } else {
+        derived_top_padding.clamp(0.0, max_top_padding)
+    };
     let primary_y = rect.y + top_padding;
     let secondary_y = primary_y + primary_h;
     (
@@ -1847,7 +1855,13 @@ mod tests {
     #[test]
     fn label_caption_pair_stacks_secondary_immediately_below_primary_text_band() {
         let rect = Rect { x: 100.0, y: 20.0, w: 128.0, h: 152.0 };
-        let (primary_rect, secondary_rect) = stacked_label_caption_pair_text_rects(rect, 32.0, 27.0, Some(0.5));
+        let (primary_rect, secondary_rect) = stacked_label_caption_pair_text_rects(
+            rect,
+            32.0,
+            27.0,
+            Some(0.5),
+            false,
+        );
 
         assert_eq!(primary_rect.y, 47.0);
         assert_eq!(primary_rect.h, 32.0);

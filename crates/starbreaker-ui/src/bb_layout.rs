@@ -539,35 +539,6 @@ fn layout_flex_no_grow_children(
         flex.get("columnSpacing").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32 * csx
     };
 
-    let auto_label_caption_pair_count = if is_row {
-        children
-            .iter()
-            .filter_map(|child_id| scene.nodes.get(child_id))
-            .filter(|node| {
-                node.is_active
-                    && node
-                        .raw
-                        .get("affectsLayout")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(true)
-                    && matches!(
-                        &node.ty,
-                        BbNodeType::Other(kind)
-                            if kind.eq_ignore_ascii_case("BuildingBlocks_ComponentLabelCaptionPair")
-                    )
-                    && matches!(
-                        node.sizing.width,
-                        BbValue::Other {
-                            ref behavior,
-                            ..
-                        } if behavior == "Auto"
-                    )
-            })
-            .count()
-    } else {
-        0
-    };
-
     let mut sizes: Vec<(BbNodeId, f32, f32, bool)> = Vec::with_capacity(children.len());
     let mut right_aligned_flow_items = 0usize;
     let mut total_main = 0.0f32;
@@ -664,23 +635,48 @@ fn layout_flex_no_grow_children(
                 }
                 auto_main = false;
             } else if is_label_caption_pair {
-                let right_anchored_pair = node.anchor.x >= 0.99 && node.pivot.x >= 0.99;
                 if is_row {
-                    if right_anchored_pair {
-                        // Keep right-anchored label/caption pairs in their own
-                        // overlay layout pass so they don't consume row-flow
-                        // width intended for trailing controls (e.g. ExitBed).
-                        auto_main = true;
-                    } else if auto_label_caption_pair_count > 1 {
-                        let total_spacing = item_spacing * (auto_label_caption_pair_count.saturating_sub(1) as f32);
-                        let available = (container.w - total_spacing).max(0.0);
-                        w = available / auto_label_caption_pair_count as f32;
-                        auto_main = false;
-                    } else {
-                        let min_w = 80.0;
-                        w = (container.w * 0.22).max(min_w * csx);
-                        auto_main = false;
+                    // For row-flow label/caption pairs, derive intrinsic
+                    // footprint from authored Auto sizing and child content.
+                    // This avoids container-fraction heuristics that
+                    // over-stretch compact metric labels.
+                    if let BbValue::Other { value, behavior } = &node.sizing.width
+                        && behavior == "Auto" && *value > 1.0
+                    {
+                        w = *value * csx;
                     }
+                    if let BbValue::Other { value, behavior } = &node.sizing.height
+                        && behavior == "Auto" && *value > 1.0
+                    {
+                        h = *value * csy;
+                    }
+                    for child_id in &node.children {
+                        let Some(child) = scene.nodes.get(child_id) else {
+                            continue;
+                        };
+                        if !child.is_active {
+                            continue;
+                        }
+                        let child_w = resolve_value_for_node(
+                            child,
+                            &child.sizing.width,
+                            container.w,
+                            container.h,
+                            csx,
+                            true,
+                        );
+                        let child_h = resolve_value_for_node(
+                            child,
+                            &child.sizing.height,
+                            container.h,
+                            container.w,
+                            csy,
+                            false,
+                        );
+                        w = w.max(child_w.max(0.0));
+                        h = h.max(child_h.max(0.0));
+                    }
+                    auto_main = false;
                 } else {
                     h = (container.h * 0.22).max(48.0 * csy);
                     auto_main = false;
