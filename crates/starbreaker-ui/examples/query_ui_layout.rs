@@ -1,0 +1,257 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use starbreaker_ui::pipeline::{AssetFetcher, CanvasFetcher, PipelineInputs, StyleFetcher, SwfFetcher, UiBindingView};
+use starbreaker_ui::{ManufacturerStyle, StyleLoader, UiError, compile_ir_for_binding};
+
+struct FsCanvasFetcher {
+    guid_to_path: HashMap<String, PathBuf>,
+    by_name: HashMap<String, String>,
+}
+
+impl CanvasFetcher for FsCanvasFetcher {
+    fn fetch_canvas_json(&self, guid: &str) -> Result<serde_json::Value, UiError> {
+        let path = self
+            .guid_to_path
+            .get(guid)
+            .ok_or_else(|| UiError::RenderError(format!("missing canvas guid: {guid}")))?;
+        load_canvas_json_from_path(path)
+            .map_err(|e| UiError::RenderError(format!("failed to load {}: {e}", path.display())))
+    }
+
+    fn fetch_canvas_by_name(&self, record_name: &str) -> Result<serde_json::Value, UiError> {
+        let guid = self
+            .by_name
+            .get(record_name)
+            .or_else(|| self.by_name.get(&record_name.to_ascii_lowercase()))
+            .ok_or_else(|| UiError::RenderError(format!("missing canvas name: {record_name}")))?;
+        self.fetch_canvas_json(guid)
+    }
+}
+
+struct FsStyleFetcher {
+    styles_root: PathBuf,
+}
+
+impl StyleFetcher for FsStyleFetcher {
+    fn fetch_manufacturer_style(&self, manufacturer_id: &str) -> Result<ManufacturerStyle, UiError> {
+        let id = manufacturer_id.to_ascii_lowercase();
+        let candidates = [
+            self.styles_root.join(format!("{id}.json")),
+            self.styles_root.join(format!("s_{id}_hud.json")),
+            self.styles_root.join(format!("s_{id}_env.json")),
+        ];
+
+        for path in candidates {
+            if !path.is_file() {
+                continue;
+            }
+            let record_json = load_canvas_json_from_path(&path)
+                .map_err(|e| UiError::RenderError(format!("failed to parse {}: {e}", path.display())))?;
+            return StyleLoader::for_manufacturer(&id).parse_buildingblocks_style_record(&record_json);
+        }
+
+        Err(UiError::RenderError(format!(
+            "missing BuildingBlocks style record for manufacturer '{manufacturer_id}' under {}",
+            self.styles_root.display()
+        )))
+    }
+}
+
+struct NullSwfFetcher;
+
+impl SwfFetcher for NullSwfFetcher {
+    fn fetch_swf_bytes(&self, p4k_path: &str) -> Result<Vec<u8>, UiError> {
+        Err(UiError::RenderError(format!(
+            "SWF fetch not supported in query_ui_layout example: {p4k_path}"
+        )))
+    }
+}
+
+struct NullAssetFetcher;
+
+impl AssetFetcher for NullAssetFetcher {
+    fn fetch_image_bytes(&self, _p4k_path: &str) -> Option<Vec<u8>> {
+        None
+    }
+}
+
+fn collect_json_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_json_files(&path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("json") {
+            out.push(path);
+        }
+    }
+}
+
+fn load_canvas_index(root: &Path) -> Result<FsCanvasFetcher, String> {
+    let mut files = Vec::new();
+    collect_json_files(root, &mut files);
+
+    let mut guid_to_path = HashMap::new();
+    let mut by_name = HashMap::new();
+
+    for path in files {
+        let json = load_canvas_json_from_path(&path)
+            .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+
+        let Some(record_name) = json
+            .get("_RecordName_")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let Some(record_id) = json
+            .get("_RecordId_")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+
+        let bare_name = record_name
+            .strip_prefix("BuildingBlocks_Canvas.")
+            .unwrap_or(&record_name)
+            .to_string();
+
+        guid_to_path.insert(record_id.clone(), path.clone());
+        by_name.insert(record_name.clone(), record_id.clone());
+        by_name.insert(record_name.to_ascii_lowercase(), record_id.clone());
+        by_name.insert(bare_name.clone(), record_id.clone());
+        by_name.insert(bare_name.to_ascii_lowercase(), record_id.clone());
+        by_name.insert(record_id.clone(), record_id);
+    }
+
+    Ok(FsCanvasFetcher { guid_to_path, by_name })
+}
+
+fn load_canvas_json_from_path(path: &Path) -> Result<serde_json::Value, String> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|e| format!("failed to parse {}: {e}", path.display()))
+}
+
+fn print_usage() {
+    eprintln!(
+        "Usage: cargo run -p starbreaker-ui --example query_ui_layout -- \\\n  --canvas-guid <guid> --query <pattern> [--content-guid <guid>] [--manufacturer <id>] [--helper <name>] [--width <w>] [--height <h>]"
+    );
+}
+
+fn main() -> Result<(), String> {
+    let mut canvas_guid: Option<String> = None;
+    let mut content_guid: Option<String> = None;
+    let mut query: Option<String> = None;
+    let mut manufacturer = String::from("drak");
+    let mut helper = String::from("layout-query");
+    let mut width: u32 = 1920;
+    let mut height: u32 = 1080;
+
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--canvas-guid" => canvas_guid = args.next(),
+            "--content-guid" => content_guid = args.next(),
+            "--query" => query = args.next(),
+            "--manufacturer" => manufacturer = args.next().unwrap_or_else(|| "drak".to_string()),
+            "--helper" => helper = args.next().unwrap_or_else(|| "layout-query".to_string()),
+            "--width" => {
+                width = args
+                    .next()
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .ok_or_else(|| "invalid --width".to_string())?;
+            }
+            "--height" => {
+                height = args
+                    .next()
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .ok_or_else(|| "invalid --height".to_string())?;
+            }
+            _ => {
+                print_usage();
+                return Err(format!("unknown arg: {arg}"));
+            }
+        }
+    }
+
+    let Some(canvas_guid) = canvas_guid else {
+        print_usage();
+        return Err("missing --canvas-guid".to_string());
+    };
+    let Some(query) = query else {
+        print_usage();
+        return Err("missing --query".to_string());
+    };
+
+    let workspace = PathBuf::from("/home/tom/projects/scorg_tools");
+    let canvas_root = workspace.join("ships/dcb_canvas/libs/foundry/records");
+    let fetcher = load_canvas_index(&canvas_root)?;
+    let style_fetcher = FsStyleFetcher {
+        styles_root: workspace.join("ships/dcb_canvas/libs/foundry/records/ui/buildingblocks/styles"),
+    };
+    let swf_fetcher = NullSwfFetcher;
+    let asset_fetcher = NullAssetFetcher;
+
+    let canvas_guid_s = canvas_guid;
+    let content_guid_s = content_guid.unwrap_or_else(|| canvas_guid_s.clone());
+    let binding = UiBindingView {
+        canvas_guid: Some(canvas_guid_s.as_str()),
+        content_canvas_guid: Some(content_guid_s.as_str()),
+        binding_kind: Some("mfd"),
+        manufacturer_id: Some(manufacturer.as_str()),
+        helper_name: Some(helper.as_str()),
+        default_view_index: None,
+        default_screen_slot: None,
+    };
+
+    let inputs = PipelineInputs {
+        binding: &binding,
+        canvas_fetcher: &fetcher,
+        swf_fetcher: &swf_fetcher,
+        style_fetcher: &style_fetcher,
+        asset_fetcher: &asset_fetcher,
+        target_size: (width, height),
+        apply_postprocess: false,
+        localization_map: None,
+        loc_fetcher: None,
+    };
+
+    let ir = compile_ir_for_binding(&inputs)
+        .map_err(|e| format!("failed to compile IR for query: {e}"))?;
+
+    let query_lc = query.to_ascii_lowercase();
+    let mut hits = 0usize;
+    println!(
+        "Layout query '{}' for canvas_guid={} content_guid={} target={}x{}",
+        query, binding.canvas_guid.unwrap_or(""), binding.content_canvas_guid.unwrap_or(""), width, height
+    );
+    for node in &ir.nodes {
+        let name_lc = node.name.to_ascii_lowercase();
+        let ty_lc = node.node_type.to_ascii_lowercase();
+        if name_lc.contains(&query_lc) || ty_lc.contains(&query_lc) {
+            hits += 1;
+            println!(
+                "id={} name='{}' type='{}' x={:.1} y={:.1} w={:.1} h={:.1}",
+                node.id,
+                node.name,
+                node.node_type,
+                node.computed_rect.x,
+                node.computed_rect.y,
+                node.computed_rect.w,
+                node.computed_rect.h
+            );
+        }
+    }
+
+    if hits == 0 {
+        println!("(no matches)");
+    }
+
+    Ok(())
+}

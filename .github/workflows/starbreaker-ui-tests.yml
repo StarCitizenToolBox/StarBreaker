@@ -1,0 +1,21 @@
+name: starbreaker-ui tests
+
+on:
+  push:
+    paths:
+      - crates/starbreaker-ui/**
+      - .github/workflows/starbreaker-ui-tests.yml
+  pull_request:
+    paths:
+      - crates/starbreaker-ui/**
+      - .github/workflows/starbreaker-ui-tests.yml
+
+jobs:
+  test-starbreaker-ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run starbreaker-ui tests
+        run: cargo test -p starbreaker-ui
