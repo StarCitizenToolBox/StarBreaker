@@ -123,7 +123,6 @@ pub fn render_ui_ir_document(
             node,
             &text_renderer,
             ctx,
-            document,
             &mut seen_text_rects,
         );
     }
@@ -238,21 +237,7 @@ fn draw_non_text_node(
             }
             let draw_x = rect.x as i32;
             let draw_y = rect.y as i32;
-            let mut tint = node.icon_tint_colour.unwrap_or([1.0, 1.0, 1.0, 1.0]);
-            if node
-                .node_type
-                .eq_ignore_ascii_case("BuildingBlocks_WidgetManufacturerLogo")
-            {
-                tint = derived_accent_tint(ctx);
-            }
-            if node
-                .asset_ref
-                .as_deref()
-                .is_some_and(|asset_ref| asset_ref.to_ascii_lowercase().contains("bottom-bar"))
-                && is_footer_brand_text_context(node, document)
-            {
-                tint = derived_accent_tint(ctx);
-            }
+            let tint = node.icon_tint_colour.unwrap_or([1.0, 1.0, 1.0, 1.0]);
 
             let blend_mode = if node
                 .custom_shape
@@ -534,7 +519,6 @@ fn custom_shape_fill_override(node: &UiIrNode, ctx: &ComposeContext<'_>) -> Opti
                 .as_deref()
                 .and_then(|token| resolve_colour_token(ctx, token))
         })
-        .or_else(|| Some(derived_accent_tint(ctx)))
 }
 
 fn strip_custom_shape_uniform_matte(img: &RgbaImage) -> RgbaImage {
@@ -798,7 +782,6 @@ fn draw_text_node(
     node: &UiIrNode,
     renderer: &TextRenderer,
     ctx: &ComposeContext<'_>,
-    document: &UiIrDocument,
     seen_rects: &mut HashSet<(i32, i32, i32, i32)>,
 ) {
     let Some(text) = resolved_text_payload(node) else {
@@ -810,10 +793,6 @@ fn draw_text_node(
 
     let rect = ir_rect_to_layout_rect(node.computed_rect);
     if rect.w < 0.5 || rect.h < 0.5 {
-        return;
-    }
-
-    if node.name.eq_ignore_ascii_case("FunctionTitle") {
         return;
     }
 
@@ -863,7 +842,7 @@ fn draw_text_node(
         .map(|style| VerticalAlign::from_bb_str(&style.vertical_alignment))
         .unwrap_or(VerticalAlign::Centre);
 
-    let mut colour = resolved_text_colour(node, node.text_style.as_ref(), ctx, document, true);
+    let mut colour = resolved_text_colour(node.text_style.as_ref(), ctx);
 
     colour[3] = ((colour[3] as f32) * node.alpha.clamp(0.0, 1.0)).round() as u8;
 
@@ -911,7 +890,7 @@ fn draw_text_node(
     }
 
     if let Some(UiIrTextPayload::Resolved { text: secondary }) = node.secondary_text_payload.as_ref() {
-        let mut secondary_colour = resolved_text_colour(node, node.secondary_text_style.as_ref(), ctx, document, false);
+        let mut secondary_colour = resolved_text_colour(node.secondary_text_style.as_ref(), ctx);
         secondary_colour[3] = ((secondary_colour[3] as f32) * node.alpha.clamp(0.0, 1.0)).round() as u8;
         let secondary_used_swf = selected_font.is_some_and(|(_, swf_font)| {
             renderer.draw_swf_font(
@@ -940,14 +919,8 @@ fn draw_text_node(
     }
 }
 
-fn resolved_text_colour(
-    node: &UiIrNode,
-    style: Option<&crate::ui_ir::UiIrTextStyle>,
-    ctx: &ComposeContext<'_>,
-    document: &UiIrDocument,
-    is_primary: bool,
-) -> [u8; 4] {
-    let mut colour = style
+fn resolved_text_colour(style: Option<&crate::ui_ir::UiIrTextStyle>, ctx: &ComposeContext<'_>) -> [u8; 4] {
+    style
         .and_then(|style| {
             style.colour.or_else(|| {
                 style
@@ -957,86 +930,7 @@ fn resolved_text_colour(
             })
         })
         .map(rgba_to_u8)
-        .unwrap_or([255, 255, 255, 255]);
-
-    if is_footer_brand_text_context(node, document)
-        || (is_primary
-            && (node.name.eq_ignore_ascii_case("TierLevel")
-                || node.name.eq_ignore_ascii_case("LocationName")
-                || node.name.eq_ignore_ascii_case("MedGel")))
-        || is_medical_attract_banner_text(node, document)
-    {
-        let c = derived_accent_tint(ctx);
-        colour = [
-            (c[0] * 255.0).round() as u8,
-            (c[1] * 255.0).round() as u8,
-            (c[2] * 255.0).round() as u8,
-            colour[3],
-        ];
-    }
-
-    colour
-}
-
-fn is_footer_brand_text_context(node: &UiIrNode, document: &UiIrDocument) -> bool {
-    let mut current_parent_id = node.parent_id;
-    while let Some(parent_id) = current_parent_id {
-        let Some(parent) = document.nodes.iter().find(|candidate| candidate.id == parent_id) else {
-            return false;
-        };
-
-        let child_ids = &parent.children;
-        let has_logo = child_ids.iter().any(|child_id| {
-            document
-                .nodes
-                .iter()
-                .find(|candidate| candidate.id == *child_id)
-                .is_some_and(|child| child.node_type.eq_ignore_ascii_case("BuildingBlocks_WidgetManufacturerLogo"))
-        });
-        let has_bottom_bar = child_ids.iter().any(|child_id| {
-            document
-                .nodes
-                .iter()
-                .find(|candidate| candidate.id == *child_id)
-                .and_then(|child| child.asset_ref.as_deref())
-                .is_some_and(|asset_ref| asset_ref.to_ascii_lowercase().contains("bottom-bar"))
-        });
-        if has_logo && has_bottom_bar {
-            return true;
-        }
-
-        current_parent_id = parent.parent_id;
-    }
-
-    false
-}
-
-fn is_medical_attract_banner_text(node: &UiIrNode, document: &UiIrDocument) -> bool {
-    if !(node.name.eq_ignore_ascii_case("TitleText")
-        || node.name.eq_ignore_ascii_case("TouchPromptText")
-        || node.name.eq_ignore_ascii_case("TierLevel"))
-    {
-        return false;
-    }
-
-    let mut current_parent_id = node.parent_id;
-    while let Some(parent_id) = current_parent_id {
-        let Some(parent) = document.nodes.iter().find(|candidate| candidate.id == parent_id) else {
-            return false;
-        };
-        if parent.children.iter().any(|child_id| {
-            document
-                .nodes
-                .iter()
-                .find(|candidate| candidate.id == *child_id)
-                .is_some_and(|child| child.name.eq_ignore_ascii_case("TouchHere"))
-        }) {
-            return true;
-        }
-        current_parent_id = parent.parent_id;
-    }
-
-    false
+        .unwrap_or([255, 255, 255, 255])
 }
 
 pub fn debug_text_rects(node: &UiIrNode) -> Option<DebugTextRects> {
