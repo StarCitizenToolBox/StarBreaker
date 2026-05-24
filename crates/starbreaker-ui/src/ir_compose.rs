@@ -34,6 +34,12 @@ pub struct DebugTextRects {
     pub secondary_text_origin: Option<(f32, f32)>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DebugTextDrawnBounds {
+    pub primary: Rect,
+    pub secondary: Option<Rect>,
+}
+
 /// Render a generic BuildingBlocks IR document without consulting raw BB data.
 ///
 /// This renderer intentionally consumes only the canonical IR plus style/assets.
@@ -74,7 +80,8 @@ pub fn render_ui_ir_document(
         if node.meter_progress.is_none() {
             continue;
         }
-        let rect = ir_rect_to_layout_rect(node.computed_rect);
+        let rect = resolved_linear_progress_meter_rect(node, document)
+            .unwrap_or_else(|| ir_rect_to_layout_rect(node.computed_rect));
         let Some(tsk_rect) = TskRect::from_xywh(rect.x, rect.y, rect.w, rect.h) else {
             continue;
         };
@@ -131,7 +138,8 @@ fn draw_non_text_node(
     atlas: &AtlasLibrary<'_>,
     pixmap: &mut Pixmap,
 ) {
-    let rect = ir_rect_to_layout_rect(node.computed_rect);
+    let rect = resolved_linear_progress_meter_rect(node, document)
+        .unwrap_or_else(|| ir_rect_to_layout_rect(node.computed_rect));
     if rect.w < 0.5 || rect.h < 0.5 {
         return;
     }
@@ -511,6 +519,48 @@ fn draw_linear_progress_meter(
     }
 }
 
+pub fn debug_linear_progress_meter_rect(node: &UiIrNode, document: &UiIrDocument) -> Option<Rect> {
+    (node.meter_progress.is_some()).then(|| {
+        resolved_linear_progress_meter_rect(node, document)
+            .unwrap_or_else(|| ir_rect_to_layout_rect(node.computed_rect))
+    })
+}
+
+fn resolved_linear_progress_meter_rect(node: &UiIrNode, document: &UiIrDocument) -> Option<Rect> {
+    if node.meter_progress.is_none() {
+        return None;
+    }
+
+    let parent = node
+        .parent_id
+        .and_then(|parent_id| document.nodes.iter().find(|candidate| candidate.id == parent_id))?;
+    if !parent
+        .node_type
+        .eq_ignore_ascii_case("BuildingBlocks_ComponentLabelCaptionPair")
+    {
+        return None;
+    }
+    if (node.anchor[1] - 1.0).abs() > 0.01 || node.pivot[1].abs() > 0.01 || node.authored_position[1].abs() > 0.01 {
+        return None;
+    }
+
+    let mut rect = ir_rect_to_layout_rect(node.computed_rect);
+    let text_rects = debug_text_rects(parent)?;
+    let drawn_bounds = debug_text_drawn_bounds(parent);
+    let content_bottom = match (text_rects.secondary, drawn_bounds.and_then(|bounds| bounds.secondary)) {
+        (Some(secondary_rect), Some(secondary_drawn)) => {
+            secondary_rect.y + secondary_rect.h + (secondary_rect.h - secondary_drawn.h)
+        }
+        (Some(secondary_rect), None) => secondary_rect.y + secondary_rect.h,
+        (None, Some(primary_drawn)) => {
+            text_rects.primary.y + text_rects.primary.h + (text_rects.primary.h - primary_drawn.h)
+        }
+        (None, None) => text_rects.primary.y + text_rects.primary.h,
+    };
+    rect.y = content_bottom;
+    Some(rect)
+}
+
 fn segmented_count_for_width(total_width: f32, segment_width: f32, segment_gap: f32) -> usize {
     if total_width <= 0.0 || segment_width <= 0.0 {
         return 0;
@@ -767,6 +817,11 @@ pub fn debug_text_rects(node: &UiIrNode) -> Option<DebugTextRects> {
     debug_text_rects_with_renderer(node, &renderer)
 }
 
+pub fn debug_text_drawn_bounds(node: &UiIrNode) -> Option<DebugTextDrawnBounds> {
+    let renderer = TextRenderer::new();
+    debug_text_drawn_bounds_with_renderer(node, &renderer)
+}
+
 fn debug_text_rects_with_renderer(node: &UiIrNode, renderer: &TextRenderer) -> Option<DebugTextRects> {
     let text = resolved_text_payload(node)?;
     let rect = ir_rect_to_layout_rect(node.computed_rect);
@@ -864,6 +919,66 @@ fn debug_text_rects_with_renderer(node: &UiIrNode, renderer: &TextRenderer) -> O
             secondary_text_origin: None,
         })
     }
+}
+
+fn debug_text_drawn_bounds_with_renderer(
+    node: &UiIrNode,
+    renderer: &TextRenderer,
+) -> Option<DebugTextDrawnBounds> {
+    let text = resolved_text_payload(node)?;
+    let rects = debug_text_rects_with_renderer(node, renderer)?;
+
+    let nominal_font_size = node
+        .text_style
+        .as_ref()
+        .map(|style| ir_value_to_px(&style.font_size))
+        .unwrap_or(18.0)
+        .max(1.0);
+    let fallback_font_size = (nominal_font_size * TEXT_RENDER_SIZE_CALIBRATION).max(1.0);
+    let primary_align = node
+        .text_style
+        .as_ref()
+        .map(|style| TextAlign::from_bb_str(&style.alignment))
+        .unwrap_or(TextAlign::Left);
+    let primary_vertical = node
+        .text_style
+        .as_ref()
+        .map(|style| VerticalAlign::from_bb_str(&style.vertical_alignment))
+        .unwrap_or(VerticalAlign::Centre);
+
+    let primary = renderer.measure_drawn_bounds(
+        text,
+        rects.primary,
+        FontKind::Sans,
+        fallback_font_size,
+        primary_align,
+        primary_vertical,
+    )?;
+
+    let secondary = if let Some(UiIrTextPayload::Resolved { text: secondary_text }) = node.secondary_text_payload.as_ref() {
+        let secondary_nominal_font_size = node
+            .secondary_text_style
+            .as_ref()
+            .map(|style| ir_value_to_px(&style.font_size))
+            .unwrap_or(nominal_font_size)
+            .max(1.0);
+        let secondary_fallback_font_size =
+            (secondary_nominal_font_size * TEXT_RENDER_SIZE_CALIBRATION).max(1.0);
+        rects.secondary.and_then(|secondary_rect| {
+            renderer.measure_drawn_bounds(
+                secondary_text,
+                secondary_rect,
+                FontKind::Sans,
+                secondary_fallback_font_size,
+                TextAlign::Left,
+                VerticalAlign::Centre,
+            )
+        })
+    } else {
+        None
+    };
+
+    Some(DebugTextDrawnBounds { primary, secondary })
 }
 
 fn text_origin_in_rect(
@@ -1549,5 +1664,149 @@ mod tests {
         assert_eq!(primary_rect.h, 32.0);
         assert_eq!(secondary_rect.y, 79.0);
         assert_eq!(secondary_rect.h, 27.0);
+    }
+
+    #[test]
+    fn bottom_anchored_progress_meter_uses_parent_text_band_bottom() {
+        let parent = UiIrNode {
+            id: 1,
+            parent_id: None,
+            children: vec![2],
+            node_type: "BuildingBlocks_ComponentLabelCaptionPair".into(),
+            name: "pair".into(),
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            anchor: [1.0, 0.0],
+            pivot: [1.0, 0.0],
+            authored_position: [0.0, 0.0],
+            authored_size: [
+                UiIrValue::Other {
+                    value: 64.0,
+                    behavior: "Auto".into(),
+                },
+                UiIrValue::Other {
+                    value: 64.0,
+                    behavior: "Auto".into(),
+                },
+            ],
+            padding: [0.0; 4],
+            margin: [0.0; 4],
+            computed_rect: UiIrRect { x: 1736.0, y: -5.5, w: 128.0, h: 152.3 },
+            background_fill_colour: None,
+            background_fill_colour_token: None,
+            segmented_fill: None,
+            border: None,
+            stroke_colour: None,
+            stroke_colour_token: None,
+            stroke_extent: None,
+            icon_tint_colour: None,
+            icon_tint_colour_token: None,
+            icon_preset: None,
+            text_payload: Some(UiIrTextPayload::Resolved {
+                text: "MEDGELS".into(),
+            }),
+            secondary_text_payload: Some(UiIrTextPayload::Resolved {
+                text: "200/200".into(),
+            }),
+            secondary_text_style: Some(UiIrTextStyle {
+                font_record: None,
+                resolved_font_record: None,
+                font_size: UiIrValue::Fixed { value: 28.0 },
+                alignment: "Left".into(),
+                vertical_alignment: "Center".into(),
+                anchor_to_parent_x: None,
+                anchor_to_parent_y: None,
+                colour: None,
+                colour_token: None,
+            }),
+            meter_progress: None,
+            text_style: Some(UiIrTextStyle {
+                font_record: None,
+                resolved_font_record: None,
+                font_size: UiIrValue::Fixed { value: 32.0 },
+                alignment: "Left".into(),
+                vertical_alignment: "Center".into(),
+                anchor_to_parent_x: Some(0.0),
+                anchor_to_parent_y: Some(0.5),
+                colour: None,
+                colour_token: None,
+            }),
+            asset_ref: None,
+            custom_shape: None,
+            style_tag_uuids: vec![],
+            resolved_style_tags: vec![],
+        };
+        let meter = UiIrNode {
+            id: 2,
+            parent_id: Some(1),
+            children: vec![],
+            node_type: "BuildingBlocks_WidgetLinearProgressMeter".into(),
+            name: "meter".into(),
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            anchor: [0.0, 1.0],
+            pivot: [0.0, 0.0],
+            authored_position: [0.0, 0.0],
+            authored_size: [
+                UiIrValue::Fixed { value: 115.0 },
+                UiIrValue::Fixed { value: 15.0 },
+            ],
+            padding: [0.0; 4],
+            margin: [0.0; 4],
+            computed_rect: UiIrRect { x: 1736.0, y: 146.8, w: 115.0, h: 15.0 },
+            background_fill_colour: None,
+            background_fill_colour_token: None,
+            segmented_fill: None,
+            border: None,
+            stroke_colour: None,
+            stroke_colour_token: None,
+            stroke_extent: None,
+            icon_tint_colour: None,
+            icon_tint_colour_token: None,
+            icon_preset: None,
+            text_payload: None,
+            secondary_text_payload: None,
+            secondary_text_style: None,
+            meter_progress: Some(1.0),
+            text_style: None,
+            asset_ref: None,
+            custom_shape: None,
+            style_tag_uuids: vec![],
+            resolved_style_tags: vec![],
+        };
+        let document = UiIrDocument {
+            schema_version: 1,
+            canvas_guid: "test-canvas".into(),
+            canvas_name: None,
+            target_width: 1920,
+            target_height: 1080,
+            selected_style_source: None,
+            selected_swf_source: None,
+            renderer_hint: crate::ui_ir::UiRendererHint::Bb,
+            confidence: 100,
+            warnings: vec![],
+            unresolved_references: vec![],
+            resolved_asset_refs: vec![],
+            missing_asset_refs: vec![],
+            nodes: vec![parent, meter.clone()],
+        };
+
+        let rect = debug_linear_progress_meter_rect(&meter, &document).expect("meter rect");
+        let parent_text_rects = debug_text_rects(&document.nodes[0]).expect("parent text rects");
+        let parent_drawn_bounds = debug_text_drawn_bounds(&document.nodes[0]).expect("parent text bounds");
+        let expected_y = match (parent_text_rects.secondary, parent_drawn_bounds.secondary) {
+            (Some(secondary_rect), Some(secondary_drawn)) => {
+                secondary_rect.y + secondary_rect.h + (secondary_rect.h - secondary_drawn.h)
+            }
+            _ => parent_text_rects.primary.y + parent_text_rects.primary.h,
+        };
+        assert!(
+            (rect.y - expected_y).abs() < 0.1,
+            "expected meter to attach to text-band bottom {}, got {}",
+            expected_y,
+            rect.y
+        );
     }
 }

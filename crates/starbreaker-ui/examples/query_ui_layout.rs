@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use starbreaker_ui::pipeline::{AssetFetcher, CanvasFetcher, PipelineInputs, StyleFetcher, SwfFetcher, UiBindingView};
-use starbreaker_ui::ir_compose::debug_text_rects;
+use starbreaker_ui::ir_compose::{
+    debug_linear_progress_meter_rect, debug_text_drawn_bounds, debug_text_rects,
+};
 use starbreaker_ui::{ManufacturerStyle, StyleLoader, UiError, compile_ir_for_binding};
 
 struct FsCanvasFetcher {
@@ -276,6 +278,33 @@ fn main() -> Result<(), String> {
                         );
                     }
                 }
+            }
+            if let Some(text_bounds) = debug_text_drawn_bounds(node) {
+                println!(
+                    "  primary_text_drawn_bounds x={:.1} y={:.1} w={:.1} h={:.1}",
+                    text_bounds.primary.x,
+                    text_bounds.primary.y,
+                    text_bounds.primary.w,
+                    text_bounds.primary.h
+                );
+                if let Some(secondary) = text_bounds.secondary {
+                    println!(
+                        "  secondary_text_drawn_bounds x={:.1} y={:.1} w={:.1} h={:.1}",
+                        secondary.x,
+                        secondary.y,
+                        secondary.w,
+                        secondary.h
+                    );
+                }
+            }
+            if let Some(meter_rect) = debug_linear_progress_meter_rect(node, &ir) {
+                println!(
+                    "  meter_draw_rect x={:.1} y={:.1} w={:.1} h={:.1}",
+                    meter_rect.x,
+                    meter_rect.y,
+                    meter_rect.w,
+                    meter_rect.h
+                );
             }
         }
     }

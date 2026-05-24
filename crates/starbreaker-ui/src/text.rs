@@ -177,6 +177,80 @@ impl TextRenderer {
         }
     }
 
+    pub fn measure_drawn_bounds(
+        &self,
+        text: &str,
+        rect: Rect,
+        kind: FontKind,
+        size_px: f32,
+        align: TextAlign,
+        vertical_align: VerticalAlign,
+    ) -> Option<Rect> {
+        if text.is_empty() || rect.w < 1.0 || rect.h < 1.0 || size_px < 1.0 {
+            return None;
+        }
+
+        let font = self.font(kind);
+        let scale = Scale::uniform(size_px);
+        let v_metrics = font.v_metrics(scale);
+        let line_h = (v_metrics.ascent - v_metrics.descent + v_metrics.line_gap).ceil();
+
+        let lines = wrap_lines(font, text, scale, rect.w);
+        let total_h = lines.len() as f32 * line_h;
+        let block_top = match vertical_align {
+            VerticalAlign::Top => rect.y,
+            VerticalAlign::Centre => rect.y + ((rect.h - total_h) * 0.5).max(0.0),
+            VerticalAlign::Bottom => rect.y + (rect.h - total_h).max(0.0),
+        };
+        let start_baseline = block_top + v_metrics.ascent;
+
+        let clip_min_x = rect.x.floor() as i32;
+        let clip_min_y = rect.y.floor() as i32;
+        let clip_max_x = (rect.x + rect.w).ceil() as i32;
+        let clip_max_y = (rect.y + rect.h).ceil() as i32;
+
+        let mut min_x = i32::MAX;
+        let mut min_y = i32::MAX;
+        let mut max_x = i32::MIN;
+        let mut max_y = i32::MIN;
+
+        for (i, line) in lines.iter().enumerate() {
+            let baseline_y = start_baseline + i as f32 * line_h;
+            let line_w = line_advance_width(font, line, scale);
+
+            let start_x = match align {
+                TextAlign::Left => rect.x,
+                TextAlign::Centre => rect.x + ((rect.w - line_w) * 0.5).max(0.0),
+                TextAlign::Right => rect.x + (rect.w - line_w).max(0.0),
+            };
+
+            let origin: Point<f32> = point(start_x, baseline_y);
+            for glyph in font.layout(line, scale, origin) {
+                let Some(bb) = glyph.pixel_bounding_box() else {
+                    continue;
+                };
+                let clipped_min_x = bb.min.x.max(clip_min_x);
+                let clipped_min_y = bb.min.y.max(clip_min_y);
+                let clipped_max_x = bb.max.x.min(clip_max_x);
+                let clipped_max_y = bb.max.y.min(clip_max_y);
+                if clipped_max_x <= clipped_min_x || clipped_max_y <= clipped_min_y {
+                    continue;
+                }
+                min_x = min_x.min(clipped_min_x);
+                min_y = min_y.min(clipped_min_y);
+                max_x = max_x.max(clipped_max_x);
+                max_y = max_y.max(clipped_max_y);
+            }
+        }
+
+        (min_x < max_x && min_y < max_y).then_some(Rect {
+            x: min_x as f32,
+            y: min_y as f32,
+            w: (max_x - min_x) as f32,
+            h: (max_y - min_y) as f32,
+        })
+    }
+
     /// Draw using extracted SWF vector glyphs (`DefineFont2/3`) when available.
     ///
     /// Returns `true` when the draw path succeeded; `false` means callers should
