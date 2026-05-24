@@ -160,6 +160,10 @@ pub struct UiIrTextStyle {
     pub alignment: String,
     #[serde(default = "default_vertical_alignment")]
     pub vertical_alignment: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_to_parent_x: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_to_parent_y: Option<f32>,
     pub colour: Option<[f32; 4]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub colour_token: Option<String>,
@@ -394,6 +398,18 @@ pub fn compile_ui_ir_from_scene(
                     .and_then(|v| v.as_str())
                     .unwrap_or("Center")
                     .to_string(),
+                anchor_to_parent_x: node
+                    .raw
+                    .get("labelProperties")
+                    .and_then(|lp| lp.get("anchorToParentX"))
+                    .and_then(|v| v.as_f64())
+                    .map(|value| value as f32),
+                anchor_to_parent_y: node
+                    .raw
+                    .get("labelProperties")
+                    .and_then(|lp| lp.get("anchorToParentY"))
+                    .and_then(|v| v.as_f64())
+                    .map(|value| value as f32),
                 colour: text.colour.or_else(|| fill_colour_from_raw_for_text(&node.raw)),
                 colour_token: text_colour_token_from_raw(&node.raw),
             })
@@ -434,6 +450,18 @@ pub fn compile_ui_ir_from_scene(
                     .and_then(|v| v.as_str())
                     .unwrap_or("Center")
                     .to_string(),
+                anchor_to_parent_x: node
+                    .raw
+                    .get("labelProperties")
+                    .and_then(|lp| lp.get("anchorToParentX"))
+                    .and_then(|v| v.as_f64())
+                    .map(|value| value as f32),
+                anchor_to_parent_y: node
+                    .raw
+                    .get("labelProperties")
+                    .and_then(|lp| lp.get("anchorToParentY"))
+                    .and_then(|v| v.as_f64())
+                    .map(|value| value as f32),
                 colour: fill_colour_from_raw_for_text(&node.raw),
                 colour_token: text_colour_token_from_raw(&node.raw),
             })
@@ -495,6 +523,18 @@ pub fn compile_ui_ir_from_scene(
                     .and_then(|v| v.as_str())
                     .unwrap_or("Center")
                     .to_string(),
+                anchor_to_parent_x: node
+                    .raw
+                    .get("captionProperties")
+                    .and_then(|cp| cp.get("anchorToParentX"))
+                    .and_then(|v| v.as_f64())
+                    .map(|value| value as f32),
+                anchor_to_parent_y: node
+                    .raw
+                    .get("captionProperties")
+                    .and_then(|cp| cp.get("anchorToParentY"))
+                    .and_then(|v| v.as_f64())
+                    .map(|value| value as f32),
                 colour: None,
                 colour_token: None,
             })

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use starbreaker_ui::pipeline::{AssetFetcher, CanvasFetcher, PipelineInputs, StyleFetcher, SwfFetcher, UiBindingView};
+use starbreaker_ui::ir_compose::debug_text_rects;
 use starbreaker_ui::{ManufacturerStyle, StyleLoader, UiError, compile_ir_for_binding};
 
 struct FsCanvasFetcher {
@@ -246,6 +247,36 @@ fn main() -> Result<(), String> {
                 node.computed_rect.w,
                 node.computed_rect.h
             );
+            if let Some(text_rects) = debug_text_rects(node) {
+                println!(
+                    "  primary_text_rect x={:.1} y={:.1} w={:.1} h={:.1}",
+                    text_rects.primary.x,
+                    text_rects.primary.y,
+                    text_rects.primary.w,
+                    text_rects.primary.h
+                );
+                println!(
+                    "  primary_text_origin x={:.1} y={:.1}",
+                    text_rects.primary_text_origin.0,
+                    text_rects.primary_text_origin.1
+                );
+                if let Some(secondary) = text_rects.secondary {
+                    println!(
+                        "  secondary_text_rect x={:.1} y={:.1} w={:.1} h={:.1}",
+                        secondary.x,
+                        secondary.y,
+                        secondary.w,
+                        secondary.h
+                    );
+                    if let Some(origin) = text_rects.secondary_text_origin {
+                        println!(
+                            "  secondary_text_origin x={:.1} y={:.1}",
+                            origin.0,
+                            origin.1
+                        );
+                    }
+                }
+            }
         }
     }
 

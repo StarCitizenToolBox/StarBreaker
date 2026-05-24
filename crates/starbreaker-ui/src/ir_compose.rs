@@ -26,6 +26,14 @@ use crate::ui_ir::{UiIrBorder, UiIrDocument, UiIrNode, UiIrRect, UiIrTextPayload
 const TEXT_RENDER_SIZE_CALIBRATION: f32 = 1.5;
 const SWF_TEXT_RENDER_SIZE_CALIBRATION: f32 = 0.84;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DebugTextRects {
+    pub primary: Rect,
+    pub secondary: Option<Rect>,
+    pub primary_text_origin: (f32, f32),
+    pub secondary_text_origin: Option<(f32, f32)>,
+}
+
 /// Render a generic BuildingBlocks IR document without consulting raw BB data.
 ///
 /// This renderer intentionally consumes only the canonical IR plus style/assets.
@@ -618,6 +626,15 @@ fn draw_text_node(
         return;
     }
 
+    let text_rects = debug_text_rects_with_renderer(node, renderer)
+        .unwrap_or(DebugTextRects {
+            primary: rect,
+            secondary: None,
+            primary_text_origin: (rect.x, rect.y),
+            secondary_text_origin: None,
+        });
+    let primary_rect = text_rects.primary;
+    let secondary_rect = text_rects.secondary.unwrap_or(rect);
     let nominal_font_size = node
         .text_style
         .as_ref()
@@ -625,19 +642,14 @@ fn draw_text_node(
         .unwrap_or(18.0)
         .max(1.0);
     let fallback_font_size = (nominal_font_size * TEXT_RENDER_SIZE_CALIBRATION).max(1.0);
-    let is_label_caption_pair = node
-        .node_type
-        .eq_ignore_ascii_case("BuildingBlocks_ComponentLabelCaptionPair");
-    let primary_rect = if is_label_caption_pair && node.secondary_text_payload.is_some() {
-        Rect {
-            x: rect.x,
-            y: rect.y,
-            w: rect.w,
-            h: rect.h * 0.52,
-        }
-    } else {
-        rect
-    };
+    let secondary_nominal_font_size = node
+        .secondary_text_style
+        .as_ref()
+        .map(|style| ir_value_to_px(&style.font_size))
+        .unwrap_or(nominal_font_size)
+        .max(1.0);
+    let secondary_fallback_font_size =
+        (secondary_nominal_font_size * TEXT_RENDER_SIZE_CALIBRATION).max(1.0);
 
     let align = node
         .text_style
@@ -723,29 +735,6 @@ fn draw_text_node(
     }
 
     if let Some(UiIrTextPayload::Resolved { text: secondary }) = node.secondary_text_payload.as_ref() {
-        let secondary_nominal_font_size = node
-            .secondary_text_style
-            .as_ref()
-            .map(|style| ir_value_to_px(&style.font_size))
-            .unwrap_or(nominal_font_size)
-            .max(1.0);
-        let secondary_fallback_font_size =
-            (secondary_nominal_font_size * TEXT_RENDER_SIZE_CALIBRATION).max(1.0);
-        let secondary_rect = if is_label_caption_pair {
-            Rect {
-                x: rect.x,
-                y: rect.y + rect.h * 0.52,
-                w: rect.w,
-                h: rect.h * 0.48,
-            }
-        } else {
-            Rect {
-                x: rect.x + rect.w * 0.24,
-                y: rect.y,
-                w: rect.w * 0.30,
-                h: rect.h,
-            }
-        };
         let secondary_used_swf = selected_font.is_some_and(|(_, swf_font)| {
             renderer.draw_swf_font(
                 img,
@@ -771,6 +760,166 @@ fn draw_text_node(
             );
         }
     }
+}
+
+pub fn debug_text_rects(node: &UiIrNode) -> Option<DebugTextRects> {
+    let renderer = TextRenderer::new();
+    debug_text_rects_with_renderer(node, &renderer)
+}
+
+fn debug_text_rects_with_renderer(node: &UiIrNode, renderer: &TextRenderer) -> Option<DebugTextRects> {
+    let text = resolved_text_payload(node)?;
+    let rect = ir_rect_to_layout_rect(node.computed_rect);
+    if rect.w < 0.5 || rect.h < 0.5 {
+        return None;
+    }
+
+    let nominal_font_size = node
+        .text_style
+        .as_ref()
+        .map(|style| ir_value_to_px(&style.font_size))
+        .unwrap_or(18.0)
+        .max(1.0);
+    let fallback_font_size = (nominal_font_size * TEXT_RENDER_SIZE_CALIBRATION).max(1.0);
+    let is_label_caption_pair = node
+        .node_type
+        .eq_ignore_ascii_case("BuildingBlocks_ComponentLabelCaptionPair");
+    if is_label_caption_pair && node.secondary_text_payload.is_some() {
+        let secondary_nominal_font_size = node
+            .secondary_text_style
+            .as_ref()
+            .map(|style| ir_value_to_px(&style.font_size))
+            .unwrap_or(nominal_font_size)
+            .max(1.0);
+        let secondary_fallback_font_size =
+            (secondary_nominal_font_size * TEXT_RENDER_SIZE_CALIBRATION).max(1.0);
+        let (primary, secondary) = stacked_label_caption_pair_text_rects(
+            rect,
+            renderer.measure(text, FontKind::Sans, fallback_font_size).1,
+            node.secondary_text_payload
+                .as_ref()
+                .and_then(|payload| match payload {
+                    UiIrTextPayload::Resolved { text } => Some(text.as_str()),
+                    UiIrTextPayload::UnresolvedKey { .. } | UiIrTextPayload::Empty => None,
+                })
+                .map(|secondary| renderer.measure(secondary, FontKind::Sans, secondary_fallback_font_size).1)
+                .unwrap_or(secondary_fallback_font_size),
+            node.text_style.as_ref().and_then(|style| style.anchor_to_parent_y),
+        );
+        let primary_align = node
+            .text_style
+            .as_ref()
+            .map(|style| TextAlign::from_bb_str(&style.alignment))
+            .unwrap_or(TextAlign::Left);
+        let primary_vertical = node
+            .text_style
+            .as_ref()
+            .map(|style| VerticalAlign::from_bb_str(&style.vertical_alignment))
+            .unwrap_or(VerticalAlign::Centre);
+        let secondary_text = node.secondary_text_payload.as_ref().and_then(|payload| match payload {
+            UiIrTextPayload::Resolved { text } => Some(text.as_str()),
+            UiIrTextPayload::UnresolvedKey { .. } | UiIrTextPayload::Empty => None,
+        });
+        let primary_text_origin = text_origin_in_rect(
+            renderer,
+            text,
+            primary,
+            FontKind::Sans,
+            fallback_font_size,
+            primary_align,
+            primary_vertical,
+        );
+        let secondary_text_origin = secondary_text.map(|secondary_text| {
+            text_origin_in_rect(
+                renderer,
+                secondary_text,
+                secondary,
+                FontKind::Sans,
+                secondary_fallback_font_size,
+                TextAlign::Left,
+                VerticalAlign::Centre,
+            )
+        });
+        Some(DebugTextRects {
+            primary,
+            secondary: Some(secondary),
+            primary_text_origin,
+            secondary_text_origin,
+        })
+    } else {
+        let align = node
+            .text_style
+            .as_ref()
+            .map(|style| TextAlign::from_bb_str(&style.alignment))
+            .unwrap_or(TextAlign::Left);
+        let vertical = node
+            .text_style
+            .as_ref()
+            .map(|style| VerticalAlign::from_bb_str(&style.vertical_alignment))
+            .unwrap_or(VerticalAlign::Centre);
+        Some(DebugTextRects {
+            primary: rect,
+            secondary: None,
+            primary_text_origin: text_origin_in_rect(renderer, text, rect, FontKind::Sans, fallback_font_size, align, vertical),
+            secondary_text_origin: None,
+        })
+    }
+}
+
+fn text_origin_in_rect(
+    renderer: &TextRenderer,
+    text: &str,
+    rect: Rect,
+    kind: FontKind,
+    size_px: f32,
+    align: TextAlign,
+    vertical_align: VerticalAlign,
+) -> (f32, f32) {
+    let (text_w, text_h) = renderer.measure(text, kind, size_px.max(1.0));
+    let x = match align {
+        TextAlign::Left => rect.x,
+        TextAlign::Centre => rect.x + ((rect.w - text_w) * 0.5).max(0.0),
+        TextAlign::Right => rect.x + (rect.w - text_w).max(0.0),
+    };
+    let y = match vertical_align {
+        VerticalAlign::Top => rect.y,
+        VerticalAlign::Centre => rect.y + ((rect.h - text_h) * 0.5).max(0.0),
+        VerticalAlign::Bottom => rect.y + (rect.h - text_h).max(0.0),
+    };
+    (x, y)
+}
+
+fn stacked_label_caption_pair_text_rects(
+    rect: Rect,
+    primary_text_h: f32,
+    secondary_text_h: f32,
+    primary_anchor_y: Option<f32>,
+) -> (Rect, Rect) {
+    let primary_h = primary_text_h.max(1.0).min(rect.h.max(1.0));
+    let secondary_h = secondary_text_h.max(1.0).min(rect.h.max(1.0));
+    let anchor_y = primary_anchor_y.unwrap_or(0.0).clamp(0.0, 0.999);
+    let top_padding = if anchor_y > 0.0 {
+        ((anchor_y * (primary_h + secondary_h)) - (primary_h * 0.5)) / (1.0 - anchor_y)
+    } else {
+        0.0
+    }
+    .max(0.0);
+    let primary_y = rect.y + top_padding;
+    let secondary_y = primary_y + primary_h;
+    (
+        Rect {
+            x: rect.x,
+            y: primary_y,
+            w: rect.w,
+            h: primary_h,
+        },
+        Rect {
+            x: rect.x,
+            y: secondary_y,
+            w: rect.w,
+            h: secondary_h,
+        },
+    )
 }
 
 fn font_telemetry_enabled() -> bool {
@@ -1389,5 +1538,16 @@ mod tests {
     #[test]
     fn segmented_count_matches_medgel_source_geometry() {
         assert_eq!(segmented_count_for_width(115.0, 3.0, 5.0), 14);
+    }
+
+    #[test]
+    fn label_caption_pair_stacks_secondary_immediately_below_primary_text_band() {
+        let rect = Rect { x: 100.0, y: 20.0, w: 128.0, h: 152.0 };
+        let (primary_rect, secondary_rect) = stacked_label_caption_pair_text_rects(rect, 32.0, 27.0, Some(0.5));
+
+        assert_eq!(primary_rect.y, 47.0);
+        assert_eq!(primary_rect.h, 32.0);
+        assert_eq!(secondary_rect.y, 79.0);
+        assert_eq!(secondary_rect.h, 27.0);
     }
 }
