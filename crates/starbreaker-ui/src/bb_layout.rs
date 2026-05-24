@@ -257,7 +257,9 @@ fn layout_node(
         // offsets should not shift them out of the parent rect.
         (parent_inner.x + pos_x, parent_inner.y + pos_y)
     } else {
-        let mirrored_anchor_x = node.pivot.x >= 0.99
+        let mirrored_anchor_x = node.anchor.x >= 0.0
+            && node.anchor.x <= 1.0
+            && node.pivot.x >= 0.99
             && matches!(
                 node.sizing.width,
                 BbValue::Other {
