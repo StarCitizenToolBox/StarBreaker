@@ -66,6 +66,8 @@ pub struct UiIrNode {
     pub computed_rect: UiIrRect,
     pub background_fill_colour: Option<[f32; 4]>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub corner_radius: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub background_fill_colour_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub segmented_fill: Option<UiIrSegmentedFill>,
@@ -569,6 +571,13 @@ pub fn compile_ui_ir_from_scene(
                 .and_then(|value| value.as_str())
                 .is_some_and(|caption| caption.trim().eq_ignore_ascii_case("@LOC_PLACEHOLDER"));
 
+        let suppress_duplicate_function_title = node
+            .name
+            .eq_ignore_ascii_case("FunctionTitle")
+            && text_payload
+                .as_ref()
+                .is_some_and(|payload| matches!(payload, UiIrTextPayload::Resolved { text } if !text.trim().is_empty()));
+
         let rect = if suppress_placeholder_only_label_caption_pair {
             layout_rect
         } else {
@@ -697,7 +706,9 @@ pub fn compile_ui_ir_from_scene(
             children: node.children.clone(),
             node_type: node_type_name(&node.ty).to_string(),
             name: node.name.clone(),
-            is_active: node.is_active && !suppress_placeholder_only_label_caption_pair,
+            is_active: node.is_active
+                && !suppress_placeholder_only_label_caption_pair
+                && !suppress_duplicate_function_title,
             layer: node.layer,
             alpha: node.alpha,
             anchor: [node.anchor.x, node.anchor.y],
@@ -729,6 +740,7 @@ pub fn compile_ui_ir_from_scene(
                 .background
                 .as_ref()
                 .and_then(|bg| bg.fill_colour),
+            corner_radius: node_corner_radius(node),
             background_fill_colour_token: background_fill_colour_token_from_raw(&node.raw),
             segmented_fill: segmented_fill_from_raw(node),
             border: border_from_node(node),
@@ -984,6 +996,32 @@ fn maybe_reanchor_active_label_caption_pair_rect(
     } else {
         rect
     }
+}
+
+fn node_corner_radius(node: &BbNode) -> Option<f32> {
+    explicit_uniform_corner_radius(node)
+}
+
+fn explicit_uniform_corner_radius(node: &BbNode) -> Option<f32> {
+    let border = node.raw.get("border")?;
+    let radii = ["topLeftRadius", "topRightRadius", "bottomLeftRadius", "bottomRightRadius"]
+        .into_iter()
+        .map(|corner| {
+            border
+                .get(corner)
+                .and_then(|value| value.get("radius"))
+                .and_then(|value| value.get("value"))
+                .and_then(|value| value.as_f64())
+                .map(|value| value as f32)
+        })
+        .collect::<Option<Vec<_>>>()?;
+
+    let first = *radii.first()?;
+    if first <= 0.0 || radii.iter().any(|radius| (*radius - first).abs() > f32::EPSILON) {
+        return None;
+    }
+
+    Some(first)
 }
 
 fn is_footer_brand_label_context(scene: &BbScene, mut parent_id: BbNodeId) -> bool {
@@ -2190,6 +2228,7 @@ mod tests {
                     h: -1.0,
                 },
                 background_fill_colour: None,
+                corner_radius: None,
                 background_fill_colour_token: None,
                 segmented_fill: None,
                 border: None,

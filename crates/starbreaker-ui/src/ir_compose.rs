@@ -10,7 +10,7 @@
 use image::RgbaImage;
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
-use tiny_skia::{BlendMode, Color, Paint, PathBuilder, Pixmap, PixmapPaint, Rect as TskRect, Stroke, Transform};
+use tiny_skia::{BlendMode, Color, FillRule, Paint, PathBuilder, Pixmap, PixmapPaint, Rect as TskRect, Stroke, Transform};
 
 use crate::bb_atlas::AtlasLibrary;
 use crate::bb_assets::UiAssetResolver;
@@ -173,7 +173,7 @@ fn draw_non_text_node(
             .as_deref()
             .is_some_and(|preset| preset.eq_ignore_ascii_case("GeneralX"))
     {
-        draw_secondary_close_button(ctx, pixmap, tsk_rect, node.alpha);
+        draw_secondary_close_button(ctx, pixmap, node, tsk_rect, node.alpha);
         return;
     }
 
@@ -641,23 +641,6 @@ pub fn debug_node_draw_rect(node: &UiIrNode, document: &UiIrDocument) -> Rect {
     }
 
     let rect = ir_rect_to_layout_rect(node.computed_rect);
-    if node
-        .node_type
-        .eq_ignore_ascii_case("component_general_button_secondary")
-        && node
-            .icon_preset
-            .as_deref()
-            .is_some_and(|preset| preset.eq_ignore_ascii_case("GeneralX"))
-    {
-        let side = rect.w.min(rect.h).clamp(40.0, 72.0);
-        return Rect {
-            x: rect.x + rect.w - side,
-            y: rect.y + (rect.h - side) * 0.5,
-            w: side,
-            h: side,
-        };
-    }
-
     rect
 }
 
@@ -710,6 +693,7 @@ fn segmented_count_for_width(total_width: f32, segment_width: f32, segment_gap: 
 fn draw_secondary_close_button(
     ctx: &ComposeContext<'_>,
     pixmap: &mut Pixmap,
+    node: &UiIrNode,
     rect: TskRect,
     alpha: f32,
 ) {
@@ -717,18 +701,22 @@ fn draw_secondary_close_button(
     let x = rect.x() + rect.width() - side;
     let y = rect.y() + (rect.height() - side) * 0.5;
     let draw_rect = TskRect::from_xywh(x, y, side, side).unwrap_or(rect);
+    let corner_radius = node.corner_radius.unwrap_or(0.0);
 
     let accent = derived_accent_tint(ctx);
-    fill_rect_ts(
-        pixmap,
-        draw_rect,
-        [accent[0] * 0.10, accent[1] * 0.10, accent[2] * 0.10, 0.30],
-        alpha,
-    );
+    if let Some(fill_path) = rounded_rect_path(draw_rect, corner_radius) {
+        let mut fill_paint = Paint::default();
+        fill_paint.set_color(to_skia_color(
+            [accent[0] * 0.10, accent[1] * 0.10, accent[2] * 0.10, 0.30],
+            alpha,
+        ));
+        fill_paint.anti_alias = true;
+        pixmap
+            .as_mut()
+            .fill_path(&fill_path, &fill_paint, FillRule::Winding, Transform::identity(), None);
+    }
 
-    let mut frame_pb = PathBuilder::new();
-    frame_pb.push_rect(draw_rect);
-    if let Some(frame_path) = frame_pb.finish() {
+    if let Some(frame_path) = rounded_rect_path(draw_rect, corner_radius) {
         let mut frame_paint = Paint::default();
         frame_paint.set_color(to_skia_color([accent[0], accent[1], accent[2], 1.0], alpha));
         frame_paint.anti_alias = true;
@@ -775,6 +763,27 @@ fn draw_secondary_close_button(
             .as_mut()
             .stroke_path(&path, &paint, &stroke, Transform::identity(), None);
     }
+}
+
+fn rounded_rect_path(rect: TskRect, radius: f32) -> Option<tiny_skia::Path> {
+    let r = radius.max(0.0).min(rect.width() * 0.5).min(rect.height() * 0.5);
+    let x = rect.x();
+    let y = rect.y();
+    let w = rect.width();
+    let h = rect.height();
+
+    let mut pb = PathBuilder::new();
+    pb.move_to(x + r, y);
+    pb.line_to(x + w - r, y);
+    pb.quad_to(x + w, y, x + w, y + r);
+    pb.line_to(x + w, y + h - r);
+    pb.quad_to(x + w, y + h, x + w - r, y + h);
+    pb.line_to(x + r, y + h);
+    pb.quad_to(x, y + h, x, y + h - r);
+    pb.line_to(x, y + r);
+    pb.quad_to(x, y, x + r, y);
+    pb.close();
+    pb.finish()
 }
 
 fn draw_text_node(
@@ -1648,6 +1657,7 @@ mod tests {
                 margin: [0.0, 0.0, 0.0, 0.0],
                 computed_rect: UiIrRect { x: 4.0, y: 4.0, w: 24.0, h: 24.0 },
                 background_fill_colour: Some([0.0, 0.0, 1.0, 1.0]),
+                corner_radius: None,
                 background_fill_colour_token: None,
                 segmented_fill: None,
                 border: Some(UiIrBorder {
@@ -1741,6 +1751,7 @@ mod tests {
                 margin: [0.0, 0.0, 0.0, 0.0],
                 computed_rect: UiIrRect { x: 5.0, y: 6.0, w: 18.0, h: 10.0 },
                 background_fill_colour: Some([0.0, 0.0, 1.0, 1.0]),
+                corner_radius: None,
                 background_fill_colour_token: None,
                 segmented_fill: None,
                 border: Some(UiIrBorder {
@@ -1801,9 +1812,15 @@ mod tests {
         let forbidden = [
             ["_", "candidate"].concat(),
             ["is_", "med", "ical1_layout"].concat(),
+            ["is_", "medical", "_attract_banner_text"].concat(),
+            ["is_", "footer", "_brand_text_context"].concat(),
             ["med", "ical_", "cyan_tint"].concat(),
             ["Top_", "seperator"].concat(),
             ["MedGel", "FillMeter"].concat(),
+            ["Function", "Title"].concat(),
+            ["node", ".name", ".eq_ignore_ascii_case(\"Med", "Gel\")"].concat(),
+            ["node", ".name", ".eq_ignore_ascii_case(\"Location", "Name\")"].concat(),
+            ["node", ".name", ".eq_ignore_ascii_case(\"Tier", "Level\")"].concat(),
             ["s_", "bioc"].concat(),
             ["s_", "rsi"].concat(),
             ["s_", "aegs"].concat(),
@@ -1866,6 +1883,7 @@ mod tests {
             margin: [0.0; 4],
             computed_rect: UiIrRect { x: 1736.0, y: -5.5, w: 128.0, h: 152.3 },
             background_fill_colour: None,
+            corner_radius: None,
             background_fill_colour_token: None,
             segmented_fill: None,
             border: None,
@@ -1929,6 +1947,7 @@ mod tests {
             margin: [0.0; 4],
             computed_rect: UiIrRect { x: 1736.0, y: 146.8, w: 115.0, h: 15.0 },
             background_fill_colour: None,
+            corner_radius: None,
             background_fill_colour_token: None,
             segmented_fill: None,
             border: None,

@@ -74,6 +74,126 @@ fn modular_linearprogress_style_path(style_identifier: &str) -> Option<String> {
     ))
 }
 
+fn modular_buttonsecondary_style_path(style_identifier: &str) -> Option<String> {
+    let normalized = style_identifier.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let module_id = if let Some(rest) = normalized.strip_prefix("s_") {
+        format!("sk_{}", rest)
+    } else if normalized.starts_with("sk_") {
+        normalized
+    } else {
+        return None;
+    };
+
+    Some(format!(
+        "file://./../../../../../../../libs/foundry/records/ui/buildingblocks/styles/modularkitstyles/{0}/{0}_buttonsecondarystyles.json",
+        module_id
+    ))
+}
+
+fn extract_rootghost_button_secondary_corner_radius(style_entries: &[serde_json::Value]) -> Option<f32> {
+    let root_ghost_entry = style_entries.iter().find(|entry| {
+        entry
+            .get("name")
+            .and_then(|v| v.as_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("RootGhost"))
+    })?;
+
+    let modifiers = root_ghost_entry.get("modifiers").and_then(|v| v.as_array())?;
+    let radius_fields = [
+        "BorderTopLeftRadius",
+        "BorderTopRightRadius",
+        "BorderBottomLeftRadius",
+        "BorderBottomRightRadius",
+    ];
+
+    let mut radii = Vec::with_capacity(radius_fields.len());
+    for field_name in radius_fields {
+        let value = modifiers
+            .iter()
+            .find(|modifier| {
+                modifier
+                    .get("field")
+                    .and_then(|field| field.as_str())
+                    .is_some_and(|field| field.eq_ignore_ascii_case(field_name))
+            })
+            .and_then(|modifier| modifier.get("value"))
+            .and_then(|value| value.as_f64())? as f32;
+        radii.push(value);
+    }
+
+    let first = *radii.first()?;
+    if first <= 0.0 || radii.iter().any(|radius| (*radius - first).abs() > f32::EPSILON) {
+        return None;
+    }
+
+    Some(first)
+}
+
+fn set_uniform_border_radius(node: &mut crate::bb_scene::BbNode, radius: f32) {
+    let Some(raw_obj) = node.raw.as_object_mut() else {
+        return;
+    };
+    let border = raw_obj
+        .entry("border".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let Some(border_obj) = border.as_object_mut() else {
+        return;
+    };
+
+    for corner in ["topLeftRadius", "topRightRadius", "bottomLeftRadius", "bottomRightRadius"] {
+        let corner_value = border_obj
+            .entry(corner.to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        let Some(corner_obj) = corner_value.as_object_mut() else {
+            continue;
+        };
+
+        let radius_value = corner_obj
+            .entry("radius".to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        let Some(radius_obj) = radius_value.as_object_mut() else {
+            continue;
+        };
+
+        radius_obj.insert(
+            "value".to_string(),
+            serde_json::Value::Number(serde_json::Number::from_f64(radius as f64).unwrap()),
+        );
+        radius_obj.insert(
+            "behavior".to_string(),
+            serde_json::Value::String("Fixed".to_string()),
+        );
+    }
+}
+
+fn apply_buttonsecondary_modular_styles(
+    scene: &mut BbScene,
+    style_entries: &[serde_json::Value],
+) {
+    let Some(radius) = extract_rootghost_button_secondary_corner_radius(style_entries) else {
+        return;
+    };
+
+    for node in scene.nodes.values_mut() {
+        if !matches!(node.ty, BbNodeType::ComponentGeneralButtonSecondary) {
+            continue;
+        }
+        let is_ghost = node
+            .raw
+            .get("fillStyle")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("Ghost"));
+        if !is_ghost {
+            continue;
+        }
+        set_uniform_border_radius(node, radius);
+    }
+}
+
 fn collect_style_condition_tags(
     condition: &serde_json::Value,
     out: &mut Vec<(String, Option<String>, Option<String>)>,
@@ -658,18 +778,29 @@ fn resolve_canvas_graph_inner(
     }
 
     if let Some(style_id) = local_style_identifier.as_deref() {
-        if let Some(module_path) = modular_linearprogress_style_path(style_id) {
+        let module_paths = [
+            modular_linearprogress_style_path(style_id),
+            modular_buttonsecondary_style_path(style_id),
+        ];
+
+        for module_path in module_paths.into_iter().flatten() {
             match fetch_by_path(&module_path) {
                 Ok(module_style_json) => {
                     let module_style_value = module_style_json
                         .get("_RecordValue_")
                         .unwrap_or(&module_style_json);
                     if let Some(entries) = module_style_value.get("entries").and_then(|v| v.as_array()) {
-                        seed_implicit_linearprogress_style_tags(
-                            &mut scene,
-                            entries,
-                            fetch_by_path,
-                        );
+                        if module_path.contains("_linearprogressmeterstyles") {
+                            seed_implicit_linearprogress_style_tags(
+                                &mut scene,
+                                entries,
+                                fetch_by_path,
+                            );
+                        }
+                        if module_path.contains("_buttonsecondarystyles") {
+                            apply_buttonsecondary_modular_styles(&mut scene, entries);
+                        }
+
                         let brand = bb_brand_style::BrandStyle {
                             identifier: extract_record_name(&module_path),
                             entries: entries.as_slice(),
@@ -684,7 +815,8 @@ fn resolve_canvas_graph_inner(
                 }
                 Err(e) => {
                     log::debug!(
-                        "bb_resolve: no modular linear-progress style for '{}': {}",
+                        "bb_resolve: no modular style '{}' for '{}': {}",
+                        module_path,
                         style_id,
                         e
                     );

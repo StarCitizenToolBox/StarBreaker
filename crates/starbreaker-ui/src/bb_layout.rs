@@ -608,6 +608,30 @@ fn layout_flex_no_grow_children(
         } else {
             matches!(node.sizing.height, BbValue::Other { ref behavior, .. } if behavior == "Auto")
         };
+        let is_button_component = matches!(
+            node.ty,
+            BbNodeType::ComponentGeneralButton | BbNodeType::ComponentGeneralButtonSecondary
+        );
+        let auto_intrinsic_hint = if is_row {
+            matches!(
+                node.sizing.width,
+                BbValue::Other {
+                    value,
+                    ref behavior
+                } if behavior == "Auto" && value > 1.0
+            )
+        } else {
+            matches!(
+                node.sizing.height,
+                BbValue::Other {
+                    value,
+                    ref behavior
+                } if behavior == "Auto" && value > 1.0
+            )
+        };
+        if auto_main && is_button_component && auto_intrinsic_hint {
+            auto_main = false;
+        }
         let right_edge_auto_hint = node.pivot.x >= 0.99
             && matches!(
                 node.sizing.width,
@@ -642,18 +666,25 @@ fn layout_flex_no_grow_children(
             } else if is_label_caption_pair {
                 let right_anchored_pair = node.anchor.x >= 0.99 && node.pivot.x >= 0.99;
                 if is_row {
-                    if !right_anchored_pair && auto_label_caption_pair_count > 1 {
+                    if right_anchored_pair {
+                        // Keep right-anchored label/caption pairs in their own
+                        // overlay layout pass so they don't consume row-flow
+                        // width intended for trailing controls (e.g. ExitBed).
+                        auto_main = true;
+                    } else if auto_label_caption_pair_count > 1 {
                         let total_spacing = item_spacing * (auto_label_caption_pair_count.saturating_sub(1) as f32);
                         let available = (container.w - total_spacing).max(0.0);
                         w = available / auto_label_caption_pair_count as f32;
+                        auto_main = false;
                     } else {
-                        let min_w = if right_anchored_pair { 128.0 } else { 80.0 };
+                        let min_w = 80.0;
                         w = (container.w * 0.22).max(min_w * csx);
+                        auto_main = false;
                     }
                 } else {
                     h = (container.h * 0.22).max(48.0 * csy);
+                    auto_main = false;
                 }
-                auto_main = false;
             } else if is_row {
                 w = 0.0;
             } else {
@@ -906,6 +937,10 @@ fn resolve_value_for_node(
         return override_value;
     }
 
+    if let Some(override_value) = component_button_auto_intrinsic_override(node, v, canvas_scale) {
+        return override_value;
+    }
+
     if matches!(node.ty, BbNodeType::WidgetText)
         && let BbValue::Other { value, behavior } = v
         && behavior == "Auto"
@@ -917,6 +952,31 @@ fn resolve_value_for_node(
     } else {
         resolve_value(v, primary_dim, cross_dim, canvas_scale, is_width)
     }
+}
+
+fn component_button_auto_intrinsic_override(
+    node: &crate::bb_scene::BbNode,
+    v: &BbValue,
+    canvas_scale: f32,
+) -> Option<f32> {
+    let is_supported_node = matches!(
+        node.ty,
+        BbNodeType::ComponentGeneralButton | BbNodeType::ComponentGeneralButtonSecondary
+    );
+
+    if !is_supported_node {
+        return None;
+    }
+
+    let (value, behavior) = match v {
+        BbValue::Other { value, behavior } => (*value, behavior.as_str()),
+        _ => return None,
+    };
+    if behavior != "Auto" || value <= 1.0 {
+        return None;
+    }
+
+    Some(value * canvas_scale)
 }
 
 fn textfield_auto_intrinsic_override(
@@ -1403,6 +1463,117 @@ mod tests {
         assert!((r1.w - 287.4).abs() < 1.0, "expected first pair width ≈ 287.4, got {}", r1.w);
         assert!((r2.w - 287.4).abs() < 1.0, "expected second pair width ≈ 287.4, got {}", r2.w);
         assert!((r2.x - (r1.x + r1.w + 30.0)).abs() < 1.0, "expected second pair after 30px spacing, got x={}", r2.x);
+    }
+
+    #[test]
+    fn flex_row_auto_intrinsic_components_stay_in_flow_for_end_alignment() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let root = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![2, 3],
+            ty: BbNodeType::DisplayWidget,
+            name: "text-layout".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(200.0), height: BbValue::Fixed(80.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({
+                "layoutPolicy": {
+                    "_Type_": "BuildingBlocks_FlexContainer",
+                    "direction": "Row",
+                    "wrap": "NoWrap",
+                    "axisJustification": "End",
+                    "crossAxisJustification": "Start",
+                    "itemAlignment": "Start",
+                    "columnSpacing": 8.0,
+                    "rowSpacing": 0.0
+                }
+            }),
+        };
+
+        let left_button = BbNode {
+            id: 2,
+            parent: Some(1),
+            children: vec![],
+            ty: BbNodeType::ComponentGeneralButton,
+            name: "Back".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing {
+                width: BbValue::Other { value: 64.0, behavior: "Auto".into() },
+                height: BbValue::Other { value: 64.0, behavior: "Auto".into() },
+            },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2 { x: 1.0, y: 0.5 },
+            anchor: Vec2 { x: 1.0, y: 0.5 },
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+
+        let exit_bed = BbNode {
+            id: 3,
+            parent: Some(1),
+            children: vec![],
+            ty: BbNodeType::ComponentGeneralButtonSecondary,
+            name: "ExitBed".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing {
+                width: BbValue::Other { value: 64.0, behavior: "Auto".into() },
+                height: BbValue::Other { value: 64.0, behavior: "Auto".into() },
+            },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2 { x: 1.0, y: 0.5 },
+            anchor: Vec2 { x: 1.0, y: 0.5 },
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, root);
+        nodes.insert(2, left_button);
+        nodes.insert(3, exit_bed);
+        let scene = BbScene { canvas_size: (200.0, 80.0), roots: vec![1], nodes, operations: vec![] };
+
+        let result = layout(&scene, 200, 80);
+        let left = result.rects[&2];
+        let right = result.rects[&3];
+
+        assert!((right.x + right.w - 200.0).abs() < 0.5, "expected right item to align to container end, got x={} w={}", right.x, right.w);
+        assert!(left.x + left.w + 7.5 <= right.x, "expected distinct flowed items with spacing, got left={:?} right={:?}", left, right);
+        assert!(left.x >= 0.0, "expected left item to stay within container, got x={}", left.x);
     }
 
     // ── A1.6 — fixture-based layout tests ────────────────────────────────────
