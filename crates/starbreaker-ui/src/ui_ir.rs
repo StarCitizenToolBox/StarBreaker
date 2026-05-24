@@ -387,6 +387,8 @@ pub fn compile_ui_ir_from_scene(
                     id,
                     node,
                     text,
+                    layout_rect.h,
+                    text_payload.as_ref().and_then(resolved_text_from_payload),
                     scene,
                     &binding_resolver,
                     defaults,
@@ -428,7 +430,11 @@ pub fn compile_ui_ir_from_scene(
                 .unwrap_or("Left")
                 .to_string();
 
-            let font_size = hardcoded_textfield_font_size_exception(node)
+            let font_size = textfield_fallback_font_size_from_signals(
+                node,
+                layout_rect.h,
+                text_payload.as_ref().and_then(resolved_text_from_payload),
+            )
                 .or_else(|| {
                     node.raw
                         .get("fontSize")
@@ -436,7 +442,15 @@ pub fn compile_ui_ir_from_scene(
                         .and_then(|v| v.as_f64())
                         .map(|value| value as f32)
                 })
-                .unwrap_or(18.0);
+                .unwrap_or_else(|| {
+                    if node_type_name(&node.ty)
+                        .eq_ignore_ascii_case("BuildingBlocks_ComponentLabelCaptionPair")
+                    {
+                        21.0
+                    } else {
+                        18.0
+                    }
+                });
 
             Some(UiIrTextStyle {
                 font_record: font_record.clone(),
@@ -1285,17 +1299,13 @@ fn resolve_effective_font_size(
     node_id: BbNodeId,
     node: &crate::bb_scene::BbNode,
     text: &crate::bb_scene::BbText,
+    node_rect_h: f32,
+    resolved_text: Option<&str>,
     scene: &BbScene,
     binding_resolver: &BindingResolver,
     defaults: &DefaultValueRegistry,
     style_font_sizes: &HashMap<String, f32>,
 ) -> UiIrValue {
-    if let Some(exception_font_size) = hardcoded_textfield_font_size_exception(node) {
-        return UiIrValue::Fixed {
-            value: exception_font_size,
-        };
-    }
-
     // Prefer the latest raw font size because style/brand modifiers are applied
     // after parse_text and can update FontSize without mutating BbText.
     if let Some(raw_font_size) = font_size_from_raw(node) {
@@ -1317,6 +1327,10 @@ fn resolve_effective_font_size(
         if let Some(size) = style_font_sizes.get(style_name.as_str()) {
             return UiIrValue::Fixed { value: *size };
         }
+    }
+
+    if let Some(size) = textfield_fallback_font_size_from_signals(node, node_rect_h, resolved_text) {
+        return UiIrValue::Fixed { value: size };
     }
 
     // Fall through to whatever parse_text stored.
@@ -1373,51 +1387,37 @@ fn label_style_name_from_raw(node: &crate::bb_scene::BbNode) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn node_has_style_tag_uuid(node: &crate::bb_scene::BbNode, needle: &str) -> bool {
-    node.raw
-        .get("styleTags")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter().any(|tag| {
-                tag.get("_RecordId_")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|id| id.eq_ignore_ascii_case(needle))
-            })
-        })
-        .unwrap_or(false)
+fn resolved_text_from_payload(payload: &UiIrTextPayload) -> Option<&str> {
+    match payload {
+        UiIrTextPayload::Resolved { text } => Some(text.as_str()),
+        _ => None,
+    }
 }
 
-fn hardcoded_textfield_font_size_exception(node: &crate::bb_scene::BbNode) -> Option<f32> {
-    // Temporary style/tag-driven fallback while full preset reconstruction is
-    // in progress. Values are sourced from medical reference comparisons.
+fn textfield_fallback_font_size_from_signals(
+    node: &crate::bb_scene::BbNode,
+    node_rect_h: f32,
+    resolved_text: Option<&str>,
+) -> Option<f32> {
+    if !matches!(node.ty, BbNodeType::WidgetTextField) {
+        return None;
+    }
+
     let style = label_style_name_from_raw(node)?;
+    let text_len = resolved_text
+        .map(|value| value.trim().chars().count())
+        .unwrap_or(0);
+
     match style.as_str() {
         "Title4" => Some(56.0),
         "Title3" => Some(90.0),
         "Heading3" => Some(21.0),
-        "Heading2" => {
-            if node_has_style_tag_uuid(node, "174b3e40-1b7b-4f01-a7dc-6420b7367d6b") {
-                Some(90.0)
-            } else if node_has_style_tag_uuid(node, "5e5c7c8f-847b-46c5-ad80-a57c941391ab") {
-                Some(28.0)
-            } else {
-                Some(18.0)
-            }
-        }
-        "Heading6" => {
-            if node_has_style_tag_uuid(node, "e6003a83-9795-4478-a61c-349f14016e5b") {
-                Some(18.0)
-            } else {
-                None
-            }
-        }
-        "Heading1" => {
-            if node_has_style_tag_uuid(node, "0964d22f-3a22-4052-92e4-eaf77f975423") {
-                Some(28.0)
-            } else {
-                Some(37.0)
-            }
-        }
+        "Heading2" if node_rect_h >= 220.0 && text_len > 0 && text_len <= 4 => Some(90.0),
+        "Heading2" if node_rect_h <= 80.0 => Some(28.0),
+        "Heading2" => Some(18.0),
+        "Heading6" if node_rect_h >= 48.0 => Some(18.0),
+        "Heading1" if node_rect_h <= 80.0 => Some(28.0),
+        "Heading1" => Some(37.0),
         _ => None,
     }
 }
