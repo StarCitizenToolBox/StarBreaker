@@ -64,9 +64,9 @@ pub fn rasterize_svg(
         for chunk in bytes.chunks_exact_mut(4) {
             if chunk[3] > 0 {
                 let alpha = (chunk[3] as f32 * fill[3]).clamp(0.0, 255.0);
-                chunk[0] = (fill[0].clamp(0.0, 1.0) * alpha) as u8;
-                chunk[1] = (fill[1].clamp(0.0, 1.0) * alpha) as u8;
-                chunk[2] = (fill[2].clamp(0.0, 1.0) * alpha) as u8;
+                chunk[0] = (fill[0].clamp(0.0, 1.0) * 255.0) as u8;
+                chunk[1] = (fill[1].clamp(0.0, 1.0) * 255.0) as u8;
+                chunk[2] = (fill[2].clamp(0.0, 1.0) * 255.0) as u8;
                 chunk[3] = alpha as u8;
             }
         }
@@ -131,6 +131,18 @@ mod tests {
             px[0] >= 110 && px[1] >= 190 && px[2] >= 245,
             "black mask pixel should be recoloured cyan, got {px:?}"
         );
+    }
+
+    #[test]
+    fn fill_override_preserves_straight_rgb_for_partial_alpha_masks() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4">
+            <rect width="4" height="4" fill="black" opacity="0.5"/>
+        </svg>"#;
+        let fill = Some([115.0 / 255.0, 198.0 / 255.0, 254.0 / 255.0, 1.0]);
+        let img = rasterize_svg(svg, 4, 4, fill).expect("should rasterize");
+        let px = img.get_pixel(2, 2).0;
+        assert!(px[3] > 80 && px[3] < 180, "expected partial alpha, got {px:?}");
+        assert!(px[0] >= 110 && px[1] >= 190 && px[2] >= 245, "RGB should remain straight overlay colour, got {px:?}");
     }
 
     #[test]

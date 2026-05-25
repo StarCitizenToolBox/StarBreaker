@@ -602,7 +602,14 @@ fn layout_flex_no_grow_children(
                 } if behavior == "Auto" && value > 1.0
             )
         };
-        if auto_main && is_button_component && auto_intrinsic_hint {
+        let has_main_axis_intrinsic_override = if is_row {
+            textfield_auto_intrinsic_override(node, &node.sizing.width, csx, true).is_some()
+                || component_button_auto_intrinsic_override(node, &node.sizing.width, csx).is_some()
+        } else {
+            textfield_auto_intrinsic_override(node, &node.sizing.height, csy, false).is_some()
+                || component_button_auto_intrinsic_override(node, &node.sizing.height, csy).is_some()
+        };
+        if auto_main && (is_button_component && auto_intrinsic_hint || has_main_axis_intrinsic_override) {
             auto_main = false;
         }
         let right_edge_auto_hint = node.pivot.x >= 0.99
@@ -880,12 +887,18 @@ fn layout_flex_no_grow_children(
             let ch = if cross_just.eq_ignore_ascii_case("stretch") { container.h } else { h };
             Rect { x: cursor, y, w, h: ch }
         } else {
-            let x = match cross_just.to_ascii_lowercase().as_str() {
+            let mut x = match cross_just.to_ascii_lowercase().as_str() {
                 "center" => container.x + (container.w - w) * 0.5,
                 "end" | "right" | "bottom" => container.x + (container.w - w),
                 "start" if cross_start_from_end => container.x + (container.w - w),
                 _ => container.x,
             };
+            if cross_just.eq_ignore_ascii_case("center")
+                && let Some(node) = scene.nodes.get(&id)
+            {
+                x += (node.anchor.x * container.w) + ((node.position.x + node.position_offset.x) * csx)
+                    - (node.pivot.x * w);
+            }
             let cw = if cross_just.eq_ignore_ascii_case("stretch") { container.w } else { w };
             Rect { x, y: cursor, w: cw, h }
         };
@@ -1588,6 +1601,124 @@ mod tests {
         assert!((right.x + right.w - 200.0).abs() < 0.5, "expected right item to align to container end, got x={} w={}", right.x, right.w);
         assert!(left.x + left.w + 7.5 <= right.x, "expected distinct flowed items with spacing, got left={:?} right={:?}", left, right);
         assert!(left.x >= 0.0, "expected left item to stay within container, got x={}", left.x);
+    }
+
+    #[test]
+    fn flex_column_auto_textfields_keep_intrinsic_height_slots() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let root = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![2, 3, 4],
+            ty: BbNodeType::DisplayWidget,
+            name: "root".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(1000.0), height: BbValue::Fixed(1000.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({
+                "layoutPolicy": {
+                    "_Type_": "BuildingBlocks_FlexContainer",
+                    "direction": "Column",
+                    "wrap": "NoWrapInfinite",
+                    "axisJustification": "Center",
+                    "crossAxisJustification": "Center",
+                    "itemAlignment": "Center",
+                    "columnSpacing": 0.0,
+                    "rowSpacing": 30.0
+                }
+            }),
+        };
+
+        let textfield = |id: u32, name: &str, style: &str, tags: Vec<&str>, anchor_x: f32| BbNode {
+            id,
+            parent: Some(1),
+            children: vec![],
+            ty: BbNodeType::WidgetTextField,
+            name: name.into(),
+            style_tag_uuids: tags.into_iter().map(String::from).collect(),
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing {
+                width: BbValue::Percent(0.7),
+                height: BbValue::Other { value: 1.0, behavior: "Auto".into() },
+            },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2 { x: anchor_x, y: 0.0 },
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({
+                "labelProperties": {
+                    "style": style
+                }
+            }),
+        };
+
+        let touch = BbNode {
+            id: 4,
+            parent: Some(1),
+            children: vec![],
+            ty: BbNodeType::WidgetCanvas,
+            name: "TouchHere".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(400.0), height: BbValue::Fixed(400.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, root);
+        nodes.insert(2, textfield(2, "TitleText", "Title3", vec!["e6003a83-9795-4478-a61c-349f14016e5b"], 0.043));
+        nodes.insert(3, textfield(3, "TouchPromptText", "Heading2", vec!["5e5c7c8f-847b-46c5-ad80-a57c941391ab"], 0.0));
+        nodes.insert(4, touch);
+        let scene = BbScene { canvas_size: (1000.0, 1000.0), roots: vec![1], nodes, operations: vec![] };
+
+        let result = layout(&scene, 1000, 1000);
+        let title = result.rects[&2];
+        let prompt = result.rects[&3];
+        let touch = result.rects[&4];
+
+        assert!((title.y - 105.0).abs() < 0.5, "expected centered title flow y=105, got {}", title.y);
+        assert!((title.x - 193.0).abs() < 0.5, "expected authored cross-axis anchor to offset title x, got {}", title.x);
+        assert!((title.h - 270.0).abs() < 0.5, "expected Title3 intrinsic height 270, got {}", title.h);
+        assert!((prompt.y - 405.0).abs() < 0.5, "expected prompt after title plus spacing, got {}", prompt.y);
+        assert!((prompt.x - 150.0).abs() < 0.5, "expected prompt without cross-axis anchor offset at centered x, got {}", prompt.x);
+        assert!((prompt.h - 60.0).abs() < 0.5, "expected prompt intrinsic height 60, got {}", prompt.h);
+        assert!((touch.y - 495.0).abs() < 0.5, "expected touch canvas after intrinsic text slots, got {}", touch.y);
     }
 
     // ── A1.6 — fixture-based layout tests ────────────────────────────────────

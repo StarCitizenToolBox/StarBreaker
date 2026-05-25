@@ -710,6 +710,13 @@ pub fn compile_ui_ir_from_scene(
             })
             .unwrap_or_default();
 
+        let alpha = if is_transient_static_pulse_node(node) {
+            0.0
+        } else {
+            representative_animation_alpha(&node.raw).unwrap_or(node.alpha)
+        };
+        let stroke_extent = node.raw.get("strokeExtent").and_then(|value| value.as_f64()).map(|value| value as f32);
+
         nodes.push(UiIrNode {
             id,
             parent_id: node.parent,
@@ -720,7 +727,7 @@ pub fn compile_ui_ir_from_scene(
                 && !suppress_placeholder_only_label_caption_pair
                 && !suppress_duplicate_function_title,
             layer: node.layer,
-            alpha: node.alpha,
+            alpha,
             anchor: [node.anchor.x, node.anchor.y],
             pivot: [node.pivot.x, node.pivot.y],
             authored_position: [node.position.x, node.position.y],
@@ -756,8 +763,12 @@ pub fn compile_ui_ir_from_scene(
             border: border_from_node(node),
             stroke_colour: stroke_colour_from_raw(&node.raw),
             stroke_colour_token: stroke_colour_token_from_raw(&node.raw),
-            stroke_extent: node.raw.get("strokeExtent").and_then(|value| value.as_f64()).map(|value| value as f32),
-            icon_tint_colour: node.icon.as_ref().and_then(|i| i.tint_colour),
+            stroke_extent,
+            icon_tint_colour: node
+                .icon
+                .as_ref()
+                .and_then(|i| i.tint_colour)
+                .or_else(|| custom_shape.as_ref().and_then(|_| fill_colour_from_raw_for_text(&node.raw))),
             icon_tint_colour_token: icon_tint_colour_token_from_raw(&node.raw),
             icon_preset: node.icon.as_ref().and_then(|i| i.icon_preset.clone()),
             text_payload,
@@ -771,8 +782,6 @@ pub fn compile_ui_ir_from_scene(
             resolved_style_tags,
         });
     }
-
-    apply_medical_attract_banner_layout(&mut nodes);
 
     UiIrDocument {
         schema_version: UI_IR_SCHEMA_VERSION,
@@ -789,81 +798,6 @@ pub fn compile_ui_ir_from_scene(
         resolved_asset_refs,
         missing_asset_refs,
         nodes,
-    }
-}
-
-fn apply_medical_attract_banner_layout(nodes: &mut [UiIrNode]) {
-    let touch_idx = nodes.iter().position(|node| {
-        node.name == "TouchHere"
-            && node.node_type.eq_ignore_ascii_case("widget_canvas")
-            && node.computed_rect.w >= 300.0
-            && node.computed_rect.w <= 500.0
-            && node.computed_rect.h >= 300.0
-            && node.computed_rect.h <= 500.0
-    });
-    let title_idx = nodes
-        .iter()
-        .position(|node| node.name == "TitleText" && node.node_type.eq_ignore_ascii_case("widget_text_field"));
-    let prompt_idx = nodes
-        .iter()
-        .position(|node| node.name == "TouchPromptText" && node.node_type.eq_ignore_ascii_case("widget_text_field"));
-
-    let (Some(touch_idx), Some(title_idx), Some(prompt_idx)) = (touch_idx, title_idx, prompt_idx) else {
-        return;
-    };
-
-    let touch = nodes[touch_idx].computed_rect;
-    let title = nodes[title_idx].computed_rect;
-    let prompt = nodes[prompt_idx].computed_rect;
-
-    if title.h < 180.0 || title.h > 360.0 || prompt.h < 40.0 || prompt.h > 140.0 {
-        return;
-    }
-
-    let target_x = touch.x - 470.0;
-    let target_title_y = touch.y - 230.0;
-    let target_prompt_y = target_title_y + title.h + 17.0;
-
-    let title_id = nodes[title_idx].id;
-    let prompt_id = nodes[prompt_idx].id;
-    let title_frame_inset_x = textfield_fullsize_frame_leading_inset(nodes, title_id).unwrap_or(0.0);
-    shift_ir_subtree(
-        nodes,
-        title_id,
-        (target_x - title.x) + title_frame_inset_x,
-        target_title_y - title.y,
-    );
-    shift_ir_subtree(nodes, prompt_id, target_x - prompt.x, target_prompt_y - prompt.y);
-}
-
-fn textfield_fullsize_frame_leading_inset(nodes: &[UiIrNode], textfield_id: BbNodeId) -> Option<f32> {
-    let textfield = nodes.iter().find(|node| node.id == textfield_id)?;
-    if !textfield.node_type.eq_ignore_ascii_case("widget_text_field") {
-        return None;
-    }
-
-    let rect = textfield.computed_rect;
-    textfield
-        .children
-        .iter()
-        .filter_map(|child_id| nodes.iter().find(|node| node.id == *child_id))
-        .filter(|child| child.node_type.eq_ignore_ascii_case("widget_canvas"))
-        .filter(|child| (child.computed_rect.w - rect.w).abs() <= 1.0)
-        .filter(|child| (child.computed_rect.h - rect.h).abs() <= 1.0)
-        .map(|child| rect.x - child.computed_rect.x)
-        .filter(|offset| *offset > 1.0)
-        .max_by(|a, b| a.total_cmp(b))
-}
-
-fn shift_ir_subtree(nodes: &mut [UiIrNode], root_id: BbNodeId, dx: f32, dy: f32) {
-    let Some(idx) = nodes.iter().position(|node| node.id == root_id) else {
-        return;
-    };
-    nodes[idx].computed_rect.x += dx;
-    nodes[idx].computed_rect.y += dy;
-    let child_ids = nodes[idx].children.clone();
-    for child_id in child_ids {
-        shift_ir_subtree(nodes, child_id, dx, dy);
     }
 }
 
@@ -1693,6 +1627,88 @@ fn convert_bb_value(value: &BbValue) -> UiIrValue {
     }
 }
 
+fn animation_number_keyframes(raw: &serde_json::Value, field_name: &str) -> Vec<(f64, f32)> {
+    let Some(keyframes) = raw.get("animation")
+        .and_then(|animation| animation.get("animationTimeline"))
+        .and_then(|timeline| timeline.get("keyframes"))
+        .and_then(|keyframes| keyframes.as_array())
+    else {
+        return Vec::new();
+    };
+
+    keyframes
+        .iter()
+        .flat_map(|keyframe| {
+            let percent = keyframe
+                .get("percent")
+                .and_then(|value| value.as_f64())
+                .unwrap_or(0.0);
+            keyframe
+                .get("modifiers")
+                .and_then(|modifiers| modifiers.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(move |modifier_data| {
+                    let modifier = modifier_data.get("modifier").unwrap_or(modifier_data);
+                    let is_number = modifier
+                        .get("_Type_")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|ty| ty == "BuildingBlocks_FieldModifierNumber");
+                    if !is_number {
+                        return None;
+                    }
+                    let matches_field = modifier
+                        .get("field")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|field| field == field_name);
+                    if !matches_field {
+                        return None;
+                    }
+                    modifier
+                        .get("value")
+                        .and_then(|value| value.as_f64())
+                        .map(|value| (percent, value as f32))
+                })
+        })
+        .collect()
+}
+
+fn representative_animation_alpha(raw: &serde_json::Value) -> Option<f32> {
+    animation_number_keyframes(raw, "Alpha")
+        .into_iter()
+        .map(|(_, value)| value.clamp(0.0, 1.0))
+        .max_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal))
+}
+
+fn is_transient_static_pulse_node(node: &BbNode) -> bool {
+    if !node_type_name(&node.ty).eq_ignore_ascii_case("BuildingBlocks_WidgetCircle") {
+        return false;
+    }
+
+    let looping = node
+        .raw
+        .get("animation")
+        .and_then(|animation| animation.get("loopIndefinitely"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if !looping {
+        return false;
+    }
+
+    let mut alpha_keyframes = animation_number_keyframes(&node.raw, "Alpha");
+    if alpha_keyframes.len() < 2 {
+        return false;
+    }
+    alpha_keyframes.sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let starts_hidden = alpha_keyframes.first().is_some_and(|(_, value)| *value <= 0.001);
+    let ends_hidden = alpha_keyframes.last().is_some_and(|(_, value)| *value <= 0.001);
+    let scales_over_time = !animation_number_keyframes(&node.raw, "SizeX").is_empty()
+        || !animation_number_keyframes(&node.raw, "SizeY").is_empty();
+
+    starts_hidden && ends_hidden && scales_over_time
+}
+
 fn node_type_name(node_type: &BbNodeType) -> &str {
     match node_type {
         BbNodeType::DisplayWidget => "display_widget",
@@ -1993,6 +2009,19 @@ mod tests {
                             "width": {"behavior": "Fixed", "value": 20.0},
                             "height": {"behavior": "Fixed", "value": 20.0}
                         }
+                    },
+                    {
+                        "_Pointer_": "ptr:3",
+                        "_Type_": "BuildingBlocks_WidgetCustomShape",
+                        "name": "shape",
+                        "isActive": true,
+                        "renderShape": true,
+                        "svgPath": "UI/Textures/Vector/General/FingerPrint.svg",
+                        "FillColor": {"r": 0.25, "g": 0.5, "b": 0.75, "a": 1.0},
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 20.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
                     }
                 ],
                 "operations": []
@@ -2026,6 +2055,168 @@ mod tests {
         let icon = ir.nodes.iter().find(|node| node.name == "icon").expect("icon node");
         assert_eq!(icon.icon_tint_colour, None);
         assert_eq!(icon.icon_tint_colour_token.as_deref(), Some("Accent3"));
+
+        let shape = ir.nodes.iter().find(|node| node.name == "shape").expect("shape node");
+        assert_eq!(shape.icon_tint_colour, Some([0.25, 0.5, 0.75, 1.0]));
+    }
+
+    #[test]
+    fn compile_ir_uses_representative_animation_alpha_for_static_render() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestAnimationStart",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetCircle",
+                        "name": "pulse",
+                        "isActive": true,
+                        "alpha": 1.0,
+                        "strokeExtent": 3.0,
+                        "animation": {
+                            "animationTimeline": {
+                                "keyframes": [
+                                    {
+                                        "percent": 0.0,
+                                        "modifiers": [
+                                            {
+                                                "modifier": {
+                                                    "_Type_": "BuildingBlocks_FieldModifierNumber",
+                                                    "field": "Alpha",
+                                                    "value": 0.0
+                                                }
+                                            },
+                                            {
+                                                "modifier": {
+                                                    "_Type_": "BuildingBlocks_FieldModifierNumber",
+                                                    "field": "SizeX",
+                                                    "value": 0.44
+                                                }
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "percent": 0.4,
+                                        "modifiers": [
+                                            {
+                                                "modifier": {
+                                                    "_Type_": "BuildingBlocks_FieldModifierNumber",
+                                                    "field": "Alpha",
+                                                    "value": 1.0
+                                                }
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "percent": 0.8,
+                                        "modifiers": [
+                                            {
+                                                "modifier": {
+                                                    "_Type_": "BuildingBlocks_FieldModifierNumber",
+                                                    "field": "Alpha",
+                                                    "value": 0.0
+                                                }
+                                            },
+                                            {
+                                                "modifier": {
+                                                    "_Type_": "BuildingBlocks_FieldModifierNumber",
+                                                    "field": "SizeX",
+                                                    "value": 1.33
+                                                }
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            "loopIndefinitely": true
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 20.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "label",
+                        "isActive": true,
+                        "alpha": 1.0,
+                        "text": "TOUCH TO START",
+                        "animation": {
+                            "animationTimeline": {
+                                "keyframes": [
+                                    {
+                                        "percent": 0.0,
+                                        "modifiers": [
+                                            {
+                                                "modifier": {
+                                                    "_Type_": "BuildingBlocks_FieldModifierNumber",
+                                                    "field": "Alpha",
+                                                    "value": 0.0
+                                                }
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "percent": 0.33,
+                                        "modifiers": [
+                                            {
+                                                "modifier": {
+                                                    "_Type_": "BuildingBlocks_FieldModifierNumber",
+                                                    "field": "Alpha",
+                                                    "value": 0.66
+                                                }
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "percent": 0.99,
+                                        "modifiers": [
+                                            {
+                                                "modifier": {
+                                                    "_Type_": "BuildingBlocks_FieldModifierNumber",
+                                                    "field": "Alpha",
+                                                    "value": 0.0
+                                                }
+                                            }
+                                        ]
+                                    }
+                                ]
+                            }
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 20.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-animation-start",
+            Some("BuildingBlocks_Canvas.TestAnimationStart"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let pulse = ir.nodes.iter().find(|node| node.name == "pulse").expect("pulse node");
+        assert_eq!(pulse.alpha, 0.0);
+        assert_eq!(pulse.stroke_extent, Some(3.0));
+
+        let label = ir.nodes.iter().find(|node| node.name == "label").expect("label node");
+        assert_eq!(label.alpha, 0.66);
     }
 
     #[test]
@@ -2856,6 +3047,7 @@ mod tests {
             ["BG", "Dots"].concat(),
             ["MainMenu", "Canvas"].concat(),
             ["base_", "animatedelements"].concat(),
+            ["apply_medical", "attract_banner_layout"].concat(),
         ];
 
         for marker in forbidden {
