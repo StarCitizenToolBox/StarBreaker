@@ -19,7 +19,10 @@ use crate::compose::ComposeContext;
 use crate::error::UiError;
 use crate::text::{FontKind, TextAlign, TextRenderer, VerticalAlign};
 use crate::swf_assets::FontGlyphSet;
-use crate::ui_ir::{UiIrBorder, UiIrDocument, UiIrNode, UiIrRect, UiIrTextPayload, UiIrValue, validate_ui_ir_document};
+use crate::ui_ir::{
+    UiIrBorder, UiIrDocument, UiIrNode, UiIrRect, UiIrTextPayload, UiIrTextStyle, UiIrValue,
+    validate_ui_ir_document,
+};
 
 // BB/Flash nominal font sizes render visually smaller with the bundled DejaVu
 // fallback fonts. Calibrate at compose time to match measured output.
@@ -830,15 +833,24 @@ fn draw_text_node(
         .map(|style| ir_value_to_px(&style.font_size))
         .unwrap_or(18.0)
         .max(1.0);
-    let fallback_font_size = (nominal_font_size * TEXT_RENDER_SIZE_CALIBRATION).max(1.0);
+    let primary_font_style_scale = font_style_scale_modifier(node.text_style.as_ref());
+    let fallback_font_size =
+        (nominal_font_size * primary_font_style_scale * TEXT_RENDER_SIZE_CALIBRATION).max(1.0);
     let secondary_nominal_font_size = node
         .secondary_text_style
         .as_ref()
         .map(|style| ir_value_to_px(&style.font_size))
         .unwrap_or(nominal_font_size)
         .max(1.0);
-    let secondary_fallback_font_size =
-        (secondary_nominal_font_size * TEXT_RENDER_SIZE_CALIBRATION).max(1.0);
+    let secondary_font_style_scale = font_style_scale_modifier(
+        node.secondary_text_style
+            .as_ref()
+            .or(node.text_style.as_ref()),
+    );
+    let secondary_fallback_font_size = (secondary_nominal_font_size
+        * secondary_font_style_scale
+        * TEXT_RENDER_SIZE_CALIBRATION)
+        .max(1.0);
 
     let align = node
         .text_style
@@ -854,14 +866,15 @@ fn draw_text_node(
     let mut colour = resolved_text_colour(node.text_style.as_ref(), ctx);
     colour[3] = ((colour[3] as f32) * node.alpha.clamp(0.0, 1.0)).round() as u8;
 
-    let selected_font = select_imported_ui_font(ctx, node);
+    let selected_font = select_imported_ui_font(ctx, node.text_style.as_ref());
     let used_swf_font = selected_font.as_ref().is_some_and(|(_, swf_font)| {
         renderer.draw_swf_font(
             img,
             text,
             primary_rect,
             swf_font,
-            (nominal_font_size * SWF_TEXT_RENDER_SIZE_CALIBRATION).max(1.0),
+            (nominal_font_size * primary_font_style_scale * SWF_TEXT_RENDER_SIZE_CALIBRATION)
+                .max(1.0),
             colour,
             align,
             vertical_align,
@@ -900,16 +913,35 @@ fn draw_text_node(
     if let Some(UiIrTextPayload::Resolved { text: secondary }) = node.secondary_text_payload.as_ref() {
         let mut secondary_colour = resolved_text_colour(node.secondary_text_style.as_ref(), ctx);
         secondary_colour[3] = ((secondary_colour[3] as f32) * node.alpha.clamp(0.0, 1.0)).round() as u8;
-        let secondary_used_swf = selected_font.as_ref().is_some_and(|(_, swf_font)| {
+        let secondary_align = node
+            .secondary_text_style
+            .as_ref()
+            .map(|style| TextAlign::from_bb_str(&style.alignment))
+            .unwrap_or(TextAlign::Left);
+        let secondary_vertical_align = node
+            .secondary_text_style
+            .as_ref()
+            .map(|style| VerticalAlign::from_bb_str(&style.vertical_alignment))
+            .unwrap_or(VerticalAlign::Centre);
+        let secondary_selected_font = select_imported_ui_font(
+            ctx,
+            node.secondary_text_style
+                .as_ref()
+                .or(node.text_style.as_ref()),
+        );
+        let secondary_used_swf = secondary_selected_font.as_ref().is_some_and(|(_, swf_font)| {
             renderer.draw_swf_font(
                 img,
                 secondary,
                 secondary_rect,
                 swf_font,
-                (secondary_nominal_font_size * SWF_TEXT_RENDER_SIZE_CALIBRATION).max(1.0),
+                (secondary_nominal_font_size
+                    * secondary_font_style_scale
+                    * SWF_TEXT_RENDER_SIZE_CALIBRATION)
+                    .max(1.0),
                 secondary_colour,
-                TextAlign::Left,
-                VerticalAlign::Centre,
+                secondary_align,
+                secondary_vertical_align,
             )
         });
         if !secondary_used_swf {
@@ -920,8 +952,8 @@ fn draw_text_node(
                 FontKind::Sans,
                 secondary_fallback_font_size,
                 secondary_colour,
-                TextAlign::Left,
-                VerticalAlign::Centre,
+                secondary_align,
+                secondary_vertical_align,
             );
         }
     }
@@ -1185,28 +1217,32 @@ fn font_telemetry_enabled() -> bool {
 
 fn select_imported_ui_font<'a>(
     ctx: &'a ComposeContext<'_>,
-    node: &UiIrNode,
+    text_style: Option<&UiIrTextStyle>,
 ) -> Option<(String, &'a FontGlyphSet)> {
-    let label_style = node
-        .text_style
-        .as_ref()
-        .and_then(|style| style.label_style.as_deref());
+    if let Some(symbol) = font_symbol_from_text_style(text_style)
+        && let Some(id) = ctx.assets.lookup_export(symbol)
+        && let Some(font) = ctx.assets.get_font(id)
+    {
+        return Some((symbol.to_string(), font));
+    }
+
+    let label_style = text_style.and_then(|style| style.label_style.as_deref());
 
     if matches!(label_style, Some("Title3")) {
-        let mut text1_candidates: Vec<(String, &'a FontGlyphSet)> = ctx
+        let mut text1_fonts: Vec<(String, &'a FontGlyphSet)> = ctx
             .assets
             .export_entries()
             .filter(|(symbol, _)| symbol.starts_with("$Text1"))
             .filter_map(|(symbol, id)| ctx.assets.get_font(id).map(|font| (symbol.to_string(), font)))
             .collect();
 
-        text1_candidates.sort_by(|(left_name, left_font), (right_name, right_font)| {
+        text1_fonts.sort_by(|(left_name, left_font), (right_name, right_font)| {
             title3_font_weight_rank(left_name, left_font)
                 .cmp(&title3_font_weight_rank(right_name, right_font))
                 .then_with(|| left_name.cmp(right_name))
         });
 
-        if let Some((symbol, font)) = text1_candidates.into_iter().next() {
+        if let Some((symbol, font)) = text1_fonts.into_iter().next() {
             return Some((symbol, font));
         }
     }
@@ -1244,6 +1280,26 @@ fn select_imported_ui_font<'a>(
         }
     }
     None
+}
+
+fn resolved_font_record_value(style: Option<&UiIrTextStyle>) -> Option<&serde_json::Value> {
+    let record = style?.resolved_font_record.as_ref()?;
+    Some(record.get("_RecordValue_").unwrap_or(record))
+}
+
+fn font_symbol_from_text_style(style: Option<&UiIrTextStyle>) -> Option<&str> {
+    resolved_font_record_value(style)
+        .and_then(|value| value.get("font"))
+        .and_then(|value| value.as_str())
+        .filter(|symbol| !symbol.is_empty())
+}
+
+fn font_style_scale_modifier(style: Option<&UiIrTextStyle>) -> f32 {
+    resolved_font_record_value(style)
+        .and_then(|value| value.get("scaleModifier"))
+        .and_then(|value| value.as_f64())
+        .map(|value| value as f32)
+        .unwrap_or(1.0)
 }
 
 fn title3_font_weight_rank(symbol: &str, font: &FontGlyphSet) -> i32 {
@@ -1558,6 +1614,47 @@ mod tests {
     use crate::canvas::RgbaColor;
     use crate::style::{CrtParams, ManufacturerStyle};
     use crate::ui_ir::{UI_IR_SCHEMA_VERSION, UiRendererHint, UiIrTextStyle};
+
+    fn text_style_with_font_record(record: serde_json::Value) -> UiIrTextStyle {
+        UiIrTextStyle {
+            font_record: Some("file://./fontstyles/blenderpro-medium.json".into()),
+            resolved_font_record: Some(record),
+            font_size: UiIrValue::Fixed { value: 18.0 },
+            alignment: "Left".into(),
+            vertical_alignment: "Center".into(),
+            anchor_to_parent_x: None,
+            anchor_to_parent_y: None,
+            colour: None,
+            colour_token: None,
+            label_style: None,
+        }
+    }
+
+    #[test]
+    fn font_symbol_reads_buildingblocks_font_style_record() {
+        let style = text_style_with_font_record(serde_json::json!({
+            "_RecordName_": "BuildingBlocks_FontStyle.BlenderPro-Medium",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_FontStyle",
+                "font": "$Text1Med",
+                "scaleModifier": 1.0
+            }
+        }));
+
+        assert_eq!(font_symbol_from_text_style(Some(&style)), Some("$Text1Med"));
+    }
+
+    #[test]
+    fn font_symbol_reads_unwrapped_font_style_record() {
+        let style = text_style_with_font_record(serde_json::json!({
+            "_Type_": "BuildingBlocks_FontStyle",
+            "font": "$Text1Thin",
+            "scaleModifier": 0.92
+        }));
+
+        assert_eq!(font_symbol_from_text_style(Some(&style)), Some("$Text1Thin"));
+        assert_eq!(font_style_scale_modifier(Some(&style)), 0.92);
+    }
 
     fn assert_not_uniform(img: &RgbaImage, label: &str) {
         let (w, h) = img.dimensions();
@@ -1955,6 +2052,7 @@ mod tests {
                 anchor_to_parent_y: None,
                 colour: None,
                 colour_token: None,
+                label_style: None,
             }),
             meter_progress: None,
             text_style: Some(UiIrTextStyle {
@@ -1967,6 +2065,7 @@ mod tests {
                 anchor_to_parent_y: Some(0.5),
                 colour: None,
                 colour_token: None,
+                label_style: None,
             }),
             asset_ref: None,
             custom_shape: None,
