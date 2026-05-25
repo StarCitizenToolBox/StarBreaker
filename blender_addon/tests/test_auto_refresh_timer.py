@@ -218,7 +218,7 @@ class TestAutoRefreshPromptTimer(unittest.TestCase):
         self.assertEqual(view3d.regions[0].active_panel_category, "StarBreaker")
         self.assertEqual(view3d.redraws, 1)
 
-    def test_sync_scene_package_controls_uses_root_values(self) -> None:
+    def test_sync_scene_package_controls_defers_root_values(self) -> None:
         sync_controls, namespace = _load_sync_scene_package_controls()
         scene = types.SimpleNamespace(
             starbreaker_engine_glow_strength=3.0,
@@ -226,13 +226,26 @@ class TestAutoRefreshPromptTimer(unittest.TestCase):
         )
         context = types.SimpleNamespace(scene=scene)
         package_root = _MockObject("Root", starbreaker_package_root=True)
+        scheduled: list[tuple[object, float, bool]] = []
         namespace["engine_glow_control_enabled"] = lambda _root: True
         namespace["engine_glow_strength"] = lambda _root: 0.0
         namespace["shared_glow_control_enabled"] = lambda _root: True
         namespace["shared_glow_strength"] = lambda _root: 2.5
+        namespace["bpy"].app.timers.register = (
+            lambda callback, *, first_interval=0.0, persistent=False: scheduled.append(
+                (callback, first_interval, persistent)
+            )
+        )
 
         sync_controls(context, package_root)
 
+        self.assertEqual(scene.starbreaker_engine_glow_strength, 3.0)
+        self.assertEqual(scene.starbreaker_shared_glow_strength, 1.0)
+        self.assertEqual(len(scheduled), 1)
+        self.assertEqual(scheduled[0][1:], (0.0, False))
+
+        callback = scheduled[0][0]
+        self.assertIsNone(callback())
         self.assertEqual(scene.starbreaker_engine_glow_strength, 0.0)
         self.assertEqual(scene.starbreaker_shared_glow_strength, 2.5)
         self.assertFalse(namespace["_CONTROL_PROP_SYNCING"])

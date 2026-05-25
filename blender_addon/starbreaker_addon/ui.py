@@ -489,7 +489,6 @@ def _update_pom_detail(_: bpy.types.ID, context: bpy.types.Context) -> None:
 
 
 def _sync_scene_package_controls(context: bpy.types.Context, package_root: bpy.types.Object) -> None:
-    global _CONTROL_PROP_SYNCING
     scene = getattr(context, "scene", None)
     if scene is None:
         return
@@ -500,15 +499,36 @@ def _sync_scene_package_controls(context: bpy.types.Context, package_root: bpy.t
         updates.append((SCENE_SHARED_GLOW_PROP, shared_glow_strength(package_root)))
     if not updates:
         return
-    _CONTROL_PROP_SYNCING = True
+
+    pending: list[tuple[str, float]] = []
+    for prop_name, value in updates:
+        try:
+            current = float(getattr(scene, prop_name))
+        except Exception:
+            current = None
+        if current is not None and abs(current - float(value)) <= 1.0e-6:
+            continue
+        pending.append((prop_name, float(value)))
+    if not pending:
+        return
+
+    def _apply() -> None:
+        global _CONTROL_PROP_SYNCING
+        _CONTROL_PROP_SYNCING = True
+        try:
+            for prop_name, value in pending:
+                try:
+                    setattr(scene, prop_name, value)
+                except Exception:
+                    continue
+        finally:
+            _CONTROL_PROP_SYNCING = False
+        return None
+
     try:
-        for prop_name, value in updates:
-            try:
-                setattr(scene, prop_name, float(value))
-            except Exception:
-                continue
-    finally:
-        _CONTROL_PROP_SYNCING = False
+        bpy.app.timers.register(_apply, first_interval=0.0, persistent=False)
+    except Exception:
+        pass
 
 
 def _update_engine_glow(_: bpy.types.ID, context: bpy.types.Context) -> None:
