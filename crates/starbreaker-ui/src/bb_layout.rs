@@ -139,6 +139,17 @@ pub struct LayoutResult {
 /// Never panics on well-formed input.  Unknown `BbValue` behaviors produce
 /// warnings and fall back to filling the parent dimension.
 pub fn layout(scene: &BbScene, target_w: u32, target_h: u32) -> LayoutResult {
+    layout_with_animation_sample(scene, target_w, target_h, None)
+}
+
+/// Compute pixel-space rects while applying sampled animated SizeX/SizeY
+/// modifiers when `animation_sample_percent` is provided.
+pub fn layout_with_animation_sample(
+    scene: &BbScene,
+    target_w: u32,
+    target_h: u32,
+    animation_sample_percent: Option<f32>,
+) -> LayoutResult {
     let canvas_scale = if scene.canvas_size.0 > 0.0 && scene.canvas_size.1 > 0.0 {
         let sx = target_w as f32 / scene.canvas_size.0;
         let sy = target_h as f32 / scene.canvas_size.1;
@@ -174,6 +185,7 @@ pub fn layout(scene: &BbScene, target_w: u32, target_h: u32) -> LayoutResult {
             scene,
             canvas_scale,
             canvas_scale,
+            animation_sample_percent,
             &mut rects,
             &mut draw_order,
         );
@@ -192,6 +204,7 @@ fn layout_node(
     scene: &BbScene,
     csx: f32,
     csy: f32,
+    animation_sample_percent: Option<f32>,
     rects: &mut BTreeMap<BbNodeId, Rect>,
     draw_order: &mut Vec<BbNodeId>,
 ) {
@@ -206,15 +219,22 @@ fn layout_node(
     // opposite dimension. This handles the common "square icon" idiom
     // (e.g. `width: Percent(0.8), height: PercentOfX(1.0)`) correctly while
     // remaining a no-op for non-cross-axis sizing.
-    let naive_w = resolve_value_for_node(node, &node.sizing.width, parent_inner.w, parent_inner.h, csx, true);
-    let naive_h = resolve_value_for_node(node, &node.sizing.height, parent_inner.h, parent_inner.w, csy, false);
-    let base_outer_w = if matches!(node.sizing.width, BbValue::Other { ref behavior, .. } if behavior == "PercentOfY") {
-        resolve_value_for_node(node, &node.sizing.width, parent_inner.w, naive_h, csx, true)
+    let fills_body_background_surface = fills_body_background_surface(node);
+    let width_value = sampled_sizing_value(&node.sizing.width, &node.raw, "SizeX", animation_sample_percent);
+    let height_value = sampled_sizing_value(&node.sizing.height, &node.raw, "SizeY", animation_sample_percent);
+    let naive_w = resolve_value_for_node(node, &width_value, parent_inner.w, parent_inner.h, csx, true);
+    let naive_h = resolve_value_for_node(node, &height_value, parent_inner.h, parent_inner.w, csy, false);
+    let base_outer_w = if fills_body_background_surface {
+        parent_inner.w
+    } else if matches!(width_value, BbValue::Other { ref behavior, .. } if behavior == "PercentOfY") {
+        resolve_value_for_node(node, &width_value, parent_inner.w, naive_h, csx, true)
     } else {
         naive_w
     };
-    let base_outer_h = if matches!(node.sizing.height, BbValue::Other { ref behavior, .. } if behavior == "PercentOfX") {
-        resolve_value_for_node(node, &node.sizing.height, parent_inner.h, naive_w, csy, false)
+    let base_outer_h = if fills_body_background_surface {
+        parent_inner.h
+    } else if matches!(height_value, BbValue::Other { ref behavior, .. } if behavior == "PercentOfX") {
+        resolve_value_for_node(node, &height_value, parent_inner.h, naive_w, csy, false)
     } else {
         naive_h
     };
@@ -245,16 +265,19 @@ fn layout_node(
         .and_then(|v| v.as_str())
         .map(|t| t.contains("FlexContainer"))
         .unwrap_or(false);
-    let fills_parent = matches!(node.sizing.width, BbValue::Percent(p) if (p - 1.0).abs() < 0.0001)
-        && matches!(node.sizing.height, BbValue::Percent(p) if (p - 1.0).abs() < 0.0001);
+    let fills_parent = matches!(width_value, BbValue::Percent(p) if (p - 1.0).abs() < 0.0001)
+        && matches!(height_value, BbValue::Percent(p) if (p - 1.0).abs() < 0.0001);
 
     let is_root_fullscreen_canvas = matches!(node.ty, BbNodeType::WidgetCanvas)
         && node.parent.is_none_or(|pid| scene.roots.contains(&pid))
-        && matches!(node.sizing.width, BbValue::Percent(p) if (p - 1.0).abs() < 0.0001)
-        && matches!(node.sizing.height, BbValue::Percent(p) if p > 0.90)
+        && matches!(width_value, BbValue::Percent(p) if (p - 1.0).abs() < 0.0001)
+        && matches!(height_value, BbValue::Percent(p) if p > 0.90)
         && (node.anchor.x - 0.5).abs() < 0.01
         && (node.pivot.x - 0.5).abs() < 0.01;
-    let (outer_x, outer_y) = if (is_flex_container && fills_parent) || is_root_fullscreen_canvas {
+    let (outer_x, outer_y) = if (is_flex_container && fills_parent)
+        || is_root_fullscreen_canvas
+        || fills_body_background_surface
+    {
         // Full-bleed containers are parent-space overlays; authoring anchor/pivot
         // offsets should not shift them out of the parent rect.
         // offsets should not shift them out of the parent rect.
@@ -264,7 +287,7 @@ fn layout_node(
             && node.anchor.x <= 1.0
             && node.pivot.x >= 0.99
             && matches!(
-                node.sizing.width,
+                width_value,
                 BbValue::Other {
                     value,
                     ref behavior
@@ -289,7 +312,16 @@ fn layout_node(
 
     let outer_rect = Rect { x: outer_x, y: outer_y, w: outer_w, h: outer_h };
 
-    layout_node_with_rect(node_id, outer_rect, scene, csx, csy, rects, draw_order);
+    layout_node_with_rect(
+        node_id,
+        outer_rect,
+        scene,
+        csx,
+        csy,
+        animation_sample_percent,
+        rects,
+        draw_order,
+    );
 }
 
 /// Register `outer_rect` for `node_id` and recurse into children, bypassing
@@ -301,6 +333,7 @@ fn layout_node_with_rect(
     scene: &BbScene,
     csx: f32,
     csy: f32,
+    animation_sample_percent: Option<f32>,
     rects: &mut BTreeMap<BbNodeId, Rect>,
     draw_order: &mut Vec<BbNodeId>,
 ) {
@@ -355,14 +388,148 @@ fn layout_node_with_rect(
             scene,
             csx,
             csy,
+            animation_sample_percent,
             rects,
             draw_order,
         );
     } else {
         for child_id in children {
-            layout_node(child_id, inner_rect, scene, csx, csy, rects, draw_order);
+            layout_node(
+                child_id,
+                inner_rect,
+                scene,
+                csx,
+                csy,
+                animation_sample_percent,
+                rects,
+                draw_order,
+            );
         }
     }
+}
+
+fn fills_body_background_surface(node: &crate::bb_scene::BbNode) -> bool {
+    if !matches!(node.ty, BbNodeType::WidgetBodyBackground) {
+        return false;
+    }
+
+    let uses_texture_background = node
+        .raw
+        .get("backgroundType")
+        .and_then(|value| {
+            value
+                .as_str()
+                .map(|text| text.eq_ignore_ascii_case("Texture"))
+                .or_else(|| value.as_i64().map(|number| number == 1))
+        })
+        .unwrap_or(false);
+
+    uses_texture_background && node.raw.get("textureProperties").is_some()
+}
+
+fn sampled_sizing_value(
+    authored: &BbValue,
+    raw: &serde_json::Value,
+    field_name: &str,
+    animation_sample_percent: Option<f32>,
+) -> BbValue {
+    let Some(sample_percent) = animation_sample_percent else {
+        return authored.clone();
+    };
+    let Some(sampled_value) = sampled_animation_number(raw, field_name, sample_percent) else {
+        return authored.clone();
+    };
+
+    match authored {
+        BbValue::Fixed(_) => BbValue::Fixed(sampled_value),
+        BbValue::Percent(_) => BbValue::Percent(sampled_value),
+        BbValue::Other { behavior, .. } => BbValue::Other {
+            value: sampled_value,
+            behavior: behavior.clone(),
+        },
+    }
+}
+
+fn animation_number_keyframes(raw: &serde_json::Value, field_name: &str) -> Vec<(f64, f32)> {
+    let Some(keyframes) = raw
+        .get("animation")
+        .and_then(|animation| animation.get("animationTimeline"))
+        .and_then(|timeline| timeline.get("keyframes"))
+        .and_then(|keyframes| keyframes.as_array())
+    else {
+        return Vec::new();
+    };
+
+    keyframes
+        .iter()
+        .flat_map(|keyframe| {
+            let percent = keyframe
+                .get("percent")
+                .and_then(|value| value.as_f64())
+                .unwrap_or(0.0);
+            keyframe
+                .get("modifiers")
+                .and_then(|modifiers| modifiers.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(move |modifier_data| {
+                    let modifier = modifier_data.get("modifier").unwrap_or(modifier_data);
+                    let is_number = modifier
+                        .get("_Type_")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|ty| ty == "BuildingBlocks_FieldModifierNumber");
+                    if !is_number {
+                        return None;
+                    }
+                    let matches_field = modifier
+                        .get("field")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|field| field == field_name);
+                    if !matches_field {
+                        return None;
+                    }
+                    modifier
+                        .get("value")
+                        .and_then(|value| value.as_f64())
+                        .map(|value| (percent, value as f32))
+                })
+        })
+        .collect()
+}
+
+fn sampled_animation_number(raw: &serde_json::Value, field_name: &str, sample_percent: f32) -> Option<f32> {
+    let mut keyframes = animation_number_keyframes(raw, field_name);
+    if keyframes.is_empty() {
+        return None;
+    }
+    keyframes.sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let timeline_max = keyframes.last().map(|(percent, _)| *percent).unwrap_or(1.0);
+    let sample = if timeline_max <= 1.0 {
+        sample_percent as f64 / 100.0
+    } else {
+        sample_percent as f64
+    };
+
+    let first = keyframes[0];
+    if sample <= first.0 {
+        return Some(first.1);
+    }
+
+    for window in keyframes.windows(2) {
+        let (left_percent, left_value) = window[0];
+        let (right_percent, right_value) = window[1];
+        if sample <= right_percent {
+            let span = right_percent - left_percent;
+            if span <= f64::EPSILON {
+                return Some(right_value);
+            }
+            let t = ((sample - left_percent) / span) as f32;
+            return Some(left_value + (right_value - left_value) * t);
+        }
+    }
+
+    keyframes.last().map(|(_, value)| *value)
 }
 
 /// Lay out `children` inside `container` according to a `BuildingBlocks_FlexContainer`
@@ -380,6 +547,7 @@ fn layout_flex_children(
     scene: &BbScene,
     csx: f32,
     csy: f32,
+    animation_sample_percent: Option<f32>,
     rects: &mut BTreeMap<BbNodeId, Rect>,
     draw_order: &mut Vec<BbNodeId>,
 ) {
@@ -442,7 +610,16 @@ fn layout_flex_children(
 
     // Children that do not participate in flex layout are overlayed.
     for child_id in overlay_non_flex {
-        layout_node(child_id, container, scene, csx, csy, rects, draw_order);
+        layout_node(
+            child_id,
+            container,
+            scene,
+            csx,
+            csy,
+            animation_sample_percent,
+            rects,
+            draw_order,
+        );
     }
 
     if flex_children.is_empty() {
@@ -455,20 +632,39 @@ fn layout_flex_children(
                 scene,
                 csx,
                 csy,
+                animation_sample_percent,
                 rects,
                 draw_order,
                 is_row,
             );
         } else {
             for child_id in flow_non_grow {
-                layout_node(child_id, container, scene, csx, csy, rects, draw_order);
+                layout_node(
+                    child_id,
+                    container,
+                    scene,
+                    csx,
+                    csy,
+                    animation_sample_percent,
+                    rects,
+                    draw_order,
+                );
             }
         }
         return;
     }
 
     for child_id in flow_non_grow {
-        layout_node(child_id, container, scene, csx, csy, rects, draw_order);
+        layout_node(
+            child_id,
+            container,
+            scene,
+            csx,
+            csy,
+            animation_sample_percent,
+            rects,
+            draw_order,
+        );
     }
 
     let n = flex_children.len();
@@ -503,7 +699,16 @@ fn layout_flex_children(
             }
         };
         cursor += main_size + item_spacing;
-        layout_node_with_rect(*id, child_rect, scene, csx, csy, rects, draw_order);
+        layout_node_with_rect(
+            *id,
+            child_rect,
+            scene,
+            csx,
+            csy,
+            animation_sample_percent,
+            rects,
+            draw_order,
+        );
     }
 }
 
@@ -515,6 +720,7 @@ fn layout_flex_no_grow_children(
     scene: &BbScene,
     csx: f32,
     csy: f32,
+    animation_sample_percent: Option<f32>,
     rects: &mut BTreeMap<BbNodeId, Rect>,
     draw_order: &mut Vec<BbNodeId>,
     is_row: bool,
@@ -800,7 +1006,19 @@ fn layout_flex_no_grow_children(
             };
 
             for (id, w, h, auto_main) in line {
-                if auto_main { layout_node(id, container, scene, csx, csy, rects, draw_order); continue; }
+                if auto_main {
+                    layout_node(
+                        id,
+                        container,
+                        scene,
+                        csx,
+                        csy,
+                        animation_sample_percent,
+                        rects,
+                        draw_order,
+                    );
+                    continue;
+                }
                 let rect = if is_row {
                     let y = match cross_just.to_ascii_lowercase().as_str() {
                         "center" => line_cross_cursor + (line_cross - h) * 0.5,
@@ -819,7 +1037,16 @@ fn layout_flex_no_grow_children(
                     let cw = if cross_just.eq_ignore_ascii_case("stretch") { line_cross } else { w };
                     Rect { x, y: line_main_cursor, w: cw, h }
                 };
-                layout_node_with_rect(id, rect, scene, csx, csy, rects, draw_order);
+                layout_node_with_rect(
+                    id,
+                    rect,
+                    scene,
+                    csx,
+                    csy,
+                    animation_sample_percent,
+                    rects,
+                    draw_order,
+                );
                 line_main_cursor += if is_row { w } else { h };
                 line_main_cursor += item_spacing;
             }
@@ -867,7 +1094,16 @@ fn layout_flex_no_grow_children(
                         w,
                         h,
                     };
-                    layout_node_with_rect(id, rect, scene, csx, csy, rects, draw_order);
+                    layout_node_with_rect(
+                        id,
+                        rect,
+                        scene,
+                        csx,
+                        csy,
+                        animation_sample_percent,
+                        rects,
+                        draw_order,
+                    );
                     cursor += h;
                     cursor += item_spacing;
                     continue;
@@ -876,7 +1112,16 @@ fn layout_flex_no_grow_children(
             // Auto-sized text-like items still contribute spacing/alignment
             // slots, but keep their own overlay layout so they can render with
             // intrinsic content bounds.
-            layout_node(id, container, scene, csx, csy, rects, draw_order);
+            layout_node(
+                id,
+                container,
+                scene,
+                csx,
+                csy,
+                animation_sample_percent,
+                rects,
+                draw_order,
+            );
             cursor += if is_row { w } else { h };
             cursor += item_spacing;
             continue;
@@ -905,7 +1150,16 @@ fn layout_flex_no_grow_children(
             let cw = if cross_just.eq_ignore_ascii_case("stretch") { container.w } else { w };
             Rect { x, y: cursor, w: cw, h }
         };
-        layout_node_with_rect(id, rect, scene, csx, csy, rects, draw_order);
+        layout_node_with_rect(
+            id,
+            rect,
+            scene,
+            csx,
+            csy,
+            animation_sample_percent,
+            rects,
+            draw_order,
+        );
         cursor += if is_row { w } else { h };
         cursor += item_spacing;
     }
@@ -1295,6 +1549,136 @@ mod tests {
         // height = 1.0 × own_w(160)   = 160   (NOT 1.0 × parent_w(200) = 200 or × parent_h(400))
         assert!((r.w - 160.0).abs() < 0.5, "expected width ≈ 160, got {}", r.w);
         assert!((r.h - 160.0).abs() < 0.5, "expected height ≈ 160 (square), got {}", r.h);
+    }
+
+    #[test]
+    fn texture_body_background_fills_canvas_surface() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let background = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![],
+            ty: BbNodeType::WidgetBodyBackground,
+            name: "body background".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(64.0), height: BbValue::Fixed(64.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2 { x: 0.5, y: 0.5 },
+            anchor: Vec2 { x: 0.5, y: 0.5 },
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({
+                "backgroundType": "Texture",
+                "textureProperties": {
+                    "_Type_": "BuildingBlocks_ComponentTextureProperties",
+                    "orientation": "Landscape"
+                }
+            }),
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, background);
+        let scene = BbScene { canvas_size: (800.0, 450.0), roots: vec![1], nodes, operations: vec![] };
+
+        let result = layout(&scene, 800, 450);
+        let rect = result.rects[&1];
+        assert_eq!(rect, Rect { x: 0.0, y: 0.0, w: 800.0, h: 450.0 });
+    }
+
+    #[test]
+    fn sampled_size_animation_overrides_sizing_value() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let parent = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![2],
+            ty: BbNodeType::DisplayWidget,
+            name: "parent".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(400.0), height: BbValue::Fixed(300.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+        let child = BbNode {
+            id: 2,
+            parent: Some(1),
+            children: vec![],
+            ty: BbNodeType::WidgetCustomShape,
+            name: "animated shape".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Percent(0.85), height: BbValue::Percent(0.85) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({
+                "animation": {
+                    "animationTimeline": {
+                        "keyframes": [
+                            {
+                                "percent": 0.0,
+                                "modifiers": [
+                                    {"modifier": {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "SizeX", "value": 0.77}},
+                                    {"modifier": {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "SizeY", "value": 0.77}}
+                                ]
+                            },
+                            {
+                                "percent": 1.0,
+                                "modifiers": [
+                                    {"modifier": {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "SizeX", "value": 0.9}},
+                                    {"modifier": {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "SizeY", "value": 0.9}}
+                                ]
+                            }
+                        ]
+                    }
+                }
+            }),
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, parent);
+        nodes.insert(2, child);
+        let scene = BbScene { canvas_size: (400.0, 300.0), roots: vec![1], nodes, operations: vec![] };
+
+        let static_result = layout(&scene, 400, 300);
+        let sampled_result = layout_with_animation_sample(&scene, 400, 300, Some(50.0));
+        assert!((static_result.rects[&2].w - 340.0).abs() < 0.5);
+        assert!((sampled_result.rects[&2].w - 334.0).abs() < 0.5);
+        assert!((sampled_result.rects[&2].h - 250.5).abs() < 0.5);
     }
 
     /// Mirror of above: `PercentOfY` for width must use own height.
