@@ -878,17 +878,20 @@ fn draw_text_node(
     colour[3] = ((colour[3] as f32) * node.alpha.clamp(0.0, 1.0)).round() as u8;
 
     let selected_font = select_imported_ui_font(ctx, node.text_style.as_ref());
+    let primary_line_spacing = node.text_style.as_ref().and_then(|style| style.line_spacing);
+    let primary_swf_font_scale = primary_font_style_scale * SWF_TEXT_RENDER_SIZE_CALIBRATION;
+    let primary_ttf_font_scale = primary_font_style_scale * TEXT_RENDER_SIZE_CALIBRATION;
     let used_swf_font = selected_font.as_ref().is_some_and(|(_, swf_font)| {
         renderer.draw_swf_font(
             img,
             text,
             primary_rect,
             swf_font,
-            (nominal_font_size * primary_font_style_scale * SWF_TEXT_RENDER_SIZE_CALIBRATION)
-                .max(1.0),
+            (nominal_font_size * primary_swf_font_scale).max(1.0),
             colour,
             align,
             vertical_align,
+            scale_line_spacing(primary_line_spacing, primary_swf_font_scale),
         )
     });
     if font_telemetry_enabled() {
@@ -918,6 +921,7 @@ fn draw_text_node(
             colour,
             align,
             vertical_align,
+            scale_line_spacing(primary_line_spacing, primary_ttf_font_scale),
         );
     }
 
@@ -940,19 +944,24 @@ fn draw_text_node(
                 .as_ref()
                 .or(node.text_style.as_ref()),
         );
+        let secondary_line_spacing = node
+            .secondary_text_style
+            .as_ref()
+            .or(node.text_style.as_ref())
+            .and_then(|style| style.line_spacing);
+        let secondary_swf_font_scale = secondary_font_style_scale * SWF_TEXT_RENDER_SIZE_CALIBRATION;
+        let secondary_ttf_font_scale = secondary_font_style_scale * TEXT_RENDER_SIZE_CALIBRATION;
         let secondary_used_swf = secondary_selected_font.as_ref().is_some_and(|(_, swf_font)| {
             renderer.draw_swf_font(
                 img,
                 secondary,
                 secondary_rect,
                 swf_font,
-                (secondary_nominal_font_size
-                    * secondary_font_style_scale
-                    * SWF_TEXT_RENDER_SIZE_CALIBRATION)
-                    .max(1.0),
+                (secondary_nominal_font_size * secondary_swf_font_scale).max(1.0),
                 secondary_colour,
                 secondary_align,
                 secondary_vertical_align,
+                scale_line_spacing(secondary_line_spacing, secondary_swf_font_scale),
             )
         });
         if !secondary_used_swf {
@@ -965,9 +974,14 @@ fn draw_text_node(
                 secondary_colour,
                 secondary_align,
                 secondary_vertical_align,
+                scale_line_spacing(secondary_line_spacing, secondary_ttf_font_scale),
             );
         }
     }
+}
+
+fn scale_line_spacing(line_spacing: Option<f32>, font_scale: f32) -> Option<f32> {
+    line_spacing.map(|spacing| spacing * font_scale)
 }
 
 fn resolved_text_colour(
@@ -1192,6 +1206,7 @@ fn debug_text_drawn_bounds_with_renderer(
         fallback_font_size,
         primary_align,
         primary_vertical,
+        node.text_style.as_ref().and_then(|style| style.line_spacing),
     )?;
 
     let secondary = if let Some(UiIrTextPayload::Resolved { text: secondary_text }) = node.secondary_text_payload.as_ref() {
@@ -1211,6 +1226,10 @@ fn debug_text_drawn_bounds_with_renderer(
                 secondary_fallback_font_size,
                 TextAlign::Left,
                 VerticalAlign::Centre,
+                node.secondary_text_style
+                    .as_ref()
+                    .or(node.text_style.as_ref())
+                    .and_then(|style| style.line_spacing),
             )
         })
     } else {
@@ -1702,6 +1721,7 @@ mod tests {
             font_record: Some("file://./fontstyles/blenderpro-medium.json".into()),
             resolved_font_record: Some(record),
             font_size: UiIrValue::Fixed { value: 18.0 },
+            line_spacing: None,
             alignment: "Left".into(),
             vertical_alignment: "Center".into(),
             anchor_to_parent_x: None,
@@ -2069,6 +2089,7 @@ mod tests {
             font_record: None,
             resolved_font_record: None,
             font_size: crate::ui_ir::UiIrValue::Fixed { value: 28.0 },
+            line_spacing: None,
             alignment: "Left".to_string(),
             vertical_alignment: "Center".to_string(),
             anchor_to_parent_x: None,
@@ -2429,6 +2450,7 @@ mod tests {
                 font_record: None,
                 resolved_font_record: None,
                 font_size: UiIrValue::Fixed { value: 28.0 },
+                line_spacing: None,
                 alignment: "Left".into(),
                 vertical_alignment: "Center".into(),
                 anchor_to_parent_x: None,
@@ -2442,6 +2464,7 @@ mod tests {
                 font_record: None,
                 resolved_font_record: None,
                 font_size: UiIrValue::Fixed { value: 32.0 },
+                line_spacing: None,
                 alignment: "Left".into(),
                 vertical_alignment: "Center".into(),
                 anchor_to_parent_x: Some(0.0),

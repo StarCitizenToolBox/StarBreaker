@@ -160,6 +160,8 @@ pub struct UiIrTextStyle {
     pub font_record: Option<String>,
     pub resolved_font_record: Option<serde_json::Value>,
     pub font_size: UiIrValue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_spacing: Option<f32>,
     pub alignment: String,
     #[serde(default = "default_vertical_alignment")]
     pub vertical_alignment: String,
@@ -360,6 +362,7 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
 
     let mut warnings = Vec::new();
     let style_font_sizes = collect_style_font_sizes(scene);
+    let standard_text_styles = collect_standard_text_styles(canvas_fetcher, selected_style_source.as_deref());
     if scene.roots.is_empty() {
         warnings.push("scene has no root nodes".to_string());
     }
@@ -420,24 +423,28 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
                 UiIrTextPayload::Empty
             }
         });
+        let resolved_style_tags = resolved_style_tags_for_node(canvas_fetcher, node);
         let font_record = effective_font_record(node);
+        let label_style = label_style_name_from_raw(node);
         let text_style = if let Some(text) = node.text.as_ref() {
+            let font_size = resolve_effective_font_size(
+                id,
+                node,
+                text,
+                layout_rect.h,
+                text_payload.as_ref().and_then(resolved_text_from_payload),
+                scene,
+                &binding_resolver,
+                defaults,
+                &style_font_sizes,
+            );
             Some(UiIrTextStyle {
                 font_record: font_record.clone(),
                 resolved_font_record: font_record
                     .as_deref()
                     .and_then(|record_ref| resolve_record(canvas_fetcher, &[record_ref])),
-                font_size: resolve_effective_font_size(
-                    id,
-                    node,
-                    text,
-                    layout_rect.h,
-                    text_payload.as_ref().and_then(resolved_text_from_payload),
-                    scene,
-                    &binding_resolver,
-                    defaults,
-                    &style_font_sizes,
-                ),
+                line_spacing: resolve_effective_line_spacing(node, &font_size, &standard_text_styles),
+                font_size,
                 alignment: text.alignment.clone(),
                 vertical_alignment: node
                     .raw
@@ -459,9 +466,11 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
                     .map(|value| value as f32),
                 colour: text.colour.or_else(|| fill_colour_from_raw_for_text(&node.raw)),
                 colour_token: text_colour_token_from_raw(&node.raw).or_else(|| {
+                    semantic_text_colour_token_from_style_tags(&resolved_style_tags, label_style.as_deref())
+                }).or_else(|| {
                     default_style_text_colour_token_from_raw(&node.raw, &node.ty, false)
                 }),
-                label_style: label_style_name_from_raw(node),
+                label_style: label_style.clone(),
             })
         } else if text_payload.is_some() {
             let alignment = node
@@ -505,6 +514,11 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
                     .as_deref()
                     .and_then(|record_ref| resolve_record(canvas_fetcher, &[record_ref])),
                 font_size: UiIrValue::Fixed { value: font_size },
+                line_spacing: resolve_effective_line_spacing(
+                    node,
+                    &UiIrValue::Fixed { value: font_size },
+                    &standard_text_styles,
+                ),
                 alignment,
                 vertical_alignment: node
                     .raw
@@ -526,9 +540,11 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
                     .map(|value| value as f32),
                 colour: fill_colour_from_raw_for_text(&node.raw),
                 colour_token: text_colour_token_from_raw(&node.raw).or_else(|| {
+                    semantic_text_colour_token_from_style_tags(&resolved_style_tags, label_style.as_deref())
+                }).or_else(|| {
                     default_style_text_colour_token_from_raw(&node.raw, &node.ty, false)
                 }),
-                label_style: label_style_name_from_raw(node),
+                label_style: label_style.clone(),
             })
         } else {
             None
@@ -581,6 +597,11 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
                 font_record: None,
                 resolved_font_record: None,
                 font_size: UiIrValue::Fixed { value: font_size },
+                line_spacing: resolve_effective_line_spacing(
+                    node,
+                    &UiIrValue::Fixed { value: font_size },
+                    &standard_text_styles,
+                ),
                 alignment,
                 vertical_alignment: node
                     .raw
@@ -602,6 +623,8 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
                     .map(|value| value as f32),
                 colour: fill_colour_from_raw_for_text(&node.raw),
                 colour_token: text_colour_token_from_raw(&node.raw).or_else(|| {
+                    semantic_text_colour_token_from_style_tags(&resolved_style_tags, None)
+                }).or_else(|| {
                     default_style_text_colour_token_from_raw(&node.raw, &node.ty, true)
                 }),
                 label_style: node
@@ -727,53 +750,6 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
         } else {
             None
         };
-
-        let resolved_style_tags = node
-            .raw
-            .get("styleTags")
-            .and_then(|v| v.as_array())
-            .map(|tags| {
-                tags
-                    .iter()
-                    .filter_map(|tag| {
-                        let uuid = tag
-                            .get("_RecordId_")
-                            .and_then(|v| v.as_str())
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .map(str::to_owned)?;
-
-                        let resolved_record = resolve_style_tag_record(
-                            canvas_fetcher,
-                            tag,
-                            tag.get("_RecordPath_")
-                                .and_then(|v| v.as_str())
-                                .map(str::trim)
-                                .filter(|s| !s.is_empty())
-                                .unwrap_or(""),
-                            tag.get("_RecordName_")
-                                .and_then(|v| v.as_str())
-                                .map(str::trim)
-                                .filter(|s| !s.is_empty())
-                                .unwrap_or(""),
-                            &uuid,
-                        );
-
-                        let tag_name = resolved_record
-                            .as_ref()
-                            .and_then(|record| record.get("_RecordValue_"))
-                            .and_then(|v| v.get("tagName"))
-                            .and_then(|v| v.as_str())
-                            .map(str::to_owned);
-
-                        Some(UiIrStyleTag {
-                            uuid,
-                            tag_name,
-                        })
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
 
         let alpha = if is_transient_static_pulse_node(node) {
             0.0
@@ -1401,6 +1377,70 @@ fn text_colour_token_from_raw(raw: &serde_json::Value) -> Option<String> {
         .or_else(|| raw.get("FillColor").and_then(colour_style_token))
 }
 
+fn semantic_text_colour_token_from_style_tags(
+    tags: &[UiIrStyleTag],
+    label_style: Option<&str>,
+) -> Option<String> {
+    let is_title_style = label_style
+        .map(str::trim)
+        .is_some_and(|style| style.starts_with("Title"));
+    if !is_title_style {
+        return None;
+    }
+
+    tags.iter().find_map(|tag| match tag.tag_name.as_deref() {
+        Some("Primary") => Some("Bright".to_string()),
+        _ => None,
+    })
+}
+
+fn resolved_style_tags_for_node(
+    canvas_fetcher: Option<&dyn CanvasFetcher>,
+    node: &crate::bb_scene::BbNode,
+) -> Vec<UiIrStyleTag> {
+    node.raw
+        .get("styleTags")
+        .and_then(|v| v.as_array())
+        .map(|tags| {
+            tags.iter()
+                .filter_map(|tag| {
+                    let uuid = tag
+                        .get("_RecordId_")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)?;
+
+                    let resolved_record = resolve_style_tag_record(
+                        canvas_fetcher,
+                        tag,
+                        tag.get("_RecordPath_")
+                            .and_then(|v| v.as_str())
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or(""),
+                        tag.get("_RecordName_")
+                            .and_then(|v| v.as_str())
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or(""),
+                        &uuid,
+                    );
+
+                    let tag_name = resolved_record
+                        .as_ref()
+                        .and_then(|record| record.get("_RecordValue_"))
+                        .and_then(|v| v.get("tagName"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned);
+
+                    Some(UiIrStyleTag { uuid, tag_name })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
 fn default_style_text_colour_token_from_raw(
     raw: &serde_json::Value,
     node_type: &BbNodeType,
@@ -1522,6 +1562,178 @@ fn apply_label_style_font_scale(value: UiIrValue, label_style: Option<&str>) -> 
         },
         other => other,
     }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct StandardTextStyle {
+    line_spacing: Option<f32>,
+    font_size: Option<f32>,
+}
+
+fn standard_text_field_widget_path() -> &'static str {
+    "file://./../../../../../../../libs/foundry/records/ui/buildingblocks/modularkit/standard/widgets/textfieldwidgetstandard.json"
+}
+
+fn collect_standard_text_styles(
+    canvas_fetcher: Option<&dyn CanvasFetcher>,
+    selected_style_source: Option<&str>,
+) -> HashMap<String, StandardTextStyle> {
+    let Some(fetcher) = canvas_fetcher else {
+        return HashMap::new();
+    };
+    let Ok(record) = fetcher.fetch_canvas_by_path(standard_text_field_widget_path()) else {
+        return HashMap::new();
+    };
+    let record_value = record.get("_RecordValue_").unwrap_or(&record);
+    let mut styles = HashMap::new();
+
+    for entry in record_value
+        .get("defaultStyles")
+        .and_then(|styles| styles.get("entries"))
+        .and_then(|entries| entries.as_array())
+        .into_iter()
+        .flatten()
+        .chain(
+            record_value
+                .get("brandStyles")
+                .and_then(|styles| styles.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|brand| brand.get("entries").and_then(|entries| entries.as_array()))
+                .flatten(),
+        )
+    {
+        let Some(name) = entry
+            .get("name")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        let style = standard_text_style_from_entry(entry);
+        styles
+            .entry(name.to_string())
+            .or_insert(style);
+    }
+
+    let selected_style_name = selected_style_source
+        .and_then(|source| source.strip_prefix("canvas:"))
+        .map(str::to_ascii_lowercase);
+    for entry in record_value
+        .get("brandStyles")
+        .and_then(|styles| styles.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|brand| {
+            let Some(selected_style_name) = selected_style_name.as_deref() else {
+                return false;
+            };
+            brand
+                .get("brandIdentifier")
+                .and_then(|identifier| identifier.as_str())
+                .map(crate::pipeline::extract_record_name)
+                .is_some_and(|identifier| identifier.eq_ignore_ascii_case(selected_style_name))
+        })
+        .filter_map(|brand| brand.get("entries").and_then(|entries| entries.as_array()))
+        .flatten()
+    {
+        let Some(name) = entry
+            .get("name")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        let style = standard_text_style_from_entry(entry);
+        if style.line_spacing.is_some() || style.font_size.is_some() {
+            styles.insert(name.to_string(), style);
+        }
+    }
+
+    styles
+}
+
+fn standard_text_style_from_entry(entry: &serde_json::Value) -> StandardTextStyle {
+    let mut style = StandardTextStyle::default();
+    for modifier in entry
+        .get("modifiers")
+        .and_then(|modifiers| modifiers.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let Some(field) = modifier.get("field").and_then(|field| field.as_str()) else {
+            continue;
+        };
+        let value = modifier.get("value").and_then(|value| value.as_f64()).map(|value| value as f32);
+        if field.eq_ignore_ascii_case("LineSpacing") {
+            style.line_spacing = value;
+        } else if field.eq_ignore_ascii_case("FontSize") {
+            style.font_size = value;
+        }
+    }
+    style
+}
+
+fn resolve_effective_line_spacing(
+    node: &crate::bb_scene::BbNode,
+    effective_font_size: &UiIrValue,
+    standard_text_styles: &HashMap<String, StandardTextStyle>,
+) -> Option<f32> {
+    line_spacing_from_raw(node).or_else(|| {
+        label_style_name_from_raw(node).and_then(|style| {
+            standard_text_style_keys(&style)
+                .into_iter()
+                .find_map(|key| standard_text_styles.get(&key).and_then(|standard| {
+                    standard.line_spacing.map(|line_spacing| {
+                        scale_standard_line_spacing(line_spacing, standard.font_size, effective_font_size)
+                    })
+                }))
+        })
+    })
+}
+
+fn scale_standard_line_spacing(
+    line_spacing: f32,
+    standard_font_size: Option<f32>,
+    effective_font_size: &UiIrValue,
+) -> f32 {
+    let Some(standard_font_size) = standard_font_size.filter(|value| value.is_finite() && *value > 0.0) else {
+        return line_spacing;
+    };
+    let UiIrValue::Fixed { value: effective_font_size } = effective_font_size else {
+        return line_spacing;
+    };
+    if !effective_font_size.is_finite() || *effective_font_size <= 0.0 {
+        return line_spacing;
+    }
+    line_spacing * (*effective_font_size / standard_font_size)
+}
+
+fn standard_text_style_keys(style: &str) -> Vec<String> {
+    let trimmed = style.trim();
+    let mut keys = vec![trimmed.to_string()];
+    if let Some(index) = trimmed.strip_prefix("Title") {
+        keys.push(format!("T{index}"));
+    } else if let Some(index) = trimmed.strip_prefix("Heading") {
+        keys.push(format!("H{index}"));
+    }
+    keys
+}
+
+fn line_spacing_from_raw(node: &crate::bb_scene::BbNode) -> Option<f32> {
+    node.raw
+        .get("lineSpacing")
+        .or_else(|| node.raw.get("LineSpacing"))
+        .or_else(|| {
+            node.raw
+                .get("modifiers")
+                .and_then(|mods| mods.get("lineSpacing").or_else(|| mods.get("LineSpacing")))
+        })
+        .and_then(|value| value.as_f64())
+        .map(|value| value as f32)
+        .filter(|value| value.is_finite())
 }
 
 fn font_size_from_raw(node: &crate::bb_scene::BbNode) -> Option<UiIrValue> {
@@ -2248,6 +2460,199 @@ mod tests {
 
         let shape = ir.nodes.iter().find(|node| node.name == "shape").expect("shape node");
         assert_eq!(shape.icon_tint_colour, Some([0.25, 0.5, 0.75, 1.0]));
+    }
+
+    #[test]
+    fn compile_ir_maps_primary_text_colour_tag_to_bright_token() {
+        let tag_db_path = "file://tagdatabase.tagdatabase.json";
+        let primary_tag_id = "primary-tag-id";
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestPrimaryTextColourTag",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "primary_title",
+                        "isActive": true,
+                        "text": "DIGITAL MEDICAL ASSISTANT",
+                        "labelProperties": {
+                            "style": "Title3"
+                        },
+                        "styleTags": [
+                            {
+                                "_RecordPath_": tag_db_path,
+                                "_RecordName_": "Tag.primary-tag-id",
+                                "_RecordId_": primary_tag_id
+                            }
+                        ],
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "primary_heading",
+                        "isActive": true,
+                        "text": "VIEW CURRENT STATUS",
+                        "labelProperties": {
+                            "style": "Heading6"
+                        },
+                        "styleTags": [
+                            {
+                                "_RecordPath_": tag_db_path,
+                                "_RecordName_": "Tag.primary-tag-id",
+                                "_RecordId_": primary_tag_id
+                            }
+                        ],
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+        let tag_db = serde_json::json!({
+            "_RecordName_": "TagDatabase",
+            "_RecordValue_": {
+                "tags": [
+                    {
+                        "_RecordId_": primary_tag_id,
+                        "_RecordName_": "Tag.primary-tag-id",
+                        "_Type_": "Tag",
+                        "tagName": "Primary",
+                        "children": []
+                    }
+                ]
+            }
+        });
+        let fetcher = TestCanvasFetcher {
+            by_guid: std::collections::HashMap::new(),
+            by_path: [(tag_db_path.to_string(), tag_db)].into_iter().collect(),
+        };
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            Some(&fetcher),
+            "guid-primary-text-colour-tag",
+            Some("BuildingBlocks_Canvas.TestPrimaryTextColourTag"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "primary_title").expect("primary title node");
+        assert_eq!(
+            node.text_style.as_ref().and_then(|style| style.colour_token.as_deref()),
+            Some("Bright")
+        );
+        assert_eq!(node.resolved_style_tags.first().and_then(|tag| tag.tag_name.as_deref()), Some("Primary"));
+
+        let heading = ir.nodes.iter().find(|node| node.name == "primary_heading").expect("primary heading node");
+        assert_eq!(
+            heading.text_style.as_ref().and_then(|style| style.colour_token.as_deref()),
+            None
+        );
+        assert_eq!(heading.resolved_style_tags.first().and_then(|tag| tag.tag_name.as_deref()), Some("Primary"));
+    }
+
+    #[test]
+    fn compile_ir_resolves_standard_textfield_line_spacing_for_label_style() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestStandardLineSpacing",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "title",
+                        "isActive": true,
+                        "text": "DIGITAL MEDICAL ASSISTANT",
+                        "FontSize": 100.0,
+                        "labelProperties": {
+                            "style": "Title3",
+                            "anchorToParentX": 0.5,
+                            "anchorToParentY": 0.5
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 40.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+        let standard = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TextFieldWidgetStandard",
+            "_RecordValue_": {
+                "defaultStyles": {
+                    "entries": [
+                        {
+                            "name": "T3",
+                            "modifiers": [
+                                    {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "FontSize", "value": 115.0},
+                                {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "LineSpacing", "value": -55.0}
+                            ]
+                        }
+                    ]
+                },
+                "brandStyles": [
+                    {
+                        "brandIdentifier": "file://./styles/s_bioc.json",
+                        "entries": [
+                            {
+                                "name": "T3",
+                                "modifiers": [
+                                    {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "FontSize", "value": 115.0},
+                                    {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "LineSpacing", "value": -35.0}
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+        let fetcher = TestCanvasFetcher {
+            by_guid: std::collections::HashMap::new(),
+            by_path: [(standard_text_field_widget_path().to_string(), standard)]
+                .into_iter()
+                .collect(),
+        };
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            Some(&fetcher),
+            "guid-standard-line-spacing",
+            Some("BuildingBlocks_Canvas.TestStandardLineSpacing"),
+            (100, 100),
+            &defaults(),
+            Some("canvas:s_bioc".to_string()),
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "title").expect("title node");
+        assert_eq!(
+            node.text_style.as_ref().and_then(|style| style.line_spacing),
+            Some(-35.0)
+        );
     }
 
     #[test]

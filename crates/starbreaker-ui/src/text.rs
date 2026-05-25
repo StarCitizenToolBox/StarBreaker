@@ -108,6 +108,7 @@ impl TextRenderer {
         colour: [u8; 4],
         align: TextAlign,
         vertical_align: VerticalAlign,
+        line_spacing_px: Option<f32>,
     ) {
         if text.is_empty() || rect.w < 1.0 || rect.h < 1.0 || size_px < 1.0 {
             return;
@@ -116,7 +117,10 @@ impl TextRenderer {
         let font = self.font(kind);
         let scale = Scale::uniform(size_px);
         let v_metrics = font.v_metrics(scale);
-        let line_h = (v_metrics.ascent - v_metrics.descent + v_metrics.line_gap).ceil();
+        let line_spacing = line_spacing_px.filter(|value| value.is_finite()).unwrap_or(0.0);
+        let line_h = (v_metrics.ascent - v_metrics.descent + v_metrics.line_gap + line_spacing)
+            .ceil()
+            .max(1.0);
 
         let lines = wrap_lines(font, text, scale, rect.w);
         let total_h = lines.len() as f32 * line_h;
@@ -185,6 +189,7 @@ impl TextRenderer {
         size_px: f32,
         align: TextAlign,
         vertical_align: VerticalAlign,
+        line_spacing_px: Option<f32>,
     ) -> Option<Rect> {
         if text.is_empty() || rect.w < 1.0 || rect.h < 1.0 || size_px < 1.0 {
             return None;
@@ -193,7 +198,10 @@ impl TextRenderer {
         let font = self.font(kind);
         let scale = Scale::uniform(size_px);
         let v_metrics = font.v_metrics(scale);
-        let line_h = (v_metrics.ascent - v_metrics.descent + v_metrics.line_gap).ceil();
+        let line_spacing = line_spacing_px.filter(|value| value.is_finite()).unwrap_or(0.0);
+        let line_h = (v_metrics.ascent - v_metrics.descent + v_metrics.line_gap + line_spacing)
+            .ceil()
+            .max(1.0);
 
         let lines = wrap_lines(font, text, scale, rect.w);
         let total_h = lines.len() as f32 * line_h;
@@ -266,6 +274,7 @@ impl TextRenderer {
         colour: [u8; 4],
         align: TextAlign,
         vertical_align: VerticalAlign,
+        line_spacing_px: Option<f32>,
     ) -> bool {
         if text.is_empty() || rect.w < 1.0 || rect.h < 1.0 || size_px < 1.0 {
             return false;
@@ -355,8 +364,11 @@ impl TextRenderer {
             .map(|layout| (layout.max_y_units - layout.min_y_units).abs() * scale)
             .fold(0.0f32, f32::max);
         let line_step = nominal_line_h.max(measured_line_h.max(1.0));
-        let interline_px = (size_px * 0.45).max(1.0);
-        let baseline_step = line_step + interline_px;
+        let default_interline_px = (size_px * 0.45).max(1.0);
+        let interline_px = line_spacing_px
+            .filter(|value| value.is_finite())
+            .map_or(default_interline_px, |value| default_interline_px + value);
+        let baseline_step = (line_step + interline_px).max(1.0);
         let mut min_y_px = f32::INFINITY;
         let mut max_y_px = f32::NEG_INFINITY;
         for (line_index, layout) in layouts.iter().enumerate() {
@@ -626,6 +638,7 @@ mod tests {
             [255, 255, 255, 255],
             TextAlign::Left,
             VerticalAlign::Centre,
+            None,
         );
         let changed = img.pixels().any(|p| p[0] > 0 || p[1] > 0 || p[2] > 0);
         assert!(changed, "no pixels changed after draw");
@@ -646,9 +659,45 @@ mod tests {
             [255, 0, 0, 255],
             TextAlign::Left,
             VerticalAlign::Centre,
+            None,
         );
         let after: Vec<_> = img.pixels().copied().collect();
         assert_eq!(before, after, "draw of empty string mutated the image");
+    }
+
+    #[test]
+    fn measure_drawn_bounds_uses_source_line_spacing() {
+        let r = TextRenderer::new();
+        let rect = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
+        let default_bounds = r
+            .measure_drawn_bounds(
+                "A\nA",
+                rect,
+                FontKind::Sans,
+                24.0,
+                TextAlign::Left,
+                VerticalAlign::Top,
+                None,
+            )
+            .expect("default bounds");
+        let tightened_bounds = r
+            .measure_drawn_bounds(
+                "A\nA",
+                rect,
+                FontKind::Sans,
+                24.0,
+                TextAlign::Left,
+                VerticalAlign::Top,
+                Some(-8.0),
+            )
+            .expect("tightened bounds");
+
+        assert!(
+            tightened_bounds.h < default_bounds.h,
+            "expected negative source line spacing to tighten multiline bounds ({:?} vs {:?})",
+            tightened_bounds,
+            default_bounds
+        );
     }
 
     #[test]

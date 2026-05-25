@@ -925,6 +925,7 @@ fn draw_text_node(
         colour,
         align,
         VerticalAlign::Centre,
+        None,
     );
 }
 
