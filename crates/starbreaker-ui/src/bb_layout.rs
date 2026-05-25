@@ -238,7 +238,7 @@ fn layout_node(
     } else {
         naive_h
     };
-    let (scale_x, scale_y) = authored_node_scale(node);
+    let (scale_x, scale_y) = authored_node_scale(node, scene);
     let outer_w = base_outer_w * scale_x;
     let outer_h = base_outer_h * scale_y;
 
@@ -1230,7 +1230,16 @@ fn resolve_value_for_node(
     }
 }
 
-fn authored_node_scale(node: &crate::bb_scene::BbNode) -> (f32, f32) {
+fn authored_node_scale(node: &crate::bb_scene::BbNode, scene: &BbScene) -> (f32, f32) {
+    if matches!(node.ty, BbNodeType::WidgetCanvas)
+        && node
+            .parent
+            .and_then(|parent_id| scene.nodes.get(&parent_id))
+            .is_some_and(|parent| matches!(parent.ty, BbNodeType::WidgetTextField))
+    {
+        return (1.0, 1.0);
+    }
+
     let Some(scale) = node.raw.get("scale") else {
         return (1.0, 1.0);
     };
@@ -2430,6 +2439,100 @@ mod tests {
         assert!((rect.h - 70.0).abs() < 0.01, "expected scaled height 70, got {}", rect.h);
         assert!((rect.x - 20.0).abs() < 0.01, "expected pivot-centred x 20, got {}", rect.x);
         assert!((rect.y - 15.0).abs() < 0.01, "expected pivot-centred y 15, got {}", rect.y);
+    }
+
+    #[test]
+    fn text_field_child_canvas_scale_does_not_expand_layout_slot() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbScene, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let root = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![2],
+            ty: BbNodeType::WidgetCanvas,
+            name: "root".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(200.0), height: BbValue::Fixed(100.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+        let text = BbNode {
+            id: 2,
+            parent: Some(1),
+            children: vec![3],
+            ty: BbNodeType::WidgetTextField,
+            name: "prompt".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(200.0), height: BbValue::Fixed(60.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+        let backing_canvas = BbNode {
+            id: 3,
+            parent: Some(2),
+            children: vec![],
+            ty: BbNodeType::WidgetCanvas,
+            name: "text_backing_canvas".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Percent(1.0), height: BbValue::Percent(1.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2 { x: 0.5, y: 0.5 },
+            anchor: Vec2 { x: 0.5, y: 0.5 },
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({
+                "scale": { "x": 1.0, "y": 1.5 },
+                "sizingMethod": "Size"
+            }),
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, root);
+        nodes.insert(2, text);
+        nodes.insert(3, backing_canvas);
+        let scene = BbScene { canvas_size: (200.0, 100.0), roots: vec![1], nodes, operations: vec![] };
+
+        let result = layout(&scene, 200, 100);
+        let rect = result.rects[&3];
+
+        assert!((rect.w - 200.0).abs() < 0.01, "expected backing width to fill text slot, got {}", rect.w);
+        assert!((rect.h - 60.0).abs() < 0.01, "expected backing height to stay in text slot, got {}", rect.h);
+        assert!((rect.y - 0.0).abs() < 0.01, "expected backing to remain aligned to text slot, got {}", rect.y);
     }
 
     /// A3-PIVOT.3: when the canvas declares a 4:3 aspect (e.g. 800×600) and the
