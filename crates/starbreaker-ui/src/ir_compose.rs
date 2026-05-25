@@ -1032,23 +1032,65 @@ fn resolved_text_colour(
     style: Option<&crate::ui_ir::UiIrTextStyle>,
     ctx: &ComposeContext<'_>,
 ) -> [u8; 4] {
-    style
-        .and_then(|style| style.colour)
+    explicit_text_colour_override(node)
+        .and_then(|token| resolve_colour_token(ctx, token))
+        .or_else(|| style.and_then(|style| style.colour))
         .or_else(|| {
             style
                 .and_then(|style| style.colour_token.as_deref())
+                .and_then(|token| text_colour_token_override(node, token).or(Some(token)))
                 .and_then(|token| resolve_colour_token(ctx, token))
         })
         .or_else(|| style_tag_colour_token(node).and_then(|token| resolve_colour_token(ctx, token)))
+        .or_else(|| label_style_colour_token(style, node).and_then(|token| resolve_colour_token(ctx, token)))
         .map(rgba_to_u8)
         .unwrap_or([255, 255, 255, 255])
+}
+
+fn explicit_text_colour_override(node: &UiIrNode) -> Option<&'static str> {
+    if node.resolved_style_tags.iter().any(|tag| {
+        tag.tag_name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case("UI_Generic_Flag_03"))
+    }) {
+        Some("Foreground")
+    } else {
+        None
+    }
+}
+
+fn text_colour_token_override<'a>(node: &UiIrNode, token: &'a str) -> Option<&'a str> {
+    let has_emphasis_flag = node.resolved_style_tags.iter().any(|tag| {
+        tag.tag_name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case("UI_Generic_Flag_03"))
+    });
+    if has_emphasis_flag && token.eq_ignore_ascii_case("Bright") {
+        Some("Foreground")
+    } else {
+        None
+    }
+}
+
+fn label_style_colour_token(
+    style: Option<&crate::ui_ir::UiIrTextStyle>,
+    node: &UiIrNode,
+) -> Option<&'static str> {
+    if !node.resolved_style_tags.is_empty() {
+        return None;
+    }
+    match style.and_then(|style| style.label_style.as_deref()) {
+        Some("Heading1" | "Heading3") => Some("Accent1"),
+        _ => None,
+    }
 }
 
 fn style_tag_colour_token(node: &UiIrNode) -> Option<&'static str> {
     node.resolved_style_tags.iter().find_map(|tag| {
         let name = tag.tag_name.as_deref()?.trim().to_ascii_lowercase();
         match name.as_str() {
-            "primary" | "modify" => Some("Accent1"),
+            "primary" | "ui_generic_flag_03" => Some("Foreground"),
+            "modify" => Some("Accent1"),
             _ => None,
         }
     })
@@ -1548,13 +1590,17 @@ fn draw_widget_separator(
     alpha: f32,
 ) {
     let draw_rect = widget_separator_draw_rect(rect, node.stroke_extent);
-    fill_rect_ts(pixmap, draw_rect, style_primary_rgba(ctx), alpha);
+    let colour = resolve_colour_token(ctx, "Accent5").unwrap_or_else(|| style_primary_rgba(ctx));
+    fill_rect_ts(pixmap, draw_rect, colour, alpha);
 }
 
 fn widget_separator_draw_rect(rect: TskRect, stroke_extent: Option<f32>) -> TskRect {
     let Some(stroke_extent) = stroke_extent else {
         return rect;
     };
+    if (rect.height() - 16.0).abs() <= 0.5 && stroke_extent <= 1.0 {
+        return rect;
+    }
     let thickness = (stroke_extent.max(0.5) * 2.0).min(rect.height()).max(1.0);
     TskRect::from_xywh(
         rect.x(),
@@ -2049,7 +2095,7 @@ mod tests {
         node.icon_tint_colour_token = Some("Base".to_string());
 
         assert_eq!(
-            image_tint_for_blit(&node, "UI/Textures/I_InteractiveScreens/Med/i_med_bioc_bottom-bar.tif", None, &ctx),
+            image_tint_for_blit(&node, "UI/Textures/Shared/panel-bar.tif", None, &ctx),
             style_primary_rgba(&ctx)
         );
     }
@@ -2074,10 +2120,40 @@ mod tests {
             tag_name: Some("Primary".to_string()),
         }];
 
-        assert_eq!(resolved_text_colour(&node, None, &ctx), rgba_to_u8(style_primary_rgba(&ctx)));
+        assert_eq!(resolved_text_colour(&node, None, &ctx), [255, 255, 255, 255]);
 
         node.resolved_style_tags[0].tag_name = Some("Modify".to_string());
         assert_eq!(resolved_text_colour(&node, None, &ctx), rgba_to_u8(style_primary_rgba(&ctx)));
+    }
+
+    #[test]
+    fn untagged_heading_text_resolves_to_accent() {
+        let style = stub_style();
+        let defaults = crate::defaults::DefaultValueRegistry::with_well_known_path_defaults();
+        let assets = minimal_swf_assets();
+        let ctx = ComposeContext {
+            style: &style,
+            defaults: &defaults,
+            assets: &assets,
+        };
+        let mut node = blank_node("widget_text_field");
+        node.text_style = Some(crate::ui_ir::UiIrTextStyle {
+            font_record: None,
+            resolved_font_record: None,
+            font_size: crate::ui_ir::UiIrValue::Fixed { value: 28.0 },
+            alignment: "Left".to_string(),
+            vertical_alignment: "Center".to_string(),
+            anchor_to_parent_x: None,
+            anchor_to_parent_y: None,
+            colour: None,
+            colour_token: None,
+            label_style: Some("Heading1".to_string()),
+        });
+
+        assert_eq!(
+            resolved_text_colour(&node, node.text_style.as_ref(), &ctx),
+            rgba_to_u8(style_primary_rgba(&ctx))
+        );
     }
 
     #[test]

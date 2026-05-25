@@ -803,7 +803,12 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
                 h: rect.h,
             },
             background_fill_colour: allow_background_fill
-                .then(|| node.background.as_ref().and_then(|bg| bg.fill_colour))
+                .then(|| {
+                    node.background
+                        .as_ref()
+                        .and_then(|bg| bg.fill_colour)
+                        .or_else(|| node.raw.get("BackgroundColor").and_then(parse_raw_colour))
+                })
                 .flatten(),
             corner_radius: node_corner_radius(node),
             background_fill_colour_token: background_fill_colour_token_from_raw(&node.raw, allow_background_fill),
@@ -1118,6 +1123,15 @@ fn background_fill_colour_token_from_raw(raw: &serde_json::Value, allow_fill_col
 }
 
 fn raw_background_enabled(raw: &serde_json::Value) -> bool {
+    if raw.get("BackgroundColor").is_some()
+        || raw
+            .get("BackgroundColorToken")
+            .and_then(|token| token.as_str())
+            .is_some_and(|token| !token.trim().is_empty())
+    {
+        return true;
+    }
+
     if raw
         .get("EnableBackground")
         .and_then(|enable| enable.as_bool())
@@ -1554,6 +1568,7 @@ fn textfield_fallback_font_size_from_signals(
         "Heading2" if node_rect_h <= 80.0 => Some(28.0),
         "Heading2" => Some(18.0),
         "Heading6" if node_rect_h >= 48.0 => Some(18.0),
+        "Heading1" if text_len >= 32 && node_rect_h <= 120.0 => Some(28.8),
         "Heading1" if node_rect_h <= 80.0 => Some(28.0),
         "Heading1" => Some(40.0),
         _ => None,
@@ -2391,6 +2406,55 @@ mod tests {
         let enabled_panel = ir.nodes.iter().find(|node| node.name == "enabled_panel").expect("enabled panel node");
         assert_eq!(enabled_panel.background_fill_colour, None);
         assert_eq!(enabled_panel.background_fill_colour_token.as_deref(), Some("Bright"));
+    }
+
+    #[test]
+    fn compile_ir_draws_explicit_background_color_on_disabled_base_background() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestExplicitBackgroundColor",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "style_background_panel",
+                        "isActive": true,
+                        "background": {
+                            "enable": false,
+                            "color": null
+                        },
+                        "BackgroundColor": {"r": 0.015, "g": 0.031, "b": 0.09, "a": 0.5},
+                        "BackgroundColorToken": "Background",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-explicit-background-color",
+            Some("BuildingBlocks_Canvas.TestExplicitBackgroundColor"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let panel = ir.nodes.iter().find(|node| node.name == "style_background_panel").expect("panel node");
+        assert_eq!(panel.background_fill_colour, Some([0.015, 0.031, 0.09, 0.5]));
+        assert_eq!(panel.background_fill_colour_token.as_deref(), Some("Background"));
     }
 
     #[test]

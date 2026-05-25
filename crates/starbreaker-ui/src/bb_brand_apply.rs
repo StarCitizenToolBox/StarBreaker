@@ -111,17 +111,13 @@ fn resolve_node_background_color(node: &mut BbNode, palette_source: &serde_json:
     }
 
     let background_color_value = node.raw.get("BackgroundColor");
-    let style_color_value = node
+    let authored_background_color_value = node
         .raw
         .get("background")
         .and_then(|bg| bg.get("color"))
-        .filter(|v| {
-            v.get("_Type_")
-                .and_then(|ty| ty.as_str())
-                .is_some_and(|ty| ty == "BuildingBlocks_ColorStyle")
-        });
+        .filter(|value| !value.is_null());
 
-    let Some(color_value) = background_color_value.or(style_color_value) else {
+    let Some(color_value) = background_color_value.or(authored_background_color_value) else {
         return;
     };
     let Some(color) = parse_color_value(color_value, palette_source) else {
@@ -715,6 +711,16 @@ fn apply_record_ref_field(field_name: &str, value: &str, node: &mut BbNode) {
 /// palette slots. Named slots are resolved against the style record's
 /// `colorStyles[]` array using the standard BuildingBlocks slot ordering.
 fn parse_color_value(value: &serde_json::Value, palette_source: &serde_json::Value) -> Option<[f32; 4]> {
+    if value
+        .get("_Type_")
+        .and_then(|ty| ty.as_str())
+        .is_some_and(|ty| ty == "BuildingBlocks_ColorSolid")
+    {
+        return value
+            .get("color")
+            .and_then(|color| parse_color_value(color, palette_source));
+    }
+
     if value.get("color").and_then(|v| v.as_str()).is_some() && value.get("r").is_none() {
         return parse_named_color(value, palette_source);
     }
@@ -1185,6 +1191,36 @@ mod tests {
         let node = scene.nodes.get(&1).unwrap();
         assert_eq!(node.sizing.width, BbValue::Fixed(640.0));
         assert_eq!(node.sizing.height, BbValue::Fixed(480.0));
+    }
+
+    #[test]
+    fn color_modifier_accepts_color_solid_wrapper() {
+        let mut scene = make_test_scene();
+        scene.nodes.get_mut(&1).unwrap().background = Some(BbBackground::default());
+        let brand = BrandStyle {
+            identifier: "test_brand".to_string(),
+            entries: &[json!({
+                "modifiers": [
+                    {
+                        "_Type_": "BuildingBlocks_FieldModifierColor",
+                        "field": "BackgroundColor",
+                        "color": {
+                            "_Type_": "BuildingBlocks_ColorSolid",
+                            "color": {"_Type_": "SRGBA8", "r": 7, "g": 100, "b": 161, "a": 255}
+                        }
+                    }
+                ]
+            })],
+            raw: &json!({}),
+        };
+
+        apply_brand_modifiers(&mut scene, &brand, None);
+
+        let node = scene.nodes.get(&1).unwrap();
+        assert_eq!(
+            node.background.as_ref().and_then(|bg| bg.fill_colour),
+            Some([7.0 / 255.0, 100.0 / 255.0, 161.0 / 255.0, 1.0])
+        );
     }
 
     #[test]

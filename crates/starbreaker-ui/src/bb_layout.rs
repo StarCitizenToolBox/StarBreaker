@@ -208,16 +208,19 @@ fn layout_node(
     // remaining a no-op for non-cross-axis sizing.
     let naive_w = resolve_value_for_node(node, &node.sizing.width, parent_inner.w, parent_inner.h, csx, true);
     let naive_h = resolve_value_for_node(node, &node.sizing.height, parent_inner.h, parent_inner.w, csy, false);
-    let outer_w = if matches!(node.sizing.width, BbValue::Other { ref behavior, .. } if behavior == "PercentOfY") {
+    let base_outer_w = if matches!(node.sizing.width, BbValue::Other { ref behavior, .. } if behavior == "PercentOfY") {
         resolve_value_for_node(node, &node.sizing.width, parent_inner.w, naive_h, csx, true)
     } else {
         naive_w
     };
-    let outer_h = if matches!(node.sizing.height, BbValue::Other { ref behavior, .. } if behavior == "PercentOfX") {
+    let base_outer_h = if matches!(node.sizing.height, BbValue::Other { ref behavior, .. } if behavior == "PercentOfX") {
         resolve_value_for_node(node, &node.sizing.height, parent_inner.h, naive_w, csy, false)
     } else {
         naive_h
     };
+    let (scale_x, scale_y) = authored_node_scale(node);
+    let outer_w = base_outer_w * scale_x;
+    let outer_h = base_outer_h * scale_y;
 
     // ── 2. Anchor / pivot / position ────────────────────────────────────────
     //
@@ -603,10 +606,10 @@ fn layout_flex_no_grow_children(
             )
         };
         let has_main_axis_intrinsic_override = if is_row {
-            textfield_auto_intrinsic_override(node, &node.sizing.width, csx, true).is_some()
+            textfield_auto_intrinsic_override(node, &node.sizing.width, container.w, csx, true).is_some()
                 || component_button_auto_intrinsic_override(node, &node.sizing.width, csx).is_some()
         } else {
-            textfield_auto_intrinsic_override(node, &node.sizing.height, csy, false).is_some()
+            textfield_auto_intrinsic_override(node, &node.sizing.height, container.h, csy, false).is_some()
                 || component_button_auto_intrinsic_override(node, &node.sizing.height, csy).is_some()
         };
         if auto_main && (is_button_component && auto_intrinsic_hint || has_main_axis_intrinsic_override) {
@@ -952,7 +955,7 @@ fn resolve_value_for_node(
     canvas_scale: f32,
     is_width: bool,
 ) -> f32 {
-    if let Some(override_value) = textfield_auto_intrinsic_override(node, v, canvas_scale, is_width) {
+    if let Some(override_value) = textfield_auto_intrinsic_override(node, v, primary_dim, canvas_scale, is_width) {
         return override_value;
     }
 
@@ -971,6 +974,25 @@ fn resolve_value_for_node(
     } else {
         resolve_value(v, primary_dim, cross_dim, canvas_scale, is_width)
     }
+}
+
+fn authored_node_scale(node: &crate::bb_scene::BbNode) -> (f32, f32) {
+    let Some(scale) = node.raw.get("scale") else {
+        return (1.0, 1.0);
+    };
+    let x = scale
+        .get("x")
+        .and_then(|value| value.as_f64())
+        .map(|value| value as f32)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(1.0);
+    let y = scale
+        .get("y")
+        .and_then(|value| value.as_f64())
+        .map(|value| value as f32)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(1.0);
+    (x, y)
 }
 
 fn component_button_auto_intrinsic_override(
@@ -1001,11 +1023,23 @@ fn component_button_auto_intrinsic_override(
 fn textfield_auto_intrinsic_override(
     node: &crate::bb_scene::BbNode,
     v: &BbValue,
+    primary_dim: f32,
     canvas_scale: f32,
     is_width: bool,
 ) -> Option<f32> {
     if !matches!(node.ty, BbNodeType::WidgetTextField) {
         return None;
+    }
+
+    if is_width
+        && node.pivot.x >= 0.99
+        && node.anchor.x > 1.0
+        && let BbValue::Other { value, behavior } = v
+        && behavior == "Auto"
+        && *value > 0.0
+        && *value <= 1.0
+    {
+        return Some(primary_dim);
     }
 
     let (value, behavior) = match v {
@@ -1943,6 +1977,75 @@ mod tests {
         // Fallback is fill → width = parent_inner.w
         assert!(rect.w > 0.0, "fallback width must be positive");
         assert!(rect.h > 0.0, "fallback height must be positive");
+    }
+
+    #[test]
+    fn authored_scale_expands_rect_around_pivot() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbScene, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let parent = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![2],
+            ty: BbNodeType::WidgetCanvas,
+            name: "parent".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(100.0), height: BbValue::Fixed(100.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+        let child = BbNode {
+            id: 2,
+            parent: Some(1),
+            children: vec![],
+            ty: BbNodeType::WidgetCustomShape,
+            name: "scaled_shape".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(50.0), height: BbValue::Fixed(50.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2 { x: 0.5, y: 0.5 },
+            anchor: Vec2 { x: 0.5, y: 0.5 },
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({
+                "scale": { "x": 1.2, "y": 1.4 }
+            }),
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, parent);
+        nodes.insert(2, child);
+        let scene = BbScene { canvas_size: (100.0, 100.0), roots: vec![1], nodes, operations: vec![] };
+
+        let result = layout(&scene, 100, 100);
+        let rect = result.rects[&2];
+
+        assert!((rect.w - 60.0).abs() < 0.01, "expected scaled width 60, got {}", rect.w);
+        assert!((rect.h - 70.0).abs() < 0.01, "expected scaled height 70, got {}", rect.h);
+        assert!((rect.x - 20.0).abs() < 0.01, "expected pivot-centred x 20, got {}", rect.x);
+        assert!((rect.y - 15.0).abs() < 0.01, "expected pivot-centred y 15, got {}", rect.y);
     }
 
     /// A3-PIVOT.3: when the canvas declares a 4:3 aspect (e.g. 800×600) and the

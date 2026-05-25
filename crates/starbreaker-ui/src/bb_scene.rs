@@ -620,6 +620,13 @@ fn parse_colour(v: Option<&serde_json::Value>) -> Option<[f32; 4]> {
     if obj.is_null() {
         return None;
     }
+    if obj
+        .get("_Type_")
+        .and_then(|ty| ty.as_str())
+        .is_some_and(|ty| ty == "BuildingBlocks_ColorSolid")
+    {
+        return parse_colour(obj.get("color"));
+    }
     let r = obj.get("r").and_then(|c| c.as_f64())? as f32;
     let g = obj.get("g").and_then(|c| c.as_f64())? as f32;
     let b = obj.get("b").and_then(|c| c.as_f64())? as f32;
@@ -853,6 +860,38 @@ mod tests {
         let root_id = scene.roots[0];
         let root = &scene.nodes[&root_id];
         assert_eq!(root.children.len(), 1, "root should have exactly 1 child");
+    }
+
+    #[test]
+    fn parse_background_accepts_color_solid_wrapper() {
+        let canvas = serde_json::json!({
+            "_RecordValue_": {
+                "size": {"x": 100.0, "y": 100.0},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "solid_background",
+                        "isActive": true,
+                        "background": {
+                            "enable": true,
+                            "color": {
+                                "_Type_": "BuildingBlocks_ColorSolid",
+                                "color": {"_Type_": "SRGBA8", "r": 17, "g": 19, "b": 36, "a": 64}
+                            }
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = parse_bb_canvas(&canvas).expect("parse failed");
+        let node = scene.nodes.values().find(|node| node.name == "solid_background").unwrap();
+        assert_eq!(
+            node.background.as_ref().and_then(|bg| bg.fill_colour),
+            Some([17.0 / 255.0, 19.0 / 255.0, 36.0 / 255.0, 64.0 / 255.0])
+        );
     }
 
     // ── MC_S_Self_Master ─────────────────────────────────────────────────────
