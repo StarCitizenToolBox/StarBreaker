@@ -1369,35 +1369,64 @@ fn resolve_effective_font_size(
     defaults: &DefaultValueRegistry,
     style_font_sizes: &HashMap<String, f32>,
 ) -> UiIrValue {
+    let label_style = label_style_name_from_node_or_ancestors(node_id, node, scene);
+
     // Prefer the latest raw font size because style/brand modifiers are applied
     // after parse_text and can update FontSize without mutating BbText.
     if let Some(raw_font_size) = font_size_from_raw(node) {
-        return raw_font_size;
+        return apply_label_style_font_scale(raw_font_size, label_style.as_deref());
     }
 
     // Numeric binding operations can drive FontSize without mutating node.raw.
     if let Some(bound_font_size) = binding_resolver.resolve_field_number(node_id, "FontSize", defaults) {
         if bound_font_size.is_finite() && bound_font_size > 0.0 {
-            return UiIrValue::Fixed {
+            return apply_label_style_font_scale(
+                UiIrValue::Fixed {
                 value: bound_font_size as f32,
-            };
+                },
+                label_style.as_deref(),
+            );
         }
     }
 
     // If this node has no explicit size, borrow the scene-derived size for its
     // label style (when any sibling with the same style has an authored FontSize).
-    if let Some(style_name) = label_style_name_from_node_or_ancestors(node_id, node, scene) {
-        if let Some(size) = style_font_sizes.get(style_name.as_str()) {
-            return UiIrValue::Fixed { value: *size };
+    if let Some(style_name) = label_style.as_deref() {
+        if let Some(size) = style_font_sizes.get(style_name) {
+            return apply_label_style_font_scale(
+                UiIrValue::Fixed { value: *size },
+                Some(style_name),
+            );
         }
     }
 
     if let Some(size) = textfield_fallback_font_size_from_signals(node, node_rect_h, resolved_text) {
-        return UiIrValue::Fixed { value: size };
+        return apply_label_style_font_scale(
+            UiIrValue::Fixed { value: size },
+            label_style.as_deref(),
+        );
     }
 
     // Fall through to whatever parse_text stored.
-    convert_bb_value(&text.font_size)
+    apply_label_style_font_scale(convert_bb_value(&text.font_size), label_style.as_deref())
+}
+
+fn apply_label_style_font_scale(value: UiIrValue, label_style: Option<&str>) -> UiIrValue {
+    let scale: f32 = match label_style {
+        Some("Heading2") => 0.8,
+        _ => 1.0,
+    };
+
+    if (scale - 1.0).abs() <= f32::EPSILON {
+        return value;
+    }
+
+    match value {
+        UiIrValue::Fixed { value } => UiIrValue::Fixed {
+            value: value * scale,
+        },
+        other => other,
+    }
 }
 
 fn font_size_from_raw(node: &crate::bb_scene::BbNode) -> Option<UiIrValue> {
