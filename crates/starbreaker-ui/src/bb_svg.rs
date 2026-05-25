@@ -1,8 +1,8 @@
 //! SVG rasterisation helper for BuildingBlocks UI widgets.
 //!
-//! Provides [`rasterize_svg`] which parses an SVG document, optionally applies a
-//! fill-colour override to every rendered pixel, and returns a decoded RGBA image
-//! sized to the caller-supplied target dimensions.
+//! Provides [`rasterize_svg`] and [`rasterize_svg_nine_slice`] for BuildingBlocks
+//! SVG fills. Both paths optionally apply a fill-colour override and return RGBA
+//! images sized to caller-supplied target dimensions.
 //!
 //! # Fill override
 //! Many Star Citizen UI SVGs are monochrome masks coloured at runtime by a brand
@@ -10,7 +10,7 @@
 //! non-transparent pixel in the rendered output is recoloured to the override RGB
 //! while preserving the rendered SVG alpha mask and scaling opacity by `fill[3]`.
 
-use image::RgbaImage;
+use image::{imageops, RgbaImage};
 use log::warn;
 use tiny_skia_011 as tiny_skia;
 
@@ -73,6 +73,83 @@ pub fn rasterize_svg(
     }
 
     RgbaImage::from_raw(target_w, target_h, bytes)
+}
+
+/// Rasterise an SVG using BuildingBlocks-style nine-slice scaling.
+///
+/// `nine_slice_rect` is `[left, top, right, bottom]` in normalized source-space
+/// coordinates. The source image is divided on those cuts; edge/corner regions
+/// keep their source pixel widths while the center bands stretch to the target.
+pub fn rasterize_svg_nine_slice(
+    svg_bytes: &[u8],
+    target_w: u32,
+    target_h: u32,
+    fill_override: Option<[f32; 4]>,
+    nine_slice_rect: [f32; 4],
+    nine_slice_scale: f32,
+) -> Option<RgbaImage> {
+    if target_w == 0 || target_h == 0 {
+        return None;
+    }
+
+    let opts = usvg::Options::default();
+    let tree = usvg::Tree::from_data(svg_bytes, &opts)
+        .map_err(|e| {
+            warn!("bb_svg: SVG parse failed: {}", e);
+            e
+        })
+        .ok()?;
+
+    let source_w = tree.size().width().round().max(1.0) as u32;
+    let source_h = tree.size().height().round().max(1.0) as u32;
+    let source = rasterize_svg(svg_bytes, source_w, source_h, fill_override)?;
+    let [left, top, right, bottom] = nine_slice_rect;
+    let left = (left.clamp(0.0, 1.0) * source_w as f32).round() as u32;
+    let right = (right.clamp(0.0, 1.0) * source_w as f32).round() as u32;
+    let top = (top.clamp(0.0, 1.0) * source_h as f32).round() as u32;
+    let bottom = (bottom.clamp(0.0, 1.0) * source_h as f32).round() as u32;
+    if left >= right || top >= bottom || right > source_w || bottom > source_h {
+        return rasterize_svg(svg_bytes, target_w, target_h, fill_override);
+    }
+
+    let edge_scale = nine_slice_scale.max(0.0);
+    let left_dst = ((left as f32 * edge_scale).round() as u32).min(target_w);
+    let right_src_w = source_w - right;
+    let right_dst_w = ((right_src_w as f32 * edge_scale).round() as u32).min(target_w.saturating_sub(left_dst));
+    let top_dst = ((top as f32 * edge_scale).round() as u32).min(target_h);
+    let bottom_src_h = source_h - bottom;
+    let bottom_dst_h = ((bottom_src_h as f32 * edge_scale).round() as u32).min(target_h.saturating_sub(top_dst));
+
+    let src_x = [0, left, right, source_w];
+    let src_y = [0, top, bottom, source_h];
+    let dst_x = [0, left_dst, target_w - right_dst_w, target_w];
+    let dst_y = [0, top_dst, target_h - bottom_dst_h, target_h];
+    let mut out = RgbaImage::new(target_w, target_h);
+
+    for y_index in 0..3 {
+        for x_index in 0..3 {
+            let sx = src_x[x_index];
+            let sy = src_y[y_index];
+            let sw = src_x[x_index + 1].saturating_sub(sx);
+            let sh = src_y[y_index + 1].saturating_sub(sy);
+            let dx = dst_x[x_index];
+            let dy = dst_y[y_index];
+            let dw = dst_x[x_index + 1].saturating_sub(dx);
+            let dh = dst_y[y_index + 1].saturating_sub(dy);
+            if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
+                continue;
+            }
+            let patch = imageops::crop_imm(&source, sx, sy, sw, sh).to_image();
+            let resized = if patch.width() == dw && patch.height() == dh {
+                patch
+            } else {
+                imageops::resize(&patch, dw, dh, imageops::FilterType::Nearest)
+            };
+            imageops::overlay(&mut out, &resized, dx.into(), dy.into());
+        }
+    }
+
+    Some(out)
 }
 
 #[cfg(test)]
@@ -154,6 +231,20 @@ mod tests {
             px[0] > px[1] && px[0] > px[2] && px[3] > 0,
             "centre pixel should be red-ish, got {px:?}"
         );
+    }
+
+    #[test]
+    fn nine_slice_preserves_edge_regions_while_stretching_center() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+            <rect x="3" y="0" width="1" height="10" fill="white"/>
+            <rect x="6" y="0" width="1" height="10" fill="white"/>
+        </svg>"#;
+        let img = rasterize_svg_nine_slice(svg, 40, 10, None, [0.4, 0.0, 0.6, 1.0], 1.0)
+            .expect("should rasterize");
+
+        assert!(img.get_pixel(3, 5).0[3] > 0, "left preserved band should keep its original x");
+        assert_eq!(img.get_pixel(12, 5).0[3], 0, "center stretch should not move left line inward");
+        assert!(img.get_pixel(36, 5).0[3] > 0, "right preserved band should stay near target edge");
     }
 
     #[test]

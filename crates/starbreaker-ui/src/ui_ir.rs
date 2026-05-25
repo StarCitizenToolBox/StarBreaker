@@ -195,6 +195,9 @@ pub struct UiIrCustomShape {
     pub shape: Option<String>,
     pub svg_path: Option<String>,
     pub render_shape: Option<bool>,
+    pub enable_nine_slice_rect: Option<bool>,
+    pub nine_slice_rect: Option<[f32; 4]>,
+    pub nine_slice_scale: Option<f32>,
 }
 
 /// Resolved style-tag metadata from source `styleTags[]` entries.
@@ -681,21 +684,40 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
                 .map(str::to_owned);
             let svg_path = node
                 .raw
-                .get("svgFill")
-                .and_then(|sf| sf.get("svgPath"))
+                .get("svgPath")
+                .or_else(|| node.raw.get("svgFill").and_then(|sf| sf.get("svgPath")))
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned);
             let render_shape = node
                 .raw
-                .get("svgFill")
-                .and_then(|sf| sf.get("renderShape"))
+                .get("renderShape")
+                .or_else(|| node.raw.get("svgFill").and_then(|sf| sf.get("renderShape")))
                 .and_then(|v| v.as_bool());
+            let enable_nine_slice_rect = node
+                .raw
+                .get("enableNineSliceRect")
+                .or_else(|| node.raw.get("svgFill").and_then(|sf| sf.get("enableNineSliceRect")))
+                .and_then(|v| v.as_bool());
+            let nine_slice_rect = node
+                .raw
+                .get("nineSliceRect")
+                .or_else(|| node.raw.get("svgFill").and_then(|sf| sf.get("nineSliceRect")))
+                .and_then(parse_nine_slice_rect);
+            let nine_slice_scale = node
+                .raw
+                .get("nineSliceScale")
+                .or_else(|| node.raw.get("svgFill").and_then(|sf| sf.get("nineSliceScale")))
+                .and_then(|v| v.as_f64())
+                .map(|value| value as f32);
             Some(UiIrCustomShape {
                 shape_type,
                 shape,
                 svg_path,
                 render_shape,
+                enable_nine_slice_rect,
+                nine_slice_rect,
+                nine_slice_scale,
             })
         } else {
             None
@@ -1328,6 +1350,14 @@ fn parse_raw_colour(value: &serde_json::Value) -> Option<[f32; 4]> {
     }
 }
 
+fn parse_nine_slice_rect(value: &serde_json::Value) -> Option<[f32; 4]> {
+    let left = value.get("left")?.as_f64()? as f32;
+    let top = value.get("top")?.as_f64()? as f32;
+    let right = value.get("right")?.as_f64()? as f32;
+    let bottom = value.get("bottom")?.as_f64()? as f32;
+    Some([left, top, right, bottom])
+}
+
 fn stroke_colour_token_from_raw(raw: &serde_json::Value) -> Option<String> {
     raw.get("StrokeColorToken")
         .and_then(|value| value.as_str())
@@ -1568,7 +1598,7 @@ fn textfield_fallback_font_size_from_signals(
         "Heading2" if node_rect_h <= 80.0 => Some(28.0),
         "Heading2" => Some(18.0),
         "Heading6" if node_rect_h >= 48.0 => Some(18.0),
-        "Heading1" if text_len >= 32 && node_rect_h <= 120.0 => Some(28.8),
+        "Heading1" if text_len >= 32 && node_rect_h <= 120.0 => Some(27.9),
         "Heading1" if node_rect_h <= 80.0 => Some(28.0),
         "Heading1" => Some(40.0),
         _ => None,

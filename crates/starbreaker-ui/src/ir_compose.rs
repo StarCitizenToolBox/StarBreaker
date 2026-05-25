@@ -230,7 +230,7 @@ fn draw_non_text_node(
                         .then(|| atlas.fetch_raw(&normalised_asset_ref))
                         .flatten()
                 })
-                .and_then(|svg_bytes| crate::bb_svg::rasterize_svg(&svg_bytes, iw, ih, fill_override))
+                .and_then(|svg_bytes| rasterize_custom_shape_svg(node, &svg_bytes, iw, ih, fill_override))
         } else {
             atlas.resolve(asset_ref, iw, ih).or_else(|| {
                 (normalised_asset_ref != asset_ref)
@@ -591,6 +591,30 @@ fn image_blend_mode_for_node(node: &UiIrNode, asset_ref: &str) -> BlendMode {
     }
 }
 
+fn rasterize_custom_shape_svg(
+    node: &UiIrNode,
+    svg_bytes: &[u8],
+    target_w: u32,
+    target_h: u32,
+    fill_override: Option<[f32; 4]>,
+) -> Option<RgbaImage> {
+    let shape = node.custom_shape.as_ref()?;
+    if shape.enable_nine_slice_rect.unwrap_or(false)
+        && let Some(nine_slice_rect) = shape.nine_slice_rect
+    {
+        return crate::bb_svg::rasterize_svg_nine_slice(
+            svg_bytes,
+            target_w,
+            target_h,
+            fill_override,
+            nine_slice_rect,
+            shape.nine_slice_scale.unwrap_or(1.0),
+        );
+    }
+
+    crate::bb_svg::rasterize_svg(svg_bytes, target_w, target_h, fill_override)
+}
+
 fn strip_custom_shape_uniform_matte(img: &RgbaImage) -> RgbaImage {
     let mut opaque_counts: HashMap<[u8; 4], usize> = HashMap::new();
     let mut transparent_count = 0usize;
@@ -711,7 +735,7 @@ pub fn debug_node_draw_rect(node: &UiIrNode, document: &UiIrDocument) -> Rect {
         return meter_rect;
     }
 
-    let rect = ir_rect_to_layout_rect(node.computed_rect);
+    let rect = text_layout_rect_for_node(node);
     rect
 }
 
@@ -1275,6 +1299,30 @@ fn debug_text_drawn_bounds_with_renderer(
     };
 
     Some(DebugTextDrawnBounds { primary, secondary })
+}
+
+fn text_layout_rect_for_node(node: &UiIrNode) -> Rect {
+    let mut rect = ir_rect_to_layout_rect(node.computed_rect);
+    let Some(style) = node.text_style.as_ref() else {
+        return rect;
+    };
+    let Some(label_style) = style.label_style.as_deref() else {
+        return rect;
+    };
+
+    if rect.y < 64.0 && node.anchor[1] <= 0.0 {
+        match label_style {
+            "Heading1" => rect.y += 24.0,
+            "Heading3" if node.anchor[1] < 0.0 => rect.y += 14.0,
+            _ => {}
+        }
+    }
+
+    if label_style == "Heading1" && rect.y < 80.0 && node.pivot[0] >= 0.99 && node.anchor[0] > 1.0 {
+        rect.x -= 43.0;
+    }
+
+    rect
 }
 
 fn text_origin_in_rect(
@@ -1982,6 +2030,9 @@ mod tests {
             shape: None,
             svg_path: None,
             render_shape: Some(true),
+            enable_nine_slice_rect: None,
+            nine_slice_rect: None,
+            nine_slice_scale: None,
         });
         node.background_fill_colour = Some([0.1, 0.2, 0.3, 1.0]);
         node.stroke_colour = Some([0.8, 0.1, 0.1, 1.0]);
@@ -2006,6 +2057,9 @@ mod tests {
             shape: None,
             svg_path: None,
             render_shape: Some(true),
+            enable_nine_slice_rect: None,
+            nine_slice_rect: None,
+            nine_slice_scale: None,
         });
         node.background_fill_colour = Some([0.1, 0.9, 0.1, 1.0]);
         node.icon_tint_colour_token = Some("Accent1".to_string());
@@ -2044,6 +2098,9 @@ mod tests {
             shape: None,
             svg_path: None,
             render_shape: Some(true),
+            enable_nine_slice_rect: None,
+            nine_slice_rect: None,
+            nine_slice_scale: None,
         });
 
         assert_eq!(
@@ -2172,6 +2229,9 @@ mod tests {
             shape: None,
             svg_path: Some("UI/Textures/Vector/General/FingerPrint.svg".to_string()),
             render_shape: Some(true),
+            enable_nine_slice_rect: None,
+            nine_slice_rect: None,
+            nine_slice_scale: None,
         });
         node.icon_tint_colour_token = Some("Accent1".to_string());
         node.resolved_style_tags = vec![UiIrStyleTag {
