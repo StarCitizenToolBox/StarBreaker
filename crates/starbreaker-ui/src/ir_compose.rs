@@ -168,10 +168,6 @@ fn draw_non_text_node(
         return;
     }
 
-    if node.node_type.eq_ignore_ascii_case("widget_body_background") {
-        draw_clinic_body_background_overlays(node, document, ctx, atlas, pixmap);
-    }
-
     if node.meter_progress.is_some() {
         draw_linear_progress_meter(node, ctx, pixmap, tsk_rect);
         return;
@@ -279,78 +275,6 @@ fn draw_non_text_node(
     }
 }
 
-fn draw_clinic_body_background_overlays(
-    node: &UiIrNode,
-    document: &UiIrDocument,
-    ctx: &ComposeContext<'_>,
-    atlas: &AtlasLibrary<'_>,
-    pixmap: &mut Pixmap,
-) {
-    let full_rect = Rect {
-        x: 0.0,
-        y: 0.0,
-        w: document.target_width as f32,
-        h: document.target_height as f32,
-    };
-    let body_rect = ir_rect_to_layout_rect(node.computed_rect);
-    if body_rect.w < 1.0 || body_rect.h < 1.0 {
-        return;
-    }
-    let gradient_iw = full_rect.w.round().max(1.0) as u32;
-    let gradient_ih = full_rect.h.round().max(1.0) as u32;
-
-    let ir_brand_slug = brand_slug_from_ir(document, ctx);
-    let med_brand = med_texture_brand_slug(&ir_brand_slug);
-    let gradient_path = format!(
-        "UI/Textures/I_InteractiveScreens/Med/i_med_{med_brand}_bg_gradient.tif"
-    );
-    let gradient_norm = UiAssetResolver::normalise_path(&gradient_path);
-    if !UiAssetResolver::is_reference_overlay(&gradient_norm)
-        && let Some(img) = atlas.resolve(&gradient_norm, gradient_iw, gradient_ih)
-    {
-        blit_atlas_image_tinted(
-            pixmap,
-            &img,
-            full_rect.x as i32,
-            full_rect.y as i32,
-            [1.0, 1.0, 1.0, 1.0],
-            node.alpha,
-        );
-    }
-
-    let measure_path = format!(
-        "UI/Textures/I_InteractiveScreens/Med/i_med_{med_brand}_measure_vert.tif"
-    );
-    let measure_norm = UiAssetResolver::normalise_path(&measure_path);
-    if UiAssetResolver::is_reference_overlay(&measure_norm) {
-        return;
-    }
-
-    let Some((source_w, source_h)) = atlas.source_dimensions(&measure_norm) else {
-        return;
-    };
-
-    let target_rect = content_scale_anchor_rect(document);
-
-    let target_h = target_rect
-        .map(|rect| {
-            let scale_y = (full_rect.h / rect.h.max(1.0)).max(1.0);
-            (source_h as f32 * scale_y).round().max(1.0) as u32
-        })
-        .unwrap_or(source_h);
-
-    if let Some(img) = atlas.resolve(&measure_norm, source_w, target_h) {
-        blit_atlas_image_tinted(
-            pixmap,
-            &img,
-            body_rect.x as i32,
-            body_rect.y as i32,
-            [1.0, 1.0, 1.0, 1.0],
-            node.alpha,
-        );
-    }
-}
-
 fn brand_slug_from_ir(document: &UiIrDocument, ctx: &ComposeContext<'_>) -> String {
     let source = document.selected_style_source.as_deref().unwrap_or(&ctx.style.name);
     let token = source
@@ -365,10 +289,6 @@ fn brand_slug_from_ir(document: &UiIrDocument, ctx: &ComposeContext<'_>) -> Stri
         .chars()
         .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
         .collect::<String>()
-}
-
-fn med_texture_brand_slug(brand_slug: &str) -> &str {
-    brand_slug
 }
 
 fn draw_manufacturer_logo_ir(
@@ -735,8 +655,7 @@ pub fn debug_node_draw_rect(node: &UiIrNode, document: &UiIrDocument) -> Rect {
         return meter_rect;
     }
 
-    let rect = text_layout_rect_for_node(node);
-    rect
+    ir_rect_to_layout_rect(node.computed_rect)
 }
 
 fn resolved_linear_progress_meter_rect(node: &UiIrNode, document: &UiIrDocument) -> Option<Rect> {
@@ -1301,30 +1220,6 @@ fn debug_text_drawn_bounds_with_renderer(
     Some(DebugTextDrawnBounds { primary, secondary })
 }
 
-fn text_layout_rect_for_node(node: &UiIrNode) -> Rect {
-    let mut rect = ir_rect_to_layout_rect(node.computed_rect);
-    let Some(style) = node.text_style.as_ref() else {
-        return rect;
-    };
-    let Some(label_style) = style.label_style.as_deref() else {
-        return rect;
-    };
-
-    if rect.y < 64.0 && node.anchor[1] <= 0.0 {
-        match label_style {
-            "Heading1" => rect.y += 24.0,
-            "Heading3" if node.anchor[1] < 0.0 => rect.y += 14.0,
-            _ => {}
-        }
-    }
-
-    if label_style == "Heading1" && rect.y < 80.0 && node.pivot[0] >= 0.99 && node.anchor[0] > 1.0 {
-        rect.x -= 43.0;
-    }
-
-    rect
-}
-
 fn text_origin_in_rect(
     renderer: &TextRenderer,
     text: &str,
@@ -1513,30 +1408,6 @@ fn derived_accent_tint(ctx: &ComposeContext<'_>) -> [f32; 4] {
         ctx.style.backlight.b as f32 / 255.0,
         1.0,
     ]
-}
-
-fn content_scale_anchor_rect(document: &UiIrDocument) -> Option<Rect> {
-    let target_w = document.target_width as f32;
-    let target_h = document.target_height as f32;
-
-    document
-        .nodes
-        .iter()
-        .filter(|node| node.node_type.eq_ignore_ascii_case("widget_canvas"))
-        .map(|node| ir_rect_to_layout_rect(node.computed_rect))
-        .filter(|rect| {
-            rect.w >= target_w * 0.25
-                && rect.h >= target_h * 0.12
-                && rect.w <= target_w * 0.98
-                && rect.h <= target_h * 0.98
-        })
-        .max_by(|left, right| {
-            let left_area = left.w * left.h;
-            let right_area = right.w * right.h;
-            left_area
-                .partial_cmp(&right_area)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
 }
 
 fn resolved_text_payload(node: &UiIrNode) -> Option<&str> {

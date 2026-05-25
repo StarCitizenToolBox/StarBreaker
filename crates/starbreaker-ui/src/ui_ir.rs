@@ -327,7 +327,12 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
     animation_sample_percent: Option<f32>,
     confidence: u8,
 ) -> UiIrDocument {
-    let layout = bb_layout::layout(scene, target_size.0, target_size.1);
+    let layout = bb_layout::layout_with_animation_sample(
+        scene,
+        target_size.0,
+        target_size.1,
+        animation_sample_percent,
+    );
     let binding_resolver = BindingResolver::from_operations(&scene.operations);
 
     let has_text = scene.nodes.values().any(|n| n.text.is_some());

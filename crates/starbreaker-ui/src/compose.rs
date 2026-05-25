@@ -244,8 +244,8 @@ fn draw_node(
     ctx: &ComposeContext<'_>,
     atlas: &AtlasLibrary<'_>,
     pixmap: &mut Pixmap,
-    scene: &BbScene,
-    layout_rects: &std::collections::BTreeMap<BbNodeId, Rect>,
+    _scene: &BbScene,
+    _layout_rects: &std::collections::BTreeMap<BbNodeId, Rect>,
 ) {
     let Some(tsk_rect) = TskRect::from_xywh(rect.x, rect.y, rect.w, rect.h) else {
         return;
@@ -289,142 +289,15 @@ fn draw_node(
             else {
                 return;
             };
-            let body_iw = body_rect.w.round().max(1.0) as u32;
-            let body_ih = body_rect.h.round().max(1.0) as u32;
-
             let background_type = node
                 .raw
                 .get("backgroundType")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
-            if background_type.eq_ignore_ascii_case("Texture") {
-                let image_probe = std::env::var("BB_A3_IMAGE_PROBE").as_deref() == Ok("1");
-                if draw_raw_asset(node, body_rect, resolver, atlas, pixmap, alpha) {
-                    return;
-                }
-
-                // Engine-authored medical body backgrounds commonly use implicit
-                // style-branded texture naming for the base gradient.
-                let brand = node_brand_slug(node, ctx);
-                let med_brand = med_texture_brand_slug(&brand);
-                let mut drew_any = false;
-                let gradient_candidates = [format!(
-                    "UI/Textures/I_InteractiveScreens/Med/i_med_{med_brand}_bg_gradient.tif"
-                )];
-                for raw_path in gradient_candidates {
-                    let norm = UiAssetResolver::normalise_path(&raw_path);
-                    if image_probe {
-                        log::info!(
-                            "A3-image-probe: body-bg node={} id=ptr:{} style={} raw={:?} norm={:?}",
-                            node.name,
-                            node.id,
-                            ctx.style.name,
-                            raw_path,
-                            norm
-                        );
-                    }
-                    if UiAssetResolver::is_reference_overlay(&norm) {
-                        continue;
-                    }
-                    if let Some(img) = atlas.resolve(&norm, body_iw, body_ih) {
-                        blit_atlas_image(
-                            pixmap,
-                            &img,
-                            0,
-                            body_rect.y as i32,
-                            alpha,
-                        );
-                        drew_any = true;
-                    } else if image_probe {
-                        log::info!(
-                            "A3-image-probe: body-bg atlas_miss node={} id=ptr:{} norm={:?}",
-                            node.name,
-                            node.id,
-                            norm
-                        );
-                    }
-                }
-
-                let measure_candidates = [format!(
-                    "UI/Textures/I_InteractiveScreens/Med/i_med_{med_brand}_measure_vert.tif"
-                )];
-                for raw_path in measure_candidates {
-                    let norm = UiAssetResolver::normalise_path(&raw_path);
-                    if image_probe {
-                        log::info!(
-                            "A3-image-probe: body-bg measure node={} id=ptr:{} raw={:?} norm={:?}",
-                            node.name,
-                            node.id,
-                            raw_path,
-                            norm
-                        );
-                    }
-                    if UiAssetResolver::is_reference_overlay(&norm) {
-                        continue;
-                    }
-                    let Some((source_w, source_h)) = atlas.source_dimensions(&norm) else {
-                        if image_probe {
-                            log::info!(
-                                "A3-image-probe: body-bg measure dimensions unavailable node={} id=ptr:{} norm={:?}",
-                                node.name,
-                                node.id,
-                                norm
-                            );
-                        }
-                        continue;
-                    };
-                    // Use authored container viewport ratio to apply inverse vertical scale.
-                    // Anchor on the largest authored widget-canvas viewport.
-                    let target_rect = content_scale_anchor_rect(scene, layout_rects);
-                    let target_h = target_rect
-                        .map(|r| {
-                            let scale_y = (body_rect.h / r.h.max(1.0)).max(1.0);
-                            (source_h as f32 * scale_y).round().max(1.0) as u32
-                        })
-                        .unwrap_or(source_h);
-                    if let Some(img) = atlas.resolve(&norm, source_w, target_h) {
-                        if let Some(target_rect) = target_rect {
-                            if image_probe {
-                                log::info!(
-                                    "A3-image-probe: body-bg measure scale node={} id=ptr:{} target_rect=({}, {}, {}, {}) draw=({}, {}) source={}x{} scaled={}x{}",
-                                    node.name,
-                                    node.id,
-                                    target_rect.x as i32,
-                                    target_rect.y as i32,
-                                    target_rect.w as i32,
-                                    target_rect.h as i32,
-                                    body_rect.x as i32,
-                                    body_rect.y as i32,
-                                    source_w,
-                                    source_h,
-                                    img.width(),
-                                    img.height()
-                                );
-                            }
-                            blit_atlas_image(pixmap, &img, body_rect.x as i32, body_rect.y as i32, alpha);
-                        } else {
-                            blit_atlas_image(
-                                pixmap,
-                                &img,
-                                body_rect.x as i32,
-                                body_rect.y as i32,
-                                alpha,
-                            );
-                        }
-                        drew_any = true;
-                    } else if image_probe {
-                        log::info!(
-                            "A3-image-probe: body-bg measure atlas_miss node={} id=ptr:{} norm={:?}",
-                            node.name,
-                            node.id,
-                            norm
-                        );
-                    }
-                }
-
-                if drew_any {
-                    return;
-                }
+            if background_type.eq_ignore_ascii_case("Texture")
+                && draw_raw_asset(node, body_rect, resolver, atlas, pixmap, alpha)
+            {
+                return;
             }
 
             let bl = &ctx.style.backlight;
@@ -785,32 +658,6 @@ fn node_brand_slug(node: &BbNode, ctx: &ComposeContext<'_>) -> String {
         .and_then(|v| v.as_str())
         .map(brand_slug)
         .unwrap_or_else(|| brand_slug(&ctx.style.name))
-}
-
-fn med_texture_brand_slug(brand_slug: &str) -> &str {
-    brand_slug
-}
-
-fn content_scale_anchor_rect(
-    scene: &BbScene,
-    layout_rects: &std::collections::BTreeMap<BbNodeId, Rect>,
-) -> Option<Rect> {
-    layout_rects
-        .iter()
-        .filter_map(|(node_id, rect)| {
-            scene
-                .nodes
-                .get(node_id)
-                .filter(|node| matches!(node.ty, BbNodeType::WidgetCanvas))
-                .map(|_| *rect)
-        })
-        .max_by(|left, right| {
-            let left_area = left.w * left.h;
-            let right_area = right.w * right.h;
-            left_area
-                .partial_cmp(&right_area)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
 }
 
 fn brand_title(slug: &str) -> String {
