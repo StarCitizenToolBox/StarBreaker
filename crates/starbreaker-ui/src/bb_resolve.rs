@@ -94,6 +94,105 @@ fn modular_buttonsecondary_style_path(style_identifier: &str) -> Option<String> 
     ))
 }
 
+fn standard_body_background_widget_path() -> String {
+    "file://./../../../../../../../libs/foundry/records/ui/buildingblocks/modularkit/standard/widgets/bodybackgroundwidgetstandard.json".to_string()
+}
+
+fn body_background_uses_texture(node: &crate::bb_scene::BbNode) -> bool {
+    if !matches!(node.ty, BbNodeType::WidgetBodyBackground) {
+        return false;
+    }
+
+    match node.raw.get("backgroundType") {
+        Some(serde_json::Value::String(value)) => value.eq_ignore_ascii_case("Texture"),
+        Some(serde_json::Value::Number(value)) => value.as_i64() == Some(1),
+        _ => false,
+    }
+}
+
+fn extract_body_background_texture_tag_id(standard_record: &serde_json::Value) -> Option<String> {
+    let record_value = standard_record
+        .get("_RecordValue_")
+        .unwrap_or(standard_record);
+    record_value
+        .get("operations")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .find_map(|operation| {
+            let ty = operation.get("_Type_").and_then(|v| v.as_str())?;
+            if !ty.eq_ignore_ascii_case("BuildingBlocks_BindingsTagFromIntegerSwitch") {
+                return None;
+            }
+            operation
+                .get("values")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+                .find_map(|pair| {
+                    if pair.get("first").and_then(|v| v.as_i64()) != Some(1) {
+                        return None;
+                    }
+                    pair.get("second")
+                        .and_then(|tag| tag.get("_RecordId_"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                })
+        })
+}
+
+fn seed_body_background_texture_tags(scene: &mut BbScene, tag_id: &str) {
+    for node in scene.nodes.values_mut() {
+        if body_background_uses_texture(node)
+            && !node.style_tag_uuids.iter().any(|id| id == tag_id)
+        {
+            node.style_tag_uuids.push(tag_id.to_string());
+        }
+    }
+}
+
+fn apply_body_background_standard_styles(
+    scene: &mut BbScene,
+    standard_record: &serde_json::Value,
+    manufacturer_id: Option<&str>,
+    preferred_brand: Option<&str>,
+    loc_fetcher: Option<&dyn LocFetcher>,
+) {
+    let Some(texture_tag_id) = extract_body_background_texture_tag_id(standard_record) else {
+        return;
+    };
+    seed_body_background_texture_tags(scene, &texture_tag_id);
+    if !scene
+        .nodes
+        .values()
+        .any(|node| body_background_uses_texture(node))
+    {
+        return;
+    }
+
+    let record_value = standard_record
+        .get("_RecordValue_")
+        .unwrap_or(standard_record);
+    if let Some(brand_style) =
+        bb_brand_style::resolve_brand_style(standard_record, None, preferred_brand)
+            .or_else(|| bb_brand_style::resolve_brand_style(standard_record, manufacturer_id, None))
+    {
+        crate::bb_brand_apply::apply_brand_modifiers(scene, &brand_style, loc_fetcher);
+    } else if let Some(entries) = record_value
+        .get("defaultStyles")
+        .and_then(|styles| styles.get("entries"))
+        .and_then(|entries| entries.as_array())
+        .filter(|entries| !entries.is_empty())
+    {
+        let brand = bb_brand_style::BrandStyle {
+            identifier: "BodyBackgroundWidgetStandard.defaultStyles".to_string(),
+            entries: entries.as_slice(),
+            raw: record_value,
+        };
+        crate::bb_brand_apply::apply_brand_modifiers(scene, &brand, loc_fetcher);
+    }
+}
+
 fn extract_rootghost_button_secondary_corner_radius(style_entries: &[serde_json::Value]) -> Option<f32> {
     let root_ghost_entry = style_entries.iter().find(|entry| {
         entry
@@ -407,6 +506,7 @@ pub fn resolve_canvas_graph_with_loc(
         None,
         None,
         None,
+        &HashMap::new(),
     )
 }
 
@@ -424,9 +524,21 @@ fn resolve_canvas_graph_inner(
     inherited_style: Option<&serde_json::Value>,
     inherited_style_identifier: Option<&str>,
     inherited_param_inputs: Option<&[serde_json::Value]>,
+    inherited_boolean_bindings: &HashMap<String, bool>,
 ) -> Result<BbScene, String> {
     let mut scene = parse_bb_canvas(root_json)?;
     let record_value = root_json.get("_RecordValue_").ok_or("missing _RecordValue_")?;
+    let local_boolean_bindings = {
+        let mut bindings = inherited_boolean_bindings.clone();
+        bindings.extend(
+            crate::bb_state_filter::resolved_boolean_variable_bindings_with_param_inputs_and_inherited(
+                record_value,
+                inherited_param_inputs.unwrap_or(&[]),
+                inherited_boolean_bindings,
+            ),
+        );
+        bindings
+    };
 
     if depth >= MAX_CANVAS_DEPTH {
         return Ok(scene);
@@ -547,14 +659,15 @@ fn resolve_canvas_graph_inner(
                 let mut child_scene = match resolve_canvas_graph_inner(
                     &child_json,
                     manufacturer_id,
-                fetch_by_path,
-                loc_fetcher,
-                depth + 1,
-                visited,
-                palette_source,
-                local_style_identifier.as_deref(),
-                match_to_param_inputs.as_deref(),
-            ) {
+                    fetch_by_path,
+                    loc_fetcher,
+                    depth + 1,
+                    visited,
+                    palette_source,
+                    local_style_identifier.as_deref(),
+                    match_to_param_inputs.as_deref(),
+                    &local_boolean_bindings,
+                ) {
                     Ok(scene) => scene,
                     Err(e) => {
                         log::warn!(
@@ -642,9 +755,10 @@ fn resolve_canvas_graph_inner(
         // canvases are inactive at startup and must not be followed in Pass 2.
         // For canvases without any `Instantiated` bindings (e.g. MFD screens)
         // the set is empty and all WidgetCanvas URLs are followed normally.
-        let instantiated_false = crate::bb_state_filter::instantiated_false_widgets_with_param_inputs(
+        let instantiated_false = crate::bb_state_filter::instantiated_false_widgets_with_param_inputs_and_inherited_bindings(
             record_value,
             inherited_param_inputs.unwrap_or(&[]),
+            inherited_boolean_bindings,
         );
 
         deactivate_subtrees(&mut scene, &instantiated_false);
@@ -713,14 +827,15 @@ fn resolve_canvas_graph_inner(
             let mut child_scene = match resolve_canvas_graph_inner(
                 &child_json,
                 manufacturer_id,
-                    fetch_by_path,
-                    loc_fetcher,
-                    depth + 1,
-                    visited,
-                    palette_source,
-                    local_style_identifier.as_deref(),
-                    Some(param_inputs.as_slice()),
-                ) {
+                fetch_by_path,
+                loc_fetcher,
+                depth + 1,
+                visited,
+                palette_source,
+                local_style_identifier.as_deref(),
+                Some(param_inputs.as_slice()),
+                &local_boolean_bindings,
+            ) {
                 Ok(s) => s,
                 Err(e) => {
                     log::warn!(
@@ -747,6 +862,26 @@ fn resolve_canvas_graph_inner(
     //      The linked Style record has the same `entries[]` (StyleEntry) shape
     //      as a brandStyles entry, so we can apply it identically.
     let preferred_brand = local_style_identifier.as_deref();
+    if scene.nodes.values().any(body_background_uses_texture) {
+        let module_path = standard_body_background_widget_path();
+        match fetch_by_path(&module_path) {
+            Ok(standard_record) => apply_body_background_standard_styles(
+                &mut scene,
+                &standard_record,
+                manufacturer_id,
+                preferred_brand,
+                loc_fetcher,
+            ),
+            Err(e) => {
+                log::debug!(
+                    "bb_resolve: no standard body-background widget '{}': {}",
+                    module_path,
+                    e
+                );
+            }
+        }
+    }
+
     if let Some(brand_style) =
         bb_brand_style::resolve_brand_style(root_json, manufacturer_id, preferred_brand)
     {
@@ -1648,6 +1783,61 @@ mod tests {
         );
     }
 
+    #[test]
+    fn texture_body_background_uses_standard_bioc_texture_style() {
+        let body_background_texture_tag = "cc37cf84-f93a-4a60-82a6-efea090069b1";
+        let root = serde_json::json!({
+            "_RecordName_": "I_Med_Test",
+            "_RecordId_": "00000000-0000-0000-0000-000000000200",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_":"Vec3", "x": 1920.0, "y": 1080.0, "z": 0.0},
+                "style": "file://./../../../../../../../libs/foundry/records/ui/buildingblocks/styles/s_bioc.json",
+                "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
+                "brandStyles": [],
+                "scene": [{
+                    "_Pointer_": "ptr:24",
+                    "_Type_": "BuildingBlocks_WidgetBodyBackground",
+                    "name": "Background2D",
+                    "styleTags": [],
+                    "parent": null,
+                    "isActive": true,
+                    "exportNode": true,
+                    "sizing": {
+                        "_Type_": "BuildingBlocks_Size",
+                        "width": {"_Type_": "BuildingBlocks_FixedOrRelativeValue", "value": 64.0, "behavior": "Fixed"},
+                        "height": {"_Type_": "BuildingBlocks_FixedOrRelativeValue", "value": 64.0, "behavior": "Fixed"}
+                    },
+                    "backgroundType": "Texture"
+                }]
+            }
+        });
+        let scene = resolve_canvas_graph(&root, Some("drak"), &|path| {
+            if path.contains("bodybackgroundwidgetstandard") {
+                Ok(body_background_standard_fixture(body_background_texture_tag))
+            } else {
+                Err(format!("no fixture for {path}"))
+            }
+        })
+        .expect("resolve body background");
+
+        let node = scene
+            .nodes
+            .values()
+            .find(|node| node.name == "Background2D")
+            .expect("background node");
+        assert!(
+            node.style_tag_uuids
+                .iter()
+                .any(|tag| tag == body_background_texture_tag),
+            "expected source-derived body-background texture tag"
+        );
+        assert_eq!(
+            node.raw.get("ImagePath").and_then(|value| value.as_str()),
+            Some("UI/Textures/ModularKitStyles/BIOC/BIOC_bg.tif")
+        );
+    }
+
     fn load_fixture(name: &str) -> serde_json::Value {
         let path = format!("{}/tests/fixtures/canvas/{name}", env!("CARGO_MANIFEST_DIR"));
         let text = std::fs::read_to_string(&path)
@@ -1681,6 +1871,91 @@ mod tests {
                     {"_Pointer_": "ptr:2", "_Type_": "BuildingBlocks_WidgetCanvas", "name": "c1", "parent": "_PointsTo_:ptr:1"},
                     {"_Pointer_": "ptr:3", "_Type_": "BuildingBlocks_WidgetCanvas", "name": "c2", "parent": "_PointsTo_:ptr:1"}
                 ]
+            }
+        })
+    }
+
+    fn body_background_standard_fixture(texture_tag: &str) -> serde_json::Value {
+        serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.BodyBackgroundWidgetStandard",
+            "_RecordId_": "0b262f33-a075-42cb-907f-5e2fa3aa9df5",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_":"Vec3", "x": 1920.0, "y": 1080.0, "z": 0.0},
+                "defaultStyles": {
+                    "_Type_": "BuildingBlocks_DefaultStyles",
+                    "sharedStyles": null,
+                    "entries": [{
+                        "_Type_": "BuildingBlocks_StyleEntry",
+                        "name": "BackgroundTexture",
+                        "conditionsList": [{
+                            "_Type_": "BuildingBlocks_StyleConditionList",
+                            "conditions": [{
+                                "_Type_": "BuildingBlocks_StyleSelectorConditionTag",
+                                "tag": {"_RecordId_": texture_tag}
+                            }]
+                        }],
+                        "modifiers": [{
+                            "_Type_": "BuildingBlocks_FieldModifierString",
+                            "field": "ImagePath",
+                            "value": "UI/Textures/ModularKitStyles/_Default/SK_Default_BG.tif"
+                        }]
+                    }]
+                },
+                "brandStyles": [
+                    {
+                        "_Type_": "BuildingBlocks_BrandStyles",
+                        "brandIdentifier": "file://./../../../../../../../../libs/foundry/records/ui/buildingblocks/styles/s_drak.json",
+                        "entries": [{
+                            "_Type_": "BuildingBlocks_StyleEntry",
+                            "name": "Background Texture Style",
+                            "conditionsList": [{
+                                "_Type_": "BuildingBlocks_StyleConditionList",
+                                "conditions": [{
+                                    "_Type_": "BuildingBlocks_StyleSelectorConditionTag",
+                                    "tag": {"_RecordId_": texture_tag}
+                                }]
+                            }],
+                            "modifiers": [{
+                                "_Type_": "BuildingBlocks_FieldModifierString",
+                                "field": "ImagePath",
+                                "value": "UI/Textures/ModularKitStyles/DRAK/Drake_DoorPanel_Background-DarkTheme.tif"
+                            }]
+                        }]
+                    },
+                    {
+                        "_Type_": "BuildingBlocks_BrandStyles",
+                        "brandIdentifier": "file://./../../../../../../../../libs/foundry/records/ui/buildingblocks/styles/s_bioc.json",
+                        "entries": [{
+                            "_Type_": "BuildingBlocks_StyleEntry",
+                            "name": "Background Texture Style",
+                            "conditionsList": [{
+                                "_Type_": "BuildingBlocks_StyleConditionList",
+                                "conditions": [{
+                                    "_Type_": "BuildingBlocks_StyleSelectorConditionTag",
+                                    "tag": {"_RecordId_": texture_tag}
+                                }]
+                            }],
+                            "modifiers": [{
+                                "_Type_": "BuildingBlocks_FieldModifierString",
+                                "field": "ImagePath",
+                                "value": "UI/Textures/ModularKitStyles/BIOC/BIOC_bg.tif"
+                            }]
+                        }]
+                    }
+                ],
+                "scene": [],
+                "operations": [{
+                    "_Type_": "BuildingBlocks_BindingsTagFromIntegerSwitch",
+                    "values": [
+                        {"_Type_": "BuildingBlocks_IntegerTagPair", "first": 0, "second": null},
+                        {
+                            "_Type_": "BuildingBlocks_IntegerTagPair",
+                            "first": 1,
+                            "second": {"_RecordId_": texture_tag}
+                        }
+                    ]
+                }]
             }
         })
     }
@@ -1888,6 +2163,69 @@ mod tests {
             scene.nodes.len(),
             2,
             "inactive widget should not merge child canvas content"
+        );
+    }
+
+    #[test]
+    fn child_canvas_is_active_gate_uses_parent_selected_state() {
+        let host = serde_json::json!({
+            "_RecordName_": "test_host_selected_state",
+            "_RecordId_": "00000000-0000-0000-0000-000000000130",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 800.0, "y": 600.0, "z": 0.0},
+                "staticVariables": [
+                    {"name": "Standing/state.BaseScreens.Attract", "value": true}
+                ],
+                "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "root"},
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetCanvas",
+                        "name": "footer_slot",
+                        "parent": "_PointsTo_:ptr:1",
+                        "canvas": "file://./footer_canvas.json"
+                    }
+                ],
+                "operations": [
+                    {"_Pointer_":"ptr:10","_Type_":"BuildingBlocks_BindingsBooleanVariable","binding":"Standing/state.BaseScreens.Attract"}
+                ]
+            }
+        });
+        let footer = serde_json::json!({
+            "_RecordName_": "footer_canvas",
+            "_RecordId_": "00000000-0000-0000-0000-000000000131",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 800.0, "y": 80.0, "z": 0.0},
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "footer_root"},
+                    {"_Pointer_": "ptr:2", "_Type_": "BuildingBlocks_WidgetTextField", "name": "patient_name", "parent": "_PointsTo_:ptr:1"}
+                ],
+                "operations": [
+                    {"_Pointer_":"ptr:10","_Type_":"BuildingBlocks_BindingsBooleanVariable","binding":"Standing/state.BaseScreens.Attract"},
+                    {"_Pointer_":"ptr:11","_Type_":"BuildingBlocks_BindingsBooleanInvert","input":"_PointsTo_:ptr:10"},
+                    {"_Type_":"BuildingBlocks_BindingsBooleanField","widget":"_PointsTo_:ptr:2","field":"IsActive","input":"_PointsTo_:ptr:11"}
+                ]
+            }
+        });
+
+        let scene = resolve_canvas_graph(&host, None, &|url| {
+            assert_eq!(url, "file://./footer_canvas.json");
+            Ok(footer.clone())
+        })
+        .expect("resolve failed");
+
+        let patient = scene
+            .nodes
+            .values()
+            .find(|node| node.name == "patient_name")
+            .expect("merged footer patient node must exist");
+        assert!(
+            !patient.is_active,
+            "child IsActive gate must inherit the parent's selected Attract state"
         );
     }
 
