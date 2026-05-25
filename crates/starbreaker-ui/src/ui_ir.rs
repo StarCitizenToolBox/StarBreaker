@@ -764,7 +764,7 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
             .and_then(|value| value.as_f64())
             .map(|value| value as f32);
 
-        let allow_background_fill = asset_ref.is_none() || raw_background_enabled(&node.raw);
+        let allow_background_fill = raw_background_enabled(&node.raw);
 
         nodes.push(UiIrNode {
             id,
@@ -806,7 +806,7 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
                 .then(|| node.background.as_ref().and_then(|bg| bg.fill_colour))
                 .flatten(),
             corner_radius: node_corner_radius(node),
-            background_fill_colour_token: background_fill_colour_token_from_raw(&node.raw, asset_ref.is_none()),
+            background_fill_colour_token: background_fill_colour_token_from_raw(&node.raw, allow_background_fill),
             segmented_fill: segmented_fill_from_raw(node),
             border: border_from_node(node),
             stroke_colour: stroke_colour_from_raw(&node.raw),
@@ -1118,6 +1118,14 @@ fn background_fill_colour_token_from_raw(raw: &serde_json::Value, allow_fill_col
 }
 
 fn raw_background_enabled(raw: &serde_json::Value) -> bool {
+    if raw
+        .get("EnableBackground")
+        .and_then(|enable| enable.as_bool())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
     raw.get("background")
         .and_then(|background| background.get("enable"))
         .and_then(|enable| enable.as_bool())
@@ -2309,6 +2317,80 @@ mod tests {
         assert_eq!(node.background_fill_colour, None);
         assert_eq!(node.background_fill_colour_token.as_deref(), None);
         assert_eq!(node.icon_tint_colour_token.as_deref(), Some("Base"));
+    }
+
+    #[test]
+    fn compile_ir_does_not_draw_fill_colour_on_disabled_background_containers() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestDisabledContainerFillTint",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "card_root",
+                        "isActive": true,
+                        "background": {
+                            "enable": false,
+                            "color": null
+                        },
+                        "FillColor": {
+                            "_Type_": "BuildingBlocks_ColorStyle",
+                            "color": "Bright",
+                            "alpha": 1.0
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 80.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "enabled_panel",
+                        "isActive": true,
+                        "background": {
+                            "enable": true,
+                            "color": {
+                                "_Type_": "BuildingBlocks_ColorStyle",
+                                "color": "Bright",
+                                "alpha": 1.0
+                            }
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-disabled-container-fill-tint",
+            Some("BuildingBlocks_Canvas.TestDisabledContainerFillTint"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let card_root = ir.nodes.iter().find(|node| node.name == "card_root").expect("card root node");
+        assert_eq!(card_root.background_fill_colour, None);
+        assert_eq!(card_root.background_fill_colour_token, None);
+
+        let enabled_panel = ir.nodes.iter().find(|node| node.name == "enabled_panel").expect("enabled panel node");
+        assert_eq!(enabled_panel.background_fill_colour, None);
+        assert_eq!(enabled_panel.background_fill_colour_token.as_deref(), Some("Bright"));
     }
 
     #[test]
