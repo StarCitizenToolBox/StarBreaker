@@ -642,6 +642,13 @@ impl SwfAssetLibrary {
         self.exports.get(name).copied()
     }
 
+    /// Iterate all exported linkage symbols and character ids.
+    pub fn export_entries(&self) -> impl Iterator<Item = (&str, CharacterId)> {
+        self.exports
+            .iter()
+            .map(|(name, &id)| (name.as_str(), id))
+    }
+
     /// Return the first-frame display list of a `DefineSprite` character.
     ///
     /// This re-parses the raw SWF bytes on each call. For high-frequency access,

@@ -170,6 +170,8 @@ pub struct UiIrTextStyle {
     pub colour: Option<[f32; 4]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub colour_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label_style: Option<String>,
 }
 
 fn default_vertical_alignment() -> String {
@@ -417,6 +419,7 @@ pub fn compile_ui_ir_from_scene(
                     .map(|value| value as f32),
                 colour: text.colour.or_else(|| fill_colour_from_raw_for_text(&node.raw)),
                 colour_token: text_colour_token_from_raw(&node.raw),
+                label_style: label_style_name_from_raw(node),
             })
         } else if text_payload.is_some() {
             let alignment = node
@@ -481,6 +484,7 @@ pub fn compile_ui_ir_from_scene(
                     .map(|value| value as f32),
                 colour: fill_colour_from_raw_for_text(&node.raw),
                 colour_token: text_colour_token_from_raw(&node.raw),
+                label_style: label_style_name_from_raw(node),
             })
         } else {
             None
@@ -554,6 +558,12 @@ pub fn compile_ui_ir_from_scene(
                     .map(|value| value as f32),
                 colour: None,
                 colour_token: None,
+                label_style: node
+                    .raw
+                    .get("captionProperties")
+                    .and_then(|cp| cp.get("style"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
             })
         } else {
             None
@@ -1413,6 +1423,7 @@ fn resolve_effective_font_size(
 
 fn apply_label_style_font_scale(value: UiIrValue, label_style: Option<&str>) -> UiIrValue {
     let scale: f32 = match label_style {
+        Some("Title3") => 1.15,
         Some("Heading2") => 0.8,
         _ => 1.0,
     };

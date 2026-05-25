@@ -852,11 +852,10 @@ fn draw_text_node(
         .unwrap_or(VerticalAlign::Centre);
 
     let mut colour = resolved_text_colour(node.text_style.as_ref(), ctx);
-
     colour[3] = ((colour[3] as f32) * node.alpha.clamp(0.0, 1.0)).round() as u8;
 
     let selected_font = select_imported_ui_font(ctx, node);
-    let used_swf_font = selected_font.is_some_and(|(_, swf_font)| {
+    let used_swf_font = selected_font.as_ref().is_some_and(|(_, swf_font)| {
         renderer.draw_swf_font(
             img,
             text,
@@ -869,7 +868,7 @@ fn draw_text_node(
         )
     });
     if font_telemetry_enabled() {
-        if let Some((symbol, _)) = selected_font {
+        if let Some((symbol, _)) = selected_font.as_ref() {
             eprintln!(
                 "text-font node='{}' symbol='{}' swf_used={} text='{}'",
                 node.name,
@@ -901,7 +900,7 @@ fn draw_text_node(
     if let Some(UiIrTextPayload::Resolved { text: secondary }) = node.secondary_text_payload.as_ref() {
         let mut secondary_colour = resolved_text_colour(node.secondary_text_style.as_ref(), ctx);
         secondary_colour[3] = ((secondary_colour[3] as f32) * node.alpha.clamp(0.0, 1.0)).round() as u8;
-        let secondary_used_swf = selected_font.is_some_and(|(_, swf_font)| {
+        let secondary_used_swf = selected_font.as_ref().is_some_and(|(_, swf_font)| {
             renderer.draw_swf_font(
                 img,
                 secondary,
@@ -1187,53 +1186,86 @@ fn font_telemetry_enabled() -> bool {
 fn select_imported_ui_font<'a>(
     ctx: &'a ComposeContext<'_>,
     node: &UiIrNode,
-) -> Option<(&'static str, &'a FontGlyphSet)> {
-    // Prefer non-manufacturer-branded UI fonts first; keep branded Drake as a
-    // fallback only when generic text families are unavailable.
-    let preferred_symbols: &[&str] = if node
-        .name
-        .to_ascii_lowercase()
-        .contains("title")
-    {
-        &["$Text1Med", "$Text1Bold", "$OutfitRegular", "$OutfitBold", "$CIGDrake"]
-    } else {
-        &["$Text1Book", "$Text1Med", "$OutfitRegular", "$Opensans", "$CIGDrake"]
-    };
+) -> Option<(String, &'a FontGlyphSet)> {
+    let label_style = node
+        .text_style
+        .as_ref()
+        .and_then(|style| style.label_style.as_deref());
+
+    if matches!(label_style, Some("Title3")) {
+        let mut text1_candidates: Vec<(String, &'a FontGlyphSet)> = ctx
+            .assets
+            .export_entries()
+            .filter(|(symbol, _)| symbol.starts_with("$Text1"))
+            .filter_map(|(symbol, id)| ctx.assets.get_font(id).map(|font| (symbol.to_string(), font)))
+            .collect();
+
+        text1_candidates.sort_by(|(left_name, left_font), (right_name, right_font)| {
+            title3_font_weight_rank(left_name, left_font)
+                .cmp(&title3_font_weight_rank(right_name, right_font))
+                .then_with(|| left_name.cmp(right_name))
+        });
+
+        if let Some((symbol, font)) = text1_candidates.into_iter().next() {
+            return Some((symbol, font));
+        }
+    }
+
+    let preferred_symbols: &[&str] = &["$Text1Book", "$Text1Med", "$OutfitRegular", "$Text1Bold", "$CIGDrake"];
 
     for symbol in preferred_symbols {
         if let Some(id) = ctx.assets.lookup_export(symbol)
             && let Some(font) = ctx.assets.get_font(id)
         {
-            return Some((symbol, font));
+            return Some((symbol.to_string(), font));
         }
     }
 
-    let preferred_font_names: &[(&str, &str)] = if node
-        .name
-        .to_ascii_lowercase()
-        .contains("title")
-    {
-        &[
-            ("Blender Pro Bold", "Blender Pro Bold"),
-            ("Blender Pro Medium", "Blender Pro Medium"),
-            ("Outfit", "Outfit"),
-            ("CIG Drake Font", "CIGDrake"),
-        ]
-    } else {
-        &[
-            ("Blender Pro Medium", "Blender Pro Medium"),
+    let preferred_font_names: &[(&str, &str)] = match label_style {
+        Some("Title3") => &[
+            ("Blender Pro Light", "Blender Pro Light"),
+            ("Blender Pro Regular", "Blender Pro Regular"),
+            ("Blender Pro Thin", "Blender Pro Thin"),
             ("Blender Pro Book", "Blender Pro Book"),
+            ("Blender Pro Medium", "Blender Pro Medium"),
+            ("CIG Drake Font", "CIGDrake"),
+        ],
+        _ => &[
+            ("Blender Pro Book", "Blender Pro Book"),
+            ("Blender Pro Medium", "Blender Pro Medium"),
             ("Outfit", "Outfit"),
             ("Open Sans", "Open Sans"),
             ("CIG Drake Font", "CIGDrake"),
-        ]
+        ],
     };
     for (query, label) in preferred_font_names {
         if let Some(font) = ctx.assets.find_font_by_name(query) {
-            return Some((label, font));
+            return Some((label.to_string(), font));
         }
     }
     None
+}
+
+fn title3_font_weight_rank(symbol: &str, font: &FontGlyphSet) -> i32 {
+    let symbol_lower = symbol.to_ascii_lowercase();
+    let name_lower = font.name.to_ascii_lowercase();
+    let combined = format!("{} {}", symbol_lower, name_lower);
+    let name_rank = if combined.contains("thin") {
+        0
+    } else if combined.contains("light") {
+        1
+    } else if combined.contains("book") {
+        2
+    } else if combined.contains("regular") {
+        3
+    } else if combined.contains("med") || combined.contains("medium") {
+        4
+    } else if combined.contains("bold") {
+        6
+    } else {
+        5
+    };
+    name_rank + if font.is_bold { 10 } else { 0 }
 }
 
 fn derived_accent_tint(ctx: &ComposeContext<'_>) -> [f32; 4] {
