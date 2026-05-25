@@ -129,6 +129,8 @@ pub struct PipelineInputs<'a> {
     pub target_size: (u32, u32),
     /// Apply manufacturer post-process (tint, scanlines, vignette) after rasterisation.
     pub apply_postprocess: bool,
+    /// Optional static animation sample as a percentage in `[0, 100]`.
+    pub animation_sample_percent: Option<f32>,
     /// Localization table loaded from `global.ini` (key → display string).
     ///
     /// When `Some`, `labelProperties.label` keys (e.g. `@hud_NoTarget`) are
@@ -270,7 +272,7 @@ pub fn compile_ir_for_binding(inputs: &PipelineInputs<'_>) -> Result<UiIrDocumen
         }
     }
 
-    Ok(crate::ui_ir::compile_ui_ir_from_scene(
+    Ok(crate::ui_ir::compile_ui_ir_from_scene_with_animation_sample(
         &scene,
         Some(inputs.canvas_fetcher),
         effective_guid,
@@ -282,6 +284,7 @@ pub fn compile_ir_for_binding(inputs: &PipelineInputs<'_>) -> Result<UiIrDocumen
         &[],
         resolved_asset_refs,
         missing_asset_refs,
+        inputs.animation_sample_percent,
         100,
     ))
 }

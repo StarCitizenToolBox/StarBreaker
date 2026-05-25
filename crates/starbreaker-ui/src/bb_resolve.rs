@@ -750,7 +750,16 @@ fn resolve_canvas_graph_inner(
     if let Some(brand_style) =
         bb_brand_style::resolve_brand_style(root_json, manufacturer_id, preferred_brand)
     {
-        crate::bb_brand_apply::apply_brand_modifiers(&mut scene, &brand_style, loc_fetcher);
+        if let Some(palette_source) = palette_source {
+            let palette_brand = bb_brand_style::BrandStyle {
+                identifier: brand_style.identifier,
+                entries: brand_style.entries,
+                raw: palette_source,
+            };
+            crate::bb_brand_apply::apply_brand_modifiers(&mut scene, &palette_brand, loc_fetcher);
+        } else {
+            crate::bb_brand_apply::apply_brand_modifiers(&mut scene, &brand_style, loc_fetcher);
+        }
     } else if let Some(style_value) = local_style_value.as_ref() {
         if let Some(entries) = style_value.get("entries").and_then(|v| v.as_array()) {
             let identifier = record_value

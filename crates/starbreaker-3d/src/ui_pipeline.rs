@@ -289,6 +289,7 @@ pub fn render_ui_binding_png(
         // would mask the "not yet rendered" signal.  Re-enable in Phase 13
         // once the paint engine produces real content.
         apply_postprocess: false,
+        animation_sample_percent: None,
         localization_map: Some(localization_map),
         loc_fetcher: Some(&ini_loc_fetcher),
     };

@@ -229,6 +229,32 @@ fn load_localization_map(workspace_root: &Path) -> Option<HashMap<String, String
     }
 }
 
+fn parse_animation_sample_percent() -> Result<Option<f32>, String> {
+    let mut args = std::env::args().skip(1);
+    let mut animation_sample_percent = None;
+    while let Some(arg) = args.next() {
+        let value = if let Some(value) = arg.strip_prefix("--animation-percent=") {
+            value.to_string()
+        } else if arg == "--animation-percent" {
+            args.next()
+                .ok_or_else(|| "--animation-percent requires a value from 0 to 100".to_string())?
+        } else {
+            return Err(format!(
+                "unknown argument {arg}; supported option: --animation-percent <0..100>"
+            ));
+        };
+
+        let percent = value
+            .parse::<f32>()
+            .map_err(|_| format!("invalid --animation-percent value {value:?}"))?;
+        if !(0.0..=100.0).contains(&percent) {
+            return Err(format!("--animation-percent must be from 0 to 100, got {percent}"));
+        }
+        animation_sample_percent = Some(percent);
+    }
+    Ok(animation_sample_percent)
+}
+
 fn render_medical(
     output_path: &Path,
     guid: &'static str,
@@ -237,6 +263,7 @@ fn render_medical(
     style_fetcher: &FsStyleFetcher,
     file_fetcher: &P4kFileFetcher,
     localization_map: Option<HashMap<String, String>>,
+    animation_sample_percent: Option<f32>,
 ) -> Result<(), String> {
     let binding = UiBindingView {
         canvas_guid: Some(guid),
@@ -256,6 +283,7 @@ fn render_medical(
         asset_fetcher: file_fetcher,
         target_size: (1920, 1080),
         apply_postprocess: false,
+        animation_sample_percent,
         localization_map,
         loc_fetcher: None,
     };
@@ -308,6 +336,7 @@ fn print_layout_locations(inputs: &PipelineInputs<'_>, label: &str, query: &str)
 }
 
 fn main() -> Result<(), String> {
+    let animation_sample_percent = parse_animation_sample_percent()?;
     let workspace = PathBuf::from("/home/tom/projects/scorg_tools");
     let canvas_root = workspace.join("ships/dcb_canvas/libs/foundry/records");
     let localization_map = load_localization_map(&workspace);
@@ -349,6 +378,7 @@ fn main() -> Result<(), String> {
         &style_fetcher,
         &file_fetcher,
         localization_map.clone(),
+        animation_sample_percent,
     )?;
     render_medical(
         &medical2_output,
@@ -358,6 +388,7 @@ fn main() -> Result<(), String> {
         &style_fetcher,
         &file_fetcher,
         localization_map,
+        animation_sample_percent,
     )?;
 
     if let Some(query) = locate_query.as_deref() {
@@ -378,6 +409,7 @@ fn main() -> Result<(), String> {
             asset_fetcher: &file_fetcher,
             target_size: (1920, 1080),
             apply_postprocess: false,
+            animation_sample_percent,
             localization_map: load_localization_map(&workspace),
             loc_fetcher: None,
         };
@@ -400,6 +432,7 @@ fn main() -> Result<(), String> {
             asset_fetcher: &file_fetcher,
             target_size: (1920, 1080),
             apply_postprocess: false,
+            animation_sample_percent,
             localization_map: load_localization_map(&workspace),
             loc_fetcher: None,
         };

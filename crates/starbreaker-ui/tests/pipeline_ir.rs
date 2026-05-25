@@ -122,6 +122,7 @@ fn compile_ir_for_binding_uses_content_canvas_guid() {
         asset_fetcher: &asset_fetcher,
         target_size: (200, 100),
         apply_postprocess: false,
+        animation_sample_percent: None,
         localization_map: None,
         loc_fetcher: None,
     };
@@ -185,6 +186,7 @@ fn compile_ir_for_binding_matches_golden_fixture() {
         asset_fetcher: &asset_fetcher,
         target_size: (200, 100),
         apply_postprocess: false,
+        animation_sample_percent: None,
         localization_map: None,
         loc_fetcher: None,
     };
@@ -249,6 +251,7 @@ fn render_for_binding_ir_produces_nonempty_png() {
         asset_fetcher: &asset_fetcher,
         target_size: (200, 100),
         apply_postprocess: false,
+        animation_sample_percent: None,
         localization_map: None,
         loc_fetcher: None,
     };
@@ -322,6 +325,7 @@ fn render_for_binding_matches_ir_entrypoint_for_bb_canvas() {
         asset_fetcher: &asset_fetcher,
         target_size: (200, 100),
         apply_postprocess: false,
+        animation_sample_percent: None,
         localization_map: None,
         loc_fetcher: None,
     };
@@ -371,6 +375,7 @@ fn render_for_binding_ir_honours_canvas_style_override() {
             name: "drake".to_string(),
             primary_tint: RgbaColor { r: 240, g: 168, b: 104, a: 255 },
             secondary_tint: None,
+            colour_slots: vec![RgbaColor { r: 240, g: 168, b: 104, a: 255 }],
             background: RgbaColor { r: 48, g: 32, b: 16, a: 255 },
             backlight: RgbaColor { r: 0, g: 0, b: 0, a: 255 },
             font_family_hints: Vec::new(),
@@ -397,6 +402,7 @@ fn render_for_binding_ir_honours_canvas_style_override() {
         asset_fetcher: &asset_fetcher,
         target_size: (16, 16),
         apply_postprocess: false,
+        animation_sample_percent: None,
         localization_map: None,
         loc_fetcher: None,
     };

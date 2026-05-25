@@ -85,6 +85,9 @@ pub struct ManufacturerStyle {
     /// highlight or inactive state color).
     pub secondary_tint: Option<RgbaColor>,
 
+    /// Raw BuildingBlocks `colorStyles[]` slots, preserved in source order.
+    pub colour_slots: Vec<RgbaColor>,
+
     /// Canvas background fill color (behind all widgets).
     pub background: RgbaColor,
 
@@ -171,6 +174,7 @@ impl StyleLoader {
             name: self.manufacturer.clone(),
             primary_tint,
             secondary_tint,
+            colour_slots: Vec::new(),
             background,
             backlight,
             font_family_hints,
@@ -209,11 +213,19 @@ impl StyleLoader {
             .unwrap_or(fallback.background);
         let backlight = parse_color_style_slot(color_styles, 11)
             .unwrap_or(fallback.backlight);
+        let mut colour_slots: Vec<RgbaColor> = color_styles
+            .iter()
+            .filter_map(|slot| slot.get("color").and_then(parse_color_value_lossy))
+            .collect();
+        if colour_slots.is_empty() {
+            colour_slots = fallback.colour_slots.clone();
+        }
 
         Ok(ManufacturerStyle {
             name: self.manufacturer.clone(),
             primary_tint,
             secondary_tint: Some(backlight),
+            colour_slots,
             background,
             backlight,
             font_family_hints: fallback.font_family_hints,
@@ -251,6 +263,8 @@ impl StyleLoader {
             primary_tint: RgbaColor { r: 240, g: 168, b: 104, a: 255 },
 
             secondary_tint: None,
+
+            colour_slots: vec![RgbaColor { r: 240, g: 168, b: 104, a: 255 }],
 
             // Dark warm brown #302010 — reference-sampled (Phase 11).
             background: RgbaColor { r: 48, g: 32, b: 16, a: 255 },

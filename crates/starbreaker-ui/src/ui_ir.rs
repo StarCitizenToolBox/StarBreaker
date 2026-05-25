@@ -292,6 +292,38 @@ pub fn compile_ui_ir_from_scene(
     missing_asset_refs: Vec<String>,
     confidence: u8,
 ) -> UiIrDocument {
+    compile_ui_ir_from_scene_with_animation_sample(
+        scene,
+        canvas_fetcher,
+        canvas_guid,
+        canvas_name,
+        target_size,
+        defaults,
+        selected_style_source,
+        selected_swf_source,
+        unresolved_references,
+        resolved_asset_refs,
+        missing_asset_refs,
+        None,
+        confidence,
+    )
+}
+
+pub fn compile_ui_ir_from_scene_with_animation_sample(
+    scene: &BbScene,
+    canvas_fetcher: Option<&dyn CanvasFetcher>,
+    canvas_guid: &str,
+    canvas_name: Option<&str>,
+    target_size: (u32, u32),
+    defaults: &DefaultValueRegistry,
+    selected_style_source: Option<String>,
+    selected_swf_source: Option<String>,
+    unresolved_references: &[String],
+    resolved_asset_refs: Vec<String>,
+    missing_asset_refs: Vec<String>,
+    animation_sample_percent: Option<f32>,
+    confidence: u8,
+) -> UiIrDocument {
     let layout = bb_layout::layout(scene, target_size.0, target_size.1);
     let binding_resolver = BindingResolver::from_operations(&scene.operations);
 
@@ -418,7 +450,9 @@ pub fn compile_ui_ir_from_scene(
                     .and_then(|v| v.as_f64())
                     .map(|value| value as f32),
                 colour: text.colour.or_else(|| fill_colour_from_raw_for_text(&node.raw)),
-                colour_token: text_colour_token_from_raw(&node.raw),
+                colour_token: text_colour_token_from_raw(&node.raw).or_else(|| {
+                    default_style_text_colour_token_from_raw(&node.raw, &node.ty, false)
+                }),
                 label_style: label_style_name_from_raw(node),
             })
         } else if text_payload.is_some() {
@@ -483,7 +517,9 @@ pub fn compile_ui_ir_from_scene(
                     .and_then(|v| v.as_f64())
                     .map(|value| value as f32),
                 colour: fill_colour_from_raw_for_text(&node.raw),
-                colour_token: text_colour_token_from_raw(&node.raw),
+                colour_token: text_colour_token_from_raw(&node.raw).or_else(|| {
+                    default_style_text_colour_token_from_raw(&node.raw, &node.ty, false)
+                }),
                 label_style: label_style_name_from_raw(node),
             })
         } else {
@@ -556,8 +592,10 @@ pub fn compile_ui_ir_from_scene(
                     .and_then(|cp| cp.get("anchorToParentY"))
                     .and_then(|v| v.as_f64())
                     .map(|value| value as f32),
-                colour: None,
-                colour_token: None,
+                colour: fill_colour_from_raw_for_text(&node.raw),
+                colour_token: text_colour_token_from_raw(&node.raw).or_else(|| {
+                    default_style_text_colour_token_from_raw(&node.raw, &node.ty, true)
+                }),
                 label_style: node
                     .raw
                     .get("captionProperties")
@@ -712,10 +750,21 @@ pub fn compile_ui_ir_from_scene(
 
         let alpha = if is_transient_static_pulse_node(node) {
             0.0
+        } else if let Some(sample_percent) = animation_sample_percent {
+            sampled_animation_alpha(&node.raw, sample_percent).unwrap_or_else(|| {
+                representative_animation_alpha(&node.raw).unwrap_or(node.alpha)
+            })
         } else {
             representative_animation_alpha(&node.raw).unwrap_or(node.alpha)
         };
-        let stroke_extent = node.raw.get("strokeExtent").and_then(|value| value.as_f64()).map(|value| value as f32);
+        let stroke_extent = node
+            .raw
+            .get("strokeExtent")
+            .or_else(|| node.raw.get("svgFill").and_then(|svg_fill| svg_fill.get("strokeExtent")))
+            .and_then(|value| value.as_f64())
+            .map(|value| value as f32);
+
+        let allow_background_fill = asset_ref.is_none() || raw_background_enabled(&node.raw);
 
         nodes.push(UiIrNode {
             id,
@@ -753,12 +802,11 @@ pub fn compile_ui_ir_from_scene(
                 w: rect.w,
                 h: rect.h,
             },
-            background_fill_colour: node
-                .background
-                .as_ref()
-                .and_then(|bg| bg.fill_colour),
+            background_fill_colour: allow_background_fill
+                .then(|| node.background.as_ref().and_then(|bg| bg.fill_colour))
+                .flatten(),
             corner_radius: node_corner_radius(node),
-            background_fill_colour_token: background_fill_colour_token_from_raw(&node.raw),
+            background_fill_colour_token: background_fill_colour_token_from_raw(&node.raw, asset_ref.is_none()),
             segmented_fill: segmented_fill_from_raw(node),
             border: border_from_node(node),
             stroke_colour: stroke_colour_from_raw(&node.raw),
@@ -769,7 +817,10 @@ pub fn compile_ui_ir_from_scene(
                 .as_ref()
                 .and_then(|i| i.tint_colour)
                 .or_else(|| custom_shape.as_ref().and_then(|_| fill_colour_from_raw_for_text(&node.raw))),
-            icon_tint_colour_token: icon_tint_colour_token_from_raw(&node.raw),
+            icon_tint_colour_token: icon_tint_colour_token_from_raw(
+                &node.raw,
+                true,
+            ),
             icon_preset: node.icon.as_ref().and_then(|i| i.icon_preset.clone()),
             text_payload,
             secondary_text_payload,
@@ -1035,13 +1086,16 @@ fn is_footer_brand_label_context(scene: &BbScene, mut parent_id: BbNodeId) -> bo
     }
 }
 
-fn background_fill_colour_token_from_raw(raw: &serde_json::Value) -> Option<String> {
+fn background_fill_colour_token_from_raw(raw: &serde_json::Value, allow_fill_colour: bool) -> Option<String> {
     raw.get("BackgroundColorToken")
         .and_then(|value| value.as_str())
         .map(str::trim)
         .filter(|token| !token.is_empty())
         .map(str::to_owned)
         .or_else(|| {
+            if !allow_fill_colour {
+                return None;
+            }
             raw.get("FillColorToken")
                 .and_then(|value| value.as_str())
                 .map(str::trim)
@@ -1049,12 +1103,25 @@ fn background_fill_colour_token_from_raw(raw: &serde_json::Value) -> Option<Stri
                 .map(str::to_owned)
         })
         .or_else(|| {
-    raw.get("background")
-        .and_then(|background| background.get("color"))
-        .and_then(colour_style_token)
-        .or_else(|| raw.get("BackgroundColor").and_then(colour_style_token))
-        .or_else(|| raw.get("FillColor").and_then(colour_style_token))
+            raw.get("background")
+                .and_then(|background| background.get("color"))
+                .and_then(colour_style_token)
+                .or_else(|| raw.get("BackgroundColor").and_then(colour_style_token))
+                .or_else(|| {
+                    if allow_fill_colour {
+                        raw.get("FillColor").and_then(colour_style_token)
+                    } else {
+                        None
+                    }
+                })
         })
+}
+
+fn raw_background_enabled(raw: &serde_json::Value) -> bool {
+    raw.get("background")
+        .and_then(|background| background.get("enable"))
+        .and_then(|enable| enable.as_bool())
+        .unwrap_or(false)
 }
 
 fn border_from_node(node: &BbNode) -> Option<UiIrBorder> {
@@ -1248,18 +1315,22 @@ fn stroke_colour_token_from_raw(raw: &serde_json::Value) -> Option<String> {
         .or_else(|| raw.get("StrokeColor").and_then(colour_style_token))
 }
 
-fn icon_tint_colour_token_from_raw(raw: &serde_json::Value) -> Option<String> {
-    raw.get("FillColorToken")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .map(str::to_owned)
+fn icon_tint_colour_token_from_raw(raw: &serde_json::Value, allow_fill_colour: bool) -> Option<String> {
+    raw.get("iconProperties")
+        .and_then(|properties| properties.get("color"))
+        .and_then(colour_style_token)
         .or_else(|| {
-            raw.get("iconProperties")
-                .and_then(|properties| properties.get("color"))
-                .and_then(colour_style_token)
+            allow_fill_colour.then(|| {
+                raw.get("FillColorToken")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|token| !token.is_empty())
+                    .map(str::to_owned)
+            }).flatten()
         })
-        .or_else(|| raw.get("FillColor").and_then(colour_style_token))
+        .or_else(|| {
+            allow_fill_colour.then(|| raw.get("FillColor").and_then(colour_style_token)).flatten()
+        })
 }
 
 fn text_colour_token_from_raw(raw: &serde_json::Value) -> Option<String> {
@@ -1271,6 +1342,28 @@ fn text_colour_token_from_raw(raw: &serde_json::Value) -> Option<String> {
         .or_else(|| raw.get("textColor").and_then(colour_style_token))
         .or_else(|| raw.get("textColour").and_then(colour_style_token))
         .or_else(|| raw.get("FillColor").and_then(colour_style_token))
+}
+
+fn default_style_text_colour_token_from_raw(
+    raw: &serde_json::Value,
+    node_type: &BbNodeType,
+    is_secondary: bool,
+) -> Option<String> {
+    if is_secondary {
+        return None;
+    }
+    if !node_type_name(node_type).eq_ignore_ascii_case("BuildingBlocks_ComponentLabelCaptionPair") {
+        return None;
+    }
+
+    raw.get("__BrandIdentifier")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|identifier| {
+            let lower = identifier.to_ascii_lowercase();
+            lower.starts_with("s_") || lower.starts_with("gen_")
+        })
+        .map(|_| "Base".to_string())
 }
 
 fn colour_style_token(value: &serde_json::Value) -> Option<String> {
@@ -1454,7 +1547,7 @@ fn textfield_fallback_font_size_from_signals(
         "Heading2" => Some(18.0),
         "Heading6" if node_rect_h >= 48.0 => Some(18.0),
         "Heading1" if node_rect_h <= 80.0 => Some(28.0),
-        "Heading1" => Some(37.0),
+        "Heading1" => Some(40.0),
         _ => None,
     }
 }
@@ -1678,6 +1771,45 @@ fn representative_animation_alpha(raw: &serde_json::Value) -> Option<f32> {
         .into_iter()
         .map(|(_, value)| value.clamp(0.0, 1.0))
         .max_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal))
+}
+
+fn sampled_animation_alpha(raw: &serde_json::Value, sample_percent: f32) -> Option<f32> {
+    sampled_animation_number(raw, "Alpha", sample_percent).map(|value| value.clamp(0.0, 1.0))
+}
+
+fn sampled_animation_number(raw: &serde_json::Value, field_name: &str, sample_percent: f32) -> Option<f32> {
+    let mut keyframes = animation_number_keyframes(raw, field_name);
+    if keyframes.is_empty() {
+        return None;
+    }
+    keyframes.sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let timeline_max = keyframes.last().map(|(percent, _)| *percent).unwrap_or(1.0);
+    let sample = if timeline_max <= 1.0 {
+        sample_percent as f64 / 100.0
+    } else {
+        sample_percent as f64
+    };
+
+    let first = keyframes[0];
+    if sample <= first.0 {
+        return Some(first.1);
+    }
+
+    for window in keyframes.windows(2) {
+        let (left_percent, left_value) = window[0];
+        let (right_percent, right_value) = window[1];
+        if sample <= right_percent {
+            let span = right_percent - left_percent;
+            if span <= f64::EPSILON {
+                return Some(right_value);
+            }
+            let t = ((sample - left_percent) / span) as f32;
+            return Some(left_value + (right_value - left_value) * t);
+        }
+    }
+
+    keyframes.last().map(|(_, value)| *value)
 }
 
 fn is_transient_static_pulse_node(node: &BbNode) -> bool {
@@ -2061,6 +2193,125 @@ mod tests {
     }
 
     #[test]
+    fn compile_ir_limits_style_palette_text_default_to_label_caption() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestStylePaletteTextColour",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "palette_text",
+                        "isActive": true,
+                        "text": "PATIENT NAME",
+                        "__BrandIdentifier": "s_bioc",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_ComponentLabelCaptionPair",
+                        "name": "palette_pair",
+                        "isActive": true,
+                        "__BrandIdentifier": "s_bioc",
+                        "labelProperties": {
+                            "label": "PATIENT NAME",
+                            "style": "Heading3"
+                        },
+                        "alignment": "Left",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-style-palette-text-colour",
+            Some("BuildingBlocks_Canvas.TestStylePaletteTextColour"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "palette_text").expect("palette text node");
+        assert_eq!(
+            node.text_style.as_ref().and_then(|style| style.colour_token.as_deref()),
+            None
+        );
+
+        let pair = ir.nodes.iter().find(|node| node.name == "palette_pair").expect("palette pair node");
+        assert_eq!(
+            pair.text_style.as_ref().and_then(|style| style.colour_token.as_deref()),
+            Some("Base")
+        );
+    }
+
+    #[test]
+    fn compile_ir_keeps_asset_fill_colour_as_tint_not_background() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestAssetFillTint",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetImage",
+                        "name": "bottom_bar",
+                        "isActive": true,
+                        "ImagePath": "UI/Textures/I_InteractiveScreens/Med/i_med_bioc_bottom-bar.tif",
+                        "FillColor": {
+                            "_Type_": "BuildingBlocks_ColorStyle",
+                            "color": "Base",
+                            "alpha": 1.0
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-asset-fill-tint",
+            Some("BuildingBlocks_Canvas.TestAssetFillTint"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "bottom_bar").expect("bottom bar node");
+        assert_eq!(node.background_fill_colour, None);
+        assert_eq!(node.background_fill_colour_token.as_deref(), None);
+        assert_eq!(node.icon_tint_colour_token.as_deref(), Some("Base"));
+    }
+
+    #[test]
     fn compile_ir_uses_representative_animation_alpha_for_static_render() {
         let canvas = serde_json::json!({
             "_RecordName_": "BuildingBlocks_Canvas.TestAnimationStart",
@@ -2220,6 +2471,65 @@ mod tests {
     }
 
     #[test]
+    fn compile_ir_samples_animation_alpha_at_requested_percent() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestAnimationSample",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "fingerprint_like",
+                        "isActive": true,
+                        "alpha": 1.0,
+                        "text": "SCAN",
+                        "animation": {
+                            "animationTimeline": {
+                                "keyframes": [
+                                    {
+                                        "percent": 0.0,
+                                        "modifiers": [{"modifier": {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "Alpha", "value": 0.0}}]
+                                    },
+                                    {
+                                        "percent": 1.0,
+                                        "modifiers": [{"modifier": {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "Alpha", "value": 1.0}}]
+                                    }
+                                ]
+                            }
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 20.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene_with_animation_sample(
+            &scene,
+            None,
+            "guid-animation-sample",
+            Some("BuildingBlocks_Canvas.TestAnimationSample"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            Some(50.0),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "fingerprint_like").expect("sample node");
+        assert!((node.alpha - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn compile_ir_emits_border_and_stroke_metadata() {
         let canvas = serde_json::json!({
             "_RecordName_": "BuildingBlocks_Canvas.TestBorderStroke",
@@ -2277,6 +2587,53 @@ mod tests {
         assert_eq!(node.stroke_colour, Some([0.25, 0.5, 0.75, 1.0]));
         assert_eq!(node.stroke_colour_token.as_deref(), Some("Accent4"));
         assert_eq!(node.stroke_extent, Some(1.5));
+    }
+
+    #[test]
+    fn compile_ir_reads_svg_fill_stroke_extent() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestSvgFillStrokeExtent",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetSeparator",
+                        "name": "separator",
+                        "isActive": true,
+                        "sizing": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 8.0}
+                        },
+                        "svgFill": {
+                            "renderShape": true,
+                            "enableColorOverlay": true,
+                            "strokeExtent": 1.0
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-svg-fill-stroke-extent",
+            Some("BuildingBlocks_Canvas.TestSvgFillStrokeExtent"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "separator").expect("separator node");
+        assert_eq!(node.stroke_extent, Some(1.0));
     }
 
     #[test]
@@ -2772,7 +3129,7 @@ mod tests {
             .find(|node| node.name == "target")
             .expect("target node");
         let style = target.text_style.as_ref().expect("text style");
-        assert_eq!(style.font_size, UiIrValue::Fixed { value: 37.0 });
+        assert_eq!(style.font_size, UiIrValue::Fixed { value: 40.0 });
     }
 
     #[test]

@@ -314,6 +314,7 @@ fn main() -> Result<(), String> {
         asset_fetcher: &asset_fetcher,
         target_size: (width, height),
         apply_postprocess: false,
+        animation_sample_percent: None,
         localization_map: None,
         loc_fetcher: None,
     };

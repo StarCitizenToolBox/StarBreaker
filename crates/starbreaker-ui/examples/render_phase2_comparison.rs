@@ -53,6 +53,7 @@ fn stub_style() -> ManufacturerStyle {
         name: "drak".to_string(),
         primary_tint: RgbaColor { r: 240, g: 168, b: 104, a: 255 },
         secondary_tint: None,
+        colour_slots: vec![RgbaColor { r: 240, g: 168, b: 104, a: 255 }],
         background: RgbaColor { r: 48, g: 32, b: 16, a: 255 },
         backlight: RgbaColor { r: 102, g: 214, b: 255, a: 255 },
         font_family_hints: Vec::new(),

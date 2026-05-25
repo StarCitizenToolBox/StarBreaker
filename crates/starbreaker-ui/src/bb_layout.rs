@@ -1037,7 +1037,7 @@ fn textfield_auto_intrinsic_override(
         return Some(180.0 * canvas_scale);
     }
     if is_width && !affects_layout && is_bright && style == "Title3" {
-        return Some(180.0 * canvas_scale);
+        return Some((180.0 * value * value) * canvas_scale);
     }
 
     if !is_width && style == "Title3" && is_primary {
@@ -1719,6 +1719,79 @@ mod tests {
         assert!((prompt.x - 150.0).abs() < 0.5, "expected prompt without cross-axis anchor offset at centered x, got {}", prompt.x);
         assert!((prompt.h - 60.0).abs() < 0.5, "expected prompt intrinsic height 60, got {}", prompt.h);
         assert!((touch.y - 495.0).abs() < 0.5, "expected touch canvas after intrinsic text slots, got {}", touch.y);
+    }
+
+    #[test]
+    fn inactive_bright_title3_auto_width_uses_authored_scale() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let root = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![2],
+            ty: BbNodeType::DisplayWidget,
+            name: "root".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(1344.0), height: BbValue::Fixed(270.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+
+        let tier = BbNode {
+            id: 2,
+            parent: Some(1),
+            children: vec![],
+            ty: BbNodeType::WidgetTextField,
+            name: "TierLevel".into(),
+            style_tag_uuids: vec!["174b3e40-1b7b-4f01-a7dc-6420b7367d6b".into()],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing {
+                width: BbValue::Other { value: 0.9, behavior: "Auto".into() },
+                height: BbValue::Other { value: 1.0, behavior: "Auto".into() },
+            },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2 { x: 0.5, y: 0.5 },
+            anchor: Vec2 { x: 0.01, y: 0.5 },
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({
+                "affectsLayout": false,
+                "labelProperties": {"style": "Title3"},
+                "textAlignment": "Left"
+            }),
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, root);
+        nodes.insert(2, tier);
+        let scene = BbScene { canvas_size: (1344.0, 270.0), roots: vec![1], nodes, operations: vec![] };
+
+        let result = layout(&scene, 1344, 270);
+        let tier = result.rects[&2];
+
+        assert!((tier.w - 145.8).abs() < 0.5, "expected authored Auto width scale to affect Title3 intrinsic width, got {}", tier.w);
+        assert!((tier.x + tier.w * 0.5 - 13.44).abs() < 0.5, "expected anchor/pivot to stay attached to authored 1% anchor, got x={} w={}", tier.x, tier.w);
     }
 
     // ── A1.6 — fixture-based layout tests ────────────────────────────────────

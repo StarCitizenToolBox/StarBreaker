@@ -164,7 +164,7 @@ fn draw_non_text_node(
         .eq_ignore_ascii_case("BuildingBlocks_WidgetSeparator")
         || node.node_type.eq_ignore_ascii_case("widget_separator")
     {
-        draw_widget_separator(ctx, pixmap, tsk_rect, node.alpha);
+        draw_widget_separator(ctx, pixmap, node, tsk_rect, node.alpha);
         return;
     }
 
@@ -249,18 +249,9 @@ fn draw_non_text_node(
             }
             let draw_x = rect.x as i32;
             let draw_y = rect.y as i32;
-            let tint = image_tint_for_blit(node, asset_ref, fill_override);
+            let tint = image_tint_for_blit(node, asset_ref, fill_override, ctx);
 
-            let blend_mode = if node
-                .custom_shape
-                .as_ref()
-                .and_then(|shape| shape.render_shape)
-                .unwrap_or(false)
-            {
-                BlendMode::Plus
-            } else {
-                BlendMode::SourceOver
-            };
+            let blend_mode = image_blend_mode_for_node(node, asset_ref);
 
             blit_atlas_image_tinted_with_mode(pixmap, &img, draw_x, draw_y, tint, node.alpha, blend_mode);
         }
@@ -489,7 +480,14 @@ fn resolve_colour_token(ctx: &ComposeContext<'_>, token: &str) -> Option<[f32; 4
     }
 
     match key.as_str() {
-        "accent1" | "base" | "bright" => Some(style_primary_rgba(ctx)),
+        "accent1" | "base" | "bright" => style_colour_slot_rgba(ctx, 0).or_else(|| Some(style_primary_rgba(ctx))),
+        "accent2" | "positive" | "success" => style_colour_slot_rgba(ctx, 1),
+        "accent3" | "warning" => style_colour_slot_rgba(ctx, 2),
+        "accent4" | "critical" | "negative" => style_colour_slot_rgba(ctx, 3).or(Some([1.0, 0.2, 0.2, 1.0])),
+        "accent5" | "contactunknown" => style_colour_slot_rgba(ctx, 4),
+        "mid" | "contactneutral" => style_colour_slot_rgba(ctx, 5),
+        "light" | "disabled" => style_colour_slot_rgba(ctx, 6),
+        "highlight" | "contactpositiverep" => style_colour_slot_rgba(ctx, 7),
         "primarytext" | "text" | "foreground" | "fg" | "white" => Some([1.0, 1.0, 1.0, 1.0]),
         "background" => Some([
             ctx.style.background.r as f32 / 255.0,
@@ -505,9 +503,22 @@ fn resolve_colour_token(ctx: &ComposeContext<'_>, token: &str) -> Option<[f32; 4
                 colour.a as f32 / 255.0,
             ]
         }),
-        "critical" => Some([1.0, 0.2, 0.2, 1.0]),
+        "surface" => style_colour_slot_rgba(ctx, 8),
+        "bg" => style_colour_slot_rgba(ctx, 9),
+        "backlight" | "contactagressive" | "contactaggressive" => style_colour_slot_rgba(ctx, 11),
         _ => None,
     }
+}
+
+fn style_colour_slot_rgba(ctx: &ComposeContext<'_>, index: usize) -> Option<[f32; 4]> {
+    ctx.style.colour_slots.get(index).map(|colour| {
+        [
+            colour.r as f32 / 255.0,
+            colour.g as f32 / 255.0,
+            colour.b as f32 / 255.0,
+            colour.a as f32 / 255.0,
+        ]
+    })
 }
 
 fn custom_shape_fill_override(node: &UiIrNode, ctx: &ComposeContext<'_>) -> Option<[f32; 4]> {
@@ -520,7 +531,9 @@ fn custom_shape_fill_override(node: &UiIrNode, ctx: &ComposeContext<'_>) -> Opti
         return None;
     }
 
-    node.icon_tint_colour
+    custom_shape_style_tag_colour_token(node)
+        .and_then(|token| resolve_colour_token(ctx, token))
+        .or(node.icon_tint_colour)
         .or_else(|| {
             node.icon_tint_colour_token
                 .as_deref()
@@ -544,13 +557,37 @@ fn image_tint_for_blit(
     node: &UiIrNode,
     asset_ref: &str,
     fill_override: Option<[f32; 4]>,
+    ctx: &ComposeContext<'_>,
 ) -> [f32; 4] {
     if fill_override.is_some()
         && UiAssetResolver::normalise_path(asset_ref).ends_with(".svg")
     {
         [1.0, 1.0, 1.0, 1.0]
     } else {
-        node.icon_tint_colour.unwrap_or([1.0, 1.0, 1.0, 1.0])
+        node.icon_tint_colour
+            .or_else(|| {
+                node.icon_tint_colour_token
+                    .as_deref()
+                    .and_then(|token| resolve_colour_token(ctx, token))
+            })
+            .unwrap_or([1.0, 1.0, 1.0, 1.0])
+    }
+}
+
+fn image_blend_mode_for_node(node: &UiIrNode, asset_ref: &str) -> BlendMode {
+    let render_shape = node
+        .custom_shape
+        .as_ref()
+        .and_then(|shape| shape.render_shape)
+        .unwrap_or(false);
+    if !render_shape {
+        return BlendMode::SourceOver;
+    }
+
+    if UiAssetResolver::normalise_path(asset_ref).ends_with(".svg") {
+        BlendMode::SourceOver
+    } else {
+        BlendMode::Plus
     }
 }
 
@@ -581,7 +618,8 @@ fn strip_custom_shape_uniform_matte(img: &RgbaImage) -> RgbaImage {
 
     let total_opaque: usize = opaque_counts.values().sum();
     let matte_fraction = matte_count as f32 / total_opaque.max(1) as f32;
-    if matte_fraction < 0.85 {
+    let full_image_fraction = matte_count as f32 / img.as_raw().chunks_exact(4).len().max(1) as f32;
+    if matte_fraction < 0.85 || full_image_fraction < 0.5 {
         return img.clone();
     }
 
@@ -1011,6 +1049,17 @@ fn style_tag_colour_token(node: &UiIrNode) -> Option<&'static str> {
         let name = tag.tag_name.as_deref()?.trim().to_ascii_lowercase();
         match name.as_str() {
             "primary" | "modify" => Some("Accent1"),
+            _ => None,
+        }
+    })
+}
+
+fn custom_shape_style_tag_colour_token(node: &UiIrNode) -> Option<&'static str> {
+    node.resolved_style_tags.iter().find_map(|tag| {
+        let name = tag.tag_name.as_deref()?.trim().to_ascii_lowercase();
+        match name.as_str() {
+            "primary" => Some("Accent1"),
+            "modify" => Some("Accent5"),
             _ => None,
         }
     })
@@ -1494,10 +1543,26 @@ fn draw_widget_circle(node: &UiIrNode, pixmap: &mut Pixmap, rect: TskRect) {
 fn draw_widget_separator(
     ctx: &ComposeContext<'_>,
     pixmap: &mut Pixmap,
+    node: &UiIrNode,
     rect: TskRect,
     alpha: f32,
 ) {
-    fill_rect_ts(pixmap, rect, style_primary_rgba(ctx), alpha);
+    let draw_rect = widget_separator_draw_rect(rect, node.stroke_extent);
+    fill_rect_ts(pixmap, draw_rect, style_primary_rgba(ctx), alpha);
+}
+
+fn widget_separator_draw_rect(rect: TskRect, stroke_extent: Option<f32>) -> TskRect {
+    let Some(stroke_extent) = stroke_extent else {
+        return rect;
+    };
+    let thickness = (stroke_extent.max(0.5) * 2.0).min(rect.height()).max(1.0);
+    TskRect::from_xywh(
+        rect.x(),
+        rect.y() + (rect.height() - thickness) * 0.5,
+        rect.width(),
+        thickness,
+    )
+    .unwrap_or(rect)
 }
 
 fn draw_rect_stroke_ts(
@@ -1775,6 +1840,13 @@ mod tests {
             name: "drak".to_string(),
             primary_tint: RgbaColor { r: 240, g: 168, b: 104, a: 255 },
             secondary_tint: None,
+            colour_slots: vec![
+                RgbaColor { r: 240, g: 168, b: 104, a: 255 },
+                RgbaColor { r: 67, g: 221, b: 147, a: 255 },
+                RgbaColor { r: 228, g: 218, b: 77, a: 255 },
+                RgbaColor { r: 201, g: 51, b: 51, a: 255 },
+                RgbaColor { r: 0, g: 113, b: 188, a: 255 },
+            ],
             background: RgbaColor { r: 48, g: 32, b: 16, a: 255 },
             backlight: RgbaColor { r: 102, g: 214, b: 255, a: 255 },
             font_family_hints: Vec::new(),
@@ -1835,6 +1907,19 @@ mod tests {
     }
 
     #[test]
+    fn widget_separator_uses_centered_svg_stroke_extent() {
+        let rect = TskRect::from_xywh(10.0, 20.0, 80.0, 8.0).expect("test rect");
+        let draw_rect = widget_separator_draw_rect(rect, Some(1.0));
+        assert_eq!(draw_rect.x(), 10.0);
+        assert_eq!(draw_rect.y(), 23.0);
+        assert_eq!(draw_rect.width(), 80.0);
+        assert_eq!(draw_rect.height(), 2.0);
+
+        let fallback = widget_separator_draw_rect(rect, None);
+        assert_eq!(fallback, rect);
+    }
+
+    #[test]
     fn custom_shape_fill_prefers_fill_tint_over_stroke() {
         let style = stub_style();
         let defaults = crate::defaults::DefaultValueRegistry::with_well_known_path_defaults();
@@ -1884,21 +1969,93 @@ mod tests {
 
     #[test]
     fn svg_fill_override_disables_second_blit_tint() {
+        let style = stub_style();
+        let defaults = crate::defaults::DefaultValueRegistry::with_well_known_path_defaults();
+        let assets = minimal_swf_assets();
+        let ctx = ComposeContext {
+            style: &style,
+            defaults: &defaults,
+            assets: &assets,
+        };
         let mut node = blank_node("widget_custom_shape");
         node.icon_tint_colour = Some([0.2, 0.6, 0.9, 1.0]);
 
         assert_eq!(
-            image_tint_for_blit(&node, "UI/Textures/Vector/General/FingerPrint.svg", Some([0.2, 0.6, 0.9, 1.0])),
+            image_tint_for_blit(&node, "UI/Textures/Vector/General/FingerPrint.svg", Some([0.2, 0.6, 0.9, 1.0]), &ctx),
             [1.0, 1.0, 1.0, 1.0]
         );
         assert_eq!(
-            image_tint_for_blit(&node, "UI/Textures/Icons/FingerPrint.dds", Some([0.2, 0.6, 0.9, 1.0])),
+            image_tint_for_blit(&node, "UI/Textures/Icons/FingerPrint.dds", Some([0.2, 0.6, 0.9, 1.0]), &ctx),
             [0.2, 0.6, 0.9, 1.0]
         );
     }
 
     #[test]
-    fn accent1_and_color_style_tags_resolve_to_primary_tint() {
+    fn custom_shape_svg_uses_source_over_blend() {
+        let mut node = blank_node("widget_custom_shape");
+        node.custom_shape = Some(UiIrCustomShape {
+            shape_type: None,
+            shape: None,
+            svg_path: None,
+            render_shape: Some(true),
+        });
+
+        assert_eq!(
+            image_blend_mode_for_node(&node, "UI/Textures/Vector/General/FingerPrint.svg"),
+            BlendMode::SourceOver
+        );
+        assert_eq!(
+            image_blend_mode_for_node(&node, "UI/Textures/I_InteractiveScreens/Med/fingerprint_glow.tif"),
+            BlendMode::Plus
+        );
+    }
+
+    #[test]
+    fn matte_strip_preserves_sparse_line_art_strokes() {
+        let mut img = RgbaImage::new(10, 10);
+        for y in 0..10 {
+            img.put_pixel(5, y, image::Rgba([0, 0, 0, 255]));
+        }
+
+        let stripped = strip_custom_shape_uniform_matte(&img);
+        assert_eq!(stripped.get_pixel(5, 5).0, [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn matte_strip_removes_dominant_opaque_matte() {
+        let mut img = RgbaImage::new(10, 10);
+        for y in 0..10 {
+            for x in 0..10 {
+                img.put_pixel(x, y, image::Rgba([1, 2, 3, 255]));
+            }
+        }
+        img.put_pixel(9, 9, image::Rgba([0, 0, 0, 0]));
+
+        let stripped = strip_custom_shape_uniform_matte(&img);
+        assert_eq!(stripped.get_pixel(0, 0).0, [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn image_tint_token_resolves_without_background_fill() {
+        let style = stub_style();
+        let defaults = crate::defaults::DefaultValueRegistry::with_well_known_path_defaults();
+        let assets = minimal_swf_assets();
+        let ctx = ComposeContext {
+            style: &style,
+            defaults: &defaults,
+            assets: &assets,
+        };
+        let mut node = blank_node("widget_image");
+        node.icon_tint_colour_token = Some("Base".to_string());
+
+        assert_eq!(
+            image_tint_for_blit(&node, "UI/Textures/I_InteractiveScreens/Med/i_med_bioc_bottom-bar.tif", None, &ctx),
+            style_primary_rgba(&ctx)
+        );
+    }
+
+    #[test]
+    fn color_style_tokens_resolve_to_palette_slots() {
         let style = stub_style();
         let defaults = crate::defaults::DefaultValueRegistry::with_well_known_path_defaults();
         let assets = minimal_swf_assets();
@@ -1909,6 +2066,7 @@ mod tests {
         };
 
         assert_eq!(resolve_colour_token(&ctx, "Accent1"), Some(style_primary_rgba(&ctx)));
+        assert_eq!(resolve_colour_token(&ctx, "Accent5"), Some([0.0, 113.0 / 255.0, 188.0 / 255.0, 1.0]));
 
         let mut node = blank_node("widget_text_field");
         node.resolved_style_tags = vec![UiIrStyleTag {
@@ -1920,6 +2078,32 @@ mod tests {
 
         node.resolved_style_tags[0].tag_name = Some("Modify".to_string());
         assert_eq!(resolved_text_colour(&node, None, &ctx), rgba_to_u8(style_primary_rgba(&ctx)));
+    }
+
+    #[test]
+    fn custom_shape_modify_tag_uses_deep_blue_palette_slot() {
+        let style = stub_style();
+        let defaults = crate::defaults::DefaultValueRegistry::with_well_known_path_defaults();
+        let assets = minimal_swf_assets();
+        let ctx = ComposeContext {
+            style: &style,
+            defaults: &defaults,
+            assets: &assets,
+        };
+        let mut node = blank_node("widget_custom_shape");
+        node.custom_shape = Some(UiIrCustomShape {
+            shape_type: None,
+            shape: None,
+            svg_path: Some("UI/Textures/Vector/General/FingerPrint.svg".to_string()),
+            render_shape: Some(true),
+        });
+        node.icon_tint_colour_token = Some("Accent1".to_string());
+        node.resolved_style_tags = vec![UiIrStyleTag {
+            uuid: "tag-modify".to_string(),
+            tag_name: Some("Modify".to_string()),
+        }];
+
+        assert_eq!(custom_shape_fill_override(&node, &ctx), Some([0.0, 113.0 / 255.0, 188.0 / 255.0, 1.0]));
     }
 
     #[test]

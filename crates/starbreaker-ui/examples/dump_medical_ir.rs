@@ -209,6 +209,7 @@ fn dump_one(
         asset_fetcher: &asset_fetcher,
         target_size: (1920, 1080),
         apply_postprocess: false,
+        animation_sample_percent: None,
         localization_map: localization_map.cloned(),
         loc_fetcher: None,
     };
