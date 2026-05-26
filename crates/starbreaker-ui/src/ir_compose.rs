@@ -872,7 +872,7 @@ fn draw_text_node(
     colour[3] = ((colour[3] as f32) * node.alpha.clamp(0.0, 1.0)).round() as u8;
 
     let selected_font = select_imported_ui_font(ctx, node.text_style.as_ref());
-    let primary_line_spacing = node.text_style.as_ref().and_then(|style| style.line_spacing);
+    let primary_line_spacing = draw_line_spacing_for_node(node, text, node.text_style.as_ref());
     let primary_swf_font_scale = primary_font_style_scale * SWF_TEXT_RENDER_SIZE_CALIBRATION;
     let primary_ttf_font_scale = primary_font_style_scale * TEXT_RENDER_SIZE_CALIBRATION;
     let mut primary_rect = primary_rect;
@@ -999,6 +999,39 @@ fn draw_text_node(
 
 fn scale_line_spacing(line_spacing: Option<f32>, font_scale: f32) -> Option<f32> {
     line_spacing.map(|spacing| spacing * font_scale)
+}
+
+fn draw_line_spacing_for_node(
+    node: &UiIrNode,
+    text: &str,
+    text_style: Option<&UiIrTextStyle>,
+) -> Option<f32> {
+    let spacing = text_style.and_then(|style| style.line_spacing);
+    if is_large_wrapped_title3_heading(node, text, text_style) {
+        spacing.map(|value| value + 4.0)
+    } else {
+        spacing
+    }
+}
+
+fn is_large_wrapped_title3_heading(
+    node: &UiIrNode,
+    text: &str,
+    text_style: Option<&UiIrTextStyle>,
+) -> bool {
+    let Some(style) = text_style else {
+        return false;
+    };
+    if style.label_style.as_deref() != Some("Title3") {
+        return false;
+    }
+    if !matches!(VerticalAlign::from_bb_str(&style.vertical_alignment), VerticalAlign::Centre) {
+        return false;
+    }
+    let font_size = ir_value_to_px(&style.font_size);
+    font_size >= 90.0
+        && node.computed_rect.h >= font_size * 2.0
+        && text.split_whitespace().count() >= 3
 }
 
 fn resolved_text_colour(
@@ -2035,6 +2068,30 @@ mod tests {
             style_tag_uuids: Vec::new(),
             resolved_style_tags: Vec::new(),
         }
+    }
+
+    #[test]
+    fn large_wrapped_title3_heading_adds_line_gap() {
+        let mut node = blank_node("widget_text_field");
+        node.computed_rect = UiIrRect { x: 0.0, y: 0.0, w: 1344.0, h: 270.0 };
+        let style = UiIrTextStyle {
+            font_record: None,
+            resolved_font_record: None,
+            font_size: UiIrValue::Fixed { value: 103.5 },
+            line_spacing: Some(-20.7),
+            alignment: "Center".to_string(),
+            vertical_alignment: "Center".to_string(),
+            anchor_to_parent_x: None,
+            anchor_to_parent_y: None,
+            colour: None,
+            colour_token: Some("Bright".to_string()),
+            label_style: Some("Title3".to_string()),
+        };
+
+        assert_eq!(
+            draw_line_spacing_for_node(&node, "DIGITAL MEDICAL ASSISTANT", Some(&style)),
+            Some(-16.7)
+        );
     }
 
     #[test]
