@@ -298,11 +298,12 @@ fn layout_node(
         } else {
             node.anchor.x
         };
+        let pivot_y = effective_pivot_y(node);
         let anchor_world_x = parent_inner.x + parent_inner.w * anchor_x + pos_x;
         let anchor_world_y = parent_inner.y + parent_inner.h * node.anchor.y + pos_y;
         (
             anchor_world_x - outer_w * node.pivot.x,
-            anchor_world_y - outer_h * node.pivot.y,
+            anchor_world_y - outer_h * pivot_y,
         )
     };
 
@@ -425,6 +426,45 @@ fn fills_body_background_surface(node: &crate::bb_scene::BbNode) -> bool {
         .unwrap_or(false);
 
     uses_texture_background && node.raw.get("textureProperties").is_some()
+}
+
+fn effective_pivot_y(node: &crate::bb_scene::BbNode) -> f32 {
+    if horizontal_filled_separator_uses_centerline_anchor(node) {
+        0.5
+    } else {
+        node.pivot.y
+    }
+}
+
+fn horizontal_filled_separator_uses_centerline_anchor(node: &crate::bb_scene::BbNode) -> bool {
+    let is_separator = matches!(
+        &node.ty,
+        BbNodeType::Other(kind) if kind.eq_ignore_ascii_case("BuildingBlocks_WidgetSeparator")
+    );
+    if !is_separator || node.pivot.y.abs() > f32::EPSILON {
+        return false;
+    }
+    let is_horizontal = node
+        .raw
+        .get("direction")
+        .and_then(|value| value.as_str())
+        .is_some_and(|direction| direction.eq_ignore_ascii_case("Horizontal"));
+    let is_filled_shape = node
+        .raw
+        .get("svgFill")
+        .is_some_and(|svg_fill| {
+            svg_fill
+                .get("renderShape")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+                && svg_fill
+                    .get("svgPath")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .is_empty()
+        });
+    let fixed_visual_height = matches!(node.sizing.height, BbValue::Fixed(height) if height > 1.0);
+    is_horizontal && is_filled_shape && fixed_visual_height
 }
 
 fn sampled_sizing_value(
@@ -1020,13 +1060,19 @@ fn layout_flex_no_grow_children(
                     continue;
                 }
                 let rect = if is_row {
+                    let mut x = line_main_cursor;
+                    if let Some(node) = scene.nodes.get(&id) {
+                        if let Some(anchor_offset) = row_flex_start_anchor_offset(node, avail_main, w, csx) {
+                            x += anchor_offset;
+                        }
+                    }
                     let y = match cross_just.to_ascii_lowercase().as_str() {
                         "center" => line_cross_cursor + (line_cross - h) * 0.5,
                         "end" | "right" | "bottom" => line_cross_cursor + (line_cross - h),
                         _ => line_cross_cursor,
                     };
                     let ch = if cross_just.eq_ignore_ascii_case("stretch") { line_cross } else { h };
-                    Rect { x: line_main_cursor, y, w, h: ch }
+                    Rect { x, y, w, h: ch }
                 } else {
                     let mut x = match cross_just.to_ascii_lowercase().as_str() {
                         "center" => line_cross_cursor + (line_cross - w) * 0.5,
@@ -1135,13 +1181,19 @@ fn layout_flex_no_grow_children(
             continue;
         }
         let rect = if is_row {
+            let mut x = cursor;
+            if let Some(node) = scene.nodes.get(&id) {
+                if let Some(anchor_offset) = row_flex_start_anchor_offset(node, container.w, w, csx) {
+                    x += anchor_offset;
+                }
+            }
             let y = match cross_just.to_ascii_lowercase().as_str() {
                 "center" => container.y + (container.h - h) * 0.5,
                 "end" | "right" | "bottom" => container.y + (container.h - h),
                 _ => container.y,
             };
             let ch = if cross_just.eq_ignore_ascii_case("stretch") { container.h } else { h };
-            Rect { x: cursor, y, w, h: ch }
+            Rect { x, y, w, h: ch }
         } else {
             let mut x = match cross_just.to_ascii_lowercase().as_str() {
                 "center" => container.x + (container.w - w) * 0.5,
@@ -1173,6 +1225,19 @@ fn layout_flex_no_grow_children(
         cursor += if is_row { w } else { h };
         cursor += item_spacing;
     }
+}
+
+fn row_flex_start_anchor_offset(
+    node: &crate::bb_scene::BbNode,
+    available_main: f32,
+    item_w: f32,
+    csx: f32,
+) -> Option<f32> {
+    let pos_x = (node.position.x + node.position_offset.x) * csx;
+    let is_start_anchored = node.anchor.x > 0.0 && node.anchor.x < 0.5 && node.pivot.x <= 0.01;
+    let has_position = pos_x.abs() > f32::EPSILON;
+    (is_start_anchored || has_position)
+        .then_some((node.anchor.x * available_main) + pos_x - (node.pivot.x * item_w))
 }
 
 
@@ -1532,7 +1597,7 @@ mod tests {
         let parent = BbNode {
             id: 1,
             parent: None,
-            children: vec![2],
+            children: vec![2, 3],
             ty: BbNodeType::DisplayWidget, name: "parent".into(),
             style_tag_uuids: vec![], is_active: true, layer: 0, alpha: 1.0,
             position: Vec3::default(), position_offset: Vec3::default(),
@@ -1621,7 +1686,7 @@ mod tests {
         let parent = BbNode {
             id: 1,
             parent: None,
-            children: vec![2],
+            children: vec![2, 3],
             ty: BbNodeType::DisplayWidget,
             name: "parent".into(),
             style_tag_uuids: vec![],
@@ -1846,6 +1911,128 @@ mod tests {
             r2.x,
             r2.y
         );
+    }
+
+    #[test]
+    fn flex_row_wrap_start_applies_child_main_axis_anchor() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let root = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![2],
+            ty: BbNodeType::DisplayWidget,
+            name: "root".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(300.0), height: BbValue::Fixed(100.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({
+                "layoutPolicy": {
+                    "_Type_": "BuildingBlocks_FlexContainer",
+                    "direction": "Row",
+                    "wrap": "Wrap",
+                    "axisJustification": "Start",
+                    "crossAxisJustification": "Start",
+                    "columnSpacing": 0,
+                    "rowSpacing": 0
+                }
+            }),
+        };
+        let child = BbNode {
+            id: 2,
+            parent: Some(1),
+            children: vec![],
+            ty: BbNodeType::WidgetTextField,
+            name: "anchored_prompt".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Percent(0.3), height: BbValue::Fixed(40.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2 { x: 0.01, y: 0.0 },
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+        let mut metric = child.clone();
+        metric.id = 3;
+        metric.name = "right_metric".into();
+        metric.sizing = BbSizing { width: BbValue::Fixed(50.0), height: BbValue::Fixed(40.0) };
+        metric.anchor = Vec2 { x: 1.0, y: 0.0 };
+        metric.pivot = Vec2 { x: 1.0, y: 0.0 };
+        assert_eq!(row_flex_start_anchor_offset(&metric, 300.0, 50.0, 1.0), None);
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, root);
+        nodes.insert(2, child);
+        let scene = BbScene { canvas_size: (300.0, 100.0), roots: vec![1], nodes, operations: vec![] };
+        let result = layout(&scene, 300, 100);
+        let rect = result.rects[&2];
+        assert!((rect.x - 3.0).abs() < 0.5, "expected x≈3 from 1% row anchor, got {}", rect.x);
+    }
+
+    #[test]
+    fn horizontal_filled_separator_uses_centerline_anchor() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let separator = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![],
+            ty: BbNodeType::Other("BuildingBlocks_WidgetSeparator".into()),
+            name: "separator".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Percent(0.5), height: BbValue::Fixed(16.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2 { x: 0.0, y: 0.18 },
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({
+                "direction": "Horizontal",
+                "svgFill": {
+                    "renderShape": true,
+                    "svgPath": ""
+                }
+            }),
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, separator);
+        let scene = BbScene { canvas_size: (100.0, 100.0), roots: vec![1], nodes, operations: vec![] };
+        let result = layout(&scene, 100, 100);
+        let rect = result.rects[&1];
+        assert!((rect.y - 10.0).abs() < 0.5, "expected centerline y=18 minus half height 8, got {}", rect.y);
     }
 
     #[test]

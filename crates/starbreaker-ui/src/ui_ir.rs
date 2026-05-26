@@ -189,14 +189,28 @@ fn default_vertical_alignment() -> String {
     "Center".to_string()
 }
 
-fn effective_font_record(node: &BbNode) -> Option<String> {
+fn effective_font_record(
+    node: &BbNode,
+    standard_text_styles: &HashMap<String, StandardTextStyle>,
+) -> Option<String> {
     node.raw
-    .get("FontStyleRecord")
-    .or_else(|| node.raw.get("fontRecord"))
+        .get("FontStyleRecord")
+        .or_else(|| node.raw.get("fontRecord"))
         .and_then(|value| value.as_str())
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
         .or_else(|| node.text.as_ref().and_then(|text| text.font_record.clone()))
+        .or_else(|| {
+            label_style_name_from_raw(node).and_then(|style| {
+                standard_text_style_keys(&style)
+                    .into_iter()
+                    .find_map(|key| {
+                        standard_text_styles
+                            .get(&key)
+                            .and_then(|standard| standard.font_record.clone())
+                    })
+            })
+        })
 }
 
 /// Shape metadata for custom-shape widgets.
@@ -433,7 +447,7 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
             }
         });
         let resolved_style_tags = resolved_style_tags_for_node(canvas_fetcher, node);
-        let font_record = effective_font_record(node);
+        let font_record = effective_font_record(node, &standard_text_styles);
         let label_style = label_style_name_from_raw(node);
         let text_style = if let Some(text) = node.text.as_ref() {
             let font_size = resolve_effective_font_size(
@@ -446,6 +460,7 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
                 &binding_resolver,
                 defaults,
                 &style_font_sizes,
+                &standard_text_styles,
             );
             Some(UiIrTextStyle {
                 font_record: font_record.clone(),
@@ -1727,6 +1742,7 @@ fn resolve_effective_font_size(
     binding_resolver: &BindingResolver,
     defaults: &DefaultValueRegistry,
     style_font_sizes: &HashMap<String, f32>,
+    standard_text_styles: &HashMap<String, StandardTextStyle>,
 ) -> UiIrValue {
     let label_style = label_style_name_from_node_or_ancestors(node_id, node, scene);
 
@@ -1759,6 +1775,24 @@ fn resolve_effective_font_size(
         }
     }
 
+    if let Some(size) = textfield_long_prompt_font_size_from_signals(node, node_rect_h, resolved_text) {
+        return apply_label_style_font_scale(
+            UiIrValue::Fixed { value: size },
+            label_style.as_deref(),
+        );
+    }
+
+    if let Some(size) = standard_textfield_font_size_from_styles(
+        node,
+        label_style.as_deref(),
+        standard_text_styles,
+    ) {
+        return apply_label_style_font_scale(
+            UiIrValue::Fixed { value: size },
+            label_style.as_deref(),
+        );
+    }
+
     if let Some(size) = textfield_fallback_font_size_from_signals(node, node_rect_h, resolved_text) {
         return apply_label_style_font_scale(
             UiIrValue::Fixed { value: size },
@@ -1789,11 +1823,14 @@ fn apply_label_style_font_scale(value: UiIrValue, label_style: Option<&str>) -> 
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct StandardTextStyle {
     line_spacing: Option<f32>,
     font_size: Option<f32>,
+    font_record: Option<String>,
 }
+
+const STANDARD_TEXTFIELD_NOMINAL_FONT_SCALE: f32 = 0.72;
 
 fn standard_text_field_widget_path() -> &'static str {
     "file://./../../../../../../../libs/foundry/records/ui/buildingblocks/modularkit/standard/widgets/textfieldwidgetstandard.json"
@@ -1888,14 +1925,35 @@ fn standard_text_style_from_entry(entry: &serde_json::Value) -> StandardTextStyl
         .into_iter()
         .flatten()
     {
-        let Some(field) = modifier.get("field").and_then(|field| field.as_str()) else {
-            continue;
-        };
-        let value = modifier.get("value").and_then(|value| value.as_f64()).map(|value| value as f32);
-        if field.eq_ignore_ascii_case("LineSpacing") {
-            style.line_spacing = value;
-        } else if field.eq_ignore_ascii_case("FontSize") {
-            style.font_size = value;
+        let field = modifier.get("field");
+        if let Some(field_name) = field.and_then(|field| field.as_str()) {
+            let value = modifier
+                .get("value")
+                .and_then(|value| value.as_f64())
+                .map(|value| value as f32);
+            if field_name.eq_ignore_ascii_case("LineSpacing") {
+                style.line_spacing = value;
+            } else if field_name.eq_ignore_ascii_case("FontSize") {
+                style.font_size = value;
+            } else if field_name.eq_ignore_ascii_case("FontStyleRecord") {
+                style.font_record = modifier
+                    .get("value")
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned);
+            }
+        } else if let Some(field_obj) = field.and_then(|field| field.as_object()) {
+            let field_type = field_obj
+                .get("_Type_")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            if field_type.ends_with("FontStyleRecord") {
+                style.font_record = field_obj
+                    .get("value")
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned);
+            }
         }
     }
     style
@@ -2018,6 +2076,55 @@ fn resolved_text_from_payload(payload: &UiIrTextPayload) -> Option<&str> {
     }
 }
 
+fn textfield_long_prompt_font_size_from_signals(
+    node: &crate::bb_scene::BbNode,
+    node_rect_h: f32,
+    resolved_text: Option<&str>,
+) -> Option<f32> {
+    if !matches!(node.ty, BbNodeType::WidgetTextField) {
+        return None;
+    }
+
+    let style = label_style_name_from_raw(node)?;
+    let text_len = resolved_text
+        .map(|value| value.trim().chars().count())
+        .unwrap_or(0);
+
+    if style == "Heading1" && text_len >= 32 && node_rect_h <= 120.0 {
+        Some(27.9)
+    } else {
+        None
+    }
+}
+
+fn standard_textfield_font_size_from_styles(
+    node: &crate::bb_scene::BbNode,
+    label_style: Option<&str>,
+    standard_text_styles: &HashMap<String, StandardTextStyle>,
+) -> Option<f32> {
+    if !matches!(node.ty, BbNodeType::WidgetTextField) {
+        return None;
+    }
+
+    let label_style = label_style?;
+    if !matches!(label_style, "Heading1" | "Heading3") {
+        return None;
+    }
+
+    standard_text_style_keys(label_style)
+        .into_iter()
+        .find_map(|key| standard_text_styles.get(&key))
+        .filter(|standard| {
+            standard
+                .font_record
+                .as_deref()
+                .is_some_and(|record| crate::pipeline::extract_record_name(record).eq_ignore_ascii_case("blenderpro-thin"))
+        })
+        .and_then(|standard| standard.font_size)
+        .filter(|font_size| font_size.is_finite() && *font_size > 0.0)
+        .map(|font_size| (font_size * STANDARD_TEXTFIELD_NOMINAL_FONT_SCALE * 10.0).round() / 10.0)
+}
+
 fn textfield_fallback_font_size_from_signals(
     node: &crate::bb_scene::BbNode,
     node_rect_h: f32,
@@ -2041,7 +2148,6 @@ fn textfield_fallback_font_size_from_signals(
         "Heading2" => Some(18.0),
         "Heading6" if node_rect_h >= 48.0 => Some(18.0),
         "Heading1" if text_len >= 32 && node_rect_h <= 120.0 => Some(27.9),
-        "Heading1" if node_rect_h <= 80.0 => Some(28.0),
         "Heading1" => Some(40.0),
         _ => None,
     }
@@ -2882,6 +2988,13 @@ mod tests {
                                 "name": "T3",
                                 "modifiers": [
                                     {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "FontSize", "value": 115.0},
+                                    {
+                                        "_Type_": "BuildingBlocks_FieldModifierRecordRef",
+                                        "field": {
+                                            "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeFontStyleRecord",
+                                            "value": "file://./fontstyles/blenderpro-thin.json"
+                                        }
+                                    },
                                     {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "LineSpacing", "value": -35.0}
                                 ]
                             }
@@ -2917,6 +3030,180 @@ mod tests {
         assert_eq!(
             node.text_style.as_ref().and_then(|style| style.line_spacing),
             Some(-35.0)
+        );
+        assert_eq!(
+            node.text_style.as_ref().and_then(|style| style.font_record.as_deref()),
+            Some("file://./fontstyles/blenderpro-thin.json")
+        );
+    }
+
+    #[test]
+    fn compile_ir_uses_standard_heading_font_size_for_unsized_textfield() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestStandardHeadingSize",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "location",
+                        "isActive": true,
+                        "text": "Drake Clipper",
+                        "labelProperties": {
+                            "style": "Heading3",
+                            "anchorToParentX": 0.5,
+                            "anchorToParentY": 0.5
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 40.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "machine_type",
+                        "isActive": true,
+                        "text": "MEDICAL ASSISTANT",
+                        "labelProperties": {
+                            "style": "Heading1",
+                            "anchorToParentX": 0.5,
+                            "anchorToParentY": 0.5
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 40.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+        let standard = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TextFieldWidgetStandard",
+            "_RecordValue_": {
+                "defaultStyles": {"entries": []},
+                "brandStyles": [
+                    {
+                        "brandIdentifier": "file://./styles/s_bioc.json",
+                        "entries": [
+                            {
+                                "name": "H3",
+                                "modifiers": [
+                                    {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "FontSize", "value": 30.0},
+                                    {
+                                        "_Type_": "BuildingBlocks_FieldModifierRecordRef",
+                                        "field": {
+                                            "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeFontStyleRecord",
+                                            "value": "file://./fontstyles/blenderpro-thin.json"
+                                        }
+                                    },
+                                    {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "LineSpacing", "value": 0.0}
+                                ]
+                            },
+                            {
+                                "name": "H1",
+                                "modifiers": [
+                                    {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "FontSize", "value": 57.0},
+                                    {
+                                        "_Type_": "BuildingBlocks_FieldModifierRecordRef",
+                                        "field": {
+                                            "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeFontStyleRecord",
+                                            "value": "file://./fontstyles/blenderpro-thin.json"
+                                        }
+                                    },
+                                    {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "LineSpacing", "value": 0.0}
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+        let fetcher = TestCanvasFetcher {
+            by_guid: std::collections::HashMap::new(),
+            by_path: [(standard_text_field_widget_path().to_string(), standard)]
+                .into_iter()
+                .collect(),
+        };
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            Some(&fetcher),
+            "guid-standard-heading-size",
+            Some("BuildingBlocks_Canvas.TestStandardHeadingSize"),
+            (100, 100),
+            &defaults(),
+            Some("canvas:s_bioc".to_string()),
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "location").expect("location node");
+        assert_eq!(
+            node.text_style.as_ref().map(|style| &style.font_size),
+            Some(&UiIrValue::Fixed { value: 21.6 })
+        );
+
+        let node = ir
+            .nodes
+            .iter()
+            .find(|node| node.name == "machine_type")
+            .expect("machine_type node");
+        assert_eq!(
+            node.text_style.as_ref().map(|style| &style.font_size),
+            Some(&UiIrValue::Fixed { value: 41.0 })
+        );
+    }
+
+    #[test]
+    fn short_heading1_uses_header_size_while_long_prompt_stays_shallow() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, Vec2, Vec3};
+
+        let textfield = |style: &str| BbNode {
+            id: 1,
+            parent: None,
+            children: vec![],
+            ty: BbNodeType::WidgetTextField,
+            name: "text".to_string(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing::default(),
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({"labelProperties": {"style": style}}),
+        };
+
+        let short_heading = textfield("Heading1");
+        assert_eq!(
+            textfield_fallback_font_size_from_signals(&short_heading, 78.0, Some("MEDICAL ASSISTANT")),
+            Some(40.0)
+        );
+
+        let long_prompt = textfield("Heading1");
+        assert_eq!(
+            textfield_fallback_font_size_from_signals(
+                &long_prompt,
+                105.0,
+                Some("PLEASE SELECT AN OPTION FROM THE AVAILABLE SERVICES"),
+            ),
+            Some(27.9)
         );
     }
 
