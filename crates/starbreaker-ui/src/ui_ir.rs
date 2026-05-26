@@ -78,6 +78,8 @@ pub struct UiIrNode {
     pub stroke_colour_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stroke_extent: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub colour_blend_mode: Option<UiIrColourBlendMode>,
     pub icon_tint_colour: Option<[f32; 4]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon_tint_colour_token: Option<String>,
@@ -104,6 +106,13 @@ pub enum UiIrValue {
     Fixed { value: f32 },
     Percent { value: f32 },
     Other { value: f32, behavior: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiIrColourBlendMode {
+    SourceOver,
+    Additive,
 }
 
 /// Pixel-space computed rectangle.
@@ -751,21 +760,28 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
             None
         };
 
-        let alpha = if is_transient_static_pulse_node(node) {
-            0.0
-        } else if let Some(sample_percent) = animation_sample_percent {
-            sampled_animation_alpha(&node.raw, sample_percent).unwrap_or_else(|| {
-                representative_animation_alpha(&node.raw).unwrap_or(node.alpha)
-            })
-        } else {
-            representative_animation_alpha(&node.raw).unwrap_or(node.alpha)
-        };
-        let stroke_extent = node
-            .raw
-            .get("strokeExtent")
-            .or_else(|| node.raw.get("svgFill").and_then(|svg_fill| svg_fill.get("strokeExtent")))
-            .and_then(|value| value.as_f64())
-            .map(|value| value as f32);
+        let stroke_extent = separator_stroke_extent_from_raw(node);
+        let separator_style = separator_standard_style_from_source(
+            node,
+            selected_style_source.as_deref(),
+            canvas_fetcher,
+        );
+        let alpha_base = separator_style
+            .as_ref()
+            .and_then(|style| style.alpha_override)
+            .unwrap_or_else(|| effective_alpha_for_node(id, node, scene, animation_sample_percent));
+        let alpha = alpha_base
+            * separator_style
+                .as_ref()
+                .and_then(|style| style.colour_alpha)
+                .unwrap_or(1.0);
+        let stroke_colour = stroke_colour_from_raw(&node.raw)
+            .or_else(|| separator_style.as_ref().and_then(|style| style.colour));
+        let stroke_colour_token = stroke_colour_token_from_raw(&node.raw).or_else(|| {
+            separator_style
+                .as_ref()
+                .and_then(|style| style.colour_token.clone())
+        });
 
         let allow_background_fill = raw_background_enabled(&node.raw);
 
@@ -817,9 +833,10 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
             background_fill_colour_token: background_fill_colour_token_from_raw(&node.raw, allow_background_fill),
             segmented_fill: segmented_fill_from_raw(node),
             border: border_from_node(node),
-            stroke_colour: stroke_colour_from_raw(&node.raw),
-            stroke_colour_token: stroke_colour_token_from_raw(&node.raw),
+            stroke_colour,
+            stroke_colour_token,
             stroke_extent,
+            colour_blend_mode: separator_colour_blend_mode_from_raw(node),
             icon_tint_colour: node
                 .icon
                 .as_ref()
@@ -1337,6 +1354,214 @@ fn parse_nine_slice_rect(value: &serde_json::Value) -> Option<[f32; 4]> {
     let right = value.get("right")?.as_f64()? as f32;
     let bottom = value.get("bottom")?.as_f64()? as f32;
     Some([left, top, right, bottom])
+}
+
+fn separator_stroke_extent_from_raw(node: &crate::bb_scene::BbNode) -> Option<f32> {
+    let stroke_extent = node
+        .raw
+        .get("strokeExtent")
+        .or_else(|| node.raw.get("svgFill").and_then(|svg_fill| svg_fill.get("strokeExtent")))
+        .and_then(|value| value.as_f64())
+        .map(|value| value as f32);
+
+    if is_authored_procedural_separator_strip(node) {
+        return None;
+    }
+
+    stroke_extent
+}
+
+fn is_authored_procedural_separator_strip(node: &crate::bb_scene::BbNode) -> bool {
+    if !matches!(node.ty, BbNodeType::Other(ref ty) if ty.eq_ignore_ascii_case("BuildingBlocks_WidgetSeparator")) {
+        return false;
+    }
+
+    let Some(svg_fill) = node.raw.get("svgFill") else {
+        return false;
+    };
+    let svg_path_empty = svg_fill
+        .get("svgPath")
+        .and_then(|value| value.as_str())
+        .is_none_or(|path| path.trim().is_empty());
+    if !svg_path_empty {
+        return false;
+    }
+    if !svg_fill
+        .get("renderShape")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    if !svg_fill
+        .get("enableColorOverlay")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    if !svg_fill
+        .get("enableNineSliceRect")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+
+    let authored_fixed_height = node.raw.get("sizing").and_then(|sizing| sizing.get("height"));
+    let is_fixed_sixteen_px = authored_fixed_height
+        .and_then(|height| height.get("behavior"))
+        .and_then(|value| value.as_str())
+        .is_some_and(|behavior| behavior.eq_ignore_ascii_case("Fixed"))
+        && authored_fixed_height
+            .and_then(|height| height.get("value"))
+            .and_then(|value| value.as_f64())
+            .is_some_and(|value| (value - 16.0).abs() <= f64::EPSILON);
+
+    is_fixed_sixteen_px
+}
+
+fn separator_colour_blend_mode_from_raw(
+    node: &crate::bb_scene::BbNode,
+) -> Option<UiIrColourBlendMode> {
+    if !matches!(node.ty, BbNodeType::Other(ref ty) if ty.eq_ignore_ascii_case("BuildingBlocks_WidgetSeparator")) {
+        return None;
+    }
+
+    let svg_fill = node.raw.get("svgFill")?;
+    let svg_path_empty = svg_fill
+        .get("svgPath")
+        .and_then(|value| value.as_str())
+        .is_none_or(|path| path.trim().is_empty());
+    let render_shape = svg_fill
+        .get("renderShape")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let enable_color_overlay = svg_fill
+        .get("enableColorOverlay")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+
+    (svg_path_empty && render_shape && enable_color_overlay).then_some(UiIrColourBlendMode::Additive)
+}
+
+#[derive(Debug, Clone, Default)]
+struct SeparatorStyleSource {
+    colour: Option<[f32; 4]>,
+    colour_token: Option<String>,
+    colour_alpha: Option<f32>,
+    alpha_override: Option<f32>,
+}
+
+fn separator_standard_style_from_source(
+    node: &crate::bb_scene::BbNode,
+    selected_style_source: Option<&str>,
+    canvas_fetcher: Option<&dyn CanvasFetcher>,
+) -> Option<SeparatorStyleSource> {
+    if !matches!(node.ty, BbNodeType::Other(ref ty) if ty.eq_ignore_ascii_case("BuildingBlocks_WidgetSeparator")) {
+        return None;
+    }
+
+    let direction = node
+        .raw
+        .get("direction")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let style = node
+        .raw
+        .get("style")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+
+    let record_name = match (
+        direction.to_ascii_lowercase().as_str(),
+        style.to_ascii_lowercase().as_str(),
+    ) {
+        ("horizontal", "primary") => "BuildingBlocks_Canvas.HorizontalSeparatorPrimaryWidgetStandard",
+        ("horizontal", "secondary") => "BuildingBlocks_Canvas.HorizontalSeparatorSecondaryWidgetStandard",
+        ("horizontal", "tertiary") => "BuildingBlocks_Canvas.HorizontalSeparatorTertiaryWidgetStandard",
+        ("vertical", "primary") => "BuildingBlocks_Canvas.VerticalSeparatorPrimaryWidgetStandard",
+        ("vertical", "secondary") => "BuildingBlocks_Canvas.VerticalSeparatorSecondaryWidgetStandard",
+        ("vertical", "tertiary") => "BuildingBlocks_Canvas.VerticalSeparatorTertiaryWidgetStandard",
+        _ => return None,
+    };
+
+    let selected_style_slug = style_source_slug(selected_style_source)?;
+    let standard = canvas_fetcher?.fetch_canvas_by_name(record_name).ok()?;
+    separator_style_from_standard_record(&standard, &selected_style_slug)
+}
+
+fn separator_style_from_standard_record(
+    standard: &serde_json::Value,
+    selected_style_slug: &str,
+) -> Option<SeparatorStyleSource> {
+    let brand_styles = standard.get("_RecordValue_")?.get("brandStyles")?.as_array()?;
+    for brand_style in brand_styles {
+        let brand_identifier = brand_style.get("brandIdentifier").and_then(|value| value.as_str());
+        if style_source_slug(brand_identifier).as_deref() != Some(selected_style_slug) {
+            continue;
+        }
+
+        let mut source = SeparatorStyleSource::default();
+        for modifier in brand_style
+            .get("entries")
+            .and_then(|entries| entries.as_array())
+            .into_iter()
+            .flatten()
+            .flat_map(|entry| entry.get("modifiers").and_then(|modifiers| modifiers.as_array()))
+            .flatten()
+        {
+            let field = modifier_field_name(modifier).unwrap_or_default();
+            if field.eq_ignore_ascii_case("Alpha") {
+                source.alpha_override = modifier
+                    .get("value")
+                    .and_then(|value| value.as_f64())
+                    .map(|value| (value as f32).clamp(0.0, 1.0));
+                continue;
+            }
+
+            if !field.eq_ignore_ascii_case("FillColor")
+                && !field.eq_ignore_ascii_case("BackgroundColor")
+            {
+                continue;
+            }
+
+            let Some(color_value) = modifier.get("color") else {
+                continue;
+            };
+            source.colour = parse_raw_colour(color_value);
+            source.colour_token = colour_style_token(color_value);
+            source.colour_alpha = color_value
+                .get("alpha")
+                .and_then(|value| value.as_f64())
+                .map(|value| (value as f32).clamp(0.0, 1.0))
+                .or_else(|| source.colour.map(|colour| colour[3]));
+        }
+
+        if source.colour.is_some() || source.colour_token.is_some() || source.alpha_override.is_some() {
+            return Some(source);
+        }
+    }
+
+    None
+}
+
+fn style_source_slug(source: Option<&str>) -> Option<String> {
+    let source = source?.trim();
+    if source.is_empty() {
+        return None;
+    }
+
+    let source = source.strip_prefix("canvas:").unwrap_or(source);
+    let basename = source.rsplit(['/', '\\']).next().unwrap_or(source);
+    let slug = basename.strip_suffix(".json").unwrap_or(basename).to_ascii_lowercase();
+    (!slug.is_empty()).then_some(slug)
+}
+
+fn modifier_field_name(modifier: &serde_json::Value) -> Option<&str> {
+    modifier
+        .get("field")
+        .and_then(|field| field.as_str().or_else(|| field.get("value").and_then(|value| value.as_str())))
 }
 
 fn stroke_colour_token_from_raw(raw: &serde_json::Value) -> Option<String> {
@@ -2041,6 +2266,46 @@ fn representative_animation_alpha(raw: &serde_json::Value) -> Option<f32> {
         .into_iter()
         .map(|(_, value)| value.clamp(0.0, 1.0))
         .max_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal))
+}
+
+fn local_alpha_for_node(
+    node: &crate::bb_scene::BbNode,
+    animation_sample_percent: Option<f32>,
+) -> f32 {
+    if is_transient_static_pulse_node(node) {
+        return 0.0;
+    }
+    if let Some(sample_percent) = animation_sample_percent {
+        sampled_animation_alpha(&node.raw, sample_percent)
+            .unwrap_or_else(|| representative_animation_alpha(&node.raw).unwrap_or(node.alpha))
+    } else {
+        representative_animation_alpha(&node.raw).unwrap_or(node.alpha)
+    }
+    .clamp(0.0, 1.0)
+}
+
+fn effective_alpha_for_node(
+    node_id: BbNodeId,
+    node: &crate::bb_scene::BbNode,
+    scene: &BbScene,
+    animation_sample_percent: Option<f32>,
+) -> f32 {
+    let mut alpha = local_alpha_for_node(node, animation_sample_percent);
+    let mut current_parent = node.parent;
+    let mut visited = HashSet::from([node_id]);
+
+    while let Some(parent_id) = current_parent {
+        if !visited.insert(parent_id) {
+            break;
+        }
+        let Some(parent) = scene.nodes.get(&parent_id) else {
+            break;
+        };
+        alpha *= local_alpha_for_node(parent, animation_sample_percent);
+        current_parent = parent.parent;
+    }
+
+    alpha.clamp(0.0, 1.0)
 }
 
 fn sampled_animation_alpha(raw: &serde_json::Value, sample_percent: f32) -> Option<f32> {
@@ -3223,6 +3488,209 @@ mod tests {
     }
 
     #[test]
+    fn compile_ir_treats_authored_procedural_separator_strip_as_fill() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestAuthoredSeparatorStrip",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetSeparator",
+                        "name": "separator",
+                        "isActive": true,
+                        "sizing": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 16.0}
+                        },
+                        "svgFill": {
+                            "svgPath": "",
+                            "renderShape": true,
+                            "enableColorOverlay": true,
+                            "enableNineSliceRect": true,
+                            "strokeExtent": 1.0
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-authored-separator-strip",
+            Some("BuildingBlocks_Canvas.TestAuthoredSeparatorStrip"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "separator").expect("separator node");
+        assert_eq!(node.computed_rect.h, 16.0);
+        assert_eq!(node.stroke_extent, None);
+    }
+
+    #[test]
+    fn compile_ir_applies_horizontal_separator_source_style_colour() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestHorizontalSeparatorStyle",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetSeparator",
+                        "name": "secondary_separator",
+                        "isActive": true,
+                        "alpha": 0.5,
+                        "direction": "Horizontal",
+                        "style": "Secondary",
+                        "sizing": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 8.0}
+                        },
+                        "svgFill": {
+                            "svgPath": "",
+                            "renderShape": true,
+                            "enableColorOverlay": true,
+                            "enableNineSliceRect": true,
+                            "strokeExtent": 1.0
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+        let standard_separator = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.HorizontalSeparatorSecondaryWidgetStandard",
+            "_RecordValue_": {
+                "brandStyles": [
+                    {
+                        "brandIdentifier": "file://./../../../../../../../../libs/foundry/records/ui/buildingblocks/styles/s_bioc.json",
+                        "entries": [
+                            {
+                                "name": "Root",
+                                "modifiers": [
+                                    {
+                                        "_Type_": "BuildingBlocks_FieldModifierColor",
+                                        "field": "FillColor",
+                                        "color": {
+                                            "_Type_": "BuildingBlocks_ColorStyle",
+                                            "color": "Accent1",
+                                            "alpha": 0.3
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+        let fetcher = TestCanvasFetcher {
+            by_guid: std::collections::HashMap::new(),
+            by_path: std::collections::HashMap::from([(
+                "horizontal-secondary".to_string(),
+                standard_separator,
+            )]),
+        };
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            Some(&fetcher),
+            "guid-horizontal-separator-style",
+            Some("BuildingBlocks_Canvas.TestHorizontalSeparatorStyle"),
+            (100, 100),
+            &defaults(),
+            Some("canvas:s_bioc".to_owned()),
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir
+            .nodes
+            .iter()
+            .find(|node| node.name == "secondary_separator")
+            .expect("secondary separator node");
+        assert_eq!(node.stroke_colour_token.as_deref(), Some("Accent1"));
+        assert_eq!(node.colour_blend_mode, Some(UiIrColourBlendMode::Additive));
+        assert!((node.alpha - 0.15).abs() < 0.001, "expected styled alpha 0.15, got {}", node.alpha);
+    }
+
+    #[test]
+    fn compile_ir_emits_effective_inherited_alpha() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestInheritedAlpha",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "parent",
+                        "isActive": true,
+                        "alpha": 0.5,
+                        "sizing": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 80.0}
+                        },
+                        "children": ["ptr:2"]
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetSeparator",
+                        "name": "child",
+                        "isActive": true,
+                        "parent": "_PointsTo_:ptr:1",
+                        "alpha": 0.62,
+                        "sizing": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 8.0}
+                        },
+                        "svgFill": {
+                            "svgPath": "",
+                            "renderShape": true,
+                            "enableColorOverlay": true,
+                            "strokeExtent": 1.0
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-inherited-alpha",
+            Some("BuildingBlocks_Canvas.TestInheritedAlpha"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let child = ir.nodes.iter().find(|node| node.name == "child").expect("child node");
+        assert!((child.alpha - 0.31).abs() < 0.001, "expected inherited alpha 0.31, got {}", child.alpha);
+    }
+
+    #[test]
     fn compile_ir_emits_segmented_fill_metadata() {
         let canvas = serde_json::json!({
             "_RecordName_": "BuildingBlocks_Canvas.TestSegmentedFill",
@@ -3434,6 +3902,7 @@ mod tests {
                 stroke_colour: None,
                 stroke_colour_token: None,
                 stroke_extent: None,
+                colour_blend_mode: None,
                 icon_tint_colour: None,
                 icon_tint_colour_token: None,
                 icon_preset: None,

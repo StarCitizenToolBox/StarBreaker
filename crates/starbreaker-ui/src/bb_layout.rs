@@ -1028,12 +1028,20 @@ fn layout_flex_no_grow_children(
                     let ch = if cross_just.eq_ignore_ascii_case("stretch") { line_cross } else { h };
                     Rect { x: line_main_cursor, y, w, h: ch }
                 } else {
-                    let x = match cross_just.to_ascii_lowercase().as_str() {
+                    let mut x = match cross_just.to_ascii_lowercase().as_str() {
                         "center" => line_cross_cursor + (line_cross - w) * 0.5,
                         "end" | "right" | "bottom" => line_cross_cursor + (line_cross - w),
                         "start" if cross_start_from_end => line_cross_cursor + (line_cross - w),
                         _ => line_cross_cursor,
                     };
+                    if let Some(node) = scene.nodes.get(&id) {
+                        let pos_x = (node.position.x + node.position_offset.x) * csx;
+                        if cross_just.eq_ignore_ascii_case("center") {
+                            x += (node.anchor.x * line_cross) + pos_x - (node.pivot.x * w);
+                        } else if cross_just.eq_ignore_ascii_case("start") && !cross_start_from_end {
+                            x += (node.anchor.x * line_cross) + pos_x - (node.pivot.x * w);
+                        }
+                    }
                     let cw = if cross_just.eq_ignore_ascii_case("stretch") { line_cross } else { w };
                     Rect { x, y: line_main_cursor, w: cw, h }
                 };
@@ -1141,11 +1149,13 @@ fn layout_flex_no_grow_children(
                 "start" if cross_start_from_end => container.x + (container.w - w),
                 _ => container.x,
             };
-            if cross_just.eq_ignore_ascii_case("center")
-                && let Some(node) = scene.nodes.get(&id)
-            {
-                x += (node.anchor.x * container.w) + ((node.position.x + node.position_offset.x) * csx)
-                    - (node.pivot.x * w);
+            if let Some(node) = scene.nodes.get(&id) {
+                let pos_x = (node.position.x + node.position_offset.x) * csx;
+                if cross_just.eq_ignore_ascii_case("center") {
+                    x += (node.anchor.x * container.w) + pos_x - (node.pivot.x * w);
+                } else if cross_just.eq_ignore_ascii_case("start") && !cross_start_from_end {
+                    x += (node.anchor.x * container.w) + pos_x - (node.pivot.x * w);
+                }
             }
             let cw = if cross_just.eq_ignore_ascii_case("stretch") { container.w } else { w };
             Rect { x, y: cursor, w: cw, h }
@@ -2146,6 +2156,81 @@ mod tests {
         assert!((prompt.x - 150.0).abs() < 0.5, "expected prompt without cross-axis anchor offset at centered x, got {}", prompt.x);
         assert!((prompt.h - 60.0).abs() < 0.5, "expected prompt intrinsic height 60, got {}", prompt.h);
         assert!((touch.y - 495.0).abs() < 0.5, "expected touch canvas after intrinsic text slots, got {}", touch.y);
+    }
+
+    #[test]
+    fn flex_column_nowrap_infinite_start_cross_axis_applies_child_anchor() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let root = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![2],
+            ty: BbNodeType::DisplayWidget,
+            name: "root".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(1000.0), height: BbValue::Fixed(120.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({
+                "layoutPolicy": {
+                    "_Type_": "BuildingBlocks_FlexContainer",
+                    "direction": "Column",
+                    "wrap": "NoWrapInfinite",
+                    "axisJustification": "Start",
+                    "crossAxisJustification": "Start",
+                    "itemAlignment": "Start",
+                    "columnSpacing": 0.0,
+                    "rowSpacing": 0.0
+                }
+            }),
+        };
+
+        let child = BbNode {
+            id: 2,
+            parent: Some(1),
+            children: vec![],
+            ty: BbNodeType::WidgetTextField,
+            name: "WelcomeText".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Percent(1.0), height: BbValue::Fixed(40.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2 { x: 0.01, y: 0.0 },
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, root);
+        nodes.insert(2, child);
+        let scene = BbScene { canvas_size: (1000.0, 120.0), roots: vec![1], nodes, operations: vec![] };
+
+        let result = layout(&scene, 1000, 120);
+        let child = result.rects[&2];
+        assert!((child.x - 10.0).abs() < 0.5, "expected child anchor.x to offset start cross-axis x, got {}", child.x);
     }
 
     #[test]

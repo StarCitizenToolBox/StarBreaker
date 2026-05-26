@@ -20,8 +20,8 @@ use crate::error::UiError;
 use crate::text::{FontKind, TextAlign, TextRenderer, VerticalAlign};
 use crate::swf_assets::FontGlyphSet;
 use crate::ui_ir::{
-    UiIrBorder, UiIrDocument, UiIrNode, UiIrRect, UiIrTextPayload, UiIrTextStyle, UiIrValue,
-    validate_ui_ir_document,
+    validate_ui_ir_document, UiIrBorder, UiIrColourBlendMode, UiIrDocument, UiIrNode, UiIrRect,
+    UiIrTextPayload, UiIrTextStyle, UiIrValue,
 };
 
 // BB/Flash nominal font sizes render visually smaller with the bundled DejaVu
@@ -678,18 +678,10 @@ fn resolved_linear_progress_meter_rect(node: &UiIrNode, document: &UiIrDocument)
 
     let mut rect = ir_rect_to_layout_rect(node.computed_rect);
     let text_rects = debug_text_rects(parent)?;
-    let drawn_bounds = debug_text_drawn_bounds(parent);
-    let content_bottom = match (text_rects.secondary, drawn_bounds.and_then(|bounds| bounds.secondary)) {
-        (Some(secondary_rect), Some(secondary_drawn)) => {
-            secondary_rect.y + secondary_rect.h + (secondary_rect.h - secondary_drawn.h)
-        }
-        (Some(secondary_rect), None) => secondary_rect.y + secondary_rect.h,
-        (None, Some(primary_drawn)) => {
-            text_rects.primary.y + text_rects.primary.h + (text_rects.primary.h - primary_drawn.h)
-        }
-        (None, None) => text_rects.primary.y + text_rects.primary.h,
-    };
-    rect.y = content_bottom;
+    rect.y = text_rects
+        .secondary
+        .map(|secondary_rect| secondary_rect.y + secondary_rect.h)
+        .unwrap_or_else(|| text_rects.primary.y + text_rects.primary.h);
     Some(rect)
 }
 
@@ -1528,17 +1520,35 @@ fn draw_widget_separator(
     alpha: f32,
 ) {
     let draw_rect = widget_separator_draw_rect(rect, node.stroke_extent);
-    let colour = resolve_colour_token(ctx, "Accent5").unwrap_or_else(|| style_primary_rgba(ctx));
-    fill_rect_ts(pixmap, draw_rect, colour, alpha);
+    let colour = node
+        .stroke_colour
+        .or_else(|| {
+            node.stroke_colour_token
+                .as_deref()
+                .and_then(|token| resolve_colour_token(ctx, token))
+        })
+        .or(node.background_fill_colour)
+        .or_else(|| {
+            node.background_fill_colour_token
+                .as_deref()
+                .and_then(|token| resolve_colour_token(ctx, token))
+        })
+        .or_else(|| resolve_colour_token(ctx, "Accent5"))
+        .unwrap_or_else(|| style_primary_rgba(ctx));
+    fill_rect_ts_with_mode(pixmap, draw_rect, colour, alpha, node_colour_blend_mode(node));
+}
+
+fn node_colour_blend_mode(node: &UiIrNode) -> BlendMode {
+    match node.colour_blend_mode {
+        Some(UiIrColourBlendMode::Additive) => BlendMode::Plus,
+        Some(UiIrColourBlendMode::SourceOver) | None => BlendMode::SourceOver,
+    }
 }
 
 fn widget_separator_draw_rect(rect: TskRect, stroke_extent: Option<f32>) -> TskRect {
     let Some(stroke_extent) = stroke_extent else {
         return rect;
     };
-    if (rect.height() - 16.0).abs() <= 0.5 && stroke_extent <= 1.0 {
-        return rect;
-    }
     let thickness = (stroke_extent.max(0.5) * 2.0).min(rect.height()).max(1.0);
     TskRect::from_xywh(
         rect.x(),
@@ -1574,8 +1584,19 @@ fn draw_rect_stroke_ts(
 }
 
 fn fill_rect_ts(pixmap: &mut Pixmap, rect: TskRect, rgba: [f32; 4], alpha: f32) {
+    fill_rect_ts_with_mode(pixmap, rect, rgba, alpha, BlendMode::SourceOver);
+}
+
+fn fill_rect_ts_with_mode(
+    pixmap: &mut Pixmap,
+    rect: TskRect,
+    rgba: [f32; 4],
+    alpha: f32,
+    blend_mode: BlendMode,
+) {
     let mut paint = Paint::default();
     paint.set_color(to_skia_color(rgba, alpha));
+    paint.blend_mode = blend_mode;
     paint.anti_alias = false;
     pixmap
         .as_mut()
@@ -1876,6 +1897,7 @@ mod tests {
             stroke_colour: None,
             stroke_colour_token: None,
             stroke_extent: None,
+            colour_blend_mode: None,
             icon_tint_colour: None,
             icon_tint_colour_token: None,
             icon_preset: None,
@@ -1902,6 +1924,14 @@ mod tests {
 
         let fallback = widget_separator_draw_rect(rect, None);
         assert_eq!(fallback, rect);
+    }
+
+    #[test]
+    fn widget_separator_preserves_sixteen_pixel_authored_rects() {
+        let rect = TskRect::from_xywh(10.0, 20.0, 80.0, 16.0).expect("test rect");
+        let draw_rect = widget_separator_draw_rect(rect, None);
+
+        assert_eq!(draw_rect, rect);
     }
 
     #[test]
@@ -2210,6 +2240,7 @@ mod tests {
                 stroke_colour: None,
                 stroke_colour_token: None,
                 stroke_extent: None,
+                colour_blend_mode: None,
                 icon_tint_colour: None,
                 icon_tint_colour_token: None,
                 icon_preset: None,
@@ -2304,6 +2335,7 @@ mod tests {
                 stroke_colour: None,
                 stroke_colour_token: None,
                 stroke_extent: None,
+                colour_blend_mode: None,
                 icon_tint_colour: None,
                 icon_tint_colour_token: None,
                 icon_preset: None,
@@ -2403,7 +2435,7 @@ mod tests {
     }
 
     #[test]
-    fn bottom_anchored_progress_meter_uses_parent_text_band_bottom() {
+    fn bottom_anchored_progress_meter_uses_label_caption_text_band_bottom() {
         let parent = UiIrNode {
             id: 1,
             parent_id: None,
@@ -2437,6 +2469,7 @@ mod tests {
             stroke_colour: None,
             stroke_colour_token: None,
             stroke_extent: None,
+            colour_blend_mode: None,
             icon_tint_colour: None,
             icon_tint_colour_token: None,
             icon_preset: None,
@@ -2505,6 +2538,7 @@ mod tests {
             stroke_colour: None,
             stroke_colour_token: None,
             stroke_extent: None,
+            colour_blend_mode: None,
             icon_tint_colour: None,
             icon_tint_colour_token: None,
             icon_preset: None,
@@ -2537,18 +2571,27 @@ mod tests {
 
         let rect = debug_linear_progress_meter_rect(&meter, &document).expect("meter rect");
         let parent_text_rects = debug_text_rects(&document.nodes[0]).expect("parent text rects");
+        let expected_y = parent_text_rects
+            .secondary
+            .map(|secondary_rect| secondary_rect.y + secondary_rect.h)
+            .unwrap_or_else(|| parent_text_rects.primary.y + parent_text_rects.primary.h);
+        assert!(
+            (rect.y - expected_y).abs() < 0.1,
+            "expected meter to attach to text-band bottom {}, got {}",
+            expected_y,
+            rect.y
+        );
+
         let parent_drawn_bounds = debug_text_drawn_bounds(&document.nodes[0]).expect("parent text bounds");
-        let expected_y = match (parent_text_rects.secondary, parent_drawn_bounds.secondary) {
+        let drawn_padded_y = match (parent_text_rects.secondary, parent_drawn_bounds.secondary) {
             (Some(secondary_rect), Some(secondary_drawn)) => {
                 secondary_rect.y + secondary_rect.h + (secondary_rect.h - secondary_drawn.h)
             }
             _ => parent_text_rects.primary.y + parent_text_rects.primary.h,
         };
         assert!(
-            (rect.y - expected_y).abs() < 0.1,
-            "expected meter to attach to text-band bottom {}, got {}",
-            expected_y,
-            rect.y
+            rect.y < drawn_padded_y,
+            "expected text-band placement to avoid fallback drawn-bounds padding"
         );
     }
 }
