@@ -1746,8 +1746,20 @@ fn resolve_effective_font_size(
 ) -> UiIrValue {
     let label_style = label_style_name_from_node_or_ancestors(node_id, node, scene);
 
-    // Prefer the latest raw font size because style/brand modifiers are applied
-    // after parse_text and can update FontSize without mutating BbText.
+    let standard_font_size =
+        standard_textfield_font_size_from_styles(node, label_style.as_deref(), standard_text_styles);
+
+    if matches!(label_style.as_deref(), Some("Title4")) {
+        if let Some(size) = standard_font_size {
+            return apply_label_style_font_scale(
+                UiIrValue::Fixed { value: size },
+                label_style.as_deref(),
+            );
+        }
+    }
+
+    // Prefer the latest raw font size because direct style/brand modifiers are
+    // applied after parse_text and can update FontSize without mutating BbText.
     if let Some(raw_font_size) = font_size_from_raw(node) {
         return apply_label_style_font_scale(raw_font_size, label_style.as_deref());
     }
@@ -1757,7 +1769,7 @@ fn resolve_effective_font_size(
         if bound_font_size.is_finite() && bound_font_size > 0.0 {
             return apply_label_style_font_scale(
                 UiIrValue::Fixed {
-                value: bound_font_size as f32,
+                    value: bound_font_size as f32,
                 },
                 label_style.as_deref(),
             );
@@ -1782,11 +1794,7 @@ fn resolve_effective_font_size(
         );
     }
 
-    if let Some(size) = standard_textfield_font_size_from_styles(
-        node,
-        label_style.as_deref(),
-        standard_text_styles,
-    ) {
+    if let Some(size) = standard_font_size {
         return apply_label_style_font_scale(
             UiIrValue::Fixed { value: size },
             label_style.as_deref(),
@@ -1996,12 +2004,13 @@ fn scale_standard_line_spacing(
 
 fn standard_text_style_keys(style: &str) -> Vec<String> {
     let trimmed = style.trim();
-    let mut keys = vec![trimmed.to_string()];
+    let mut keys = Vec::new();
     if let Some(index) = trimmed.strip_prefix("Title") {
         keys.push(format!("T{index}"));
     } else if let Some(index) = trimmed.strip_prefix("Heading") {
         keys.push(format!("H{index}"));
     }
+    keys.push(trimmed.to_string());
     keys
 }
 
@@ -2107,18 +2116,24 @@ fn standard_textfield_font_size_from_styles(
     }
 
     let label_style = label_style?;
-    if !matches!(label_style, "Heading1" | "Heading3") {
+    if !matches!(label_style, "Heading1" | "Heading3" | "Title4") {
         return None;
     }
 
     standard_text_style_keys(label_style)
         .into_iter()
-        .find_map(|key| standard_text_styles.get(&key))
-        .filter(|standard| {
+        .filter_map(|key| standard_text_styles.get(&key))
+        .find(|standard| {
+            if label_style == "Title4" {
+                return standard.font_size.is_some();
+            }
             standard
                 .font_record
                 .as_deref()
-                .is_some_and(|record| crate::pipeline::extract_record_name(record).eq_ignore_ascii_case("blenderpro-thin"))
+                .is_some_and(|record| {
+                    let font_style = crate::pipeline::extract_record_name(record);
+                    font_style.eq_ignore_ascii_case("blenderpro-thin")
+                })
         })
         .and_then(|standard| standard.font_size)
         .filter(|font_size| font_size.is_finite() && *font_size > 0.0)
@@ -2649,7 +2664,29 @@ mod tests {
             }
         });
 
-        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let mut scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let target = scene.nodes.values_mut().next().expect("target node");
+        target.raw["FontSize"] = serde_json::Value::from(40.0);
+        target.raw["__AppliedStyleEntries"] = serde_json::json!([
+            {
+                "name": "ParentTitleSize",
+                "conditionsList": [
+                    {
+                        "conditions": [
+                            {
+                                "_Type_": "BuildingBlocks_StyleSelectorConditionParent",
+                                "conditions": [
+                                    {"_Type_": "BuildingBlocks_StyleSelectorConditionTag"}
+                                ]
+                            }
+                        ]
+                    }
+                ],
+                "modifiers": [
+                    {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "FontSize", "value": 40.0}
+                ]
+            }
+        ]);
         let ir = compile_ui_ir_from_scene(
             &scene,
             Some(&fetcher),
@@ -3158,6 +3195,110 @@ mod tests {
         assert_eq!(
             node.text_style.as_ref().map(|style| &style.font_size),
             Some(&UiIrValue::Fixed { value: 41.0 })
+        );
+    }
+
+    #[test]
+    fn compile_ir_uses_standard_title4_font_size_before_scene_style_borrow() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestStandardTitleSize",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "small_title_reference",
+                        "isActive": true,
+                        "text": "SMALL",
+                        "FontSize": 40.0,
+                        "labelProperties": {"style": "Title4"},
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 40.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "standard_title",
+                        "isActive": true,
+                        "text": "T3",
+                        "labelProperties": {"style": "Title4"},
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 40.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+        let standard = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TextFieldWidgetStandard",
+            "_RecordValue_": {
+                "defaultStyles": {"entries": [
+                    {
+                        "name": "Title4",
+                        "modifiers": [
+                            {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "FontSize", "value": 40.0},
+                            {
+                                "_Type_": "BuildingBlocks_FieldModifierRecordRef",
+                                "field": {
+                                    "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeFontStyleRecord",
+                                    "value": "file://./fontstyles/blenderpro-thin.json"
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "name": "T4",
+                        "modifiers": [
+                            {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "FontSize", "value": 75.0},
+                            {
+                                "_Type_": "BuildingBlocks_FieldModifierRecordRef",
+                                "field": {
+                                    "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeFontStyleRecord",
+                                    "value": "file://./fontstyles/blenderpro-medium.json"
+                                }
+                            }
+                        ]
+                    }
+                ]},
+                "brandStyles": []
+            }
+        });
+        let fetcher = TestCanvasFetcher {
+            by_guid: std::collections::HashMap::new(),
+            by_path: [(standard_text_field_widget_path().to_string(), standard)]
+                .into_iter()
+                .collect(),
+        };
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            Some(&fetcher),
+            "guid-standard-title-size",
+            Some("BuildingBlocks_Canvas.TestStandardTitleSize"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir
+            .nodes
+            .iter()
+            .find(|node| node.name == "standard_title")
+            .expect("standard title node");
+        assert_eq!(
+            node.text_style.as_ref().map(|style| &style.font_size),
+            Some(&UiIrValue::Fixed { value: 54.0 })
         );
     }
 

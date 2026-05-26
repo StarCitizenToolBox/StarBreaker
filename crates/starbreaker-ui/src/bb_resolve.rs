@@ -527,6 +527,7 @@ fn resolve_canvas_graph_inner(
     inherited_boolean_bindings: &HashMap<String, bool>,
 ) -> Result<BbScene, String> {
     let mut scene = parse_bb_canvas(root_json)?;
+    inline_animation_timeline_references(&mut scene, fetch_by_path);
     let record_value = root_json.get("_RecordValue_").ok_or("missing _RecordValue_")?;
     let local_boolean_bindings = {
         let mut bindings = inherited_boolean_bindings.clone();
@@ -980,6 +981,44 @@ fn resolve_canvas_graph_inner(
     }
 
     Ok(scene)
+}
+
+fn inline_animation_timeline_references(
+    scene: &mut BbScene,
+    fetch_by_path: &dyn Fn(&str) -> Result<serde_json::Value, String>,
+) {
+    for node in scene.nodes.values_mut() {
+        let Some(timeline_slot) = node
+            .raw
+            .get_mut("animation")
+            .and_then(|animation| animation.get_mut("animationTimeline"))
+        else {
+            continue;
+        };
+        let Some(timeline_path) = timeline_slot
+            .get("timelineRecord")
+            .and_then(|value| value.as_str())
+            .filter(|path| !path.is_empty())
+        else {
+            continue;
+        };
+        let Ok(timeline_record) = fetch_by_path(timeline_path) else {
+            continue;
+        };
+        let record_value = timeline_record
+            .get("_RecordValue_")
+            .unwrap_or(&timeline_record);
+        let Some(timeline) = record_value
+            .get("timeline")
+            .or_else(|| record_value.get("animationTimeline"))
+            .or_else(|| record_value.get("keyframes").map(|_| record_value))
+        else {
+            continue;
+        };
+        if timeline.get("keyframes").is_some() {
+            *timeline_slot = timeline.clone();
+        }
+    }
 }
 
 fn deactivate_subtrees(scene: &mut BbScene, roots: &std::collections::HashSet<BbNodeId>) {
@@ -1743,6 +1782,79 @@ mod tests {
     #[test]
     fn extract_record_name_mixed_case_json_extension_strips_extension() {
         assert_eq!(extract_record_name("file://./local.Json"), "local");
+    }
+
+    #[test]
+    fn resolve_inlines_referenced_animation_timeline_keyframes() {
+        let timeline_path = "file://./animation/as_ping_slidein_a.json";
+        let root = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.AnimationHost",
+            "_RecordValue_": {
+                "size": {"x": 200.0, "y": 100.0},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetImage",
+                        "name": "animated_image",
+                        "isActive": true,
+                        "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+                        "sizing": {
+                            "width": {"behavior": "Fixed", "value": 100.0},
+                            "height": {"behavior": "Fixed", "value": 50.0}
+                        },
+                        "animation": {
+                            "animationTimeline": {
+                                "timelineRecord": timeline_path
+                            }
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+        let timeline = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Timeline.AS_Ping_SlideIn_A",
+            "_RecordValue_": {
+                "timeline": {
+                    "_Type_": "BuildingBlocks_TimelineTypeEmbedded",
+                    "keyframes": [
+                        {
+                            "percent": 0.0,
+                            "modifiers": [
+                                {"modifier": {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "PosXOffset", "value": 50.0}}
+                            ]
+                        },
+                        {
+                            "percent": 1.0,
+                            "modifiers": [
+                                {"modifier": {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "PosXOffset", "value": 0.0}}
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+
+        let scene = resolve_canvas_graph(&root, None, &|path| {
+            if path == timeline_path {
+                Ok(timeline.clone())
+            } else {
+                Err(format!("unexpected path {path}"))
+            }
+        })
+        .expect("resolved scene");
+
+        let node = scene.nodes.get(&1).expect("node");
+        assert!(
+            node.raw
+                .get("animation")
+                .and_then(|animation| animation.get("animationTimeline"))
+                .and_then(|timeline| timeline.get("keyframes"))
+                .is_some(),
+            "expected timeline keyframes to be inlined"
+        );
+        let layout = crate::bb_layout::layout_with_animation_sample(&scene, 200, 100, Some(50.0));
+        assert!((layout.rects[&1].x - 25.0).abs() < 0.5);
     }
 
     #[test]
