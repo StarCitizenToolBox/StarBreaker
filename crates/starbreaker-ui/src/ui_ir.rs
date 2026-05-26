@@ -1839,6 +1839,7 @@ struct StandardTextStyle {
 }
 
 const STANDARD_TEXTFIELD_NOMINAL_FONT_SCALE: f32 = 0.72;
+const LONG_HEADING1_PROMPT_FONT_SIZE: f32 = 28.7;
 
 fn standard_text_field_widget_path() -> &'static str {
     "file://./../../../../../../../libs/foundry/records/ui/buildingblocks/modularkit/standard/widgets/textfieldwidgetstandard.json"
@@ -2100,7 +2101,7 @@ fn textfield_long_prompt_font_size_from_signals(
         .unwrap_or(0);
 
     if style == "Heading1" && text_len >= 32 && node_rect_h <= 120.0 {
-        Some(27.9)
+        Some(LONG_HEADING1_PROMPT_FONT_SIZE)
     } else {
         None
     }
@@ -2162,7 +2163,7 @@ fn textfield_fallback_font_size_from_signals(
         "Heading2" if node_rect_h <= 80.0 => Some(28.0),
         "Heading2" => Some(18.0),
         "Heading6" if node_rect_h >= 48.0 => Some(18.0),
-        "Heading1" if text_len >= 32 && node_rect_h <= 120.0 => Some(27.9),
+        "Heading1" if text_len >= 32 && node_rect_h <= 120.0 => Some(LONG_HEADING1_PROMPT_FONT_SIZE),
         "Heading1" => Some(40.0),
         _ => None,
     }
@@ -3344,7 +3345,7 @@ mod tests {
                 105.0,
                 Some("PLEASE SELECT AN OPTION FROM THE AVAILABLE SERVICES"),
             ),
-            Some(27.9)
+            Some(LONG_HEADING1_PROMPT_FONT_SIZE)
         );
     }
 
