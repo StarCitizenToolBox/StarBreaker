@@ -82,6 +82,29 @@ pub struct FontGlyphSet {
     pub glyphs: Vec<FontGlyph>,
 }
 
+/// Source `DefineEditText` metrics associated with an imported or exported SWF font symbol.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SwfEditTextMetrics {
+    /// Text format height stored in the source SWF, in pixels.
+    pub height_px: f32,
+    /// Top of the source text-field bounds, in pixels.
+    pub bounds_y_min_px: f32,
+    /// Bottom of the source text-field bounds, in pixels.
+    pub bounds_y_max_px: f32,
+}
+
+impl SwfEditTextMetrics {
+    /// Scale the source text-field overscan to the renderer's current font size.
+    pub fn top_overscan_px(self, size_px: f32) -> f32 {
+        if self.height_px <= 0.0 || !self.height_px.is_finite() || !size_px.is_finite() {
+            return 0.0;
+        }
+        let above = (-self.bounds_y_min_px).max(0.0);
+        let below = (self.bounds_y_max_px - self.height_px).max(0.0);
+        ((above + below) * (size_px / self.height_px)).max(0.0)
+    }
+}
+
 /// A single placed child from a sprite's first frame.
 #[derive(Clone, Debug)]
 pub struct PlaceRecord {
@@ -540,6 +563,59 @@ pub fn extract_exported_symbols(
     })
 }
 
+/// Extract source `DefineEditText` metrics keyed by imported/exported font symbol.
+pub fn extract_font_edit_text_metrics(
+    swf_bytes: &[u8],
+) -> Result<HashMap<String, SwfEditTextMetrics>, UiError> {
+    let mut out: HashMap<String, SwfEditTextMetrics> = HashMap::new();
+
+    with_parsed_swf!(swf_bytes, |tags| {
+        let mut imported_font_symbols: HashMap<CharacterId, String> = HashMap::new();
+        let mut skipped_action_tags = 0u32;
+
+        for tag in &tags {
+            match tag {
+                Tag::ImportAssets { imports, .. } => {
+                    for import in imports {
+                        imported_font_symbols.insert(import.id, import.name.to_string_lossy(swf::UTF_8));
+                    }
+                }
+                Tag::DoAction(_) | Tag::DoInitAction { .. } | Tag::DoAbc(_) | Tag::DoAbc2(_) => {
+                    skipped_action_tags += 1;
+                }
+                _ => {}
+            }
+        }
+
+        for tag in &tags {
+            let Tag::DefineEditText(edit) = tag else {
+                continue;
+            };
+            let Some(font_id) = edit.font_id() else {
+                continue;
+            };
+            let Some(symbol) = imported_font_symbols.get(&font_id) else {
+                continue;
+            };
+            let Some(height) = edit.height() else {
+                continue;
+            };
+            let bounds = edit.bounds();
+            let metrics = SwfEditTextMetrics {
+                height_px: height.get() as f32 / 20.0,
+                bounds_y_min_px: bounds.y_min.get() as f32 / 20.0,
+                bounds_y_max_px: bounds.y_max.get() as f32 / 20.0,
+            };
+            out.entry(symbol.clone()).or_insert(metrics);
+        }
+
+        if skipped_action_tags > 0 {
+            log::debug!("extract_font_edit_text_metrics: skipped {skipped_action_tags} action tag(s)");
+        }
+        Ok(out)
+    })
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // SwfAssetLibrary — content-addressed cache of all extracted atoms
 // ──────────────────────────────────────────────────────────────────────────────
@@ -558,6 +634,7 @@ pub struct SwfAssetLibrary {
     shapes: HashMap<CharacterId, ShapeRecord>,
     fonts: HashMap<CharacterId, FontGlyphSet>,
     exports: HashMap<String, CharacterId>,
+    font_edit_text_metrics: HashMap<String, SwfEditTextMetrics>,
     /// Raw bytes, kept so sprite first-frame queries can re-parse on demand.
     raw: Vec<u8>,
 }
@@ -579,6 +656,7 @@ impl SwfAssetLibrary {
         let shapes = extract_shapes(&swf_bytes)?;
         let fonts = extract_fonts(&swf_bytes)?;
         let exports = extract_exported_symbols(&swf_bytes)?;
+        let font_edit_text_metrics = extract_font_edit_text_metrics(&swf_bytes)?;
 
         Ok(Self {
             content_hash,
@@ -586,6 +664,7 @@ impl SwfAssetLibrary {
             shapes,
             fonts,
             exports,
+            font_edit_text_metrics,
             raw: swf_bytes,
         })
     }
@@ -598,6 +677,10 @@ impl SwfAssetLibrary {
         self.bitmaps.extend(extract_bitmaps(swf_bytes)?);
         self.shapes.extend(extract_shapes(swf_bytes)?);
         self.fonts.extend(extract_fonts(swf_bytes)?);
+
+        for (symbol, metrics) in extract_font_edit_text_metrics(swf_bytes)? {
+            self.font_edit_text_metrics.entry(symbol).or_insert(metrics);
+        }
 
         for (name, id) in extract_exported_symbols(swf_bytes)? {
             self.exports.entry(name).or_insert(id);
@@ -647,6 +730,11 @@ impl SwfAssetLibrary {
         self.exports
             .iter()
             .map(|(name, &id)| (name.as_str(), id))
+    }
+
+    /// Retrieve source edit-text metrics for an imported/exported font symbol.
+    pub fn font_edit_text_metrics(&self, symbol: &str) -> Option<&SwfEditTextMetrics> {
+        self.font_edit_text_metrics.get(symbol)
     }
 
     /// Return the first-frame display list of a `DefineSprite` character.
@@ -980,6 +1068,62 @@ mod tests {
         buf
     }
 
+    fn make_swf_with_imported_font_edit_text() -> Vec<u8> {
+        use swf::*;
+
+        let header = Header {
+            compression: Compression::None,
+            version: 8,
+            stage_size: Rectangle {
+                x_min: Twips::ZERO,
+                x_max: Twips::from_pixels(200.0),
+                y_min: Twips::ZERO,
+                y_max: Twips::from_pixels(200.0),
+            },
+            frame_rate: Fixed8::from_f32(24.0),
+            num_frames: 1,
+        };
+
+        let imported = Tag::ImportAssets {
+            url: "fonts.gfx".into(),
+            imports: vec![ExportedAsset {
+                id: 18,
+                name: "$Text1Thin".into(),
+            }],
+        };
+        let edit = Tag::DefineEditText(Box::new(
+            EditText::new()
+                .with_id(19)
+                .with_font_id(18, Twips::from_pixels(20.0))
+                .with_bounds(Rectangle {
+                    x_min: Twips::from_pixels(-2.0),
+                    x_max: Twips::from_pixels(536.0),
+                    y_min: Twips::from_pixels(-2.0),
+                    y_max: Twips::from_pixels(23.4),
+                }),
+        ));
+        let exported_font_sheet_edit = Tag::DefineEditText(Box::new(
+            EditText::new()
+                .with_id(39)
+                .with_font_id(20, Twips::from_pixels(20.0))
+                .with_bounds(Rectangle {
+                    x_min: Twips::from_pixels(-2.0),
+                    x_max: Twips::from_pixels(536.0),
+                    y_min: Twips::from_pixels(-2.0),
+                    y_max: Twips::from_pixels(75.8),
+                }),
+        ));
+        let exported = Tag::ExportAssets(vec![ExportedAsset {
+            id: 20,
+            name: "$Text1Thin".into(),
+        }]);
+        let tags = [imported, edit, exported_font_sheet_edit, exported, Tag::ShowFrame];
+
+        let mut buf = Vec::new();
+        swf::write_swf(&header, &tags, &mut buf).expect("write_swf failed");
+        buf
+    }
+
     #[test]
     fn parse_minimal_swf_without_panicking() {
         let swf_bytes = make_minimal_swf();
@@ -1016,6 +1160,18 @@ mod tests {
         let swf_bytes = make_swf_with_action();
         let shapes = extract_shapes(&swf_bytes).expect("extract_shapes failed");
         assert!(shapes.is_empty(), "DoAction must not produce a shape entry");
+    }
+
+    #[test]
+    fn font_edit_text_metrics_use_imported_font_templates() {
+        let swf_bytes = make_swf_with_imported_font_edit_text();
+        let metrics = extract_font_edit_text_metrics(&swf_bytes).expect("extract metrics failed");
+        let text1_thin = metrics.get("$Text1Thin").expect("$Text1Thin metrics");
+
+        assert_eq!(text1_thin.height_px, 20.0);
+        assert_eq!(text1_thin.bounds_y_min_px, -2.0);
+        assert!((text1_thin.bounds_y_max_px - 23.4).abs() < 0.01);
+        assert!((text1_thin.top_overscan_px(20.0) - 5.4).abs() < 0.01);
     }
 
     #[test]

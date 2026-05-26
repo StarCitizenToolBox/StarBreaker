@@ -163,7 +163,7 @@ fn main() {
                 let w = (bounds.x_max.get() - bounds.x_min.get()) as f32 / 20.0;
                 let h = (bounds.y_max.get() - bounds.y_min.get()) as f32 / 20.0;
                 println!(
-                    "id={} var={} font_id={:?} font_name={:?} font_class={:?} height_px={:?} auto_size={} bounds=({:.1}x{:.1})",
+                    "id={} var={} font_id={:?} font_name={:?} font_class={:?} height_px={:?} auto_size={} bounds=({:.1},{:.1})-({:.1},{:.1}) size=({:.1}x{:.1})",
                     edit.id(),
                     variable_name,
                     edit.font_id(),
@@ -171,6 +171,10 @@ fn main() {
                     edit.font_class().map(|s| s.to_string_lossy(swf::UTF_8)),
                     height_px,
                     edit.is_auto_size(),
+                    bounds.x_min.get() as f32 / 20.0,
+                    bounds.y_min.get() as f32 / 20.0,
+                    bounds.x_max.get() as f32 / 20.0,
+                    bounds.y_max.get() as f32 / 20.0,
                     w,
                     h
                 );

@@ -432,9 +432,24 @@ fn load_first_swf(paths: &[String], fetcher: &dyn SwfFetcher) -> SwfAssetLibrary
                 let mut pending = vec![(normalize_p4k_swf_path(path), bytes)];
                 let mut seen = HashSet::new();
 
-                // BuildingBlocks text fonts are centralized in this shared SWF.
-                // Some game SWFs reference the text styles indirectly, so include
-                // this source even when the primary SWF has no explicit imports.
+                // BuildingBlocks text fields use Canvas.swf as the font-template
+                // source and fonts_en.gfx as the shared glyph source. Some game
+                // SWFs reference these indirectly, so include both sources even
+                // when the primary SWF has no explicit imports.
+                let canvas_path = "Data/UI/BuildingBlocks/assets/SWF/Canvas.swf".to_string();
+                if let Ok(canvas_bytes) = fetcher.fetch_swf_bytes(&canvas_path) {
+                    if let Err(e) = root_lib.merge_swf_bytes(&canvas_bytes) {
+                        log::debug!(
+                            "pipeline: failed to merge BuildingBlocks canvas SWF '{}': {}",
+                            canvas_path,
+                            e
+                        );
+                    }
+                    pending.push((canvas_path, canvas_bytes));
+                } else if std::env::var("SB_UI_FONT_TELEMETRY").is_ok() {
+                    eprintln!("pipeline-font: canvas SWF fetch failed for Data/UI/BuildingBlocks/assets/SWF/Canvas.swf");
+                }
+
                 let shared_fonts_path = "Data/UI/fonts/Shared/fonts_en.gfx".to_string();
                 if let Ok(shared_bytes) = fetcher.fetch_swf_bytes(&shared_fonts_path) {
                     if let Err(e) = root_lib.merge_swf_bytes(&shared_bytes) {
@@ -494,10 +509,39 @@ fn load_first_swf(paths: &[String], fetcher: &dyn SwfFetcher) -> SwfAssetLibrary
         }
     }
 
+    let canvas_path = "Data/UI/BuildingBlocks/assets/SWF/Canvas.swf".to_string();
     let shared_fonts_path = "Data/UI/fonts/Shared/fonts_en.gfx".to_string();
-    if let Ok(shared_bytes) = fetcher.fetch_swf_bytes(&shared_fonts_path)
-        && let Ok(lib) = SwfAssetLibrary::new(shared_bytes)
-    {
+    if let Ok(shared_bytes) = fetcher.fetch_swf_bytes(&shared_fonts_path) {
+        let lib = if let Ok(canvas_bytes) = fetcher.fetch_swf_bytes(&canvas_path) {
+            match SwfAssetLibrary::new(canvas_bytes) {
+                Ok(mut canvas_lib) => {
+                    if let Err(e) = canvas_lib.merge_swf_bytes(&shared_bytes) {
+                        log::debug!(
+                            "pipeline: failed to merge shared fonts SWF '{}' into fallback canvas library: {}",
+                            shared_fonts_path,
+                            e
+                        );
+                    }
+                    canvas_lib
+                }
+                Err(e) => {
+                    log::debug!(
+                        "pipeline: failed to parse fallback canvas SWF '{}': {}",
+                        canvas_path,
+                        e
+                    );
+                    match SwfAssetLibrary::new(shared_bytes) {
+                        Ok(lib) => lib,
+                        Err(_) => break_fallback_swf_load(),
+                    }
+                }
+            }
+        } else {
+            match SwfAssetLibrary::new(shared_bytes) {
+                Ok(lib) => lib,
+                Err(_) => break_fallback_swf_load(),
+            }
+        };
         if std::env::var("SB_UI_FONT_TELEMETRY").is_ok() {
             eprintln!(
                 "pipeline-font: fallback='{}' fonts={} exports={}",
@@ -507,6 +551,15 @@ fn load_first_swf(paths: &[String], fetcher: &dyn SwfFetcher) -> SwfAssetLibrary
             );
         }
         return lib;
+    }
+
+    fn break_fallback_swf_load() -> SwfAssetLibrary {
+        let minimal: Vec<u8> = vec![
+            b'F', b'W', b'S', 6, 21, 0, 0, 0,
+            0x00, 0x18, 0x00, 0x01, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        SwfAssetLibrary::new(minimal).expect("minimal SWF is always valid")
     }
 
     // Minimal valid uncompressed SWF — no tags.

@@ -10,7 +10,7 @@ use rusttype::{Font, Point, Scale, point};
 use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Transform};
 
 use crate::bb_layout::Rect;
-use crate::swf_assets::FontGlyphSet;
+use crate::swf_assets::{FontGlyphSet, SwfEditTextMetrics};
 
 static SANS_BYTES: &[u8] = include_bytes!("../assets/fonts/DejaVuSans.ttf");
 static MONO_BYTES: &[u8] = include_bytes!("../assets/fonts/DejaVuSansMono.ttf");
@@ -270,6 +270,7 @@ impl TextRenderer {
         text: &str,
         rect: Rect,
         swf_font: &FontGlyphSet,
+        edit_text_metrics: Option<&SwfEditTextMetrics>,
         size_px: f32,
         colour: [u8; 4],
         align: TextAlign,
@@ -381,8 +382,12 @@ impl TextRenderer {
             max_y_px = ascent * scale;
         }
         let total_h = (max_y_px - min_y_px).max(1.0);
+        let source_top_overscan = edit_text_metrics
+            .copied()
+            .map(|metrics| metrics.top_overscan_px(size_px))
+            .unwrap_or(0.0);
         let block_top = match vertical_align {
-            VerticalAlign::Top => rect.y,
+            VerticalAlign::Top => rect.y + source_top_overscan,
             VerticalAlign::Centre => rect.y + ((rect.h - total_h) * 0.5).max(0.0),
             VerticalAlign::Bottom => rect.y + (rect.h - total_h).max(0.0),
         };
@@ -421,6 +426,22 @@ impl TextRenderer {
 
         blend_pixmap_onto_image(&pixmap, img, rect);
         true
+    }
+
+    /// Measure SWF text advance using the same glyph widths as the SWF renderer.
+    pub fn measure_swf_advance_width(
+        &self,
+        text: &str,
+        swf_font: &FontGlyphSet,
+        size_px: f32,
+    ) -> Option<f32> {
+        if text.is_empty() || size_px < 1.0 {
+            return None;
+        }
+        let ascent = swf_font.ascent.map(|v| v as f32).unwrap_or(820.0);
+        let descent = swf_font.descent.map(|v| v as f32).unwrap_or(-204.0);
+        let units_per_em = (ascent - descent).abs().max(1.0);
+        (units_per_em > 0.0).then(|| swf_line_width(text, swf_font, units_per_em, size_px))
     }
 }
 
@@ -611,9 +632,54 @@ fn blend_pixmap_onto_image(pixmap: &Pixmap, img: &mut RgbaImage, clip: Rect) {
 mod tests {
     use super::*;
     use image::Rgba;
+    use swf::{Point, PointDelta, ShapeRecord, StyleChangeData, Twips};
 
     fn make_img(w: u32, h: u32) -> RgbaImage {
         RgbaImage::from_pixel(w, h, Rgba([0, 0, 0, 255]))
+    }
+
+    fn test_swf_font() -> FontGlyphSet {
+        FontGlyphSet {
+            id: 1,
+            name: "Test".to_string(),
+            is_bold: false,
+            is_italic: false,
+            ascent: Some(800),
+            descent: Some(200),
+            leading: Some(0),
+            glyphs: vec![crate::swf_assets::FontGlyph {
+                code: Some('A' as u16),
+                advance: Some(360),
+                shape_records: vec![
+                    ShapeRecord::StyleChange(Box::new(StyleChangeData {
+                        move_to: Some(Point::new(Twips::new(0), Twips::new(-300))),
+                        fill_style_0: None,
+                        fill_style_1: None,
+                        line_style: None,
+                        new_styles: None,
+                    })),
+                    ShapeRecord::StraightEdge {
+                        delta: PointDelta::new(Twips::new(300), Twips::new(0)),
+                    },
+                    ShapeRecord::StraightEdge {
+                        delta: PointDelta::new(Twips::new(0), Twips::new(300)),
+                    },
+                    ShapeRecord::StraightEdge {
+                        delta: PointDelta::new(Twips::new(-300), Twips::new(0)),
+                    },
+                    ShapeRecord::StraightEdge {
+                        delta: PointDelta::new(Twips::new(0), Twips::new(-300)),
+                    },
+                ],
+            }],
+        }
+    }
+
+    fn first_nonblack_y(img: &RgbaImage) -> Option<u32> {
+        img.enumerate_pixels()
+            .filter(|(_, _, pixel)| pixel[0] > 0 || pixel[1] > 0 || pixel[2] > 0)
+            .map(|(_, y, _)| y)
+            .min()
     }
 
     #[test]
@@ -663,6 +729,53 @@ mod tests {
         );
         let after: Vec<_> = img.pixels().copied().collect();
         assert_eq!(before, after, "draw of empty string mutated the image");
+    }
+
+    #[test]
+    fn swf_top_alignment_uses_source_edit_text_overscan() {
+        let r = TextRenderer::new();
+        let font = test_swf_font();
+        let rect = Rect { x: 0.0, y: 0.0, w: 80.0, h: 40.0 };
+
+        let mut without_metrics = make_img(96, 48);
+        assert!(r.draw_swf_font(
+            &mut without_metrics,
+            "A",
+            rect,
+            &font,
+            None,
+            20.0,
+            [255, 255, 255, 255],
+            TextAlign::Left,
+            VerticalAlign::Top,
+            None,
+        ));
+
+        let metrics = SwfEditTextMetrics {
+            height_px: 20.0,
+            bounds_y_min_px: -2.0,
+            bounds_y_max_px: 23.4,
+        };
+        let mut with_metrics = make_img(96, 48);
+        assert!(r.draw_swf_font(
+            &mut with_metrics,
+            "A",
+            rect,
+            &font,
+            Some(&metrics),
+            20.0,
+            [255, 255, 255, 255],
+            TextAlign::Left,
+            VerticalAlign::Top,
+            None,
+        ));
+
+        let uncorrected_top = first_nonblack_y(&without_metrics).expect("uncorrected pixels");
+        let corrected_top = first_nonblack_y(&with_metrics).expect("corrected pixels");
+        assert!(
+            corrected_top >= uncorrected_top + 5,
+            "expected source edit-text overscan to lower top-aligned SWF text ({uncorrected_top} -> {corrected_top})"
+        );
     }
 
     #[test]

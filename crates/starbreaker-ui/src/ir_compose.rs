@@ -124,6 +124,7 @@ pub fn render_ui_ir_document(
         draw_text_node(
             &mut img,
             node,
+            document,
             &text_renderer,
             ctx,
             &mut seen_text_rects,
@@ -795,6 +796,7 @@ fn rounded_rect_path(rect: TskRect, radius: f32) -> Option<tiny_skia::Path> {
 fn draw_text_node(
     img: &mut RgbaImage,
     node: &UiIrNode,
+    document: &UiIrDocument,
     renderer: &TextRenderer,
     ctx: &ComposeContext<'_>,
     seen_rects: &mut HashSet<(i32, i32, i32, i32)>,
@@ -873,12 +875,24 @@ fn draw_text_node(
     let primary_line_spacing = node.text_style.as_ref().and_then(|style| style.line_spacing);
     let primary_swf_font_scale = primary_font_style_scale * SWF_TEXT_RENDER_SIZE_CALIBRATION;
     let primary_ttf_font_scale = primary_font_style_scale * TEXT_RENDER_SIZE_CALIBRATION;
-    let used_swf_font = selected_font.as_ref().is_some_and(|(_, swf_font)| {
+    let mut primary_rect = primary_rect;
+    let used_swf_font = selected_font.as_ref().is_some_and(|(symbol, swf_font)| {
+        if let Some(inline_rect) = inline_nested_textfield_text_rect(
+            node,
+            primary_rect,
+            document,
+            renderer,
+            ctx,
+            (nominal_font_size * primary_swf_font_scale).max(1.0),
+        ) {
+            primary_rect = inline_rect;
+        }
         renderer.draw_swf_font(
             img,
             text,
             primary_rect,
             swf_font,
+            ctx.assets.font_edit_text_metrics(symbol),
             (nominal_font_size * primary_swf_font_scale).max(1.0),
             colour,
             align,
@@ -904,6 +918,16 @@ fn draw_text_node(
         }
     }
     if !used_swf_font {
+        if let Some(inline_rect) = inline_nested_textfield_text_rect(
+            node,
+            primary_rect,
+            document,
+            renderer,
+            ctx,
+            fallback_font_size,
+        ) {
+            primary_rect = inline_rect;
+        }
         renderer.draw(
             img,
             text,
@@ -943,12 +967,13 @@ fn draw_text_node(
             .and_then(|style| style.line_spacing);
         let secondary_swf_font_scale = secondary_font_style_scale * SWF_TEXT_RENDER_SIZE_CALIBRATION;
         let secondary_ttf_font_scale = secondary_font_style_scale * TEXT_RENDER_SIZE_CALIBRATION;
-        let secondary_used_swf = secondary_selected_font.as_ref().is_some_and(|(_, swf_font)| {
+        let secondary_used_swf = secondary_selected_font.as_ref().is_some_and(|(symbol, swf_font)| {
             renderer.draw_swf_font(
                 img,
                 secondary,
                 secondary_rect,
                 swf_font,
+                ctx.assets.font_edit_text_metrics(symbol),
                 (secondary_nominal_font_size * secondary_swf_font_scale).max(1.0),
                 secondary_colour,
                 secondary_align,
@@ -1157,13 +1182,112 @@ fn debug_text_rects_with_renderer(node: &UiIrNode, renderer: &TextRenderer) -> O
             .as_ref()
             .map(|style| VerticalAlign::from_bb_str(&style.vertical_alignment))
             .unwrap_or(VerticalAlign::Centre);
+        let primary_rect = center_anchored_heading_textfield_text_rect(node, rect).unwrap_or(rect);
         Some(DebugTextRects {
-            primary: rect,
+            primary: primary_rect,
             secondary: None,
-            primary_text_origin: text_origin_in_rect(renderer, text, rect, FontKind::Sans, fallback_font_size, align, vertical),
+            primary_text_origin: text_origin_in_rect(renderer, text, primary_rect, FontKind::Sans, fallback_font_size, align, vertical),
             secondary_text_origin: None,
         })
     }
+}
+
+fn center_anchored_heading_textfield_text_rect(node: &UiIrNode, rect: Rect) -> Option<Rect> {
+    let style = node.text_style.as_ref()?;
+    if !node.node_type.eq_ignore_ascii_case("widget_text_field") {
+        return None;
+    }
+    if !style
+        .label_style
+        .as_deref()
+        .is_some_and(|label| label.eq_ignore_ascii_case("Heading1"))
+    {
+        return None;
+    }
+    if !style.vertical_alignment.eq_ignore_ascii_case("Center") {
+        return None;
+    }
+    let anchor_to_parent_y = style.anchor_to_parent_y?;
+    if (anchor_to_parent_y - 0.5).abs() > f32::EPSILON || node.pivot[1].abs() > f32::EPSILON {
+        return None;
+    }
+    if node.anchor[1] > 0.0 && !(node.anchor[0] > 1.0 && node.pivot[0] >= 0.99) {
+        return None;
+    }
+
+    let top = rect.y + rect.h * anchor_to_parent_y;
+    let height = (rect.h * (1.0 - anchor_to_parent_y)).max(1.0);
+    Some(Rect { y: top, h: height, ..rect })
+}
+
+fn inline_nested_textfield_text_rect(
+    node: &UiIrNode,
+    rect: Rect,
+    document: &UiIrDocument,
+    renderer: &TextRenderer,
+    ctx: &ComposeContext<'_>,
+    child_render_size_px: f32,
+) -> Option<Rect> {
+    let style = node.text_style.as_ref()?;
+    if !node.node_type.eq_ignore_ascii_case("widget_text_field")
+        || node.pivot[0] < 0.99
+        || node.anchor[0] <= 1.0
+        || !style.vertical_alignment.eq_ignore_ascii_case("Center")
+    {
+        return None;
+    }
+
+    let parent_id = node.parent_id?;
+    let parent = document.nodes.iter().find(|candidate| candidate.id == parent_id)?;
+    let parent_style = parent.text_style.as_ref()?;
+    if !parent.node_type.eq_ignore_ascii_case("widget_text_field")
+        || !same_label_style(style, parent_style)
+        || !parent_style.vertical_alignment.eq_ignore_ascii_case(&style.vertical_alignment)
+    {
+        return None;
+    }
+
+    let parent_text = resolved_text_payload(parent)?;
+    let parent_rect = center_anchored_heading_textfield_text_rect(
+        parent,
+        ir_rect_to_layout_rect(parent.computed_rect),
+    )
+    .unwrap_or_else(|| ir_rect_to_layout_rect(parent.computed_rect));
+    let parent_nominal_size = parent_style_font_size(parent_style);
+    let parent_font_style_scale = font_style_scale_modifier(Some(parent_style));
+    let parent_swf_size = (parent_nominal_size * parent_font_style_scale * SWF_TEXT_RENDER_SIZE_CALIBRATION).max(1.0);
+    let parent_width = select_imported_ui_font(ctx, Some(parent_style))
+        .and_then(|(_, swf_font)| renderer.measure_swf_advance_width(parent_text, swf_font, parent_swf_size))
+        .unwrap_or_else(|| {
+            renderer.measure(
+                parent_text,
+                FontKind::Sans,
+                (parent_nominal_size * parent_font_style_scale * TEXT_RENDER_SIZE_CALIBRATION).max(1.0),
+            ).0
+        });
+    let inline_gap = style.anchor_to_parent_x.unwrap_or(0.0).max(0.0) * child_render_size_px;
+    let inline_x = parent_rect.x + parent_width + inline_gap;
+    if !inline_x.is_finite() || inline_x >= rect.x || inline_x <= parent_rect.x {
+        return None;
+    }
+
+    let right = rect.x + rect.w;
+    Some(Rect {
+        x: inline_x,
+        w: (right - inline_x).max(1.0),
+        ..rect
+    })
+}
+
+fn same_label_style(left: &UiIrTextStyle, right: &UiIrTextStyle) -> bool {
+    match (left.label_style.as_deref(), right.label_style.as_deref()) {
+        (Some(left), Some(right)) => left.eq_ignore_ascii_case(right),
+        _ => false,
+    }
+}
+
+fn parent_style_font_size(style: &UiIrTextStyle) -> f32 {
+    ir_value_to_px(&style.font_size).max(1.0)
 }
 
 fn debug_text_drawn_bounds_with_renderer(
@@ -2432,6 +2556,102 @@ mod tests {
         assert_eq!(primary_rect.h, 32.0);
         assert_eq!(secondary_rect.y, 79.0);
         assert_eq!(secondary_rect.h, 27.0);
+    }
+
+    #[test]
+    fn center_anchored_heading_textfield_uses_parent_anchor_text_band() {
+        let mut node = blank_node("widget_text_field");
+        node.computed_rect = UiIrRect { x: 20.0, y: 25.0, w: 320.0, h: 78.0 };
+        node.authored_size = [
+            UiIrValue::Fixed { value: 320.0 },
+            UiIrValue::Fixed { value: 78.0 },
+        ];
+        node.anchor = [0.0, -0.12];
+        node.pivot = [0.0, 0.0];
+        node.text_payload = Some(UiIrTextPayload::Resolved { text: "T3".to_string() });
+        node.text_style = Some(UiIrTextStyle {
+            font_record: None,
+            resolved_font_record: None,
+            font_size: UiIrValue::Fixed { value: 41.0 },
+            line_spacing: None,
+            alignment: "Left".to_string(),
+            vertical_alignment: "Center".to_string(),
+            anchor_to_parent_x: None,
+            anchor_to_parent_y: Some(0.5),
+            colour: None,
+            colour_token: None,
+            label_style: Some("Heading1".to_string()),
+        });
+
+        let rects = debug_text_rects(&node).expect("text rects");
+        assert_eq!(rects.primary.y, 64.0);
+        assert_eq!(rects.primary.h, 39.0);
+    }
+
+    #[test]
+    fn nested_right_pivot_heading_textfield_uses_inline_parent_text_advance() {
+        let mut parent = blank_node("widget_text_field");
+        parent.id = 1;
+        parent.children = vec![2];
+        parent.computed_rect = UiIrRect { x: 90.0, y: 25.0, w: 780.0, h: 78.0 };
+        parent.text_payload = Some(UiIrTextPayload::Resolved { text: "T3".to_string() });
+        parent.text_style = Some(UiIrTextStyle {
+            font_record: None,
+            resolved_font_record: None,
+            font_size: UiIrValue::Fixed { value: 41.0 },
+            line_spacing: None,
+            alignment: "Left".to_string(),
+            vertical_alignment: "Center".to_string(),
+            anchor_to_parent_x: Some(0.5),
+            anchor_to_parent_y: Some(0.5),
+            colour: None,
+            colour_token: None,
+            label_style: Some("Heading1".to_string()),
+        });
+
+        let mut child = blank_node("widget_text_field");
+        child.id = 2;
+        child.parent_id = Some(1);
+        child.anchor = [1.14, 0.0];
+        child.pivot = [1.0, 0.0];
+        child.computed_rect = UiIrRect { x: 200.0, y: 25.0, w: 780.0, h: 78.0 };
+        child.text_payload = Some(UiIrTextPayload::Resolved { text: "INLINE TITLE".to_string() });
+        child.text_style = parent.text_style.clone();
+
+        let document = UiIrDocument {
+            schema_version: UI_IR_SCHEMA_VERSION,
+            canvas_guid: "test-guid".to_string(),
+            canvas_name: None,
+            target_width: 400,
+            target_height: 160,
+            selected_style_source: None,
+            selected_swf_source: None,
+            renderer_hint: UiRendererHint::Bb,
+            confidence: 100,
+            warnings: Vec::new(),
+            unresolved_references: Vec::new(),
+            resolved_asset_refs: Vec::new(),
+            missing_asset_refs: Vec::new(),
+            nodes: vec![parent, child.clone()],
+        };
+        let style = stub_style();
+        let defaults = crate::defaults::DefaultValueRegistry::with_well_known_path_defaults();
+        let assets = minimal_swf_assets();
+        let ctx = ComposeContext { style: &style, defaults: &defaults, assets: &assets };
+        let rect = ir_rect_to_layout_rect(child.computed_rect);
+        let inline = inline_nested_textfield_text_rect(
+            &child,
+            rect,
+            &document,
+            &TextRenderer::new(),
+            &ctx,
+            41.0 * SWF_TEXT_RENDER_SIZE_CALIBRATION,
+        )
+        .expect("inline rect");
+
+        assert!(inline.x < rect.x, "expected nested title to move left from inflated Auto field");
+        assert!(inline.x > 90.0, "expected nested title to remain after parent text");
+        assert_eq!(inline.x + inline.w, rect.x + rect.w);
     }
 
     #[test]
