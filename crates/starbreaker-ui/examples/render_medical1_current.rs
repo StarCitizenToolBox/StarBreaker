@@ -231,7 +231,7 @@ fn load_localization_map(workspace_root: &Path) -> Option<HashMap<String, String
 
 fn parse_animation_sample_percent() -> Result<Option<f32>, String> {
     let mut args = std::env::args().skip(1);
-    let mut animation_sample_percent = None;
+    let mut animation_sample_percent = Some(starbreaker_ui::pipeline::DEFAULT_STATIC_ANIMATION_SAMPLE_PERCENT);
     while let Some(arg) = args.next() {
         let value = if let Some(value) = arg.strip_prefix("--animation-percent=") {
             value.to_string()
@@ -263,6 +263,7 @@ fn render_medical(
     style_fetcher: &FsStyleFetcher,
     file_fetcher: &P4kFileFetcher,
     localization_map: Option<HashMap<String, String>>,
+    loc_fetcher: Option<&dyn starbreaker_ui::bb_loc::LocFetcher>,
     animation_sample_percent: Option<f32>,
 ) -> Result<(), String> {
     let binding = UiBindingView {
@@ -285,7 +286,7 @@ fn render_medical(
         apply_postprocess: false,
         animation_sample_percent,
         localization_map,
-        loc_fetcher: None,
+        loc_fetcher,
     };
 
     let png = render_for_binding(&inputs).map_err(|e| {
@@ -364,6 +365,11 @@ fn main() -> Result<(), String> {
         .as_ref()
         .map(|p4k| P4kFileFetcher { p4k: Arc::clone(p4k) })
         .ok_or_else(|| "P4K-backed fetcher unavailable".to_string())?;
+    let ini_loc_fetcher = (std::env::var("SB_UI_USE_LOC_FETCHER").as_deref() == Ok("1"))
+        .then(|| starbreaker_ui::bb_loc_p4k::load_global_ini(|path| read_p4k_path(&file_fetcher.p4k, path).ok()));
+    let loc_fetcher = ini_loc_fetcher
+        .as_ref()
+        .map(|fetcher| fetcher as &dyn starbreaker_ui::bb_loc::LocFetcher);
 
     let comparison_dir = workspace.join("docs/StarBreaker/ui-rework-artifacts/phase-2/comparison");
     let medical1_output = comparison_dir.join("medical1-current.png");
@@ -378,6 +384,7 @@ fn main() -> Result<(), String> {
         &style_fetcher,
         &file_fetcher,
         localization_map.clone(),
+        loc_fetcher,
         animation_sample_percent,
     )?;
     render_medical(
@@ -388,6 +395,7 @@ fn main() -> Result<(), String> {
         &style_fetcher,
         &file_fetcher,
         localization_map,
+        loc_fetcher,
         animation_sample_percent,
     )?;
 

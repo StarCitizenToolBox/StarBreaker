@@ -479,6 +479,8 @@ class OrchestrationMixin:
             if isinstance(helper_name, str) and helper_name:
                 if helper_name in source_names:
                     return binding
+                if fallback is None:
+                    fallback = binding
                 continue
             if fallback is None:
                 fallback = binding
@@ -666,7 +668,7 @@ class OrchestrationMixin:
         )
         if isinstance(ui_binding, dict) and bool(ui_binding.get("default_state_is_off")):
             obj[PROP_UI_DEFAULT_STATE_IS_OFF] = True
-        elif PROP_UI_DEFAULT_STATE_IS_OFF in obj:
+        elif callable(getattr(obj, "get", None)) and obj.get(PROP_UI_DEFAULT_STATE_IS_OFF) is not None:
             del obj[PROP_UI_DEFAULT_STATE_IS_OFF]
         if slot_mapping is not None:
             if mesh_materials is not None:

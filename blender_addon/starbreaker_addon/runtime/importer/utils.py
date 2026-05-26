@@ -27,6 +27,7 @@ from ..constants import (
     PROP_MATERIAL_IDENTITY,
     PROP_MATERIAL_SIDECAR,
     PROP_PALETTE_SCOPE,
+    PROP_TEMPLATE_KEY,
     PROP_SOURCE_NODE_NAME,
     PROP_SUBMATERIAL_JSON,
     SC_LIGHT_CANDELA_SCALE,
@@ -121,6 +122,41 @@ def _managed_material_runtime_graph_is_sane(material: bpy.types.Material) -> boo
     node_tree = material.node_tree
     if node_tree is None:
         return False
+
+    if _string_prop(material, PROP_TEMPLATE_KEY) == "screen_hud":
+        screen_nodes = [
+            node
+            for node in node_tree.nodes
+            if node.bl_idname == "ShaderNodeGroup"
+            and getattr(getattr(node, "node_tree", None), "name", "").startswith(
+                "StarBreaker Runtime Screen"
+            )
+        ]
+        if not screen_nodes:
+            return False
+        for node in screen_nodes:
+            group_tree = getattr(node, "node_tree", None)
+            if group_tree is None or group_tree.get("starbreaker_runtime_built_signature") != "screen_v4":
+                return False
+            for socket_name in ("Base Color", "Emission Strength", "Use CRT", "Vector", "X pixels", "Y pixels"):
+                if node.inputs.get(socket_name) is None:
+                    return False
+            embedded_groups = {
+                nested.node_tree.name
+                for nested in group_tree.nodes
+                if nested.bl_idname == "ShaderNodeGroup"
+                and getattr(nested, "node_tree", None) is not None
+            }
+            if "RGB_grid" not in embedded_groups:
+                return False
+        material_groups = {
+            node.node_tree.name
+            for node in node_tree.nodes
+            if node.bl_idname == "ShaderNodeGroup"
+            and getattr(node, "node_tree", None) is not None
+        }
+        if "Pixelate" not in material_groups:
+            return False
 
     layer_surface_nodes = [
         node

@@ -40,66 +40,51 @@ impl<'a> CanvasFetcher for DatacoreCanvasFetcher<'a> {
     }
 
     fn fetch_canvas_by_name(&self, record_name: &str) -> Result<serde_json::Value, UiError> {
-        // DataCore stores the full name as "<Type>.<Stem>" in name_offset
-        // (e.g. "BuildingBlocks_Canvas.M_Eng_MFDContent").  Match against both
-        // the full name and just the stem so that callers using file-URL basenames
-        // (e.g. "m_eng_mfdcontent") still resolve correctly.
-        let matches: Vec<_> = self
-            .db
-            .records_by_type_name("BuildingBlocks_Canvas")
-            .filter(|record| {
-                let full_name = self.db.resolve_string2(record.name_offset);
-                let stem = full_name.rsplit('.').next().unwrap_or(full_name);
-                stem.eq_ignore_ascii_case(record_name)
-                    || full_name.eq_ignore_ascii_case(record_name)
-            })
-            .collect();
+        for type_name in datacore_ui_lookup_type_names() {
+            let matches: Vec<_> = self
+                .db
+                .records_by_type_name(type_name)
+                .filter(|record| {
+                    let full_name = self.db.resolve_string2(record.name_offset);
+                    let stem = full_name.rsplit('.').next().unwrap_or(full_name);
+                    stem.eq_ignore_ascii_case(record_name)
+                        || full_name.eq_ignore_ascii_case(record_name)
+                })
+                .collect();
 
-        if let Some(record) = matches.first().copied() {
-            if matches.len() > 1 {
-                warn!(
-                    "ui_pipeline: found {} BuildingBlocks_Canvas records named '{}'; using first",
-                    matches.len(),
-                    record_name
-                );
+            if let Some(record) = matches.first().copied() {
+                if matches.len() > 1 {
+                    warn!(
+                        "ui_pipeline: found {} {} records named '{}'; using first",
+                        matches.len(),
+                        type_name,
+                        record_name
+                    );
+                }
+                return export_canvas_record(self.db, record, record_name);
             }
-            return export_canvas_record(self.db, record, record_name);
-        }
-
-        // Fallback: BuildingBlocks_Style records share the same StyleEntry shape
-        // as brandStyles entries, so a canvas-level `style` file-URL can be
-        // resolved through this same lookup.  This keeps brand resolution
-        // structural (canvas → linked Style record) without a separate fetcher.
-        let style_matches: Vec<_> = self
-            .db
-            .records_by_type_name("BuildingBlocks_Style")
-            .filter(|record| {
-                let full_name = self.db.resolve_string2(record.name_offset);
-                let stem = full_name.rsplit('.').next().unwrap_or(full_name);
-                stem.eq_ignore_ascii_case(record_name)
-                    || full_name.eq_ignore_ascii_case(record_name)
-            })
-            .collect();
-
-        if let Some(record) = style_matches.first().copied() {
-            if style_matches.len() > 1 {
-                warn!(
-                    "ui_pipeline: found {} BuildingBlocks_Style records named '{}'; using first",
-                    style_matches.len(),
-                    record_name
-                );
-            }
-            return export_canvas_record(self.db, record, record_name);
         }
 
         Err(UiError::FetchFailed {
             guid: record_name.to_string(),
             source: format!(
-                "no BuildingBlocks_Canvas or BuildingBlocks_Style record found by name: {record_name}"
+                "no UI-support record found by name: {record_name}"
             )
             .into(),
         })
     }
+}
+
+fn datacore_ui_lookup_type_names() -> &'static [&'static str] {
+    &[
+        // DataCore stores the full name as "<Type>.<Stem>" in name_offset
+        // (e.g. "BuildingBlocks_Canvas.M_Eng_MFDContent").  These are all
+        // record families the UI resolver fetches through file-URL basenames.
+        "BuildingBlocks_Canvas",
+        "BuildingBlocks_Style",
+        "BuildingBlocks_FontStyle",
+        "TagDatabase",
+    ]
 }
 
 fn export_canvas_record(
@@ -128,11 +113,12 @@ struct P4kSwfFetcher<'a> {
 
 impl<'a> SwfFetcher for P4kSwfFetcher<'a> {
     fn fetch_swf_bytes(&self, p4k_path: &str) -> Result<Vec<u8>, UiError> {
+        let candidates = p4k_swf_candidates(p4k_path);
         let entry = self
             .p4k
             .entries()
             .iter()
-            .find(|e| e.name.eq_ignore_ascii_case(p4k_path))
+            .find(|entry| candidates.iter().any(|candidate| entry.name.eq_ignore_ascii_case(candidate)))
             .ok_or_else(|| UiError::FetchFailed {
                 guid: p4k_path.to_string(),
                 source: format!("SWF not found in P4K: {p4k_path}").into(),
@@ -142,6 +128,16 @@ impl<'a> SwfFetcher for P4kSwfFetcher<'a> {
             source: Box::new(e),
         })
     }
+}
+
+fn p4k_swf_candidates(path: &str) -> Vec<String> {
+    let native = path.replace('/', "\\");
+    let mut candidates = vec![native.clone()];
+    let lower = path.to_ascii_lowercase();
+    if !lower.starts_with("data/") && !lower.starts_with("data\\") {
+        candidates.push(format!("Data\\{native}"));
+    }
+    candidates
 }
 
 struct P4kAssetFetcher<'a> {
@@ -289,12 +285,59 @@ pub fn render_ui_binding_png(
         // would mask the "not yet rendered" signal.  Re-enable in Phase 13
         // once the paint engine produces real content.
         apply_postprocess: false,
-        animation_sample_percent: None,
+        animation_sample_percent: Some(starbreaker_ui::pipeline::DEFAULT_STATIC_ANIMATION_SAMPLE_PERCENT),
         localization_map: Some(localization_map),
         loc_fetcher: Some(&ini_loc_fetcher),
     };
     let _ = texture_mip; // size is fixed per binding_kind; mip is applied at texture level
     starbreaker_ui::pipeline::render_for_binding(&inputs).map_err(|e| e.to_string())
+}
+
+/// Compile `binding` to canonical UI IR JSON using the same live DataCore + P4K
+/// inputs as [`render_ui_binding_png`].
+pub fn compile_ui_binding_ir_json(
+    binding: &UiBinding,
+    db: &Database<'_>,
+    p4k: &MappedP4k,
+    texture_mip: u32,
+    root_manufacturer_id: Option<&str>,
+) -> Result<String, String> {
+    let canvas_fetcher = DatacoreCanvasFetcher { db };
+    let view = UiBindingView {
+        canvas_guid: binding.canvas_guid.as_deref(),
+        content_canvas_guid: binding.content_canvas_guid.as_deref(),
+        binding_kind: Some(&binding.binding_kind),
+        manufacturer_id: root_manufacturer_id,
+        helper_name: binding.helper_name.as_deref(),
+        default_view_index: binding.dashboard_view_index,
+        default_screen_slot: binding.dashboard_screen_slot,
+    };
+    let effective_guid = binding
+        .content_canvas_guid
+        .as_deref()
+        .filter(|g| !g.is_empty())
+        .or_else(|| binding.canvas_guid.as_deref().filter(|g| !g.is_empty()));
+    let authored_canvas_size = effective_guid
+        .and_then(|guid| canvas_fetcher.fetch_canvas_json(guid).ok())
+        .and_then(|json| authored_canvas_size(&json));
+    let target_size = binding_target_size(&binding.binding_kind, authored_canvas_size);
+    let localization_map = crate::pipeline::load_localization_map(p4k);
+    let ini_loc_fetcher = starbreaker_ui::bb_loc_p4k::load_global_ini(|path| p4k.read_file(path).ok());
+    let inputs = PipelineInputs {
+        binding: &view,
+        canvas_fetcher: &canvas_fetcher,
+        swf_fetcher: &P4kSwfFetcher { p4k },
+        style_fetcher: &ManufacturerStyleFetcher { db },
+        asset_fetcher: &P4kAssetFetcher { p4k },
+        target_size,
+        apply_postprocess: false,
+        animation_sample_percent: Some(starbreaker_ui::pipeline::DEFAULT_STATIC_ANIMATION_SAMPLE_PERCENT),
+        localization_map: Some(localization_map),
+        loc_fetcher: Some(&ini_loc_fetcher),
+    };
+    let _ = texture_mip;
+    let ir = starbreaker_ui::pipeline::compile_ir_for_binding(&inputs).map_err(|e| e.to_string())?;
+    serde_json::to_string_pretty(&ir).map_err(|e| e.to_string())
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -335,7 +378,7 @@ fn parse_guid(value: &str) -> Option<starbreaker_datacore::starbreaker_common::C
 
 #[cfg(test)]
 mod tests {
-    use super::{authored_canvas_size, binding_target_size};
+    use super::{authored_canvas_size, binding_target_size, datacore_ui_lookup_type_names, p4k_swf_candidates};
     use serde_json::json;
 
     #[test]
@@ -368,5 +411,29 @@ mod tests {
     fn mfd_and_radar_keep_fixed_sizes() {
         assert_eq!(binding_target_size("mfd", Some((1920, 1080))), (1600, 900));
         assert_eq!(binding_target_size("radar", Some((1920, 1080))), (1024, 1024));
+    }
+
+    #[test]
+    fn live_ui_lookup_includes_tag_database_records() {
+        assert!(datacore_ui_lookup_type_names().contains(&"TagDatabase"));
+    }
+
+    #[test]
+    fn swf_candidates_normalize_forward_slashes_to_p4k_paths() {
+        assert_eq!(
+            p4k_swf_candidates("Data/UI/fonts/Shared/fonts_en.gfx"),
+            vec!["Data\\UI\\fonts\\Shared\\fonts_en.gfx".to_string()]
+        );
+    }
+
+    #[test]
+    fn swf_candidates_add_data_prefix_for_relative_paths() {
+        assert_eq!(
+            p4k_swf_candidates("UI/BuildingBlocks/assets/SWF/Canvas.swf"),
+            vec![
+                "UI\\BuildingBlocks\\assets\\SWF\\Canvas.swf".to_string(),
+                "Data\\UI\\BuildingBlocks\\assets\\SWF\\Canvas.swf".to_string(),
+            ]
+        );
     }
 }

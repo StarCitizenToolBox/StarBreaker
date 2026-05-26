@@ -29,6 +29,7 @@ from ..node_utils import (
 )
 
 _POM_LIBRARY_PATH = Path(__file__).resolve().parent.parent.parent / "resources" / "pom_library.blend"
+_SCREEN_EFFECTS_LIBRARY_PATH = Path(__file__).resolve().parent.parent.parent / "resources" / "screen_effects_library.blend"
 _POM_LIBRARY_ROOT_GROUPS = (
     "POM_Vector",
     "POM_10x_Layer_Steps",
@@ -44,6 +45,17 @@ _POM_DETAIL_CONTROL_NODE_NAME = "StarBreaker POM Detail"
 _POM_DETAIL_SCALE_NODE_NAME = "StarBreaker POM Detail Scale"
 _POM_DETAIL_LAYERS_NODE_NAME = "StarBreaker Detail Layers"
 _POM_DETAIL_SCALE_MULTIPLIER_NODE_NAME = "StarBreaker Detail Scale Multiplier"
+_SCREEN_EFFECT_GROUP_NAMES = ("Pixelate", "RGB_grid")
+
+
+def _set_node_input_default(node: Any, socket_name: str, value: Any) -> None:
+    socket = _input_socket(node, socket_name)
+    if socket is None:
+        return
+    try:
+        socket.default_value = value
+    except Exception:
+        pass
 
 
 def _ensure_runtime_pom_detail_group() -> bpy.types.ShaderNodeTree:
@@ -1381,62 +1393,93 @@ class GroupsMixin:
         return group_tree
 
     def _ensure_runtime_screen_group(self) -> bpy.types.ShaderNodeTree:
-        """Wrap Emission + Transparent + MixShader (optional checker fallback) into a shader group."""
+        """Wrap screen shading with the bundled RGB-grid CRT shader group."""
         self._invalidate_runtime_group_if_unexpected(
             "StarBreaker Runtime Screen",
-            "screen_v1",
+            "screen_v4",
             {
                 "NodeGroupInput": 1,
                 "NodeGroupOutput": 1,
                 "ShaderNodeEmission": 1,
-                "ShaderNodeBsdfTransparent": 1,
                 "ShaderNodeMixShader": 1,
-                "ShaderNodeTexChecker": 1,
+                "ShaderNodeGroup": 1,
             },
         )
         group_tree, group_input, group_output = self._begin_runtime_shared_group(
             "StarBreaker Runtime Screen",
-            signature="screen_v1",
+            signature="screen_v4",
             inputs=[
                 ("Base Color", "NodeSocketColor"),
                 ("Emission Strength", "NodeSocketFloat"),
-                ("Mix Factor", "NodeSocketFloat"),
-                ("Use Checker", "NodeSocketFloat"),
+                ("Use CRT", "NodeSocketBool"),
+                ("X pixels", "NodeSocketFloat"),
+                ("Y pixels", "NodeSocketFloat"),
+                ("Vector", "NodeSocketVector"),
             ],
             outputs=[("Shader", "NodeSocketShader")],
         )
-        if group_tree.get("starbreaker_runtime_built_signature") == "screen_v1":
+        if group_tree.get("starbreaker_runtime_built_signature") == "screen_v4":
             return group_tree
         nodes = group_tree.nodes
         links = group_tree.links
 
-        # Procedural checker fallback, selected via Use Checker.
-        checker = nodes.new("ShaderNodeTexChecker")
-        checker.location = (-520, 220)
-        checker_mix = nodes.new("ShaderNodeMixRGB")
-        checker_mix.location = (-320, 120)
-        checker_mix.blend_type = "MIX"
-        links.new(_output_socket(group_input, "Use Checker"), checker_mix.inputs[0])
-        links.new(_output_socket(group_input, "Base Color"), checker_mix.inputs[1])
-        links.new(_output_socket(checker, "Color"), checker_mix.inputs[2])
-
         emission = nodes.new("ShaderNodeEmission")
-        emission.location = (-100, 120)
-        links.new(checker_mix.outputs[0], _input_socket(emission, "Color"))
+        emission.location = (-286.55, -0.95)
+        links.new(_output_socket(group_input, "Base Color"), _input_socket(emission, "Color"))
         links.new(_output_socket(group_input, "Emission Strength"), _input_socket(emission, "Strength"))
 
-        transparent = nodes.new("ShaderNodeBsdfTransparent")
-        transparent.location = (-100, -80)
+        rgb_grid_group, _pixelate_group = self._ensure_runtime_screen_effect_groups()
+        if rgb_grid_group is not None:
+            rgb_grid_node = nodes.new("ShaderNodeGroup")
+            rgb_grid_node.node_tree = rgb_grid_group
+            _refresh_group_node_sockets(rgb_grid_node)
+            rgb_grid_node.location = (-284.6, -141.86)
+            rgb_grid_node.label = "RGB_grid"
+            _set_node_input_default(rgb_grid_node, "Strength", 1.1)
 
-        mix = nodes.new("ShaderNodeMixShader")
-        mix.location = (120, 40)
-        links.new(_output_socket(group_input, "Mix Factor"), mix.inputs[0])
-        links.new(transparent.outputs[0], mix.inputs[1])
-        links.new(emission.outputs[0], mix.inputs[2])
+            links.new(_output_socket(group_input, "Base Color"), _input_socket(rgb_grid_node, "Image"))
+            links.new(_output_socket(group_input, "Emission Strength"), _input_socket(rgb_grid_node, "Strength"))
+            links.new(_output_socket(group_input, "Vector"), _input_socket(rgb_grid_node, "Vector"))
+            links.new(_output_socket(group_input, "X pixels"), _input_socket(rgb_grid_node, "X pixels"))
+            links.new(_output_socket(group_input, "Y pixels"), _input_socket(rgb_grid_node, "Y pixels"))
 
-        links.new(mix.outputs[0], group_output.inputs["Shader"])
-        group_tree["starbreaker_runtime_built_signature"] = "screen_v1"
+            crt_select = nodes.new("ShaderNodeMixShader")
+            crt_select.location = (63.04, -56.97)
+            links.new(_output_socket(group_input, "Use CRT"), crt_select.inputs[0])
+            links.new(emission.outputs[0], crt_select.inputs[1])
+            links.new(_output_socket(rgb_grid_node, "Shader"), crt_select.inputs[2])
+            links.new(crt_select.outputs[0], group_output.inputs["Shader"])
+        else:
+            links.new(emission.outputs[0], group_output.inputs["Shader"])
+
+        _set_group_input_default(group_input, "Base Color", (0.0, 0.0, 0.0, 1.0))
+        _set_group_input_default(group_input, "Emission Strength", 0.0)
+        _set_group_input_default(group_input, "Use CRT", False)
+        _set_group_input_default(group_input, "X pixels", 800.0)
+        _set_group_input_default(group_input, "Y pixels", 600.0)
+        _set_group_input_default(group_input, "Vector", (0.0, 0.0, 0.0))
+        group_tree["starbreaker_runtime_built_signature"] = "screen_v4"
         return group_tree
+
+    def _ensure_runtime_screen_effect_groups(
+        self,
+    ) -> tuple[bpy.types.ShaderNodeTree | None, bpy.types.ShaderNodeTree | None]:
+        loaded: dict[str, bpy.types.ShaderNodeTree] = {}
+        for group_name in _SCREEN_EFFECT_GROUP_NAMES:
+            existing = bpy.data.node_groups.get(group_name)
+            if existing is not None:
+                loaded[group_name] = existing
+                continue
+            if not _SCREEN_EFFECTS_LIBRARY_PATH.is_file():
+                continue
+            with bpy.data.libraries.load(str(_SCREEN_EFFECTS_LIBRARY_PATH), link=False) as (src, dst):
+                if group_name not in src.node_groups:
+                    continue
+                dst.node_groups = [group_name]
+            appended = bpy.data.node_groups.get(group_name)
+            if appended is not None:
+                loaded[group_name] = appended
+        return loaded.get("RGB_grid"), loaded.get("Pixelate")
 
     def _ensure_runtime_effect_group(self) -> bpy.types.ShaderNodeTree:
         """Wrap Emission + Transparent + MixShader into an Effect shader group."""

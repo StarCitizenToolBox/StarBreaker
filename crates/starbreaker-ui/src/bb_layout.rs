@@ -276,7 +276,15 @@ fn layout_node(
         && matches!(height_value, BbValue::Percent(p) if p > 0.90)
         && (node.anchor.x - 0.5).abs() < 0.01
         && (node.pivot.x - 0.5).abs() < 0.01;
-    let (outer_x, outer_y) = if is_root_fullscreen_canvas || fills_body_background_surface {
+    let is_child_canvas_surface_root = matches!(node.ty, BbNodeType::DisplayWidget)
+        && parent_canvas_is_surface_host(node, scene)
+        && matches!(width_value, BbValue::Percent(p) if (p - 1.0).abs() < 0.0001)
+        && matches!(height_value, BbValue::Percent(p) if p > 0.90)
+        && node.position.x.abs() < 0.0001
+        && node.position.y.abs() < 0.0001
+        && offset_x.abs() < 0.0001
+        && offset_y.abs() < 0.0001;
+    let (outer_x, outer_y) = if is_root_fullscreen_canvas || is_child_canvas_surface_root || fills_body_background_surface {
         // Full-bleed containers are parent-space overlays; authoring anchor/pivot
         // offsets should not shift them out of the parent rect.
         (parent_inner.x + pos_x, parent_inner.y + pos_y)
@@ -424,6 +432,16 @@ fn fills_body_background_surface(node: &crate::bb_scene::BbNode) -> bool {
         .unwrap_or(false);
 
     uses_texture_background && node.raw.get("textureProperties").is_some()
+}
+
+fn parent_canvas_is_surface_host(node: &crate::bb_scene::BbNode, scene: &BbScene) -> bool {
+    node.parent
+        .and_then(|parent_id| scene.nodes.get(&parent_id))
+        .is_some_and(|parent| {
+            matches!(parent.ty, BbNodeType::WidgetCanvas)
+                && matches!(parent.sizing.width, BbValue::Percent(p) if (p - 1.0).abs() < 0.0001)
+                && matches!(parent.sizing.height, BbValue::Percent(p) if p > 0.90)
+        })
 }
 
 fn effective_pivot_y(node: &crate::bb_scene::BbNode) -> f32 {
@@ -1902,6 +1920,162 @@ mod tests {
         let child_rect = result.rects[&2];
         assert!((root_rect.y + 3.0).abs() < 0.5, "expected root y -3, got {}", root_rect.y);
         assert!((child_rect.y + 3.0).abs() < 0.5, "expected child y -3, got {}", child_rect.y);
+    }
+
+    #[test]
+    fn child_canvas_surface_root_uses_host_origin() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let host = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![2],
+            ty: BbNodeType::WidgetCanvas,
+            name: "host_canvas".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Percent(1.0), height: BbValue::Percent(0.94) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2 { x: 0.5, y: 0.45 },
+            anchor: Vec2 { x: 0.5, y: 0.5 },
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+        let child_root = BbNode {
+            id: 2,
+            parent: Some(1),
+            children: vec![3],
+            ty: BbNodeType::DisplayWidget,
+            name: "root".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Percent(1.0), height: BbValue::Percent(1.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2 { x: 0.5, y: 0.5 },
+            anchor: Vec2 { x: 0.5, y: 0.4 },
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+        let child = BbNode {
+            id: 3,
+            parent: Some(2),
+            children: vec![],
+            ty: BbNodeType::DisplayWidget,
+            name: "child".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(50.0), height: BbValue::Fixed(20.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, host);
+        nodes.insert(2, child_root);
+        nodes.insert(3, child);
+        let scene = BbScene { canvas_size: (200.0, 100.0), roots: vec![1], nodes, operations: vec![] };
+
+        let result = layout(&scene, 200, 100);
+        let host_rect = result.rects[&1];
+        let root_rect = result.rects[&2];
+        assert!((host_rect.y - 0.0).abs() < 0.5, "expected host y 0, got {}", host_rect.y);
+        assert!((root_rect.y - host_rect.y).abs() < 0.5, "expected child root y {}, got {}", host_rect.y, root_rect.y);
+    }
+
+    #[test]
+    fn non_surface_child_canvas_root_preserves_authored_pivot() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let host = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![2],
+            ty: BbNodeType::WidgetCanvas,
+            name: "menu_host_canvas".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Percent(1.0), height: BbValue::Percent(0.77) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+        let child_root = BbNode {
+            id: 2,
+            parent: Some(1),
+            children: vec![],
+            ty: BbNodeType::DisplayWidget,
+            name: "menu_root".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Percent(1.0), height: BbValue::Percent(1.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2 { x: 0.0, y: 0.03 },
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, host);
+        nodes.insert(2, child_root);
+        let scene = BbScene { canvas_size: (200.0, 100.0), roots: vec![1], nodes, operations: vec![] };
+
+        let result = layout(&scene, 200, 100);
+        let host_rect = result.rects[&1];
+        let root_rect = result.rects[&2];
+        let expected_root_y = host_rect.y - root_rect.h * 0.03;
+        assert!((host_rect.h - 77.0).abs() < 0.5, "expected host height 77, got {}", host_rect.h);
+        assert!((root_rect.y - expected_root_y).abs() < 0.5, "expected child root y {}, got {}", expected_root_y, root_rect.y);
     }
 
     /// Mirror of above: `PercentOfY` for width must use own height.

@@ -150,6 +150,9 @@ Each `*.materials.json` sidecar preserves:
 - per-submaterial name, raw shader string, shader family classification if known, and activation state
 - decoded feature flags from `StringGenMask`
 - direct texture-slot inventory with semantic roles, virtual-input flags, source paths, and exported texture paths
+- screen-family `screen_effects` metadata; `apply_crt = true` is emitted when
+  authored DisplayScreen/UIPlane data exposes a `screen_pixel_layout` slot, with
+  the source slot/path and authored `PixelGridTilingX/Y` values when present
 - DisplayScreen/UIPlane render-to-texture slots may carry additive `generated_ui`
   metadata when the exporter can provide default visible content:
   - `export_kind = "generated_ui_still"` when the slot is bound to a

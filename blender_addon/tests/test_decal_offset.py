@@ -552,6 +552,37 @@ class DecalOffsetTests(unittest.TestCase):
             },
         )
 
+    def test_ui_binding_for_object_uses_helper_binding_as_fallback_when_unmatched(self) -> None:
+        importer = OrchestrationImporterUnderTest(FakeSidecar([FakeSubmaterial(0, "screen")]))
+        obj = FakeObject(
+            material_slots=[],
+            mesh=FakeMesh(polygons=[], vertex_count=0),
+            name="mesh_end_screen_plane",
+            starbreaker_instance_json=json.dumps(
+                {
+                    "source_object_name": "mesh_end_screen_plane",
+                    "source_parent_name": None,
+                    "source_ancestors": [],
+                    "ui_bindings": [
+                        {
+                            "helper_name": "$slot_standing_screen",
+                            "generated_image_path": "Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_i_med_medicalendofbed_a.png",
+                        }
+                    ],
+                }
+            ),
+        )
+
+        binding = importer._ui_binding_for_object(obj)
+
+        self.assertEqual(
+            binding,
+            {
+                "helper_name": "$slot_standing_screen",
+                "generated_image_path": "Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_i_med_medicalendofbed_a.png",
+            },
+        )
+
     def test_illum_pom_rebind_uses_palette_channel_rgb_when_no_authored_fallback_exists(self) -> None:
         decal = FakeMaterial(
             "drak_vulture:pom_decals",

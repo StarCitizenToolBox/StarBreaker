@@ -307,6 +307,7 @@ class SubmaterialRecord:
     variant_membership: JsonDict
     virtual_inputs: list[str]
     raw: JsonDict
+    screen_effects: JsonDict = field(default_factory=dict)
 
     @classmethod
     def from_value(cls, value: Any) -> SubmaterialRecord:
@@ -327,6 +328,7 @@ class SubmaterialRecord:
             layer_manifest=[LayerManifestEntry.from_value(item) for item in data.get("layer_manifest", [])],
             palette_routing=PaletteRouting.from_value(data.get("palette_routing")),
             public_params=_as_dict(data.get("public_params")),
+            screen_effects=_as_dict(data.get("screen_effects")),
             variant_membership=_as_dict(data.get("variant_membership")),
             virtual_inputs=[str(item) for item in data.get("virtual_inputs", [])],
             raw=data,

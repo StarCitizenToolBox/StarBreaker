@@ -41,6 +41,10 @@ pub enum UiCommand {
         #[arg(long)]
         helper: Option<String>,
 
+        /// Optional directory for canonical IR JSON dumps for each rendered binding.
+        #[arg(long)]
+        dump_ir_dir: Option<PathBuf>,
+
         /// Path to Data.p4k (default: SC_DATA_P4K env var or auto-discover).
         #[arg(long)]
         p4k: Option<PathBuf>,
@@ -55,8 +59,8 @@ pub enum UiCommand {
 impl UiCommand {
     pub fn run(self) -> Result<()> {
         match self {
-            UiCommand::Render { scene, out_dir, mip, helper, p4k } => {
-                run_render(&scene, out_dir.as_deref(), mip, helper.as_deref(), p4k.as_deref().map(|p| p.as_ref()))
+            UiCommand::Render { scene, out_dir, mip, helper, dump_ir_dir, p4k } => {
+                run_render(&scene, out_dir.as_deref(), dump_ir_dir.as_deref(), mip, helper.as_deref(), p4k.as_deref().map(|p| p.as_ref()))
             }
             UiCommand::Mfd => Err(CliError::MissingRequirement(
                 "starbreaker ui mfd: removed in UI Plan 2. MFD content is now \
@@ -70,6 +74,7 @@ impl UiCommand {
 fn run_render(
     scene_path: &std::path::Path,
     out_dir: Option<&std::path::Path>,
+    dump_ir_dir: Option<&std::path::Path>,
     texture_mip: u32,
     helper_filter: Option<&str>,
     p4k_path: Option<&std::path::Path>,
@@ -89,6 +94,9 @@ fn run_render(
     let default_out = scene_path.parent().unwrap_or(std::path::Path::new("."));
     let out_dir = out_dir.unwrap_or(default_out);
     std::fs::create_dir_all(out_dir)?;
+    if let Some(dump_ir_dir) = dump_ir_dir {
+        std::fs::create_dir_all(dump_ir_dir)?;
+    }
 
     // Collect bindings from root and every child instance.
     let mut bindings: Vec<UiBinding> = Vec::new();
@@ -137,6 +145,19 @@ fn run_render(
                 let dest = out_dir.join(&file_name);
                 std::fs::write(&dest, &png_bytes)?;
                 eprintln!("  wrote  {}", dest.display());
+                if let Some(dump_ir_dir) = dump_ir_dir {
+                    let ir_json = starbreaker_3d::ui_pipeline::compile_ui_binding_ir_json(
+                        binding,
+                        &db,
+                        &p4k,
+                        texture_mip,
+                        manufacturer_id.as_deref(),
+                    )
+                    .map_err(CliError::MissingRequirement)?;
+                    let ir_dest = dump_ir_dir.join(format!("{}.ir.json", file_name.trim_end_matches(".png")));
+                    std::fs::write(&ir_dest, ir_json)?;
+                    eprintln!("  wrote  {}", ir_dest.display());
+                }
                 rendered += 1;
             }
             Err(e) => {

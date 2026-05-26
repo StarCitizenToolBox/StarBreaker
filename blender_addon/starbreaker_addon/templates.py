@@ -138,3 +138,7 @@ def material_palette_channels(submaterial: SubmaterialRecord) -> list[PaletteCha
 
 def has_virtual_input(submaterial: SubmaterialRecord, input_name: str) -> bool:
     return input_name in submaterial.virtual_inputs
+
+
+def screen_effects_apply_crt(submaterial: SubmaterialRecord) -> bool:
+    return bool(submaterial.screen_effects.get("apply_crt"))

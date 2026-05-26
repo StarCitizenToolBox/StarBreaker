@@ -1218,7 +1218,18 @@ class MaterialsMixin:
             ),
             None,
         )
-        node.image = exact_image or bpy.data.images.load(str(resolved), check_existing=False)
+        if exact_image is not None:
+            mtime_ns = resolved.stat().st_mtime_ns
+            mtime_token = str(mtime_ns)
+            if str(exact_image.get("starbreaker_source_mtime_ns", "")) != mtime_token:
+                exact_image.reload()
+                # Blender ID properties use C-backed ints and can overflow on ns timestamps.
+                exact_image["starbreaker_source_mtime_ns"] = mtime_token
+            node.image = exact_image
+        else:
+            node.image = bpy.data.images.load(str(resolved), check_existing=False)
+            if node.image is not None:
+                node.image["starbreaker_source_mtime_ns"] = str(resolved.stat().st_mtime_ns)
         if not is_color and node.image is not None and hasattr(node.image, "colorspace_settings"):
             node.image.colorspace_settings.name = "Non-Color"
         return node

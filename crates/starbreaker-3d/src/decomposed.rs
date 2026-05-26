@@ -2337,6 +2337,7 @@ fn build_submaterial_json(
         .filter(|binding| binding.is_virtual)
         .map(|binding| binding.path.clone())
         .collect::<Vec<_>>();
+    let screen_effects = screen_effects_json(material, &semantic_slots);
 
     serde_json::json!({
         "index": index,
@@ -2361,6 +2362,7 @@ fn build_submaterial_json(
         },
         "texture_slots": extracted.slot_exports,
         "virtual_inputs": virtual_inputs,
+        "screen_effects": screen_effects,
         "public_params": public_params,
         "direct_textures": extracted.direct_texture_exports.iter().map(texture_ref_json).collect::<Vec<_>>(),
         "derived_textures": extracted.derived_texture_exports.iter().map(texture_ref_json).collect::<Vec<_>>(),
@@ -3347,6 +3349,42 @@ fn hashed_variant_path(path: &str, bytes: &[u8]) -> String {
     }
 }
 
+fn screen_effects_json(
+    material: &SubMaterial,
+    semantic_slots: &[SemanticTextureBinding],
+) -> serde_json::Value {
+    if !matches!(
+        material.shader_family(),
+        ShaderFamily::DisplayScreen | ShaderFamily::UiPlane | ShaderFamily::Monitor
+    ) {
+        return serde_json::Value::Null;
+    }
+
+    let pixel_layout = semantic_slots
+        .iter()
+        .find(|binding| binding.role == TextureSemanticRole::ScreenPixelLayout);
+    let mut effects = serde_json::Map::new();
+    effects.insert("apply_crt".to_string(), serde_json::json!(pixel_layout.is_some()));
+
+    if let Some(binding) = pixel_layout {
+        effects.insert("source".to_string(), serde_json::json!(binding.role.as_str()));
+        effects.insert("pixel_layout_slot".to_string(), serde_json::json!(binding.slot));
+        effects.insert("pixel_layout_source_path".to_string(), serde_json::json!(binding.path));
+    }
+
+    if let (Some(x), Some(y)) = (
+        material.public_param_f32(&["PixelGridTilingX"]),
+        material.public_param_f32(&["PixelGridTilingY"]),
+    ) {
+        effects.insert(
+            "pixel_grid_tiling".to_string(),
+            serde_json::json!({ "x": x, "y": y }),
+        );
+    }
+
+    serde_json::Value::Object(effects)
+}
+
 fn material_activation_state(
     material: &SubMaterial,
     semantic_slots: &[SemanticTextureBinding],
@@ -4056,6 +4094,64 @@ mod tests {
         assert_eq!(value["submaterials"][0]["texture_slots"][0]["role"], serde_json::json!("iridescence"));
         assert_eq!(value["submaterials"][0]["public_params"]["IridescenceIntensity"], serde_json::json!(0.75));
         assert_eq!(value["submaterials"][0]["authored_public_params"][0]["name"], serde_json::json!("IridescenceIntensity"));
+    }
+
+    #[test]
+    fn material_sidecar_json_marks_screen_crt_from_pixel_layout_slot() {
+        let mut material = sample_submaterial();
+        material.shader = "UIPlane".into();
+        material.texture_slots = vec![crate::mtl::TextureSlotBinding {
+            slot: "TexSlot17".into(),
+            path: "Data/EngineAssets/Textures/ScreenInterference/pixel_layout_crt.tif".into(),
+            is_virtual: false,
+        }];
+        material.public_params = vec![
+            crate::mtl::PublicParam {
+                name: "PixelGridTilingX".into(),
+                value: "300".into(),
+            },
+            crate::mtl::PublicParam {
+                name: "PixelGridTilingY".into(),
+                value: "120".into(),
+            },
+        ];
+
+        let materials = MtlFile {
+            materials: vec![material],
+            source_path: Some("Data/Materials/UI/rtt_comms_opaque_hightech.mtl".into()),
+            paint_override: None,
+            material_set: Default::default(),
+        };
+        let extracted = vec![ExtractedMaterialEntry {
+            slot_exports: vec![serde_json::json!({
+                "slot": "TexSlot17",
+                "role": "screen_pixel_layout",
+                "is_virtual": false,
+                "source_path": "Data/EngineAssets/Textures/ScreenInterference/pixel_layout_crt.tif",
+                "export_path": null,
+                "export_kind": "source",
+                "authored_attributes": [],
+                "authored_child_blocks": [],
+            })],
+            direct_texture_exports: Vec::new(),
+            layer_exports: Vec::new(),
+            derived_texture_exports: Vec::new(),
+        }];
+
+        let value = build_material_sidecar_value(
+            &materials,
+            "Data/Materials/UI/rtt_comms_opaque_hightech.mtl",
+            "Data/Materials/UI/rtt_comms_opaque_hightech.materials.json",
+            "Packages/ARGO MOLE/palettes.json",
+            &extracted,
+            &[0],
+        );
+
+        let effects = &value["submaterials"][0]["screen_effects"];
+        assert_eq!(effects["apply_crt"], serde_json::json!(true));
+        assert_eq!(effects["source"], serde_json::json!("screen_pixel_layout"));
+        assert_eq!(effects["pixel_layout_slot"], serde_json::json!("TexSlot17"));
+        assert_eq!(effects["pixel_grid_tiling"], serde_json::json!({"x": 300.0, "y": 120.0}));
     }
 
     #[test]

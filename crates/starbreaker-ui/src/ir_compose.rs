@@ -1054,7 +1054,7 @@ fn label_style_colour_token(
         return None;
     }
     match style.and_then(|style| style.label_style.as_deref()) {
-        Some("Heading1" | "Heading3") => Some("Accent1"),
+        Some("Heading1" | "Heading3") => Some("Base"),
         _ => None,
     }
 }
@@ -1064,7 +1064,7 @@ fn style_tag_colour_token(node: &UiIrNode) -> Option<&'static str> {
         let name = tag.tag_name.as_deref()?.trim().to_ascii_lowercase();
         match name.as_str() {
             "primary" | "ui_generic_flag_03" => Some("Foreground"),
-            "modify" => Some("Accent1"),
+            "modify" => Some("Base"),
             _ => None,
         }
     })
@@ -2213,6 +2213,7 @@ mod tests {
             assets: &assets,
         };
 
+        assert_eq!(resolve_colour_token(&ctx, "Base"), Some(style_primary_rgba(&ctx)));
         assert_eq!(resolve_colour_token(&ctx, "Accent1"), Some(style_primary_rgba(&ctx)));
         assert_eq!(resolve_colour_token(&ctx, "Accent5"), Some([0.0, 113.0 / 255.0, 188.0 / 255.0, 1.0]));
 

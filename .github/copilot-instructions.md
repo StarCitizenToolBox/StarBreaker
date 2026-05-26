@@ -87,7 +87,7 @@ when targeting a non-default install. The canonical Aurora decomposed export is:
 ```bash
 SC_DATA_P4K="$HOME/Games/star-citizen/drive_c/Program Files/Roberts Space Industries/StarCitizen/LIVE/Data.p4k" \
   target/release/starbreaker entity export "aurora_mk2" \
-  "../ships" --kind decomposed --format blend --lod 0 --mip 0 --materials all
+  "../ships" --kind decomposed --lod 0 --mip 0 --materials all
 ```
 
 ## Architecture

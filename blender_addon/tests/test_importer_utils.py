@@ -64,9 +64,11 @@ from starbreaker_addon.manifest import MaterialSidecar, SubmaterialRecord
 from starbreaker_addon.material_contract import ContractInput, ShaderGroupContract
 from starbreaker_addon.runtime.importer.materials import MaterialsMixin
 from starbreaker_addon.runtime.record_utils import _mesh_decal_authored_emission_strength
+from starbreaker_addon.templates import screen_effects_apply_crt
 from starbreaker_addon.runtime.importer.utils import (
     _canonical_source_name,
     _material_identity,
+    _managed_material_runtime_graph_is_sane,
     _remapped_submaterial_for_slot,
     _submaterials_by_name,
     _unique_submaterials_by_name,
@@ -123,6 +125,33 @@ class _MaterialSocketProbe(MaterialsMixin):
         return _FakeImageNode(image_path)
 
 
+class _FakeGroupTree(dict):
+    def __init__(self, name: str, signature: str, nodes: list[object] | None = None) -> None:
+        super().__init__(starbreaker_runtime_built_signature=signature)
+        self.name = name
+        self.nodes = nodes or []
+
+
+class _FakeGroupNode:
+    bl_idname = "ShaderNodeGroup"
+
+    def __init__(self, node_tree: _FakeGroupTree, inputs: tuple[str, ...] = ()) -> None:
+        self.node_tree = node_tree
+        self.inputs = {name: object() for name in inputs}
+
+
+class _FakeNodeTree:
+    def __init__(self, nodes: list[object]) -> None:
+        self.nodes = nodes
+        self.links = []
+
+
+class _FakeManagedMaterial(dict):
+    def __init__(self, template_key: str, node_tree: _FakeNodeTree | None) -> None:
+        super().__init__(starbreaker_template_key=template_key)
+        self.node_tree = node_tree
+
+
 # ---------------------------------------------------------------------------
 # Tests for _submaterials_by_name
 # ---------------------------------------------------------------------------
@@ -142,6 +171,52 @@ class TestCanonicalSourceName(unittest.TestCase):
             _canonical_source_name("ship_mtl_screen_1x1_10"),
             "screen_1x1",
         )
+
+
+class TestManagedScreenMaterialGraph(unittest.TestCase):
+    def test_screen_material_requires_current_runtime_group_signature(self) -> None:
+        runtime_group = _FakeGroupTree("StarBreaker Runtime Screen", "screen_v1")
+        material = _FakeManagedMaterial(
+            "screen_hud",
+            _FakeNodeTree([_FakeGroupNode(runtime_group, inputs=("Base Color",))]),
+        )
+
+        self.assertFalse(_managed_material_runtime_graph_is_sane(material))
+
+    def test_screen_material_requires_material_level_pixelate_group(self) -> None:
+        runtime_group = _FakeGroupTree("StarBreaker Runtime Screen", "screen_v4")
+        material = _FakeManagedMaterial(
+            "screen_hud",
+            _FakeNodeTree([
+                _FakeGroupNode(
+                    runtime_group,
+                    inputs=("Base Color", "Emission Strength", "Use CRT", "Vector", "X pixels", "Y pixels"),
+                )
+            ]),
+        )
+
+        self.assertFalse(_managed_material_runtime_graph_is_sane(material))
+
+    def test_screen_material_accepts_current_crt_runtime_group(self) -> None:
+        runtime_group = _FakeGroupTree(
+            "StarBreaker Runtime Screen",
+            "screen_v4",
+            nodes=[
+                _FakeGroupNode(_FakeGroupTree("RGB_grid", "")),
+            ],
+        )
+        material = _FakeManagedMaterial(
+            "screen_hud",
+            _FakeNodeTree([
+                _FakeGroupNode(
+                    runtime_group,
+                    inputs=("Base Color", "Emission Strength", "Use CRT", "Vector", "X pixels", "Y pixels"),
+                ),
+                _FakeGroupNode(_FakeGroupTree("Pixelate", "")),
+            ]),
+        )
+
+        self.assertTrue(_managed_material_runtime_graph_is_sane(material))
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +397,7 @@ class TestMeshDecalEmissionStrength(unittest.TestCase):
         )
         self.assertAlmostEqual(_mesh_decal_authored_emission_strength(unlinked), 0.25)
 
+
     def test_mesh_decal_emissive_texture_still_emits(self) -> None:
         decal = SubmaterialRecord.from_value({"shader_family": "MeshDecal"})
         self.assertEqual(
@@ -331,6 +407,23 @@ class TestMeshDecalEmissionStrength(unittest.TestCase):
             ),
             1.0,
         )
+
+
+class TestScreenEffects(unittest.TestCase):
+    def test_screen_effects_apply_crt_reads_sidecar_flag(self) -> None:
+        submaterial = SubmaterialRecord.from_value(
+            {
+                "shader_family": "UIPlane",
+                "screen_effects": {"apply_crt": True},
+            }
+        )
+
+        self.assertTrue(screen_effects_apply_crt(submaterial))
+
+    def test_screen_effects_apply_crt_defaults_false(self) -> None:
+        submaterial = SubmaterialRecord.from_value({"shader_family": "UIPlane"})
+
+        self.assertFalse(screen_effects_apply_crt(submaterial))
 
 
 class TestMaterialAlphaSources(unittest.TestCase):

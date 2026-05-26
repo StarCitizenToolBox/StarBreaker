@@ -77,7 +77,13 @@ from ...palette import (
     palette_finish_glossiness_factor,
     palette_finish_specular,
 )
-from ...templates import has_virtual_input, material_palette_channels, representative_textures, template_plan_for_submaterial
+from ...templates import (
+    has_virtual_input,
+    material_palette_channels,
+    representative_textures,
+    screen_effects_apply_crt,
+    template_plan_for_submaterial,
+)
 from ..palette_utils import _hard_surface_palette_iridescence_channel
 from .types import LayerSurfaceSockets
 
@@ -1692,24 +1698,48 @@ class BuildersMixin:
         nodes.clear()
 
         output = nodes.new("ShaderNodeOutputMaterial")
-        output.location = (550, 0)
+        output.location = (780, -112.25)
 
         shader_group = nodes.new("ShaderNodeGroup")
         shader_group.node_tree = self._ensure_runtime_screen_group()
         _refresh_group_node_sockets(shader_group)
-        shader_group.location = (250, 0)
+        shader_group.location = (357.6, -112.25)
         shader_group.label = "StarBreaker Screen"
         self._set_socket_default(_input_socket(shader_group, "Base Color"), (0.5, 0.5, 0.5, 1.0))
         self._set_socket_default(_input_socket(shader_group, "Emission Strength"), 3.0)
-        self._set_socket_default(_input_socket(shader_group, "Mix Factor"), 0.12)
-        self._set_socket_default(_input_socket(shader_group, "Use Checker"), 0.0)
+        self._set_socket_default(_input_socket(shader_group, "Use CRT"), bool(screen_effects_apply_crt(submaterial)))
+        self._set_socket_default(_input_socket(shader_group, "X pixels"), 800.0)
+        self._set_socket_default(_input_socket(shader_group, "Y pixels"), 600.0)
 
         image_path = ui_image_path or representative_textures(submaterial)["base_color"]
-        color_source = self._color_source_socket(nodes, submaterial, palette, image_path, x=0, y=0)
-        if color_source is not None:
-            self._link_group_input(links, color_source, shader_group, "Base Color")
-        elif has_virtual_input(submaterial, "$RenderToTexture"):
-            self._set_socket_default(_input_socket(shader_group, "Use Checker"), 1.0)
+        image_node = self._image_node(nodes, image_path, x=-60, y=-112, is_color=True)
+        if image_node is not None:
+            self._link_group_input(links, image_node.outputs[0], shader_group, "Base Color")
+
+            _rgb_grid_group, pixelate_group = self._ensure_runtime_screen_effect_groups()
+            if pixelate_group is not None:
+                tex_coord = nodes.new("ShaderNodeTexCoord")
+                tex_coord.location = (-607, -112)
+
+                pixelate_node = nodes.new("ShaderNodeGroup")
+                pixelate_node.node_tree = pixelate_group
+                _refresh_group_node_sockets(pixelate_node)
+                pixelate_node.location = (-367, -112)
+                pixelate_node.label = "Pixelate"
+                self._set_socket_default(_input_socket(pixelate_node, "X Pixels"), 320.0)
+                self._set_socket_default(_input_socket(pixelate_node, "Y Pixels"), 240.0)
+                self._set_socket_default(_input_socket(pixelate_node, "pixelate"), False)
+
+                links.new(_output_socket(tex_coord, "UV"), _input_socket(pixelate_node, "Vector"))
+                links.new(_output_socket(pixelate_node, "Vector"), _input_socket(image_node, "Vector"))
+                self._link_group_input(
+                    links,
+                    _output_socket(pixelate_node, "Vector Passthrough"),
+                    shader_group,
+                    "Vector",
+                )
+                self._link_group_input(links, _output_socket(pixelate_node, "X Pixels"), shader_group, "X pixels")
+                self._link_group_input(links, _output_socket(pixelate_node, "Y Pixels"), shader_group, "Y pixels")
 
         surface = _output_socket(shader_group, "Shader")
         self._wire_surface_shader_to_output(nodes, links, surface, output, plan, submaterial)

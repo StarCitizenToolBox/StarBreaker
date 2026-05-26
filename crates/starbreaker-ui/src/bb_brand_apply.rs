@@ -477,7 +477,13 @@ fn apply_string_field(field_name: &str, value: &str, node: &mut BbNode, loc_fetc
             // Resolve @KEY localization references if a fetcher is available.
             let resolved = if value.starts_with('@') {
                 if let Some(fetcher) = loc_fetcher {
-                    crate::bb_loc::resolve_loc_string(value, &[], fetcher)
+                    let param_input_values = node
+                        .raw
+                        .get("paramInputValues")
+                        .and_then(|value| value.as_array())
+                        .map(|values| values.as_slice())
+                        .unwrap_or(&[]);
+                    crate::bb_loc::resolve_loc_string(value, param_input_values, fetcher)
                 } else {
                     value.to_string()
                 }
@@ -768,7 +774,7 @@ fn parse_named_color(value: &serde_json::Value, palette_source: &serde_json::Val
 
 fn color_style_slot_index(name: &str) -> Option<usize> {
     match name {
-        "Accent1" | "Bright" | "Base" => Some(0),
+        "Bright" | "Base" | "Accent1" => Some(0),
         "Accent2" | "Positive" | "Success" => Some(1),
         "Accent3" | "Warning" => Some(2),
         "Accent4" | "Critical" | "Negative" => Some(3),
@@ -996,6 +1002,47 @@ mod tests {
     }
 
     #[test]
+    fn test_string_modifier_localization_uses_node_params() {
+        struct TestLocFetcher;
+
+        impl LocFetcher for TestLocFetcher {
+            fn fetch_loc(&self, key: &str) -> Option<String> {
+                match key {
+                    "Med_T_Tier" => Some("T%d".to_string()),
+                    _ => None,
+                }
+            }
+        }
+
+        let mut scene = make_test_scene();
+        scene.nodes.get_mut(&1).unwrap().raw = json!({
+            "paramInputValues": [
+                { "name": "T", "defaultValue": 3 }
+            ]
+        });
+        let brand = BrandStyle {
+            identifier: "test_brand".to_string(),
+            entries: &[json!({
+                "modifiers": [
+                    {
+                        "field": {
+                            "_Type_": "BuildingBlocks_FieldModifierString",
+                            "field": "Label",
+                            "value": "@Med_T_Tier,P=T"
+                        }
+                    }
+                ]
+            })],
+            raw: &json!({}),
+        };
+
+        apply_brand_modifiers(&mut scene, &brand, Some(&TestLocFetcher));
+
+        let node = scene.nodes.get(&1).unwrap();
+        assert_eq!(node.raw.get("Label").and_then(|v| v.as_str()), Some("T3"));
+    }
+
+    #[test]
     fn test_color_modifier_0_to_1() {
         let mut scene = make_test_scene();
         scene.nodes.get_mut(&1).unwrap().background = Some(Default::default());
@@ -1102,6 +1149,43 @@ mod tests {
         assert!((color[1] - 198.0 / 255.0).abs() < 0.001);
         assert!((color[2] - 254.0 / 255.0).abs() < 0.001);
         assert_eq!(color[3], 1.0);
+    }
+
+    #[test]
+    fn named_accent1_color_maps_to_primary_slot() {
+        let mut scene = make_test_scene();
+        scene.nodes.get_mut(&1).unwrap().background = Some(Default::default());
+        let palette = json!({
+            "colorStyles": [
+                { "color": { "r": 115, "g": 198, "b": 254, "a": 255 } },
+                { "color": { "r": 67, "g": 221, "b": 147, "a": 255 } },
+                { "color": { "r": 228, "g": 218, "b": 77, "a": 255 } },
+                { "color": { "r": 201, "g": 51, "b": 51, "a": 255 } },
+                { "color": { "r": 0, "g": 113, "b": 188, "a": 255 } }
+            ]
+        });
+        let brand = BrandStyle {
+            identifier: "test_brand".to_string(),
+            entries: &[json!({
+                "modifiers": [{
+                    "_Type_": "BuildingBlocks_FieldModifierColor",
+                    "field": "FillColor",
+                    "color": {
+                        "_Type_": "BuildingBlocks_ColorStyle",
+                        "color": "Accent1",
+                        "alpha": 1.0
+                    }
+                }]
+            })],
+            raw: &palette,
+        };
+        apply_brand_modifiers(&mut scene, &brand, None);
+        let node = scene.nodes.get(&1).unwrap();
+        let color = node.background.as_ref().unwrap().fill_colour.unwrap();
+        assert!((color[0] - 115.0 / 255.0).abs() < 0.001);
+        assert!((color[1] - 198.0 / 255.0).abs() < 0.001);
+        assert!((color[2] - 254.0 / 255.0).abs() < 0.001);
+        assert_eq!(node.raw.get("FillColorToken").and_then(|value| value.as_str()), Some("Accent1"));
     }
 
     #[test]
@@ -1366,7 +1450,11 @@ mod tests {
         });
         let style_record = json!({
             "colorStyles": [
-                { "color": { "r": 115, "g": 198, "b": 254, "a": 255 } }
+                { "color": { "r": 115, "g": 198, "b": 254, "a": 255 } },
+                { "color": { "r": 67, "g": 221, "b": 147, "a": 255 } },
+                { "color": { "r": 228, "g": 218, "b": 77, "a": 255 } },
+                { "color": { "r": 201, "g": 51, "b": 51, "a": 255 } },
+                { "color": { "r": 0, "g": 113, "b": 188, "a": 255 } }
             ]
         });
         let brand = BrandStyle {
@@ -1491,7 +1579,11 @@ mod tests {
     fn named_fill_color_preserves_token_in_raw() {
         let palette = json!({
             "colorStyles": [
-                {"color": {"r": 1.0, "g": 0.5, "b": 0.25, "a": 1.0}}
+                {"color": {"r": 1.0, "g": 0.5, "b": 0.25, "a": 1.0}},
+                {"color": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0}},
+                {"color": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0}},
+                {"color": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0}},
+                {"color": {"r": 0.0, "g": 0.25, "b": 0.75, "a": 1.0}}
             ]
         });
 
