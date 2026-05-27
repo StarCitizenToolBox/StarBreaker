@@ -1442,7 +1442,11 @@ fn stacked_label_caption_pair_text_rects(
         derived_top_padding.clamp(0.0, max_top_padding)
     };
     let primary_y = rect.y + top_padding;
-    let secondary_y = primary_y + primary_h;
+    // Right-anchored metric stacks (e.g. MEDGELS/value) use two text bands
+    // with different font sizes; collapse their handoff by the measured line
+    // box delta so the visual gap follows typography instead of fixed pixels.
+    let line_box_overlap = (primary_h - secondary_h).max(0.0);
+    let secondary_y = (primary_y + primary_h - line_box_overlap).max(rect.y);
     (
         Rect {
             x: rect.x,
@@ -2624,7 +2628,7 @@ mod tests {
 
         assert_eq!(primary_rect.y, 47.0);
         assert_eq!(primary_rect.h, 32.0);
-        assert_eq!(secondary_rect.y, 79.0);
+        assert_eq!(secondary_rect.y, 74.0);
         assert_eq!(secondary_rect.h, 27.0);
     }
 
