@@ -38,9 +38,6 @@ use log::warn;
 use crate::bb_scene::{BbNodeId, BbNodeType, BbScene, BbValue};
 
 const ADDITIVE_ALTERNATE_REVERSE_POSITION_PHASE_RATIO: f32 = 2.0 / 3.0;
-const CENTERED_INTRINSIC_TEXT_FLOW_SPACING_SCALE: f32 = 0.6;
-const CENTERED_INTRINSIC_TEXT_FLOW_VERTICAL_OFFSET: f32 = 15.0;
-
 const SYNTHETIC_NODE_ID_BASE: BbNodeId = 0x8000_0000;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -835,9 +832,6 @@ fn layout_flex_no_grow_children(
         flex.get("rowSpacing").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32 * csy
     };
     let tighten_centered_intrinsic_text_column = centered_intrinsic_text_column_spacing_applies(children, flex, scene, is_row);
-    if tighten_centered_intrinsic_text_column {
-        item_spacing *= CENTERED_INTRINSIC_TEXT_FLOW_SPACING_SCALE;
-    }
     let axis_just = flex.get("axisJustification").and_then(|v| v.as_str()).unwrap_or("Start");
     let cross_just = flex
         .get("crossAxisJustification")
@@ -1027,6 +1021,19 @@ fn layout_flex_no_grow_children(
     if sizes.is_empty() {
         return;
     }
+    let mut centered_intrinsic_main_offset_shift = 0.0f32;
+    if tighten_centered_intrinsic_text_column {
+        let (adjusted_spacing, main_offset_shift) = centered_intrinsic_text_column_adjustment(
+            item_spacing,
+            &sizes,
+            scene,
+            container.h,
+            is_row,
+        );
+        item_spacing = adjusted_spacing;
+        centered_intrinsic_main_offset_shift = main_offset_shift;
+    }
+
     total_main += item_spacing * (sizes.len().saturating_sub(1) as f32);
     let avail_main = if is_row { container.w } else { container.h };
     let axis_just_lc = axis_just.to_ascii_lowercase();
@@ -1047,7 +1054,7 @@ fn layout_flex_no_grow_children(
         _ => 0.0,
     };
     if tighten_centered_intrinsic_text_column {
-        main_offset = (main_offset - CENTERED_INTRINSIC_TEXT_FLOW_VERTICAL_OFFSET * csy).max(0.0);
+        main_offset = (main_offset - centered_intrinsic_main_offset_shift).max(0.0);
     }
     let mut cursor = if is_row { container.x + main_offset } else { container.y + main_offset };
     if wrap_enabled {
@@ -1324,6 +1331,56 @@ fn centered_intrinsic_text_column_spacing_applies(
         })
         .count();
     intrinsic_textfields >= 2
+}
+
+fn centered_intrinsic_text_column_adjustment(
+    base_item_spacing: f32,
+    sizes: &[(BbNodeId, f32, f32, bool)],
+    scene: &BbScene,
+    container_main: f32,
+    is_row: bool,
+) -> (f32, f32) {
+    if is_row || sizes.len() < 2 || base_item_spacing <= 0.0 {
+        return (base_item_spacing, 0.0);
+    }
+
+    let flow_count = sizes.len() as f32;
+    let mut intrinsic_textfields = 0.0f32;
+    let mut total_item_main = 0.0f32;
+    for (child_id, w, h, _auto_main) in sizes {
+        let node_main = if is_row { *w } else { *h };
+        total_item_main += node_main.max(0.0);
+        let Some(node) = scene.nodes.get(child_id) else {
+            continue;
+        };
+        if !node.is_active || !matches!(node.ty, BbNodeType::WidgetTextField) {
+            continue;
+        }
+        if textfield_auto_intrinsic_override(node, &node.sizing.height, 1.0, 1.0, false).is_some() {
+            intrinsic_textfields += 1.0;
+        }
+    }
+    if intrinsic_textfields < 2.0 {
+        return (base_item_spacing, 0.0);
+    }
+
+    // Derive spacing compression from how much of the column is occupied by
+    // intrinsic content and how text-dominant the flow is.
+    let coverage = if container_main > 0.0 {
+        (total_item_main / container_main).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let textfield_share = (intrinsic_textfields / flow_count).clamp(0.0, 1.0);
+    let spacing_scale = (1.0 - (coverage * textfield_share)).clamp(0.0, 1.0);
+    let adjusted_spacing = (base_item_spacing * spacing_scale).max(0.0);
+
+    // Keep centered columns from drifting downward as spacing shrinks by
+    // shifting upward in proportion to collapsed spacing across text blocks.
+    let collapsed_spacing = (base_item_spacing - adjusted_spacing).max(0.0);
+    let main_offset_shift = collapsed_spacing * (intrinsic_textfields - 1.0).max(0.0);
+
+    (adjusted_spacing, main_offset_shift)
 }
 
 fn row_flex_start_anchor_offset(
@@ -2781,14 +2838,14 @@ mod tests {
         let prompt = result.rects[&3];
         let touch = result.rects[&4];
 
-        assert!((title.y - 102.0).abs() < 0.5, "expected centered title flow y=102, got {}", title.y);
+        assert!((title.y - 105.0).abs() < 0.5, "expected centered title flow y=105, got {}", title.y);
         assert!((title.x - 193.0).abs() < 0.5, "expected authored cross-axis anchor to offset title x, got {}", title.x);
         assert!((title.h - 270.0).abs() < 0.5, "expected Title3 intrinsic height 270, got {}", title.h);
         assert!((prompt.y - 390.0).abs() < 0.5, "expected prompt after title plus spacing, got {}", prompt.y);
-        assert!((prompt.y - (title.y + title.h) - 18.0).abs() < 0.5, "expected tightened title-to-prompt gap, got {}", prompt.y - (title.y + title.h));
+        assert!((prompt.y - (title.y + title.h) - 15.4).abs() < 0.5, "expected derived title-to-prompt gap, got {}", prompt.y - (title.y + title.h));
         assert!((prompt.x - 150.0).abs() < 0.5, "expected prompt without cross-axis anchor offset at centered x, got {}", prompt.x);
         assert!((prompt.h - 60.0).abs() < 0.5, "expected prompt intrinsic height 60, got {}", prompt.h);
-        assert!((touch.y - 468.0).abs() < 0.5, "expected touch canvas after intrinsic text slots, got {}", touch.y);
+        assert!((touch.y - 466.0).abs() < 0.5, "expected touch canvas after intrinsic text slots, got {}", touch.y);
     }
 
     #[test]
