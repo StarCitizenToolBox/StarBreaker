@@ -203,8 +203,31 @@ fn focused_movement_snapshot(snapshot: &UiScreenSnapshot) -> UiScreenSnapshot {
     }
 }
 
-#[test]
-fn live_medical_ir_matches_baseline_snapshot_geometry() {
+fn visible_placeholder_nodes(document: &UiIrDocument) -> Vec<String> {
+    document
+        .nodes
+        .iter()
+        .filter(|node| node.is_active)
+        .filter_map(|node| {
+            let payload = node.text_payload.as_ref()?;
+            match payload {
+                starbreaker_ui::UiIrTextPayload::Resolved { text }
+                    if text.contains("PLACEHOLDER") =>
+                {
+                    Some(format!("id={} name={} resolved={text}", node.id, node.name))
+                }
+                starbreaker_ui::UiIrTextPayload::UnresolvedKey { key }
+                    if key.trim().eq_ignore_ascii_case("@LOC_PLACEHOLDER") =>
+                {
+                    Some(format!("id={} name={} unresolved={key}", node.id, node.name))
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn load_live_and_baseline_medical_irs() -> Option<(UiIrDocument, UiIrDocument, UiIrDocument, UiIrDocument)> {
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
         .canonicalize()
@@ -215,7 +238,7 @@ fn live_medical_ir_matches_baseline_snapshot_geometry() {
             "skipping live medical IR guard (missing records root: {})",
             canvas_root.display()
         );
-        return;
+        return None;
     }
     let fetcher = load_canvas_index(&canvas_root).expect("canvas index should load");
 
@@ -239,6 +262,45 @@ fn live_medical_ir_matches_baseline_snapshot_geometry() {
     ))
     .expect("medical2 baseline should parse");
 
+    Some((med1_live, med2_live, med1_baseline, med2_baseline))
+}
+
+#[test]
+fn live_medical_ir_gold_standard_has_no_visible_placeholder_text() {
+    let Some((med1_live, med2_live, _, _)) = load_live_and_baseline_medical_irs() else {
+        return;
+    };
+
+    let med1_placeholders = visible_placeholder_nodes(&med1_live);
+    let med2_placeholders = visible_placeholder_nodes(&med2_live);
+
+    assert!(
+        med1_placeholders.is_empty(),
+        "medical1 gold-standard output contains visible placeholder text. This indicates broken UI generation, not baseline drift. Do not update baselines; investigate placeholder/default/localization handling first.\n{}",
+        med1_placeholders.join("\n")
+    );
+    assert!(
+        med2_placeholders.is_empty(),
+        "medical2 gold-standard output contains visible placeholder text. This indicates broken UI generation, not baseline drift. Do not update baselines; investigate placeholder/default/localization handling first.\n{}",
+        med2_placeholders.join("\n")
+    );
+}
+
+#[test]
+fn live_medical_ir_matches_gold_standard_snapshot_geometry() {
+    let Some((med1_live, med2_live, med1_baseline, med2_baseline)) =
+        load_live_and_baseline_medical_irs()
+    else {
+        return;
+    };
+
+    if !visible_placeholder_nodes(&med1_live).is_empty() || !visible_placeholder_nodes(&med2_live).is_empty() {
+        eprintln!(
+            "skipping gold-standard geometry comparison because visible placeholder text already indicates broken medical output"
+        );
+        return;
+    }
+
     let med1_cmp = compare_snapshots(
         &focused_movement_snapshot(&snapshot_from_ui_ir(&med1_baseline)),
         &focused_movement_snapshot(&snapshot_from_ui_ir(&med1_live)),
@@ -252,12 +314,12 @@ fn live_medical_ir_matches_baseline_snapshot_geometry() {
 
     assert!(
         med1_cmp.passed,
-        "medical1 live IR drift:\n{}",
+        "medical1 gold-standard live IR drift. Do not update baselines unless the drift is intentional, source-backed, and explicitly approved.\n{}",
         med1_cmp.failures.join("\n")
     );
     assert!(
         med2_cmp.passed,
-        "medical2 live IR drift:\n{}",
+        "medical2 gold-standard live IR drift. Do not update baselines unless the drift is intentional, source-backed, and explicitly approved.\n{}",
         med2_cmp.failures.join("\n")
     );
 }

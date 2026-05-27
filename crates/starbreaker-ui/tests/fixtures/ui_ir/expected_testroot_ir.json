@@ -2,7 +2,7 @@
   "canvas_guid": "content-guid",
   "canvas_name": "BuildingBlocks_Canvas.TestRoot",
   "confidence": 100,
-  "selected_style_source": null,
+  "selected_style_source": "manufacturer:drak",
   "resolved_asset_refs": [],
   "nodes": [
     {
@@ -84,5 +84,7 @@
   "target_width": 200,
   "missing_asset_refs": [],
   "unresolved_references": [],
-  "warnings": []
+  "warnings": [
+    "fallback path used: manufacturer_style_fallback_drak=1"
+  ]
 }

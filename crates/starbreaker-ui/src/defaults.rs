@@ -194,7 +194,19 @@ impl DefaultValueRegistry {
     /// well-known fallback remains available for keys that the live file
     /// does not define.
     pub fn merge_localization(&mut self, map: HashMap<String, String>) {
-        self.localization.extend(map);
+        for (key, value) in map {
+            // Preserve protected empty sentinels such as LOC_EMPTY and
+            // LOC_PLACEHOLDER so live localization files cannot surface
+            // placeholder/debug copy in gold-standard UI output.
+            if self
+                .localization
+                .get(&key)
+                .is_some_and(|existing| existing.is_empty())
+            {
+                continue;
+            }
+            self.localization.insert(key, value);
+        }
     }
 
     /// Force-insert a single localization key with `value`, overriding any
@@ -387,10 +399,11 @@ mod tests {
 
     #[test]
     fn pipeline_defaults_merge_localization_without_losing_sentinels() {
-        let reg = DefaultValueRegistry::with_pipeline_defaults(Some(HashMap::from([(
-            "hud_custom".to_string(),
-            "CUSTOM".to_string(),
-        )])));
+        let reg = DefaultValueRegistry::with_pipeline_defaults(Some(HashMap::from([
+            ("hud_custom".to_string(), "CUSTOM".to_string()),
+            ("loc_placeholder".to_string(), "<= PLACEHOLDER =>".to_string()),
+            ("loc_empty".to_string(), "SHOULD_NOT_OVERRIDE".to_string()),
+        ])));
 
         assert_eq!(reg.lookup_localization("@hud_custom"), Some("CUSTOM"));
         assert_eq!(reg.lookup_localization("@LOC_PLACEHOLDER"), Some(""));
