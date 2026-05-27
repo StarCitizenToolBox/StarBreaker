@@ -514,10 +514,22 @@ fn image_blend_mode_for_node(node: &UiIrNode, asset_ref: &str) -> BlendMode {
     }
 
     if UiAssetResolver::normalise_path(asset_ref).ends_with(".svg") {
-        BlendMode::SourceOver
+        if custom_shape_has_modify_tag(node) {
+            BlendMode::Plus
+        } else {
+            BlendMode::SourceOver
+        }
     } else {
         BlendMode::Plus
     }
+}
+
+fn custom_shape_has_modify_tag(node: &UiIrNode) -> bool {
+    node.resolved_style_tags.iter().any(|tag| {
+        tag.tag_name
+            .as_deref()
+            .is_some_and(|name| name.trim().eq_ignore_ascii_case("modify"))
+    })
 }
 
 fn rasterize_custom_shape_svg(
@@ -2397,6 +2409,29 @@ mod tests {
         }];
 
         assert_eq!(custom_shape_fill_override(&node, &ctx), Some([0.0, 113.0 / 255.0, 188.0 / 255.0, 1.0]));
+    }
+
+    #[test]
+    fn custom_shape_modify_svg_uses_additive_blend() {
+        let mut node = blank_node("widget_custom_shape");
+        node.custom_shape = Some(UiIrCustomShape {
+            shape_type: None,
+            shape: None,
+            svg_path: Some("UI/Textures/Vector/General/FingerPrint.svg".to_string()),
+            render_shape: Some(true),
+            enable_nine_slice_rect: None,
+            nine_slice_rect: None,
+            nine_slice_scale: None,
+        });
+        node.resolved_style_tags = vec![UiIrStyleTag {
+            uuid: "tag-modify".to_string(),
+            tag_name: Some("Modify".to_string()),
+        }];
+
+        assert_eq!(
+            image_blend_mode_for_node(&node, "UI/Textures/Vector/General/FingerPrint.svg"),
+            BlendMode::Plus
+        );
     }
 
     #[test]
