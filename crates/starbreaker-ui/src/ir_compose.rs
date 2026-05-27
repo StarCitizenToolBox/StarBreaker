@@ -687,6 +687,12 @@ fn resolved_linear_progress_meter_rect(node: &UiIrNode, document: &UiIrDocument)
 
     let mut rect = ir_rect_to_layout_rect(node.computed_rect);
     let text_rects = debug_text_rects(parent)?;
+    let (pair_offset_x, _pair_offset_y) = right_anchored_label_caption_pair_offset(
+        parent,
+        text_rects.primary.h,
+        text_rects.secondary.map(|secondary_rect| secondary_rect.h),
+    );
+    rect.x += pair_offset_x;
     rect.y = text_rects
         .secondary
         .map(|secondary_rect| secondary_rect.y + secondary_rect.h)
@@ -1158,7 +1164,7 @@ fn debug_text_rects_with_renderer(node: &UiIrNode, renderer: &TextRenderer) -> O
             .max(1.0);
         let secondary_fallback_font_size =
             (secondary_nominal_font_size * TEXT_RENDER_SIZE_CALIBRATION).max(1.0);
-        let (primary, secondary) = stacked_label_caption_pair_text_rects(
+        let (mut primary, mut secondary) = stacked_label_caption_pair_text_rects(
             rect,
             renderer.measure(text, FontKind::Sans, fallback_font_size).1,
             node.secondary_text_payload
@@ -1172,6 +1178,15 @@ fn debug_text_rects_with_renderer(node: &UiIrNode, renderer: &TextRenderer) -> O
             node.text_style.as_ref().and_then(|style| style.anchor_to_parent_y),
             node.anchor[0] >= 0.99 && node.pivot[0] >= 0.99,
         );
+        let (pair_offset_x, pair_offset_y) = right_anchored_label_caption_pair_offset(
+            node,
+            primary.h,
+            Some(secondary.h),
+        );
+        primary.x += pair_offset_x;
+        primary.y += pair_offset_y;
+        secondary.x += pair_offset_x;
+        secondary.y += pair_offset_y;
         let primary_align = node
             .text_style
             .as_ref()
@@ -1461,6 +1476,28 @@ fn stacked_label_caption_pair_text_rects(
             h: secondary_h,
         },
     )
+}
+
+fn right_anchored_label_caption_pair_offset(
+    node: &UiIrNode,
+    primary_text_h: f32,
+    secondary_text_h: Option<f32>,
+) -> (f32, f32) {
+    if !node
+        .node_type
+        .eq_ignore_ascii_case("BuildingBlocks_ComponentLabelCaptionPair")
+        || node.secondary_text_payload.is_none()
+        || node.anchor[0] < 0.99
+        || node.pivot[0] < 0.99
+    {
+        return (0.0, 0.0);
+    }
+
+    let primary_h = primary_text_h.max(0.0);
+    let secondary_h = secondary_text_h.unwrap_or(primary_h).max(0.0);
+    let line_box_delta = (primary_h - secondary_h).max(0.0);
+    let stroke_pair_span = node.stroke_extent.unwrap_or(0.0).max(0.0) * 2.0;
+    (-(line_box_delta + stroke_pair_span), line_box_delta)
 }
 
 fn font_telemetry_enabled() -> bool {
