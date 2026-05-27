@@ -197,38 +197,12 @@ pub fn compile_ir_for_binding(inputs: &PipelineInputs<'_>) -> Result<UiIrDocumen
         .get("_RecordName_")
         .and_then(|v| v.as_str());
 
-    let manufacturer_id = b.manufacturer_id.unwrap_or("drak");
-    let selected_style_source = raw_root_json
-        .get("_RecordValue_")
-        .and_then(|rv| rv.get("style"))
-        .and_then(|v| v.as_str())
-        .map(crate::pipeline::extract_record_name)
-        .and_then(|style_name| {
-            match inputs.canvas_fetcher.fetch_canvas_by_name(&style_name) {
-                Ok(_) => Some(format!("canvas:{style_name}")),
-                Err(e) => {
-                    log::warn!(
-                        "pipeline: failed to fetch canvas-level style record '{}': {}",
-                        style_name,
-                        e
-                    );
-                    None
-                }
-            }
-        })
-        .or_else(|| {
-            match inputs.style_fetcher.fetch_manufacturer_style(manufacturer_id) {
-                Ok(_) => Some(format!("manufacturer:{manufacturer_id}")),
-                Err(e) => {
-                    log::warn!(
-                        "pipeline: manufacturer style fetch failed for '{}': {}",
-                        manufacturer_id,
-                        e
-                    );
-                    None
-                }
-            }
-        });
+    let style_manifest = build_style_selection_manifest(
+        &raw_root_json,
+        b.manufacturer_id,
+        inputs.canvas_fetcher,
+        inputs.style_fetcher,
+    );
 
     let scene = crate::bb_resolve::resolve_canvas_graph_with_loc(
         &raw_root_json,
@@ -259,23 +233,7 @@ pub fn compile_ir_for_binding(inputs: &PipelineInputs<'_>) -> Result<UiIrDocumen
     defaults.insert_localization("loc_placeholder", String::new());
     defaults.insert_localization("loc_empty", String::new());
 
-    let mut resolved_asset_refs = Vec::new();
-    let mut missing_asset_refs = Vec::new();
-    let mut seen_assets = std::collections::BTreeSet::new();
-    for node in scene.nodes.values() {
-        for asset_ref in crate::ui_ir::collect_node_asset_refs(node) {
-            if !seen_assets.insert(asset_ref.clone()) {
-                continue;
-            }
-            let resolved = inputs.asset_fetcher.fetch_image_bytes(&asset_ref).is_some()
-                || inputs.asset_fetcher.fetch_svg_bytes(&asset_ref).is_some();
-            if resolved {
-                resolved_asset_refs.push(asset_ref);
-            } else {
-                missing_asset_refs.push(asset_ref);
-            }
-        }
-    }
+    let asset_manifest = build_asset_reference_manifest(&scene, inputs.asset_fetcher);
 
     Ok(crate::ui_ir::compile_ui_ir_from_scene_with_animation_sample(
         &scene,
@@ -284,11 +242,11 @@ pub fn compile_ir_for_binding(inputs: &PipelineInputs<'_>) -> Result<UiIrDocumen
         canvas_name,
         inputs.target_size,
         &defaults,
-        selected_style_source,
+        style_manifest,
         selected_swf_source,
         &[],
-        resolved_asset_refs,
-        missing_asset_refs,
+        asset_manifest.resolved_asset_refs,
+        asset_manifest.missing_asset_refs,
         inputs.animation_sample_percent,
         100,
     ))
@@ -354,7 +312,93 @@ fn load_style_for_ir(
         return loader.parse_buildingblocks_style_record(&style_record);
     }
 
+    if let Some(manufacturer_id) = ir
+        .selected_style_source
+        .as_deref()
+        .and_then(|source| source.strip_prefix("manufacturer:"))
+    {
+        return Ok(load_style(Some(manufacturer_id), inputs.style_fetcher));
+    }
+
     Ok(load_style(inputs.binding.manufacturer_id, inputs.style_fetcher))
+}
+
+fn build_style_selection_manifest(
+    raw_root_json: &serde_json::Value,
+    manufacturer_id: Option<&str>,
+    canvas_fetcher: &dyn CanvasFetcher,
+    style_fetcher: &dyn StyleFetcher,
+) -> Option<String> {
+    let effective_manufacturer = manufacturer_id.unwrap_or("drak");
+
+    if let Some(style_name) = raw_root_json
+        .get("_RecordValue_")
+        .and_then(|rv| rv.get("style"))
+        .and_then(|v| v.as_str())
+        .map(crate::pipeline::extract_record_name)
+    {
+        match canvas_fetcher.fetch_canvas_by_name(&style_name) {
+            Ok(_) => return Some(format!("canvas:{style_name}")),
+            Err(e) => {
+                log::warn!(
+                    "pipeline: failed to fetch canvas-level style record '{}': {}",
+                    style_name,
+                    e
+                );
+            }
+        }
+    }
+
+    match style_fetcher.fetch_manufacturer_style(effective_manufacturer) {
+        Ok(_) => Some(format!("manufacturer:{effective_manufacturer}")),
+        Err(e) => {
+            log::warn!(
+                "pipeline: manufacturer style fetch failed for '{}': {}; falling back to drak",
+                effective_manufacturer,
+                e
+            );
+            Some("manufacturer:drak".to_string())
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AssetReferenceManifest {
+    all_asset_refs: Vec<String>,
+    resolved_asset_refs: Vec<String>,
+    missing_asset_refs: Vec<String>,
+}
+
+fn build_asset_reference_manifest(
+    scene: &crate::bb_scene::BbScene,
+    asset_fetcher: &dyn crate::bb_atlas::AssetFetcher,
+) -> AssetReferenceManifest {
+    let mut all_asset_refs = Vec::new();
+    let mut resolved_asset_refs = Vec::new();
+    let mut missing_asset_refs = Vec::new();
+    let mut seen_assets = std::collections::BTreeSet::new();
+
+    for node in scene.nodes.values() {
+        for asset_ref in crate::ui_ir::collect_node_asset_refs(node) {
+            if !seen_assets.insert(asset_ref.clone()) {
+                continue;
+            }
+            all_asset_refs.push(asset_ref.clone());
+            let resolved = asset_fetcher.fetch_image_bytes(&asset_ref).is_some()
+                || asset_fetcher.fetch_svg_bytes(&asset_ref).is_some();
+            if resolved {
+                resolved_asset_refs.push(asset_ref);
+            } else {
+                missing_asset_refs.push(asset_ref);
+            }
+        }
+    }
+
+    AssetReferenceManifest {
+        all_asset_refs,
+        resolved_asset_refs,
+        missing_asset_refs,
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
