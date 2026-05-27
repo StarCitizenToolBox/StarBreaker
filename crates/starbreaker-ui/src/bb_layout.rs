@@ -37,6 +37,8 @@ use log::warn;
 
 use crate::bb_scene::{BbNodeId, BbNodeType, BbScene, BbValue};
 
+const ADDITIVE_ALTERNATE_REVERSE_POSITION_PHASE_RATIO: f32 = 2.0 / 3.0;
+
 const SYNTHETIC_NODE_ID_BASE: BbNodeId = 0x8000_0000;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -513,8 +515,38 @@ fn sampled_position_offset(
     animation_sample_percent: Option<f32>,
 ) -> f32 {
     animation_sample_percent
-        .and_then(|sample_percent| sampled_animation_number(raw, field_name, sample_percent))
+        .and_then(|sample_percent| {
+            sampled_animation_number(
+                raw,
+                field_name,
+                position_animation_sample_percent(raw, sample_percent),
+            )
+        })
         .unwrap_or(authored_offset)
+}
+
+fn position_animation_sample_percent(raw: &serde_json::Value, sample_percent: f32) -> f32 {
+    let Some(animation) = raw.get("animation") else {
+        return sample_percent;
+    };
+    let direction = animation
+        .get("direction")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let loops = animation
+        .get("loopIndefinitely")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let additive = animation
+        .get("additive")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+
+    if direction.eq_ignore_ascii_case("AlternateReverse") && loops && additive {
+        sample_percent * ADDITIVE_ALTERNATE_REVERSE_POSITION_PHASE_RATIO
+    } else {
+        sample_percent
+    }
 }
 
 fn animation_number_keyframes(raw: &serde_json::Value, field_name: &str) -> Vec<(f64, f32)> {
@@ -1847,6 +1879,66 @@ mod tests {
         let result = layout_with_animation_sample(&scene, 200, 100, Some(50.0));
         let rect = result.rects[&1];
         assert!((rect.x - 25.0).abs() < 0.5, "expected sampled PosXOffset x 25, got {}", rect.x);
+    }
+
+    #[test]
+    fn alternate_reverse_position_animation_uses_earlier_static_phase() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let node = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![],
+            ty: BbNodeType::WidgetImage,
+            name: "looping slide image".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(100.0), height: BbValue::Fixed(50.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({
+                "animation": {
+                    "animationTimeline": {
+                        "keyframes": [
+                            {
+                                "percent": 0.0,
+                                "modifiers": [
+                                    {"modifier": {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "PosXOffset", "value": 50.0}}
+                                ]
+                            },
+                            {
+                                "percent": 1.0,
+                                "modifiers": [
+                                    {"modifier": {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "PosXOffset", "value": 0.0}}
+                                ]
+                            }
+                        ]
+                    },
+                    "direction": "AlternateReverse",
+                    "loopIndefinitely": true,
+                    "additive": true
+                }
+            }),
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, node);
+        let scene = BbScene { canvas_size: (200.0, 100.0), roots: vec![1], nodes, operations: vec![] };
+
+        let result = layout_with_animation_sample(&scene, 200, 100, Some(50.0));
+        let rect = result.rects[&1];
+        assert!((rect.x - 33.0).abs() < 0.5, "expected alternate-reverse sampled PosXOffset x 33, got {}", rect.x);
     }
 
     #[test]

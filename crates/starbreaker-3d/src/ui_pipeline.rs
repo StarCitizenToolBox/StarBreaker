@@ -83,6 +83,7 @@ fn datacore_ui_lookup_type_names() -> &'static [&'static str] {
         "BuildingBlocks_Canvas",
         "BuildingBlocks_Style",
         "BuildingBlocks_FontStyle",
+        "BuildingBlocks_Timeline",
         "TagDatabase",
     ]
 }
@@ -414,8 +415,9 @@ mod tests {
     }
 
     #[test]
-    fn live_ui_lookup_includes_tag_database_records() {
+    fn live_ui_lookup_includes_referenced_ui_support_records() {
         assert!(datacore_ui_lookup_type_names().contains(&"TagDatabase"));
+        assert!(datacore_ui_lookup_type_names().contains(&"BuildingBlocks_Timeline"));
     }
 
     #[test]
