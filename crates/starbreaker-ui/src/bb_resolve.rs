@@ -608,9 +608,20 @@ fn resolve_canvas_graph_inner(
     //
     // The selected child canvas is resolved recursively so multi-level
     // hierarchies (master → gen → leaf) are fully expanded.
-    if let Some(entry) = pick_default_entry(record_value, root_json, manufacturer_id) {
+    if let Some(selection) = pick_default_entry_decision(record_value, root_json, manufacturer_id) {
+        let entry = selection.entry;
         let entry_name = entry.get("name").and_then(|v| v.as_str()).unwrap_or("?");
         let match_to = entry.get("matchTo").and_then(|v| v.as_str()).unwrap_or("");
+
+        if debug_trace {
+            log::info!(
+                "bb_resolve[depth={}]: default entry decision={} entry={:?} score={}",
+                depth,
+                selection.reason.as_str(),
+                entry_name,
+                selection.score.unwrap_or(0),
+            );
+        }
 
         if let Some(modifiers) = entry.get("modifiers").and_then(|v| v.as_array()) {
             for modifier in modifiers {
@@ -1070,11 +1081,34 @@ fn pick_active_entries<'a>(
 /// slot over sub-component slots — e.g. `canvas_GunsMode` with 2 tags wins
 /// over `canvas_AmmoNumbers` with 1 tag on `MC_S_Self_Master`).  Falls back
 /// to the first entry overall as a last resort.
-fn pick_default_entry<'a>(
+struct DefaultEntryDecision<'a> {
+    entry: &'a serde_json::Value,
+    reason: DefaultEntryReason,
+    score: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+enum DefaultEntryReason {
+    FirstUnconditional,
+    HighestTagScore,
+    FirstEntryFallback,
+}
+
+impl DefaultEntryReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::FirstUnconditional => "first_unconditional",
+            Self::HighestTagScore => "highest_tag_score",
+            Self::FirstEntryFallback => "first_entry_fallback",
+        }
+    }
+}
+
+fn pick_default_entry_decision<'a>(
     record_value: &'a serde_json::Value,
     record_root: &'a serde_json::Value,
     manufacturer_id: Option<&str>,
-) -> Option<&'a serde_json::Value> {
+) -> Option<DefaultEntryDecision<'a>> {
     let entries = pick_active_entries(record_value, record_root, manufacturer_id);
     // Prefer first unconditional (empty/absent conditionsList).
     if let Some(entry) = entries.iter().copied().find(|e| {
@@ -1083,7 +1117,11 @@ fn pick_default_entry<'a>(
             .map(|a| a.is_empty())
             .unwrap_or(true)
     }) {
-        return Some(entry);
+        return Some(DefaultEntryDecision {
+            entry,
+            reason: DefaultEntryReason::FirstUnconditional,
+            score: None,
+        });
     }
 
     // When all entries are conditional, use style-tag count on the matched
@@ -1130,7 +1168,11 @@ fn pick_default_entry<'a>(
             }
         }
         if best_score > 0 {
-            return Some(best_entry);
+            return Some(DefaultEntryDecision {
+                entry: best_entry,
+                reason: DefaultEntryReason::HighestTagScore,
+                score: Some(best_score),
+            });
         }
     }
 
@@ -1138,7 +1180,11 @@ fn pick_default_entry<'a>(
     // conditional and no scene-node heuristic applies, e.g. MC_S_Target_Master
     // which has exactly one entry used at runtime despite being tagged
     // conditional in the data).
-    entries.into_iter().next()
+    entries.into_iter().next().map(|entry| DefaultEntryDecision {
+        entry,
+        reason: DefaultEntryReason::FirstEntryFallback,
+        score: None,
+    })
 }
 
 /// Extract the maximum style-tag count of any scene node matched by an

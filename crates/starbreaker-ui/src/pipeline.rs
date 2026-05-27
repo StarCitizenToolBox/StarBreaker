@@ -647,30 +647,63 @@ fn select_swf_source(
     manufacturer_id: &str,
     fetcher: &dyn SwfFetcher,
 ) -> Option<String> {
-    let flash_source = if canvas_has_flash_renderer(raw_root_json) {
-        let record_name = canvas_record_name(raw_root_json).unwrap_or("");
-        let candidates = flash_swf_candidates(record_name, manufacturer_id);
-        pick_first_valid_swf_source(&candidates, fetcher)
-    } else {
-        None
-    };
-
-    flash_source.or_else(|| {
-        let swf_paths = collect_swf_paths(resolved);
-        pick_first_valid_swf_source(&swf_paths, fetcher)
-    })
+    let manifest = build_swf_selection_manifest(raw_root_json, resolved, manufacturer_id, fetcher);
+    manifest.valid_candidates.into_iter().next()
 }
 
-fn pick_first_valid_swf_source(paths: &[String], fetcher: &dyn SwfFetcher) -> Option<String> {
-    for path in paths {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SwfSelectionManifest {
+    flash_candidates: Vec<String>,
+    resolved_scene_candidates: Vec<String>,
+    ordered_candidates: Vec<String>,
+    valid_candidates: Vec<String>,
+}
+
+fn build_swf_selection_manifest(
+    raw_root_json: &serde_json::Value,
+    resolved: &ResolvedCanvas,
+    manufacturer_id: &str,
+    fetcher: &dyn SwfFetcher,
+) -> SwfSelectionManifest {
+    let flash_candidates = if canvas_has_flash_renderer(raw_root_json) {
+        let record_name = canvas_record_name(raw_root_json).unwrap_or("");
+        flash_swf_candidates(record_name, manufacturer_id)
+    } else {
+        Vec::new()
+    };
+
+    let resolved_scene_candidates = collect_swf_paths(resolved);
+    let ordered_candidates = merge_unique_paths(&flash_candidates, &resolved_scene_candidates);
+    // Keep selection deterministic but avoid validating every candidate path
+    // once a viable source is found.
+    let mut valid_candidates = Vec::new();
+    for path in &ordered_candidates {
         let Ok(bytes) = fetcher.fetch_swf_bytes(path) else {
             continue;
         };
         if SwfAssetLibrary::new(bytes).is_ok() {
-            return Some(path.clone());
+            valid_candidates.push(path.clone());
+            break;
         }
     }
-    None
+
+    SwfSelectionManifest {
+        flash_candidates,
+        resolved_scene_candidates,
+        ordered_candidates,
+        valid_candidates,
+    }
+}
+
+fn merge_unique_paths(primary: &[String], secondary: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(primary.len() + secondary.len());
+    let mut seen = HashSet::new();
+    for path in primary.iter().chain(secondary.iter()) {
+        if seen.insert(path.clone()) {
+            out.push(path.clone());
+        }
+    }
+    out
 }
 
 /// Load the manufacturer style for `manufacturer_id` via `fetcher`.
@@ -870,4 +903,55 @@ fn annunciator_swf_candidates(canvas_name: &str, brand: &str) -> Vec<String> {
     }
 
     candidates
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct EmptyFetcher;
+
+    impl SwfFetcher for EmptyFetcher {
+        fn fetch_swf_bytes(&self, _p4k_path: &str) -> Result<Vec<u8>, UiError> {
+            Err(UiError::RenderError("missing swf".to_string()))
+        }
+    }
+
+    #[test]
+    fn merge_unique_paths_preserves_primary_order_then_secondary() {
+        let primary = vec!["A.swf".to_string(), "B.swf".to_string()];
+        let secondary = vec!["B.swf".to_string(), "C.swf".to_string()];
+        let merged = merge_unique_paths(&primary, &secondary);
+        assert_eq!(
+            merged,
+            vec!["A.swf".to_string(), "B.swf".to_string(), "C.swf".to_string()]
+        );
+    }
+
+    #[test]
+    fn swf_selection_manifest_contains_structural_flash_candidates() {
+        let root = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.MC_S_Target_Master",
+            "_RecordValue_": {
+                "scene": [{"rendererType": "Flash"}]
+            }
+        });
+        let resolved = ResolvedCanvas {
+            root: crate::canvas::CanvasRecord {
+                guid: "root-guid".to_string(),
+                name: "Root".to_string(),
+                views: Vec::new(),
+                scene: Vec::new(),
+                operations: Vec::new(),
+            },
+            children: std::collections::HashMap::new(),
+        };
+        let fetcher = EmptyFetcher;
+
+        let manifest = build_swf_selection_manifest(&root, &resolved, "drak", &fetcher);
+
+        assert!(!manifest.flash_candidates.is_empty());
+        assert_eq!(manifest.ordered_candidates, manifest.flash_candidates);
+        assert!(manifest.valid_candidates.is_empty());
+    }
 }
