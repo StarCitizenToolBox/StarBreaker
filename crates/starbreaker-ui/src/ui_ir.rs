@@ -162,6 +162,7 @@ pub struct UiIrSegmentedFill {
 pub enum UiIrTextPayload {
     Resolved { text: String },
     UnresolvedKey { key: String },
+    IntentionallyEmpty { key: Option<String> },
     Empty,
 }
 
@@ -374,28 +375,11 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
         _ => UiRendererHint::Bb,
     };
 
-    let unresolved_count = scene
-        .nodes
-        .values()
-        .filter_map(|n| n.text.as_ref())
-        .map(|t| t.string.trim())
-        .filter(|s| s.starts_with('@'))
-        .count() as u8;
-    let computed_confidence = confidence
-        .saturating_sub(unresolved_count.saturating_mul(10))
-        .min(100);
-
     let mut warnings = Vec::new();
     let style_font_sizes = collect_style_font_sizes(scene);
     let standard_text_styles = collect_standard_text_styles(canvas_fetcher, selected_style_source.as_deref());
     if scene.roots.is_empty() {
         warnings.push("scene has no root nodes".to_string());
-    }
-    if unresolved_count > 0 {
-        warnings.push(format!(
-            "{} unresolved text key(s) present in scene",
-            unresolved_count
-        ));
     }
     if !missing_asset_refs.is_empty() {
         warnings.push(format!(
@@ -416,38 +400,9 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
         let has_text_intent = node_has_text_intent(node);
         let resolved_text = has_text_intent
             .then(|| binding_resolver.resolve_text_detailed(id, &node.raw, defaults));
-        let text_payload = resolved_text.as_ref().map(|resolved| {
-            let trimmed = resolved.text.trim();
-            if !trimmed.is_empty() {
-                if trimmed.starts_with('@') {
-                    if let Some(localized) = defaults.lookup_localization(trimmed) {
-                        if !localized.trim().is_empty() {
-                            UiIrTextPayload::Resolved {
-                                text: localized.trim().to_string(),
-                            }
-                        } else {
-                            UiIrTextPayload::UnresolvedKey {
-                                key: trimmed.to_string(),
-                            }
-                        }
-                    } else {
-                        UiIrTextPayload::UnresolvedKey {
-                            key: trimmed.to_string(),
-                        }
-                    }
-                } else {
-                    UiIrTextPayload::Resolved {
-                        text: trimmed.to_string(),
-                    }
-                }
-            } else if let Some(unresolved_key) = unresolved_text_key_from_raw(&node.raw) {
-                UiIrTextPayload::UnresolvedKey {
-                    key: unresolved_key,
-                }
-            } else {
-                UiIrTextPayload::Empty
-            }
-        });
+        let text_payload = resolved_text
+            .as_ref()
+            .map(|resolved| classify_text_payload(Some(resolved.text.as_str()), &node.raw, defaults));
         let resolved_style_tags = resolved_style_tags_for_node(canvas_fetcher, node);
         let font_record = effective_font_record(node, &standard_text_styles);
         let label_style = label_style_name_from_raw(node);
@@ -581,24 +536,7 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
         {
             binding_resolver
                 .resolve_field_text(id, "ParamInput1", defaults)
-                .map(|text| {
-                    let trimmed = text.trim();
-                    if trimmed.starts_with('@') {
-                        if let Some(localized) = defaults.lookup_localization(trimmed) {
-                            UiIrTextPayload::Resolved {
-                                text: localized.trim().to_string(),
-                            }
-                        } else {
-                            UiIrTextPayload::UnresolvedKey {
-                                key: trimmed.to_string(),
-                            }
-                        }
-                    } else {
-                        UiIrTextPayload::Resolved {
-                            text: trimmed.to_string(),
-                        }
-                    }
-                })
+                .map(|text| classify_text_payload(Some(text.as_str()), &node.raw, defaults))
         } else {
             None
         };
@@ -882,6 +820,21 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
         });
     }
 
+    let unresolved_count = nodes
+        .iter()
+        .flat_map(|node| node.text_payload.iter().chain(node.secondary_text_payload.iter()))
+        .filter(|payload| matches!(payload, UiIrTextPayload::UnresolvedKey { .. }))
+        .count() as u8;
+    if unresolved_count > 0 {
+        warnings.push(format!(
+            "{} unresolved text key(s) present in scene",
+            unresolved_count
+        ));
+    }
+    let computed_confidence = confidence
+        .saturating_sub(unresolved_count.saturating_mul(10))
+        .min(100);
+
     UiIrDocument {
         schema_version: UI_IR_SCHEMA_VERSION,
         canvas_guid: canvas_guid.to_string(),
@@ -1009,6 +962,7 @@ fn unresolved_text_key_from_raw(raw: &serde_json::Value) -> Option<String> {
 fn is_placeholder_or_empty_secondary_text_payload(payload: &UiIrTextPayload) -> bool {
     match payload {
         UiIrTextPayload::Empty => true,
+        UiIrTextPayload::IntentionallyEmpty { .. } => true,
         UiIrTextPayload::Resolved { text } => text.trim().is_empty(),
         UiIrTextPayload::UnresolvedKey { key } => key.trim().eq_ignore_ascii_case("@LOC_PLACEHOLDER"),
     }
@@ -2138,6 +2092,67 @@ fn resolved_text_from_payload(payload: &UiIrTextPayload) -> Option<&str> {
     match payload {
         UiIrTextPayload::Resolved { text } => Some(text.as_str()),
         _ => None,
+    }
+}
+
+fn classify_text_payload(
+    resolved_text: Option<&str>,
+    raw: &serde_json::Value,
+    defaults: &DefaultValueRegistry,
+) -> UiIrTextPayload {
+    let Some(text) = resolved_text.map(str::trim) else {
+        return UiIrTextPayload::Empty;
+    };
+
+    if !text.is_empty() {
+        return classify_literal_or_localized_text(text, defaults);
+    }
+
+    if let Some(unresolved_key) = unresolved_text_key_from_raw(raw) {
+        if let Some(localized) = defaults.lookup_localization(&unresolved_key) {
+            if localized.trim().is_empty() {
+                UiIrTextPayload::IntentionallyEmpty {
+                    key: Some(unresolved_key),
+                }
+            } else {
+                UiIrTextPayload::Resolved {
+                    text: localized.trim().to_string(),
+                }
+            }
+        } else {
+            UiIrTextPayload::UnresolvedKey {
+                key: unresolved_key,
+            }
+        }
+    } else {
+        UiIrTextPayload::Empty
+    }
+}
+
+fn classify_literal_or_localized_text(
+    text: &str,
+    defaults: &DefaultValueRegistry,
+) -> UiIrTextPayload {
+    if text.starts_with('@') {
+        if let Some(localized) = defaults.lookup_localization(text) {
+            if localized.trim().is_empty() {
+                UiIrTextPayload::IntentionallyEmpty {
+                    key: Some(text.to_string()),
+                }
+            } else {
+                UiIrTextPayload::Resolved {
+                    text: localized.trim().to_string(),
+                }
+            }
+        } else {
+            UiIrTextPayload::UnresolvedKey {
+                key: text.to_string(),
+            }
+        }
+    } else {
+        UiIrTextPayload::Resolved {
+            text: text.to_string(),
+        }
     }
 }
 
@@ -4567,6 +4582,203 @@ mod tests {
     }
 
     #[test]
+    fn compile_ir_secondary_param_input_loc_empty_uses_unified_empty_state() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.LabelCaptionLocEmpty",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_ComponentLabelCaptionPair",
+                        "name": "OperatorName",
+                        "isActive": true,
+                        "labelProperties": {
+                            "label": "OPERATOR",
+                            "style": "Heading3",
+                            "caseModifier": "Upper"
+                        },
+                        "captionProperties": {
+                            "caption": "@LOC_EMPTY",
+                            "style": "Heading6",
+                            "caseModifier": "None"
+                        },
+                        "size": {
+                            "width": {"behavior": "Auto", "value": 64.0},
+                            "height": {"behavior": "Auto", "value": 64.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let mut defaults = defaults();
+        defaults.insert_localization("loc_empty", String::new());
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-secondary-loc-empty",
+            None,
+            (100, 100),
+            &defaults,
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = &ir.nodes[0];
+        assert!(node.secondary_text_payload.is_none());
+        assert!(ir
+            .warnings
+            .iter()
+            .all(|warning| !warning.contains("unresolved text key")));
+    }
+
+    #[test]
+    fn compile_ir_resolves_localization_combine_binding_chain_for_text_field() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.LocalizationCombineBinding",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "text_TierValue",
+                        "labelProperties": {
+                            "style": "Heading3",
+                            "caseModifier": "Upper"
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 40.0},
+                            "height": {"behavior": "Fixed", "value": 12.0}
+                        }
+                    }
+                ],
+                "operations": [
+                    {
+                        "_Type_": "BuildingBlocks_BindingsLocalizedField",
+                        "widget": "_PointsTo_:ptr:1",
+                        "field": "ParamInput0",
+                        "input": "_PointsTo_:ptr:2"
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BindingsOperations_LocalizationCombine",
+                        "value": "@Med_T_Tier",
+                        "inputL": null,
+                        "inputR": "_PointsTo_:ptr:3"
+                    },
+                    {
+                        "_Pointer_": "ptr:3",
+                        "_Type_": "BuildingBlocks_BindingsIntegerComponentParameter",
+                        "name": "tier",
+                        "parameter": "ParamInput0",
+                        "defaultValue": 3
+                    }
+                ]
+            }
+        });
+
+        let mut defaults = defaults();
+        defaults.insert_localization("med_t_tier", "Tier %d".to_string());
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-localization-combine",
+            None,
+            (100, 100),
+            &defaults,
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = &ir.nodes[0];
+        assert_eq!(
+            node.text_payload,
+            Some(UiIrTextPayload::Resolved {
+                text: "TIER 3".to_string(),
+            })
+        );
+        assert!(ir
+            .warnings
+            .iter()
+            .all(|warning| !warning.contains("unresolved text key")));
+    }
+
+    #[test]
+    fn compile_ir_preserves_text_fidelity_signals_for_case_font_size_and_colour() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TextFidelitySignals",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "label",
+                        "labelProperties": {
+                            "label": "@Info_Kiosks_LogoScreen_001",
+                            "caseModifier": "Upper"
+                        },
+                        "FontStyleRecord": "record://fonts/title",
+                        "FontSize": 14.0,
+                        "FillColor": {"r": 0.25, "g": 0.5, "b": 0.75, "a": 1.0},
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 40.0},
+                            "height": {"behavior": "Fixed", "value": 12.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let mut defaults = defaults();
+        defaults.insert_localization("info_kiosks_logoscreen_001", "Touch to start".to_string());
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-text-fidelity",
+            Some("BuildingBlocks_Canvas.TextFidelitySignals"),
+            (100, 100),
+            &defaults,
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = &ir.nodes[0];
+        assert_eq!(
+            node.text_payload,
+            Some(UiIrTextPayload::Resolved {
+                text: "TOUCH TO START".to_string(),
+            })
+        );
+        let text_style = node.text_style.as_ref().expect("text style");
+        assert_eq!(text_style.font_record.as_deref(), Some("record://fonts/title"));
+        assert_eq!(text_style.font_size, UiIrValue::Fixed { value: 14.0 });
+        assert_eq!(text_style.colour, Some([0.25, 0.5, 0.75, 1.0]));
+    }
+
+    #[test]
     fn compile_ir_prefers_raw_font_size_over_stale_parsed_text_size() {
         let canvas = serde_json::json!({
             "_RecordName_": "BuildingBlocks_Canvas.RawFontSize",
@@ -4985,6 +5197,57 @@ mod tests {
         );
 
         assert_eq!(ir.renderer_hint, UiRendererHint::Hybrid);
+    }
+
+    #[test]
+    fn compile_ir_treats_loc_empty_as_intentionally_empty_not_unresolved() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.IntentionallyEmptyText",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "label",
+                        "text": "@LOC_EMPTY",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 30.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-intentionally-empty",
+            Some("BuildingBlocks_Canvas.IntentionallyEmptyText"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        assert_eq!(
+            ir.nodes[0].text_payload,
+            Some(UiIrTextPayload::IntentionallyEmpty {
+                key: Some("@LOC_EMPTY".to_string()),
+            })
+        );
+        assert!(ir
+            .warnings
+            .iter()
+            .all(|warning| !warning.contains("unresolved text key")));
+        assert_eq!(ir.confidence, 100);
     }
 
     #[test]

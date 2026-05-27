@@ -131,6 +131,7 @@ pub fn snapshot_from_ui_ir(document: &UiIrDocument) -> UiScreenSnapshot {
             text_payload: node.text_payload.as_ref().and_then(|payload| match payload {
                 crate::ui_ir::UiIrTextPayload::Resolved { text } => Some(text.clone()),
                 crate::ui_ir::UiIrTextPayload::UnresolvedKey { key } => Some(key.clone()),
+                crate::ui_ir::UiIrTextPayload::IntentionallyEmpty { key } => key.clone(),
                 crate::ui_ir::UiIrTextPayload::Empty => None,
             }),
             text_font_identity: node.text_style.as_ref().and_then(|style| {

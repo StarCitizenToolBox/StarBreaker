@@ -919,12 +919,13 @@ fn draw_text_node(
     let mut colour = resolved_text_colour(node, node.text_style.as_ref(), ctx);
     colour[3] = ((colour[3] as f32) * node.alpha.clamp(0.0, 1.0)).round() as u8;
 
+    let requested_font_symbol = font_symbol_from_text_style(node.text_style.as_ref()).unwrap_or("<none>");
     let selected_font = select_imported_ui_font(ctx, node.text_style.as_ref());
     let primary_line_spacing = draw_line_spacing_for_node(node, text, node.text_style.as_ref());
     let primary_swf_font_scale = primary_font_style_scale * SWF_TEXT_RENDER_SIZE_CALIBRATION;
     let primary_ttf_font_scale = primary_font_style_scale * TEXT_RENDER_SIZE_CALIBRATION;
-    let mut primary_rect = primary_rect;
-    let used_swf_font = selected_font.as_ref().is_some_and(|(symbol, swf_font)| {
+    let mut primary_rect = apply_font_style_vertical_offset(primary_rect, node.text_style.as_ref());
+    let used_swf_font = selected_font.as_ref().is_some_and(|selection| {
         if let Some(inline_rect) = inline_nested_textfield_text_rect(
             node,
             primary_rect,
@@ -939,8 +940,8 @@ fn draw_text_node(
             img,
             text,
             primary_rect,
-            swf_font,
-            ctx.assets.font_edit_text_metrics(symbol),
+            selection.font,
+            ctx.assets.font_edit_text_metrics(&selection.symbol),
             (nominal_font_size * primary_swf_font_scale).max(1.0),
             colour,
             align,
@@ -949,18 +950,22 @@ fn draw_text_node(
         )
     });
     if font_telemetry_enabled() {
-        if let Some((symbol, _)) = selected_font.as_ref() {
+        if let Some(selection) = selected_font.as_ref() {
             eprintln!(
-                "text-font node='{}' symbol='{}' swf_used={} text='{}'",
+                "text-font node='{}' requested='{}' selected='{}' source='{}' fallback={} swf_used={} text='{}'",
                 node.name,
-                symbol,
+                requested_font_symbol,
+                selection.symbol,
+                selection.source.as_str(),
+                selection.source.is_fallback(),
                 used_swf_font,
                 text
             );
         } else {
             eprintln!(
-                "text-font node='{}' symbol='<none>' swf_used=false text='{}'",
+                "text-font node='{}' requested='{}' selected='<none>' source='none' fallback=false swf_used=false text='{}'",
                 node.name,
+                requested_font_symbol,
                 text
             );
         }
@@ -1015,13 +1020,17 @@ fn draw_text_node(
             .and_then(|style| style.line_spacing);
         let secondary_swf_font_scale = secondary_font_style_scale * SWF_TEXT_RENDER_SIZE_CALIBRATION;
         let secondary_ttf_font_scale = secondary_font_style_scale * TEXT_RENDER_SIZE_CALIBRATION;
-        let secondary_used_swf = secondary_selected_font.as_ref().is_some_and(|(symbol, swf_font)| {
+        let secondary_rect = apply_font_style_vertical_offset(
+            secondary_rect,
+            node.secondary_text_style.as_ref().or(node.text_style.as_ref()),
+        );
+        let secondary_used_swf = secondary_selected_font.as_ref().is_some_and(|selection| {
             renderer.draw_swf_font(
                 img,
                 secondary,
                 secondary_rect,
-                swf_font,
-                ctx.assets.font_edit_text_metrics(symbol),
+                selection.font,
+                ctx.assets.font_edit_text_metrics(&selection.symbol),
                 (secondary_nominal_font_size * secondary_swf_font_scale).max(1.0),
                 secondary_colour,
                 secondary_align,
@@ -1055,10 +1064,26 @@ fn draw_line_spacing_for_node(
     text_style: Option<&UiIrTextStyle>,
 ) -> Option<f32> {
     let spacing = text_style.and_then(|style| style.line_spacing);
+    let leading = font_style_leading_modifier_px(text_style);
+    let spacing = match (spacing, leading) {
+        (Some(spacing), 0.0) => Some(spacing),
+        (Some(spacing), leading) => Some(spacing + leading),
+        (None, 0.0) => None,
+        (None, leading) => Some(leading),
+    };
     if is_large_wrapped_title3_heading(node, text, text_style) {
         spacing.map(|value| value + 4.0)
     } else {
         spacing
+    }
+}
+
+fn apply_font_style_vertical_offset(rect: Rect, text_style: Option<&UiIrTextStyle>) -> Rect {
+    let offset = font_style_top_margin_offset_px(text_style);
+    if offset.abs() <= f32::EPSILON {
+        rect
+    } else {
+        Rect { y: rect.y + offset, ..rect }
     }
 }
 
@@ -1205,7 +1230,9 @@ fn debug_text_rects_with_renderer(node: &UiIrNode, renderer: &TextRenderer) -> O
                 .as_ref()
                 .and_then(|payload| match payload {
                     UiIrTextPayload::Resolved { text } => Some(text.as_str()),
-                    UiIrTextPayload::UnresolvedKey { .. } | UiIrTextPayload::Empty => None,
+                    UiIrTextPayload::UnresolvedKey { .. }
+                    | UiIrTextPayload::IntentionallyEmpty { .. }
+                    | UiIrTextPayload::Empty => None,
                 })
                 .map(|secondary| renderer.measure(secondary, FontKind::Sans, secondary_fallback_font_size).1)
                 .unwrap_or(secondary_fallback_font_size),
@@ -1233,7 +1260,9 @@ fn debug_text_rects_with_renderer(node: &UiIrNode, renderer: &TextRenderer) -> O
             .unwrap_or(VerticalAlign::Centre);
         let secondary_text = node.secondary_text_payload.as_ref().and_then(|payload| match payload {
             UiIrTextPayload::Resolved { text } => Some(text.as_str()),
-            UiIrTextPayload::UnresolvedKey { .. } | UiIrTextPayload::Empty => None,
+            UiIrTextPayload::UnresolvedKey { .. }
+            | UiIrTextPayload::IntentionallyEmpty { .. }
+            | UiIrTextPayload::Empty => None,
         });
         let primary_text_origin = text_origin_in_rect(
             renderer,
@@ -1347,7 +1376,9 @@ fn inline_nested_textfield_text_rect(
     let parent_font_style_scale = font_style_scale_modifier(Some(parent_style));
     let parent_swf_size = (parent_nominal_size * parent_font_style_scale * SWF_TEXT_RENDER_SIZE_CALIBRATION).max(1.0);
     let parent_width = select_imported_ui_font(ctx, Some(parent_style))
-        .and_then(|(_, swf_font)| renderer.measure_swf_advance_width(parent_text, swf_font, parent_swf_size))
+        .and_then(|selection| {
+            renderer.measure_swf_advance_width(parent_text, selection.font, parent_swf_size)
+        })
         .unwrap_or_else(|| {
             renderer.measure(
                 parent_text,
@@ -1407,12 +1438,12 @@ fn debug_text_drawn_bounds_with_renderer(
 
     let primary = renderer.measure_drawn_bounds(
         text,
-        rects.primary,
+        apply_font_style_vertical_offset(rects.primary, node.text_style.as_ref()),
         FontKind::Sans,
         fallback_font_size,
         primary_align,
         primary_vertical,
-        node.text_style.as_ref().and_then(|style| style.line_spacing),
+        draw_line_spacing_for_node(node, text, node.text_style.as_ref()),
     )?;
 
     let secondary = if let Some(UiIrTextPayload::Resolved { text: secondary_text }) = node.secondary_text_payload.as_ref() {
@@ -1427,15 +1458,19 @@ fn debug_text_drawn_bounds_with_renderer(
         rects.secondary.and_then(|secondary_rect| {
             renderer.measure_drawn_bounds(
                 secondary_text,
-                secondary_rect,
+                apply_font_style_vertical_offset(
+                    secondary_rect,
+                    node.secondary_text_style.as_ref().or(node.text_style.as_ref()),
+                ),
                 FontKind::Sans,
                 secondary_fallback_font_size,
                 TextAlign::Left,
                 VerticalAlign::Centre,
-                node.secondary_text_style
-                    .as_ref()
-                    .or(node.text_style.as_ref())
-                    .and_then(|style| style.line_spacing),
+                draw_line_spacing_for_node(
+                    node,
+                    secondary_text,
+                    node.secondary_text_style.as_ref().or(node.text_style.as_ref()),
+                ),
             )
         })
     } else {
@@ -1543,15 +1578,48 @@ fn font_telemetry_enabled() -> bool {
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FontSelectionSource {
+    ResolvedRecordSymbol,
+    Title3ExportFallback,
+    PreferredExportFallback,
+    PreferredNameFallback,
+}
+
+impl FontSelectionSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ResolvedRecordSymbol => "resolved-record-symbol",
+            Self::Title3ExportFallback => "title3-export-fallback",
+            Self::PreferredExportFallback => "preferred-export-fallback",
+            Self::PreferredNameFallback => "preferred-name-fallback",
+        }
+    }
+
+    fn is_fallback(self) -> bool {
+        !matches!(self, Self::ResolvedRecordSymbol)
+    }
+}
+
+struct SelectedImportedFont<'a> {
+    symbol: String,
+    font: &'a FontGlyphSet,
+    source: FontSelectionSource,
+}
+
 fn select_imported_ui_font<'a>(
     ctx: &'a ComposeContext<'_>,
     text_style: Option<&UiIrTextStyle>,
-) -> Option<(String, &'a FontGlyphSet)> {
+) -> Option<SelectedImportedFont<'a>> {
     if let Some(symbol) = font_symbol_from_text_style(text_style)
         && let Some(id) = ctx.assets.lookup_export(symbol)
         && let Some(font) = ctx.assets.get_font(id)
     {
-        return Some((symbol.to_string(), font));
+        return Some(SelectedImportedFont {
+            symbol: symbol.to_string(),
+            font,
+            source: FontSelectionSource::ResolvedRecordSymbol,
+        });
     }
 
     let label_style = text_style.and_then(|style| style.label_style.as_deref());
@@ -1571,7 +1639,11 @@ fn select_imported_ui_font<'a>(
         });
 
         if let Some((symbol, font)) = text1_fonts.into_iter().next() {
-            return Some((symbol, font));
+            return Some(SelectedImportedFont {
+                symbol,
+                font,
+                source: FontSelectionSource::Title3ExportFallback,
+            });
         }
     }
 
@@ -1581,7 +1653,11 @@ fn select_imported_ui_font<'a>(
         if let Some(id) = ctx.assets.lookup_export(symbol)
             && let Some(font) = ctx.assets.get_font(id)
         {
-            return Some((symbol.to_string(), font));
+            return Some(SelectedImportedFont {
+                symbol: symbol.to_string(),
+                font,
+                source: FontSelectionSource::PreferredExportFallback,
+            });
         }
     }
 
@@ -1604,7 +1680,11 @@ fn select_imported_ui_font<'a>(
     };
     for (query, label) in preferred_font_names {
         if let Some(font) = ctx.assets.find_font_by_name(query) {
-            return Some((label.to_string(), font));
+            return Some(SelectedImportedFont {
+                symbol: label.to_string(),
+                font,
+                source: FontSelectionSource::PreferredNameFallback,
+            });
         }
     }
     None
@@ -1628,6 +1708,26 @@ fn font_style_scale_modifier(style: Option<&UiIrTextStyle>) -> f32 {
         .and_then(|value| value.as_f64())
         .map(|value| value as f32)
         .unwrap_or(1.0)
+}
+
+fn font_style_leading_modifier_px(style: Option<&UiIrTextStyle>) -> f32 {
+    let modifier = resolved_font_record_value(style)
+        .and_then(|value| value.get("leadingModifier"))
+        .and_then(|value| value.as_f64())
+        .map(|value| value as f32)
+        .unwrap_or(0.0);
+    let size_px = style.map(|style| ir_value_to_px(&style.font_size)).unwrap_or(0.0);
+    modifier * size_px
+}
+
+fn font_style_top_margin_offset_px(style: Option<&UiIrTextStyle>) -> f32 {
+    let modifier = resolved_font_record_value(style)
+        .and_then(|value| value.get("topMarginModifier"))
+        .and_then(|value| value.as_f64())
+        .map(|value| value as f32)
+        .unwrap_or(0.0);
+    let size_px = style.map(|style| ir_value_to_px(&style.font_size)).unwrap_or(0.0);
+    modifier * size_px
 }
 
 fn title3_font_weight_rank(symbol: &str, font: &FontGlyphSet) -> i32 {
@@ -1665,7 +1765,9 @@ fn resolved_text_payload(node: &UiIrNode) -> Option<&str> {
     let payload = node.text_payload.as_ref()?;
     match payload {
         UiIrTextPayload::Resolved { text } => Some(text.as_str()),
-        UiIrTextPayload::Empty | UiIrTextPayload::UnresolvedKey { .. } => None,
+        UiIrTextPayload::Empty
+        | UiIrTextPayload::IntentionallyEmpty { .. }
+        | UiIrTextPayload::UnresolvedKey { .. } => None,
     }
 }
 
@@ -2017,6 +2119,38 @@ mod tests {
 
         assert_eq!(font_symbol_from_text_style(Some(&style)), Some("$Text1Thin"));
         assert_eq!(font_style_scale_modifier(Some(&style)), 0.92);
+    }
+
+    #[test]
+    fn font_style_modifiers_scale_with_font_size() {
+        let mut style = text_style_with_font_record(serde_json::json!({
+            "_Type_": "BuildingBlocks_FontStyle",
+            "font": "$Text1Thin",
+            "scaleModifier": 1.0,
+            "leadingModifier": 0.25,
+            "topMarginModifier": -0.5
+        }));
+        style.font_size = UiIrValue::Fixed { value: 20.0 };
+
+        assert_eq!(font_style_leading_modifier_px(Some(&style)), 5.0);
+        assert_eq!(font_style_top_margin_offset_px(Some(&style)), -10.0);
+    }
+
+    #[test]
+    fn apply_font_style_vertical_offset_shifts_rect_y() {
+        let mut style = text_style_with_font_record(serde_json::json!({
+            "_Type_": "BuildingBlocks_FontStyle",
+            "font": "$Text1Thin",
+            "scaleModifier": 1.0,
+            "topMarginModifier": -0.25
+        }));
+        style.font_size = UiIrValue::Fixed { value: 16.0 };
+
+        let rect = Rect { x: 10.0, y: 20.0, w: 30.0, h: 40.0 };
+        assert_eq!(
+            apply_font_style_vertical_offset(rect, Some(&style)),
+            Rect { x: 10.0, y: 16.0, w: 30.0, h: 40.0 }
+        );
     }
 
     fn assert_not_uniform(img: &RgbaImage, label: &str) {

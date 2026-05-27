@@ -14,9 +14,23 @@
 //! [`DefaultValueRegistry::with_well_known_path_defaults`] cites the binding
 //! path that justifies it.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::OnceLock};
 
 use crate::canvas::{RgbaColor, Value};
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct WellKnownDefaultsData {
+    paths: HashMap<String, Value>,
+    localization: HashMap<String, String>,
+}
+
+fn well_known_defaults_data() -> &'static WellKnownDefaultsData {
+    static DATA: OnceLock<WellKnownDefaultsData> = OnceLock::new();
+    DATA.get_or_init(|| {
+        serde_json::from_str(include_str!("../data/default_value_registry_v1.json"))
+            .expect("well-known default registry data must parse")
+    })
+}
 
 /// A registry of default values used to populate state-bound widgets when no
 /// live game data is available ("switched on, no live data" state).
@@ -65,129 +79,31 @@ impl DefaultValueRegistry {
         Self::default()
     }
 
+    /// Create a registry for the UI pipeline by combining the well-known
+    /// defaults with any loaded localization overrides.
+    pub fn with_pipeline_defaults(localization_map: Option<HashMap<String, String>>) -> Self {
+        let mut reg = Self::with_well_known_path_defaults();
+        if let Some(loc_map) = localization_map
+            && !loc_map.is_empty()
+        {
+            reg.merge_localization(loc_map);
+        }
+        reg
+    }
+
     /// Create a registry pre-populated with the well-known binding-path
     /// defaults from the Phase 1 Default-on contract table.
     ///
-    /// Every entry here must cite its binding path.  Ship names, helper names,
-    /// and mesh names must **not** appear as keys.
+    /// Every entry here must cite its binding path. Ship names, helper names,
+    /// and mesh names must **not** appear as keys. The versioned source data
+    /// lives in `data/default_value_registry_v1.json`.
     pub fn with_well_known_path_defaults() -> Self {
         let mut reg = Self::new();
-
-        // /vehicle/targetname — Target Status MFD: the "no target locked" text.
-        // (Phase 1 contract: "NO TARGET when no target selected")
-        reg.insert_path("/vehicle/targetname", Value::Str("NO TARGET".into()));
-
-        // /vehicle/target/distance — Radar/Target footer range label.
-        // (Phase 1 contract: Radar range default "0.0km")
-        reg.insert_path("/vehicle/target/distance", Value::Str("0.0km".into()));
-
-        // /vehicle/target/bearing — Radar/Target footer heading label.
-        // (Phase 1 contract: Radar heading default "0°")
-        reg.insert_path("/vehicle/target/bearing", Value::Str("0°".into()));
-
-        // /ship/hp/current — Self Status MFD HP box current value.
-        // (Phase 1 contract: HP binding TBD in Phase 7; use "MAX" as placeholder)
-        reg.insert_path("/ship/hp/current", Value::Str("MAX".into()));
-
-        // /ship/hp/max — Self Status MFD HP box maximum value.
-        // (Phase 1 contract: same TBD caveat; use "MAX" as placeholder)
-        reg.insert_path("/ship/hp/max", Value::Str("MAX".into()));
-
-        // /seatdashboard/powerstate — Power Management MFD battery state label.
-        // (Phase 1 contract: "0 / 0 OFFLINE" battery; "OFFLINE" is the state string)
-        reg.insert_path("/seatdashboard/powerstate", Value::Str("OFFLINE".into()));
-
-        // /seatdashboard/powercurrent — Power Management MFD output numerator.
-        // (Phase 1 contract: "2 / 16" power output observed in reference)
-        reg.insert_path("/seatdashboard/powercurrent", Value::Int(2));
-
-        // /seatdashboard/powermax — Power Management MFD output denominator.
-        // (Phase 1 contract: "2 / 16" power output observed in reference)
-        reg.insert_path("/seatdashboard/powermax", Value::Int(16));
-
-        // /vehicle/gungroup — Self Status MFD top-right label.
-        // (Phase 1 contract: "GUNS (ALL)" gun-group runtime default)
-        reg.insert_path("/vehicle/gungroup", Value::Str("(ALL)".into()));
-
-        // Med-bed header defaults (Clipper / hospital screens):
-        // runtime `MedicalTier` commonly resolves to 3 in the static "switched-on"
-        // view; operations add +1 to the min tier, so seed inputs as 2.
-        reg.insert_path("CloneLocationInfo/MedicalTier", Value::Int(2));
-        reg.insert_path("Bed/MedBed/MedBedStatus/MedicalTier", Value::Int(2));
-        // Med-bed occupancy/capacity/location values are intentionally not
-        // seeded in live gameplay, but static render pathways need deterministic
-        // values so header/footer binding graphs resolve to authored content.
-        reg.insert_path("CloneLocationInfo/CurrentLocation/LocationName", Value::Str("Drake Clipper".into()));
-        reg.insert_path("Bed/MedBed/MedBedStatus/containerOccupancy", Value::Int(200));
-        reg.insert_path("Bed/MedBed/MedBedStatus/containerCapacity", Value::Int(200));
-        reg.insert_path("Bed/MedBed/MedBedStatus/ActorIsInBed", Value::Bool(true));
-        reg.insert_path("bed/playerinfo/name", Value::Str("@med_Start_NoPatient".into()));
-        reg.insert_path("state.BaseScreens.MainMenu", Value::Bool(true));
-        reg.insert_path("Bed/state.BaseScreens.MainMenu", Value::Bool(true));
-        // Base-screen state flags used by medical header title switching.
-        reg.insert_path("state.BaseScreens.Heal", Value::Bool(false));
-        reg.insert_path("state.BaseScreens.PerformingSurgery", Value::Bool(false));
-        reg.insert_path("state.BaseScreens.ConfirmMoreInjuries", Value::Bool(false));
-        reg.insert_path("state.BaseScreens.ConfirmNoInjuries", Value::Bool(false));
-        reg.insert_path("state.BaseScreens.CloneMe", Value::Bool(false));
-        reg.insert_path("state.BaseScreens.Admin", Value::Bool(false));
-        // Popup activity state is intentionally not seeded. Visibility must be
-        // driven by source bindings or explicit IR state.
-
-        // ── Static localization fallback ─────────────────────────────────────
-        //
-        // `Data\Localization\english\global.ini` is NOT present in the SC 4.x
-        // P4K.  These built-in translations cover the keys used by the MFD BB
-        // canvases so that `WidgetTextField` labels resolve to display text.
-        //
-        // Keys are lowercase (the format `lookup_localization` expects).
-        // Values are the canonical English UI strings visible in-game.
-        // If a live `global.ini` is ever loaded via `set_localization`, those
-        // values take precedence (set_localization replaces the whole table).
-        let mut loc: HashMap<String, String> = HashMap::new();
-        // Target-status screen labels (gen_mc_s_target)
-        loc.insert("hud_notarget".into(), "NO TARGET".into());
-        loc.insert("dfm_ui_target".into(), "TARGET".into());
-        loc.insert("hud_label_velocity".into(), "VELOCITY".into());
-        loc.insert("scan_data_faction".into(), "FACTION".into());
-        loc.insert("ui_nodata".into(), "—".into());
-        loc.insert("innerthought_hail".into(), "HAIL".into());
-        loc.insert("panel_call".into(), "CALL".into());
-        // Weapon-info screen labels (gen_mc_s_weaponinfo)
-        loc.insert("hud_gimbalmode".into(), "GIMBAL MODE".into());
-        loc.insert("hud_activegroup".into(), "ACTIVE GROUP".into());
-        // Annunciator chiclet labels (h_eng_annunciator + paramInputValues)
-        loc.insert("hud_pwr".into(), "PWR".into());
-        loc.insert("flighthud_label_wpn".into(), "WPN".into());
-        loc.insert("hud_thr".into(), "THR".into());
-        loc.insert("hud_shld".into(), "SHLD".into());
-        loc.insert("hud_cool".into(), "COOL".into());
-        // Self-status / target-status screen headers
-        loc.insert("hud_selfstatus".into(), "SELF STATUS".into());
-        loc.insert("hud_targetstatus".into(), "TARGET STATUS".into());
-        // Emissions screen labels (gen_mc_s_emissions)
-        loc.insert("hud_label_ir".into(), "IR".into());
-        loc.insert("hud_label_em".into(), "EM".into());
-        loc.insert("hud_label_cs".into(), "CS".into());
-        loc.insert("hud_ir".into(), "IR:".into());
-        loc.insert("hud_em".into(), "EM:".into());
-        loc.insert("hud_cs".into(), "CS:".into());
-        // Power output screen labels (gen_mc_s_poweroutputinfo)
-        loc.insert("engineering_ui_item_output".into(), "OUTPUT".into());
-        loc.insert("item_typebattery".into(), "BATTERY".into());
-        loc.insert("hud_mode".into(), "MODE".into());
-        loc.insert("hud_label_max".into(), "MAX".into());
-        // Weapon-info label (gen_mc_s_weaponinfo — key present only as plural ,P form
-        // in global.ini, so must also be in the static table for P4K-absent builds).
-        loc.insert("hud_label_weapon".into(), "Weapon".into());
-        // Misc HUD strings
-        loc.insert("rn_offline".into(), "OFFLINE".into());
-        loc.insert("rn_celsiussymbol".into(), "°C".into());
-        // Intentionally empty / placeholder keys
-        loc.insert("loc_empty".into(), String::new());
-        loc.insert("loc_placeholder".into(), String::new());
-
-        reg.set_localization(loc);
+        let data = well_known_defaults_data();
+        for (path, value) in &data.paths {
+            reg.insert_path(path, value.clone());
+        }
+        reg.set_localization(data.localization.clone());
 
         reg
     }
@@ -467,5 +383,17 @@ mod tests {
         assert_eq!(reg.lookup_localization("@hud_ActiveGroup"), Some("ACTIVE GROUP"));
         assert_eq!(reg.lookup_localization("@LOC_EMPTY"), Some(""));
         assert_eq!(reg.lookup_localization("@nonexistent"), None);
+    }
+
+    #[test]
+    fn pipeline_defaults_merge_localization_without_losing_sentinels() {
+        let reg = DefaultValueRegistry::with_pipeline_defaults(Some(HashMap::from([(
+            "hud_custom".to_string(),
+            "CUSTOM".to_string(),
+        )])));
+
+        assert_eq!(reg.lookup_localization("@hud_custom"), Some("CUSTOM"));
+        assert_eq!(reg.lookup_localization("@LOC_PLACEHOLDER"), Some(""));
+        assert_eq!(reg.lookup_localization("@LOC_EMPTY"), Some(""));
     }
 }

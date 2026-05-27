@@ -234,14 +234,7 @@ pub fn compile_ir_for_binding(inputs: &PipelineInputs<'_>) -> Result<UiIrDocumen
         .first()
         .map(|candidate| candidate.path.clone());
 
-    let mut defaults = DefaultValueRegistry::with_well_known_path_defaults();
-    if let Some(loc_map) = inputs.localization_map.clone() {
-        if !loc_map.is_empty() {
-            defaults.merge_localization(loc_map);
-        }
-    }
-    defaults.insert_localization("loc_placeholder", String::new());
-    defaults.insert_localization("loc_empty", String::new());
+    let defaults = DefaultValueRegistry::with_pipeline_defaults(inputs.localization_map.clone());
 
     let asset_manifest = build_asset_reference_manifest(&scene, inputs.asset_fetcher);
 
@@ -279,14 +272,7 @@ pub fn render_for_binding_ir(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiE
     let ir = compile_ir_for_binding(inputs)?;
 
     let style = load_style_for_ir(&ir, inputs)?;
-    let mut defaults = DefaultValueRegistry::with_well_known_path_defaults();
-    if let Some(loc_map) = inputs.localization_map.clone()
-        && !loc_map.is_empty()
-    {
-        defaults.merge_localization(loc_map);
-    }
-    defaults.insert_localization("loc_placeholder", String::new());
-    defaults.insert_localization("loc_empty", String::new());
+    let defaults = DefaultValueRegistry::with_pipeline_defaults(inputs.localization_map.clone());
 
     let swf_paths = ir
         .selected_swf_source
@@ -1303,6 +1289,18 @@ mod tests {
         assert_eq!(manifest.selected_source.as_deref(), Some("manufacturer:drak"));
         assert_eq!(manifest.fallback_counters.get("canvas_style_fetch_failed"), Some(&1));
         assert_eq!(manifest.fallback_counters.get("manufacturer_style_fallback_drak"), Some(&1));
+    }
+
+    #[test]
+    fn pipeline_defaults_seeds_placeholder_keys_and_merges_localization() {
+        let defaults = DefaultValueRegistry::with_pipeline_defaults(Some(std::collections::HashMap::from([(
+            "hud_custom".to_string(),
+            "CUSTOM".to_string(),
+        )])));
+
+        assert_eq!(defaults.lookup_localization("@hud_custom"), Some("CUSTOM"));
+        assert_eq!(defaults.lookup_localization("@loc_placeholder"), Some(""));
+        assert_eq!(defaults.lookup_localization("@loc_empty"), Some(""));
     }
 
     #[test]
