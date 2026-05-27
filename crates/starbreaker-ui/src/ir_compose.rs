@@ -315,8 +315,8 @@ fn draw_manufacturer_logo_ir(
 
     let iw = draw_rect.w.round().max(1.0) as u32;
     let ih = draw_rect.h.round().max(1.0) as u32;
-    let accent = derived_accent_tint(ctx);
-    let fill_override = Some(accent);
+    let tint = manufacturer_logo_tint(node, ctx);
+    let fill_override = Some(tint);
 
     for raw_path in candidates {
         let norm = UiAssetResolver::normalise_path(&raw_path);
@@ -348,12 +348,34 @@ fn draw_manufacturer_logo_ir(
                 &img,
                 draw_rect.x as i32,
                 draw_rect.y as i32,
-                accent,
+                tint,
                 node.alpha,
             );
             return;
         }
     }
+}
+
+fn manufacturer_logo_tint(node: &UiIrNode, ctx: &ComposeContext<'_>) -> [f32; 4] {
+    node.icon_tint_colour
+        .or_else(|| {
+            node.icon_tint_colour_token
+                .as_deref()
+                .and_then(|token| resolve_colour_token(ctx, token))
+        })
+        .or(node.background_fill_colour)
+        .or_else(|| {
+            node.background_fill_colour_token
+                .as_deref()
+                .and_then(|token| resolve_colour_token(ctx, token))
+        })
+        .or(node.stroke_colour)
+        .or_else(|| {
+            node.stroke_colour_token
+                .as_deref()
+                .and_then(|token| resolve_colour_token(ctx, token))
+        })
+        .unwrap_or_else(|| derived_accent_tint(ctx))
 }
 
 fn vertical_alpha_balance_offset(img: &RgbaImage) -> i32 {
@@ -736,7 +758,7 @@ fn draw_secondary_close_button(
     let draw_rect = TskRect::from_xywh(x, y, side, side).unwrap_or(rect);
     let corner_radius = node.corner_radius.unwrap_or(0.0);
 
-    let accent = derived_accent_tint(ctx);
+    let accent = secondary_close_button_tint(node, ctx);
     if let Some(fill_path) = rounded_rect_path(draw_rect, corner_radius) {
         let mut fill_paint = Paint::default();
         fill_paint.set_color(to_skia_color(
@@ -2255,6 +2277,38 @@ mod tests {
     }
 
     #[test]
+    fn manufacturer_logo_tint_prefers_source_icon_tint_over_derived_accent() {
+        let style = stub_style();
+        let defaults = crate::defaults::DefaultValueRegistry::with_well_known_path_defaults();
+        let assets = minimal_swf_assets();
+        let ctx = ComposeContext {
+            style: &style,
+            defaults: &defaults,
+            assets: &assets,
+        };
+        let mut node = blank_node("widget_manufacturer_logo");
+        node.icon_tint_colour = Some([0.2, 0.6, 0.9, 1.0]);
+
+        assert_eq!(manufacturer_logo_tint(&node, &ctx), [0.2, 0.6, 0.9, 1.0]);
+    }
+
+    #[test]
+    fn secondary_close_button_tint_prefers_source_stroke_over_derived_accent() {
+        let style = stub_style();
+        let defaults = crate::defaults::DefaultValueRegistry::with_well_known_path_defaults();
+        let assets = minimal_swf_assets();
+        let ctx = ComposeContext {
+            style: &style,
+            defaults: &defaults,
+            assets: &assets,
+        };
+        let mut node = blank_node("widget_close_button_secondary");
+        node.stroke_colour = Some([0.3, 0.7, 0.2, 1.0]);
+
+        assert_eq!(secondary_close_button_tint(&node, &ctx), [0.3, 0.7, 0.2, 1.0]);
+    }
+
+    #[test]
     fn custom_shape_svg_uses_source_over_blend() {
         let mut node = blank_node("widget_custom_shape");
         node.custom_shape = Some(UiIrCustomShape {
@@ -2965,4 +3019,26 @@ mod tests {
             "expected text-band placement to avoid fallback drawn-bounds padding"
         );
     }
+}
+
+fn secondary_close_button_tint(node: &UiIrNode, ctx: &ComposeContext<'_>) -> [f32; 4] {
+    node.stroke_colour
+        .or_else(|| {
+            node.stroke_colour_token
+                .as_deref()
+                .and_then(|token| resolve_colour_token(ctx, token))
+        })
+        .or(node.icon_tint_colour)
+        .or_else(|| {
+            node.icon_tint_colour_token
+                .as_deref()
+                .and_then(|token| resolve_colour_token(ctx, token))
+        })
+        .or(node.background_fill_colour)
+        .or_else(|| {
+            node.background_fill_colour_token
+                .as_deref()
+                .and_then(|token| resolve_colour_token(ctx, token))
+        })
+        .unwrap_or_else(|| derived_accent_tint(ctx))
 }

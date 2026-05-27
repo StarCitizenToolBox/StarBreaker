@@ -170,6 +170,12 @@ pub struct UiRenderOutput {
     pub diagnostics: UiRenderDiagnostics,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StyleSelectionManifest {
+    selected_source: Option<String>,
+    fallback_counters: BTreeMap<String, u32>,
+}
+
 /// Compile canonical UI IR for the binding described by `inputs`.
 ///
 /// This uses the same canvas-guid selection and BuildingBlocks scene resolve
@@ -217,12 +223,16 @@ pub fn compile_ir_for_binding(inputs: &PipelineInputs<'_>) -> Result<UiIrDocumen
     )
     .map_err(UiError::RenderError)?;
 
-    let selected_swf_source = select_swf_source(
+    let swf_manifest = build_swf_selection_manifest(
         &raw_root_json,
         &resolved,
         b.manufacturer_id.unwrap_or("drak"),
         inputs.swf_fetcher,
     );
+    let selected_swf_source = swf_manifest
+        .valid_candidates
+        .first()
+        .map(|candidate| candidate.path.clone());
 
     let mut defaults = DefaultValueRegistry::with_well_known_path_defaults();
     if let Some(loc_map) = inputs.localization_map.clone() {
@@ -235,21 +245,29 @@ pub fn compile_ir_for_binding(inputs: &PipelineInputs<'_>) -> Result<UiIrDocumen
 
     let asset_manifest = build_asset_reference_manifest(&scene, inputs.asset_fetcher);
 
-    Ok(crate::ui_ir::compile_ui_ir_from_scene_with_animation_sample(
+    let mut ir = crate::ui_ir::compile_ui_ir_from_scene_with_animation_sample(
         &scene,
         Some(inputs.canvas_fetcher),
         effective_guid,
         canvas_name,
         inputs.target_size,
         &defaults,
-        style_manifest,
+        style_manifest.selected_source,
         selected_swf_source,
         &[],
         asset_manifest.resolved_asset_refs,
         asset_manifest.missing_asset_refs,
         inputs.animation_sample_percent,
         100,
-    ))
+    );
+    ir.warnings.extend(fallback_counter_warnings(
+        style_manifest
+            .fallback_counters
+            .iter()
+            .chain(swf_manifest.fallback_counters.iter())
+            .map(|(key, value)| (key.as_str(), *value)),
+    ));
+    Ok(ir)
 }
 
 /// Render a UI binding by first compiling canonical IR and then consuming only IR.
@@ -328,8 +346,9 @@ fn build_style_selection_manifest(
     manufacturer_id: Option<&str>,
     canvas_fetcher: &dyn CanvasFetcher,
     style_fetcher: &dyn StyleFetcher,
-) -> Option<String> {
+) -> StyleSelectionManifest {
     let effective_manufacturer = manufacturer_id.unwrap_or("drak");
+    let mut fallback_counters = BTreeMap::new();
 
     if let Some(style_name) = raw_root_json
         .get("_RecordValue_")
@@ -338,26 +357,39 @@ fn build_style_selection_manifest(
         .map(crate::pipeline::extract_record_name)
     {
         match canvas_fetcher.fetch_canvas_by_name(&style_name) {
-            Ok(_) => return Some(format!("canvas:{style_name}")),
+            Ok(_) => {
+                return StyleSelectionManifest {
+                    selected_source: Some(format!("canvas:{style_name}")),
+                    fallback_counters,
+                };
+            }
             Err(e) => {
                 log::warn!(
                     "pipeline: failed to fetch canvas-level style record '{}': {}",
                     style_name,
                     e
                 );
+                fallback_counters.insert("canvas_style_fetch_failed".to_string(), 1);
             }
         }
     }
 
     match style_fetcher.fetch_manufacturer_style(effective_manufacturer) {
-        Ok(_) => Some(format!("manufacturer:{effective_manufacturer}")),
+        Ok(_) => StyleSelectionManifest {
+            selected_source: Some(format!("manufacturer:{effective_manufacturer}")),
+            fallback_counters,
+        },
         Err(e) => {
             log::warn!(
                 "pipeline: manufacturer style fetch failed for '{}': {}; falling back to drak",
                 effective_manufacturer,
                 e
             );
-            Some("manufacturer:drak".to_string())
+            fallback_counters.insert("manufacturer_style_fallback_drak".to_string(), 1);
+            StyleSelectionManifest {
+                selected_source: Some("manufacturer:drak".to_string()),
+                fallback_counters,
+            }
         }
     }
 }
@@ -685,22 +717,20 @@ fn collect_import_swf_paths(current_path: &str, bytes: &[u8]) -> Vec<String> {
     out
 }
 
-fn select_swf_source(
-    raw_root_json: &serde_json::Value,
-    resolved: &ResolvedCanvas,
-    manufacturer_id: &str,
-    fetcher: &dyn SwfFetcher,
-) -> Option<String> {
-    let manifest = build_swf_selection_manifest(raw_root_json, resolved, manufacturer_id, fetcher);
-    manifest.valid_candidates.into_iter().next()
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SwfPathCandidate {
+    path: String,
+    reason: &'static str,
+    rank: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SwfSelectionManifest {
-    flash_candidates: Vec<String>,
-    resolved_scene_candidates: Vec<String>,
-    ordered_candidates: Vec<String>,
-    valid_candidates: Vec<String>,
+    flash_candidates: Vec<SwfPathCandidate>,
+    resolved_scene_candidates: Vec<SwfPathCandidate>,
+    ordered_candidates: Vec<SwfPathCandidate>,
+    valid_candidates: Vec<SwfPathCandidate>,
+    fallback_counters: BTreeMap<String, u32>,
 }
 
 fn build_swf_selection_manifest(
@@ -710,25 +740,60 @@ fn build_swf_selection_manifest(
     fetcher: &dyn SwfFetcher,
 ) -> SwfSelectionManifest {
     let flash_candidates = if canvas_has_flash_renderer(raw_root_json) {
+        let mut source_candidates = flash_swf_candidates_from_canvas_refs(raw_root_json, manufacturer_id);
         let record_name = canvas_record_name(raw_root_json).unwrap_or("");
-        flash_swf_candidates(record_name, manufacturer_id)
+        source_candidates.extend(flash_swf_candidates(record_name, manufacturer_id));
+        let deduped = source_candidates
+            .into_iter()
+            .fold(Vec::<String>::new(), |mut acc, path| {
+                if !acc.iter().any(|existing| existing.eq_ignore_ascii_case(&path)) {
+                    acc.push(path);
+                }
+                acc
+            });
+        deduped
+            .into_iter()
+            .enumerate()
+            .map(|(index, path)| SwfPathCandidate {
+                path,
+                reason: "flash_structural_candidate",
+                rank: index as u32,
+            })
+            .collect()
     } else {
         Vec::new()
     };
 
-    let resolved_scene_candidates = collect_swf_paths(resolved);
-    let ordered_candidates = merge_unique_paths(&flash_candidates, &resolved_scene_candidates);
+    let resolved_scene_candidates = collect_swf_paths(resolved)
+        .into_iter()
+        .enumerate()
+        .map(|(index, path)| SwfPathCandidate {
+            path,
+            reason: "resolved_scene_reference",
+            rank: 1000 + index as u32,
+        })
+        .collect::<Vec<_>>();
+    let ordered_candidates = merge_unique_candidates(&flash_candidates, &resolved_scene_candidates);
     // Keep selection deterministic but avoid validating every candidate path
     // once a viable source is found.
     let mut valid_candidates = Vec::new();
-    for path in &ordered_candidates {
-        let Ok(bytes) = fetcher.fetch_swf_bytes(path) else {
+    for candidate in &ordered_candidates {
+        let Ok(bytes) = fetcher.fetch_swf_bytes(&candidate.path) else {
             continue;
         };
         if SwfAssetLibrary::new(bytes).is_ok() {
-            valid_candidates.push(path.clone());
+            valid_candidates.push(candidate.clone());
             break;
         }
+    }
+
+    let mut fallback_counters = BTreeMap::new();
+    if let Some(selected) = valid_candidates.first() {
+        if selected.reason == "resolved_scene_reference" {
+            fallback_counters.insert("swf_resolved_scene_fallback".to_string(), 1);
+        }
+    } else if !ordered_candidates.is_empty() {
+        fallback_counters.insert("swf_candidate_miss".to_string(), 1);
     }
 
     SwfSelectionManifest {
@@ -736,18 +801,32 @@ fn build_swf_selection_manifest(
         resolved_scene_candidates,
         ordered_candidates,
         valid_candidates,
+        fallback_counters,
     }
 }
 
-fn merge_unique_paths(primary: &[String], secondary: &[String]) -> Vec<String> {
+fn merge_unique_candidates(
+    primary: &[SwfPathCandidate],
+    secondary: &[SwfPathCandidate],
+) -> Vec<SwfPathCandidate> {
     let mut out = Vec::with_capacity(primary.len() + secondary.len());
     let mut seen = HashSet::new();
-    for path in primary.iter().chain(secondary.iter()) {
-        if seen.insert(path.clone()) {
-            out.push(path.clone());
+    for candidate in primary.iter().chain(secondary.iter()) {
+        if seen.insert(candidate.path.clone()) {
+            out.push(candidate.clone());
         }
     }
     out
+}
+
+fn fallback_counter_warnings<'a>(
+    counters: impl IntoIterator<Item = (&'a str, u32)>,
+) -> Vec<String> {
+    counters
+        .into_iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(key, count)| format!("fallback path used: {key}={count}"))
+        .collect()
 }
 
 /// Load the manufacturer style for `manufacturer_id` via `fetcher`.
@@ -872,25 +951,141 @@ pub fn flash_swf_candidates(record_name: &str, manufacturer_id: &str) -> Vec<Str
         return vec![];
     }
 
-    let base = format!(
-        r"Data\UI\ShipInterface\assets\SWF\{brand}\SupportScreen16-9\"
-    );
-
-    let mut candidates = vec![
-        format!("{base}{stem}Status.swf"),
-        format!("{base}{stem}.swf"),
-    ];
+    let mut candidates = support_screen_candidates_for_brand(&brand, stem);
 
     // For generic MC_S_* canvases used by non-RSI ships, append the RSI
-    // SupportScreen16-9 canonical paths as structural fallbacks.  RSI is the
-    // primary host for these shared canvas SWFs in the P4K layout.
+    // support-screen variants as structural fallbacks. RSI is the primary host
+    // for many shared generic MC_S_* canvas SWFs in the P4K layout.
     if is_generic_mc && brand != "RSI" {
-        let rsi_base = r"Data\UI\ShipInterface\assets\SWF\RSI\SupportScreen16-9\";
-        candidates.push(format!("{rsi_base}{stem}Status.swf"));
-        candidates.push(format!("{rsi_base}{stem}.swf"));
+        candidates.extend(support_screen_candidates_for_brand("RSI", stem));
     }
 
     candidates
+}
+
+fn flash_swf_candidates_from_canvas_refs(
+    raw_root_json: &serde_json::Value,
+    manufacturer_id: &str,
+) -> Vec<String> {
+    let Some(record_value) = raw_root_json.get("_RecordValue_") else {
+        return Vec::new();
+    };
+
+    let mut refs = Vec::new();
+    refs.extend(canvas_reference_paths_from_entries(
+        record_value
+            .get("defaultStyles")
+            .and_then(|styles| styles.get("entries"))
+            .and_then(|entries| entries.as_array()),
+    ));
+
+    let preferred_brand_prefix = format!("s_{}", manufacturer_id.to_ascii_lowercase());
+    if let Some(brand_styles) = record_value.get("brandStyles").and_then(|styles| styles.as_array()) {
+        for brand_style in brand_styles {
+            let brand_identifier = brand_style
+                .get("brandIdentifier")
+                .and_then(|value| value.as_str())
+                .map(extract_record_name)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if brand_identifier.starts_with(&preferred_brand_prefix)
+                || brand_identifier.contains(manufacturer_id)
+            {
+                refs.extend(canvas_reference_paths_from_entries(
+                    brand_style.get("entries").and_then(|entries| entries.as_array()),
+                ));
+            }
+        }
+    }
+
+    let mut candidates = Vec::new();
+    for path in refs {
+        let reference_name = extract_record_name(&path).to_ascii_lowercase();
+        if let Some(stem) = flash_stem_from_canvas_reference_name(&reference_name) {
+            candidates.extend(flash_swf_candidates_from_stem(&stem, manufacturer_id));
+        }
+    }
+    candidates
+}
+
+fn canvas_reference_paths_from_entries(entries: Option<&Vec<serde_json::Value>>) -> Vec<String> {
+    let Some(entries) = entries else {
+        return Vec::new();
+    };
+    let mut refs = Vec::new();
+    for entry in entries {
+        let Some(modifiers) = entry.get("modifiers").and_then(|mods| mods.as_array()) else {
+            continue;
+        };
+        for modifier in modifiers {
+            let is_canvas_ref = modifier
+                .get("field")
+                .and_then(|field| field.get("_Type_"))
+                .and_then(|value| value.as_str())
+                == Some("BuildingBlocks_FieldModifierRecordRefTypeCanvasReferenceRecord");
+            if !is_canvas_ref {
+                continue;
+            }
+            if let Some(path) = modifier
+                .get("field")
+                .and_then(|field| field.get("value"))
+                .and_then(|value| value.as_str())
+            {
+                refs.push(path.to_string());
+            }
+        }
+    }
+    refs
+}
+
+fn flash_stem_from_canvas_reference_name(reference_name: &str) -> Option<String> {
+    let stem = if let Some((_, tail)) = reference_name.rsplit_once("_mc_s_") {
+        tail
+    } else if let Some((_, tail)) = reference_name.rsplit_once("_s_") {
+        tail
+    } else {
+        return None;
+    }
+    .trim_matches('_')
+    .trim();
+    if stem.is_empty() {
+        None
+    } else {
+        Some(stem.to_string())
+    }
+}
+
+fn flash_swf_candidates_from_stem(stem: &str, manufacturer_id: &str) -> Vec<String> {
+    let brand: String = manufacturer_id
+        .chars()
+        .take(3)
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    if brand.is_empty() || stem.is_empty() {
+        return Vec::new();
+    }
+    support_screen_candidates_for_brand(&brand, stem)
+}
+
+fn support_screen_candidates_for_brand(brand: &str, stem: &str) -> Vec<String> {
+    if brand.is_empty() || stem.is_empty() {
+        return Vec::new();
+    }
+    let bases = [
+        format!(r"Data\UI\ShipInterface\assets\SWF\{brand}\SupportScreen16-9\"),
+        format!(r"Data\UI\ShipInterface\assets\SWF\{brand}\SupportScreen1-1\"),
+        format!(r"Data\UI\ShipInterface\assets\SWF\{brand}\SupportScreenBespoke2\"),
+        format!(r"Data\UI\ShipInterface\assets\SWF\{brand}\Support_Bespoke_2\"),
+    ];
+    bases
+        .into_iter()
+        .flat_map(|base| {
+            [
+                format!("{base}{stem}Status.swf"),
+                format!("{base}{stem}.swf"),
+            ]
+        })
+        .collect()
 }
 
 /// Build candidate P4K paths for an annunciator canvas.
@@ -962,14 +1157,31 @@ mod tests {
     }
 
     #[test]
-    fn merge_unique_paths_preserves_primary_order_then_secondary() {
-        let primary = vec!["A.swf".to_string(), "B.swf".to_string()];
-        let secondary = vec!["B.swf".to_string(), "C.swf".to_string()];
-        let merged = merge_unique_paths(&primary, &secondary);
-        assert_eq!(
-            merged,
-            vec!["A.swf".to_string(), "B.swf".to_string(), "C.swf".to_string()]
-        );
+    fn merge_unique_candidates_preserves_reason_and_rank_of_first_path() {
+        let primary = vec![SwfPathCandidate {
+            path: "A.swf".to_string(),
+            reason: "primary",
+            rank: 1,
+        }];
+        let secondary = vec![
+            SwfPathCandidate {
+                path: "A.swf".to_string(),
+                reason: "secondary-duplicate",
+                rank: 99,
+            },
+            SwfPathCandidate {
+                path: "B.swf".to_string(),
+                reason: "secondary",
+                rank: 2,
+            },
+        ];
+
+        let merged = merge_unique_candidates(&primary, &secondary);
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].reason, "primary");
+        assert_eq!(merged[0].rank, 1);
+        assert_eq!(merged[1].path, "B.swf");
     }
 
     #[test]
@@ -996,6 +1208,113 @@ mod tests {
 
         assert!(!manifest.flash_candidates.is_empty());
         assert_eq!(manifest.ordered_candidates, manifest.flash_candidates);
+        assert_eq!(manifest.flash_candidates[0].reason, "flash_structural_candidate");
         assert!(manifest.valid_candidates.is_empty());
+        assert_eq!(manifest.fallback_counters.get("swf_candidate_miss"), Some(&1));
+    }
+
+    #[test]
+    fn flash_candidates_prefer_canvas_reference_stem_when_present() {
+        let root = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.MC_S_MissionData_Master",
+            "_RecordValue_": {
+                "scene": [{"rendererType": "Flash"}],
+                "defaultStyles": {
+                    "entries": [{
+                        "modifiers": [{
+                            "field": {
+                                "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeCanvasReferenceRecord",
+                                "value": "file://./types/gen_mc_s_target.json"
+                            }
+                        }]
+                    }]
+                },
+                "brandStyles": []
+            }
+        });
+        let resolved = ResolvedCanvas {
+            root: crate::canvas::CanvasRecord {
+                guid: "root-guid".to_string(),
+                name: "Root".to_string(),
+                views: Vec::new(),
+                scene: Vec::new(),
+                operations: Vec::new(),
+            },
+            children: std::collections::HashMap::new(),
+        };
+        let fetcher = EmptyFetcher;
+
+        let manifest = build_swf_selection_manifest(&root, &resolved, "rsi", &fetcher);
+
+        assert!(manifest.flash_candidates[0]
+            .path
+            .to_ascii_lowercase()
+            .ends_with("targetstatus.swf"));
+        assert!(manifest
+            .flash_candidates
+            .iter()
+            .any(|candidate| candidate.path.to_ascii_lowercase().ends_with("missiondatastatus.swf")));
+    }
+
+    #[test]
+    fn flash_candidates_cover_structural_supportscreen_variants() {
+        let candidates = flash_swf_candidates("BuildingBlocks_Canvas.MC_S_Target_Master", "aegs");
+
+        assert!(candidates.iter().any(|path| path.contains("SupportScreen16-9\\TargetStatus.swf")));
+        assert!(candidates.iter().any(|path| path.contains("SupportScreen1-1\\TargetStatus.swf")));
+        assert!(candidates.iter().any(|path| path.contains("SupportScreenBespoke2\\TargetStatus.swf")));
+        assert!(candidates.iter().any(|path| path.contains("Support_Bespoke_2\\TargetStatus.swf")));
+    }
+
+    struct MissingCanvasStyleFetcher;
+
+    impl CanvasFetcher for MissingCanvasStyleFetcher {
+        fn fetch_canvas_json(&self, guid: &str) -> Result<serde_json::Value, UiError> {
+            Err(UiError::FetchFailed {
+                guid: guid.to_string(),
+                source: "missing canvas".to_string().into(),
+            })
+        }
+    }
+
+    struct MissingManufacturerStyleFetcher;
+
+    impl StyleFetcher for MissingManufacturerStyleFetcher {
+        fn fetch_manufacturer_style(&self, manufacturer_id: &str) -> Result<ManufacturerStyle, UiError> {
+            Err(UiError::RenderError(format!("missing manufacturer style: {manufacturer_id}")))
+        }
+    }
+
+    #[test]
+    fn style_selection_manifest_counts_manufacturer_fallback() {
+        let root = serde_json::json!({
+            "_RecordValue_": {
+                "style": "file://./foo_style.json"
+            }
+        });
+
+        let manifest = build_style_selection_manifest(
+            &root,
+            Some("aegs"),
+            &MissingCanvasStyleFetcher,
+            &MissingManufacturerStyleFetcher,
+        );
+
+        assert_eq!(manifest.selected_source.as_deref(), Some("manufacturer:drak"));
+        assert_eq!(manifest.fallback_counters.get("canvas_style_fetch_failed"), Some(&1));
+        assert_eq!(manifest.fallback_counters.get("manufacturer_style_fallback_drak"), Some(&1));
+    }
+
+    #[test]
+    fn fallback_counter_warnings_emit_human_readable_messages() {
+        let warnings = fallback_counter_warnings([
+            ("swf_candidate_miss", 1),
+            ("manufacturer_style_fallback_drak", 2),
+            ("ignored_zero", 0),
+        ]);
+
+        assert_eq!(warnings.len(), 2);
+        assert_eq!(warnings[0], "fallback path used: swf_candidate_miss=1");
+        assert_eq!(warnings[1], "fallback path used: manufacturer_style_fallback_drak=2");
     }
 }

@@ -1091,6 +1091,7 @@ struct DefaultEntryDecision<'a> {
 enum DefaultEntryReason {
     FirstUnconditional,
     HighestTagScore,
+    HighestTagScoreThenSpecificity,
     FirstEntryFallback,
 }
 
@@ -1099,6 +1100,7 @@ impl DefaultEntryReason {
         match self {
             Self::FirstUnconditional => "first_unconditional",
             Self::HighestTagScore => "highest_tag_score",
+            Self::HighestTagScoreThenSpecificity => "highest_tag_score_then_specificity",
             Self::FirstEntryFallback => "first_entry_fallback",
         }
     }
@@ -1160,17 +1162,30 @@ fn pick_default_entry_decision<'a>(
         // Score each entry by the max style-tag count of its condition's tag.
         let mut best_entry = entries[0];
         let mut best_score = 0usize;
+        let mut best_specificity = 0usize;
+        let mut used_specificity_tiebreak = false;
         for entry in &entries {
             let score = condition_tag_score(entry, &tag_to_node_tag_count);
+            let specificity = condition_tag_specificity(entry, tag_to_node_tag_count.keys().copied());
             if score > best_score {
                 best_score = score;
+                best_specificity = specificity;
                 best_entry = entry;
+                used_specificity_tiebreak = false;
+            } else if score == best_score && score > 0 && specificity > best_specificity {
+                best_specificity = specificity;
+                best_entry = entry;
+                used_specificity_tiebreak = true;
             }
         }
         if best_score > 0 {
             return Some(DefaultEntryDecision {
                 entry: best_entry,
-                reason: DefaultEntryReason::HighestTagScore,
+                reason: if used_specificity_tiebreak {
+                    DefaultEntryReason::HighestTagScoreThenSpecificity
+                } else {
+                    DefaultEntryReason::HighestTagScore
+                },
                 score: Some(best_score),
             });
         }
@@ -1212,6 +1227,29 @@ fn condition_tag_score(
         }
     }
     max
+}
+
+fn condition_tag_specificity<'a>(
+    entry: &serde_json::Value,
+    known_tags: impl IntoIterator<Item = &'a str>,
+) -> usize {
+    let known_tags: std::collections::HashSet<&str> = known_tags.into_iter().collect();
+    let cond_lists = match entry.get("conditionsList").and_then(|v| v.as_array()) {
+        Some(v) => v,
+        None => return 0,
+    };
+    cond_lists
+        .iter()
+        .filter_map(|cond_list| cond_list.get("conditions").and_then(|v| v.as_array()))
+        .flatten()
+        .filter_map(|condition| {
+            condition
+                .get("tag")
+                .and_then(|tag| tag.get("_RecordId_"))
+                .and_then(|value| value.as_str())
+        })
+        .filter(|tag| known_tags.contains(tag))
+        .count()
 }
 
 /// Recursively walk a condition node to find tag RecordIds and return the
@@ -3251,5 +3289,129 @@ mod tests {
             .collect();
         assert!(names.contains("guns_root"), "guns_root must be in merged scene");
         assert!(!names.contains("ammo_root"), "ammo_root must NOT appear");
+    }
+
+    #[test]
+    fn pick_default_entry_breaks_equal_tag_score_with_specificity() {
+        let child_simple = serde_json::json!({
+            "_RecordName_": "simple",
+            "_RecordId_": "00000000-0000-0000-0000-000000000110",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "simple_root"}
+                ]
+            }
+        });
+        let child_specific = serde_json::json!({
+            "_RecordName_": "specific",
+            "_RecordId_": "00000000-0000-0000-0000-000000000120",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "specific_root"}
+                ]
+            }
+        });
+
+        let root = serde_json::json!({
+            "_RecordName_": "specificity_master",
+            "_RecordId_": "00000000-0000-0000-0000-000000000101",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 1920.0, "y": 1080.0, "z": 0.0},
+                "defaultStyles": {
+                    "_Type_": "BuildingBlocks_DefaultStyles",
+                    "sharedStyles": null,
+                    "entries": [
+                        {
+                            "_Type_": "BuildingBlocks_StyleEntry",
+                            "name": "SimpleTagEntry",
+                            "conditionsList": [{
+                                "_Type_": "BuildingBlocks_StyleConditionList",
+                                "conditions": [{
+                                    "_Type_": "BuildingBlocks_StyleSelectorConditionTag",
+                                    "tag": {"_RecordId_": "tag_shared"}
+                                }]
+                            }],
+                            "matchTo": "",
+                            "modifiers": [{
+                                "_Type_": "BuildingBlocks_StyleModifier",
+                                "field": {
+                                    "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeCanvasReferenceRecord",
+                                    "value": "file://./simple.json"
+                                }
+                            }]
+                        },
+                        {
+                            "_Type_": "BuildingBlocks_StyleEntry",
+                            "name": "SpecificTagEntry",
+                            "conditionsList": [{
+                                "_Type_": "BuildingBlocks_StyleConditionList",
+                                "conditions": [
+                                    {
+                                        "_Type_": "BuildingBlocks_StyleSelectorConditionTag",
+                                        "tag": {"_RecordId_": "tag_shared"}
+                                    },
+                                    {
+                                        "_Type_": "BuildingBlocks_StyleSelectorConditionTag",
+                                        "tag": {"_RecordId_": "tag_extra"}
+                                    }
+                                ]
+                            }],
+                            "matchTo": "",
+                            "modifiers": [{
+                                "_Type_": "BuildingBlocks_StyleModifier",
+                                "field": {
+                                    "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeCanvasReferenceRecord",
+                                    "value": "file://./specific.json"
+                                }
+                            }]
+                        }
+                    ]
+                },
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "specificity_root"},
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetCanvas",
+                        "name": "canvas_Target",
+                        "parent": "_PointsTo_:ptr:1",
+                        "styleTags": [
+                            {"_RecordId_": "tag_shared"},
+                            {"_RecordId_": "tag_extra"}
+                        ]
+                    }
+                ]
+            }
+        });
+
+        let chosen = std::cell::Cell::new(None::<&'static str>);
+        let scene = resolve_canvas_graph(&root, None, &|url| {
+            let label: &'static str = if url.contains("specific") { "specific" } else { "simple" };
+            chosen.set(Some(label));
+            Ok(match url {
+                "file://./simple.json" => child_simple.clone(),
+                "file://./specific.json" => child_specific.clone(),
+                _ => return Err(format!("unexpected fetch: {url}")),
+            })
+        })
+        .expect("resolve failed");
+
+        assert_eq!(chosen.get(), Some("specific"));
+        let names: std::collections::HashSet<&str> = scene
+            .nodes
+            .values()
+            .filter_map(|n| if n.name.is_empty() { None } else { Some(n.name.as_str()) })
+            .collect();
+        assert!(names.contains("specific_root"));
+        assert!(!names.contains("simple_root"));
     }
 }
