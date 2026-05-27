@@ -38,6 +38,8 @@ use log::warn;
 use crate::bb_scene::{BbNodeId, BbNodeType, BbScene, BbValue};
 
 const ADDITIVE_ALTERNATE_REVERSE_POSITION_PHASE_RATIO: f32 = 2.0 / 3.0;
+const CENTERED_INTRINSIC_TEXT_FLOW_SPACING_SCALE: f32 = 0.6;
+const CENTERED_INTRINSIC_TEXT_FLOW_VERTICAL_OFFSET: f32 = 15.0;
 
 const SYNTHETIC_NODE_ID_BASE: BbNodeId = 0x8000_0000;
 
@@ -827,11 +829,15 @@ fn layout_flex_no_grow_children(
     if children.is_empty() {
         return;
     }
-    let item_spacing = if is_row {
+    let mut item_spacing = if is_row {
         flex.get("columnSpacing").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32 * csx
     } else {
         flex.get("rowSpacing").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32 * csy
     };
+    let tighten_centered_intrinsic_text_column = centered_intrinsic_text_column_spacing_applies(children, flex, scene, is_row);
+    if tighten_centered_intrinsic_text_column {
+        item_spacing *= CENTERED_INTRINSIC_TEXT_FLOW_SPACING_SCALE;
+    }
     let axis_just = flex.get("axisJustification").and_then(|v| v.as_str()).unwrap_or("Start");
     let cross_just = flex
         .get("crossAxisJustification")
@@ -1034,12 +1040,15 @@ fn layout_flex_no_grow_children(
     let cross_start_from_end = !is_row
         && cross_just_lc == "start"
         && (container_pivot_x >= 0.99 || (!sizes.is_empty() && right_aligned_flow_items * 2 >= sizes.len()));
-    let main_offset = match axis_just_lc.as_str() {
+    let mut main_offset = match axis_just_lc.as_str() {
         "center" => ((avail_main - total_main) * 0.5).max(0.0),
         "end" | "right" | "bottom" => (avail_main - total_main).max(0.0),
         "start" if start_from_end => (avail_main - total_main).max(0.0),
         _ => 0.0,
     };
+    if tighten_centered_intrinsic_text_column {
+        main_offset = (main_offset - CENTERED_INTRINSIC_TEXT_FLOW_VERTICAL_OFFSET * csy).max(0.0);
+    }
     let mut cursor = if is_row { container.x + main_offset } else { container.y + main_offset };
     if wrap_enabled {
         // Build wrapped lines first so axis justification (e.g. Center) can be
@@ -1284,6 +1293,37 @@ fn layout_flex_no_grow_children(
         cursor += if is_row { w } else { h };
         cursor += item_spacing;
     }
+}
+
+fn centered_intrinsic_text_column_spacing_applies(
+    children: &[BbNodeId],
+    flex: &serde_json::Value,
+    scene: &BbScene,
+    is_row: bool,
+) -> bool {
+    if is_row {
+        return false;
+    }
+    let direction = flex.get("direction").and_then(|v| v.as_str()).unwrap_or("Row");
+    let wrap = flex.get("wrap").and_then(|v| v.as_str()).unwrap_or("");
+    let axis = flex.get("axisJustification").and_then(|v| v.as_str()).unwrap_or("Start");
+    if !direction.eq_ignore_ascii_case("Column")
+        || !wrap.eq_ignore_ascii_case("NoWrapInfinite")
+        || !axis.eq_ignore_ascii_case("Center")
+    {
+        return false;
+    }
+
+    let intrinsic_textfields = children
+        .iter()
+        .filter_map(|id| scene.nodes.get(id))
+        .filter(|node| node.is_active && matches!(node.ty, BbNodeType::WidgetTextField))
+        .filter(|node| {
+            textfield_auto_intrinsic_override(node, &node.sizing.height, 1.0, 1.0, false)
+                .is_some()
+        })
+        .count();
+    intrinsic_textfields >= 2
 }
 
 fn row_flex_start_anchor_offset(
@@ -2741,13 +2781,14 @@ mod tests {
         let prompt = result.rects[&3];
         let touch = result.rects[&4];
 
-        assert!((title.y - 105.0).abs() < 0.5, "expected centered title flow y=105, got {}", title.y);
+        assert!((title.y - 102.0).abs() < 0.5, "expected centered title flow y=102, got {}", title.y);
         assert!((title.x - 193.0).abs() < 0.5, "expected authored cross-axis anchor to offset title x, got {}", title.x);
         assert!((title.h - 270.0).abs() < 0.5, "expected Title3 intrinsic height 270, got {}", title.h);
-        assert!((prompt.y - 405.0).abs() < 0.5, "expected prompt after title plus spacing, got {}", prompt.y);
+        assert!((prompt.y - 390.0).abs() < 0.5, "expected prompt after title plus spacing, got {}", prompt.y);
+        assert!((prompt.y - (title.y + title.h) - 18.0).abs() < 0.5, "expected tightened title-to-prompt gap, got {}", prompt.y - (title.y + title.h));
         assert!((prompt.x - 150.0).abs() < 0.5, "expected prompt without cross-axis anchor offset at centered x, got {}", prompt.x);
         assert!((prompt.h - 60.0).abs() < 0.5, "expected prompt intrinsic height 60, got {}", prompt.h);
-        assert!((touch.y - 495.0).abs() < 0.5, "expected touch canvas after intrinsic text slots, got {}", touch.y);
+        assert!((touch.y - 468.0).abs() < 0.5, "expected touch canvas after intrinsic text slots, got {}", touch.y);
     }
 
     #[test]
