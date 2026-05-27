@@ -63,6 +63,8 @@ pub struct UiIrNode {
     pub authored_size: [UiIrValue; 2],
     pub padding: [f32; 4],
     pub margin: [f32; 4],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overflow_mode: Option<String>,
     pub computed_rect: UiIrRect,
     pub background_fill_colour: Option<[f32; 4]>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -803,6 +805,7 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
         let colour_blend_mode = separator_colour_blend_mode_from_raw(node).or_else(|| {
             background_colour_blend_mode_from_raw(node, background_fill_colour_token.as_deref(), allow_background_fill)
         });
+        let overflow_mode = overflow_mode_from_raw(&node.raw);
 
         nodes.push(UiIrNode {
             id,
@@ -834,6 +837,7 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
                 node.margin.bottom,
                 node.margin.left,
             ],
+            overflow_mode,
             computed_rect: UiIrRect {
                 x: rect.x,
                 y: rect.y,
@@ -894,6 +898,29 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
         missing_asset_refs,
         nodes,
     }
+}
+
+fn overflow_mode_from_raw(raw: &serde_json::Value) -> Option<String> {
+    for key in [
+        "OverflowMode",
+        "overflowMode",
+        "overflow",
+        "Overflow",
+        "ClipMode",
+        "clipMode",
+        "clip",
+        "Clip",
+    ] {
+        if let Some(value) = raw.get(key) {
+            return Some(if let Some(string_value) = value.as_str() {
+                string_value.to_string()
+            } else {
+                value.to_string()
+            });
+        }
+    }
+
+    None
 }
 
 pub(crate) fn collect_node_asset_refs(node: &BbNode) -> Vec<String> {
@@ -4396,6 +4423,7 @@ mod tests {
                 ],
                 padding: [0.0, 0.0, 0.0, 0.0],
                 margin: [0.0, 0.0, 0.0, 0.0],
+                overflow_mode: None,
                 computed_rect: UiIrRect {
                     x: 0.0,
                     y: 0.0,

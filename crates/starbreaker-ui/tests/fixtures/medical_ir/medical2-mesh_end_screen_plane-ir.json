@@ -1,0 +1,5206 @@
+{
+  "schema_version": 1,
+  "canvas_guid": "e9ad809d-ebcf-43a3-bb20-120f64556aef",
+  "canvas_name": "BuildingBlocks_Canvas.I_Med_MedicalEndOfBed_A",
+  "target_width": 1920,
+  "target_height": 1080,
+  "selected_style_source": "canvas:s_bioc",
+  "renderer_hint": "bb",
+  "confidence": 100,
+  "warnings": [
+    "3 asset reference(s) could not be resolved",
+    "custom-shape content present but no SWF source was resolved; using BB renderer"
+  ],
+  "unresolved_references": [],
+  "resolved_asset_refs": [],
+  "missing_asset_refs": [
+    "UI/Textures/ModularKitStyles/BIOC/BIOC_bg.tif",
+    "UI/Textures/Vector/General/FingerPrint.svg",
+    "UI/Textures/I_InteractiveScreens/Med/i_med_bioc_bottom-bar.tif"
+  ],
+  "nodes": [
+    {
+      "id": 1,
+      "parent_id": null,
+      "children": [
+        5,
+        2147483648,
+        8,
+        7,
+        9,
+        11,
+        17,
+        13,
+        15,
+        22,
+        2
+      ],
+      "node_type": "display_widget",
+      "name": "Root",
+      "is_active": true,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.0,
+        0.0
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 1.0
+        },
+        {
+          "kind": "percent",
+          "value": 1.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 1920.0,
+        "h": 1080.0
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 2,
+      "parent_id": 1,
+      "children": [
+        31
+      ],
+      "node_type": "BuildingBlocks_WidgetLinearProgressMeter",
+      "name": "<unnamed>",
+      "is_active": false,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.5,
+        0.85
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "fixed",
+          "value": 128.0
+        },
+        {
+          "kind": "fixed",
+          "value": 32.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 960.0,
+        "y": 918.0,
+        "w": 128.0,
+        "h": 32.0
+      },
+      "background_fill_colour": null,
+      "segmented_fill": {
+        "enabled": true,
+        "angle": 0.0,
+        "segment_size": 3.0,
+        "segment_spacing_size": 5.0,
+        "segment_x_offset": 0.0,
+        "segmented_bar_fill": false
+      },
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "meter_progress": 1.0,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [
+        "921da883-aa9a-4d57-980b-ae093f30ab7b",
+        "93c8a6ad-ba64-4391-9498-2772e87a3554"
+      ],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 5,
+      "parent_id": 1,
+      "children": [],
+      "node_type": "widget_canvas",
+      "name": "Header",
+      "is_active": false,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.0,
+        0.0
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 1.0
+        },
+        {
+          "kind": "percent",
+          "value": 0.15
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 1920.0,
+        "h": 162.0
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 7,
+      "parent_id": 1,
+      "children": [],
+      "node_type": "widget_canvas",
+      "name": "LoggingInCanvas",
+      "is_active": false,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.5,
+        0.5
+      ],
+      "pivot": [
+        0.5,
+        0.5
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 1.0
+        },
+        {
+          "kind": "percent",
+          "value": 0.94
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 1920.0,
+        "h": 1015.2
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 8,
+      "parent_id": 1,
+      "children": [
+        2147483650
+      ],
+      "node_type": "widget_canvas",
+      "name": "AttractCanvas",
+      "is_active": true,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.5,
+        0.5
+      ],
+      "pivot": [
+        0.5,
+        0.45
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 1.0
+        },
+        {
+          "kind": "percent",
+          "value": 0.94
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 1920.0,
+        "h": 1015.2
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 9,
+      "parent_id": 1,
+      "children": [],
+      "node_type": "widget_canvas",
+      "name": "MainMenuCanvas",
+      "is_active": false,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.0,
+        0.18
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 1.0
+        },
+        {
+          "kind": "percent",
+          "value": 0.77
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 0.0,
+        "y": 194.40001,
+        "w": 1920.0,
+        "h": 831.6
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 11,
+      "parent_id": 1,
+      "children": [],
+      "node_type": "widget_canvas",
+      "name": "ViewPatientCanvas",
+      "is_active": false,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.0,
+        0.18
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 1.0
+        },
+        {
+          "kind": "percent",
+          "value": 0.77
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 0.0,
+        "y": 194.40001,
+        "w": 1920.0,
+        "h": 831.6
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 13,
+      "parent_id": 1,
+      "children": [],
+      "node_type": "widget_canvas",
+      "name": "CloneMeCanvas",
+      "is_active": false,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.0,
+        0.18
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 1.0
+        },
+        {
+          "kind": "percent",
+          "value": 0.77
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 0.0,
+        "y": 194.40001,
+        "w": 1920.0,
+        "h": 831.6
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 15,
+      "parent_id": 1,
+      "children": [],
+      "node_type": "widget_canvas",
+      "name": "AdminCanvas",
+      "is_active": false,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.0,
+        0.18
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 1.0
+        },
+        {
+          "kind": "percent",
+          "value": 0.77
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 0.0,
+        "y": 194.40001,
+        "w": 1920.0,
+        "h": 831.6
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 17,
+      "parent_id": 1,
+      "children": [],
+      "node_type": "widget_canvas",
+      "name": "HealingInProgressCanvas",
+      "is_active": false,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.0,
+        0.18
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 1.0
+        },
+        {
+          "kind": "percent",
+          "value": 0.77
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 0.0,
+        "y": 194.40001,
+        "w": 1920.0,
+        "h": 831.6
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 22,
+      "parent_id": 1,
+      "children": [],
+      "node_type": "widget_canvas",
+      "name": "HealingConfirmationCanvas",
+      "is_active": false,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.0,
+        0.18
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 1.0
+        },
+        {
+          "kind": "percent",
+          "value": 0.77
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 0.0,
+        "y": 194.40001,
+        "w": 1920.0,
+        "h": 831.6
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 24,
+      "parent_id": null,
+      "children": [],
+      "node_type": "widget_body_background",
+      "name": "Background2D",
+      "is_active": true,
+      "layer": 0,
+      "alpha": 1.0,
+      "anchor": [
+        0.0,
+        0.0
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "fixed",
+          "value": 64.0
+        },
+        {
+          "kind": "fixed",
+          "value": 64.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 1920.0,
+        "h": 1080.0
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": "UI/Textures/ModularKitStyles/BIOC/BIOC_bg.tif",
+      "custom_shape": null,
+      "style_tag_uuids": [
+        "cc37cf84-f93a-4a60-82a6-efea090069b1"
+      ],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 31,
+      "parent_id": 2,
+      "children": [],
+      "node_type": "widget_text",
+      "name": "<unnamed>",
+      "is_active": true,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.0,
+        1.0
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "fixed",
+          "value": 128.0
+        },
+        {
+          "kind": "fixed",
+          "value": 32.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 0.0,
+        "h": 0.0
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": {
+        "state": "resolved",
+        "text": "200/200"
+      },
+      "text_style": {
+        "font_record": null,
+        "resolved_font_record": null,
+        "font_size": {
+          "kind": "fixed",
+          "value": 16.0
+        },
+        "line_spacing": 0.0,
+        "alignment": "Left",
+        "vertical_alignment": "Center",
+        "colour": null
+      },
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 2147483648,
+      "parent_id": 1,
+      "children": [
+        2147483674
+      ],
+      "node_type": "widget_canvas",
+      "name": "Footer",
+      "is_active": true,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.0,
+        1.0
+      ],
+      "pivot": [
+        0.0,
+        1.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 1.0
+        },
+        {
+          "kind": "percent",
+          "value": 0.1
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 0.0,
+        "y": 972.0,
+        "w": 1920.0,
+        "h": 108.0
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 2147483649,
+      "parent_id": null,
+      "children": [
+        2147483691
+      ],
+      "node_type": "widget_canvas",
+      "name": "Medical Screen Audio Canvas",
+      "is_active": true,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.0,
+        0.0
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "fixed",
+          "value": 64.0
+        },
+        {
+          "kind": "fixed",
+          "value": 64.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 64.0,
+        "h": 64.0
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 2147483650,
+      "parent_id": 8,
+      "children": [
+        2147483653,
+        2147483651,
+        2147483652,
+        2147483661
+      ],
+      "node_type": "display_widget",
+      "name": "Root",
+      "is_active": true,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.5,
+        0.4
+      ],
+      "pivot": [
+        0.5,
+        0.5
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 1.0
+        },
+        {
+          "kind": "percent",
+          "value": 1.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 1920.0,
+        "h": 1015.2
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 2147483651,
+      "parent_id": 2147483650,
+      "children": [
+        2147483659,
+        2147483657,
+        2147483662
+      ],
+      "node_type": "widget_text_field",
+      "name": "TitleText",
+      "is_active": true,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.043,
+        0.0
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 0.7
+        },
+        {
+          "kind": "other",
+          "value": 1.0,
+          "behavior": "Auto"
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 370.56,
+        "y": 112.60001,
+        "w": 1344.0,
+        "h": 270.0
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": {
+        "state": "resolved",
+        "text": "DIGITAL MEDICAL ASSISTANT"
+      },
+      "text_style": {
+        "font_record": "file://./../../../../../../../../libs/foundry/records/ui/buildingblocks/fontstyles/blenderpro-thin.json",
+        "resolved_font_record": {
+          "_RecordId_": "2d6f1624-0920-4a5a-b6ae-cd8cf2fcd421",
+          "_RecordName_": "BuildingBlocks_FontStyle.BlenderPro-Thin",
+          "_RecordTag_": "Unknown",
+          "_RecordValue_": {
+            "_Type_": "BuildingBlocks_FontStyle",
+            "font": "$Text1Thin",
+            "imageSizePercent": 0.75,
+            "isBold": false,
+            "leadingModifier": 0.0,
+            "leftMarginModifier": 0.0,
+            "numImageReplacementSpaces": 5,
+            "paintFile": "UI/fonts/Install/BlenderPro-Thin.slug",
+            "scaleModifier": 1.0,
+            "topMarginModifier": 0.0
+          }
+        },
+        "font_size": {
+          "kind": "fixed",
+          "value": 103.5
+        },
+        "line_spacing": -20.7,
+        "alignment": "Center",
+        "vertical_alignment": "Center",
+        "anchor_to_parent_x": 0.5,
+        "anchor_to_parent_y": 0.5,
+        "colour": null,
+        "colour_token": "Bright",
+        "label_style": "Title3"
+      },
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [
+        "e6003a83-9795-4478-a61c-349f14016e5b"
+      ],
+      "resolved_style_tags": [
+        {
+          "uuid": "e6003a83-9795-4478-a61c-349f14016e5b",
+          "tag_name": "Primary"
+        }
+      ]
+    },
+    {
+      "id": 2147483652,
+      "parent_id": 2147483650,
+      "children": [
+        2147483660
+      ],
+      "node_type": "widget_text_field",
+      "name": "TouchPromptText",
+      "is_active": true,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.0,
+        0.0
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 0.7
+        },
+        {
+          "kind": "other",
+          "value": 1.0,
+          "behavior": "Auto"
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 288.0,
+        "y": 398.2186,
+        "w": 1344.0,
+        "h": 60.0
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": {
+        "state": "resolved",
+        "text": "PLEASE TOUCH THE SCREEN TO BEGIN"
+      },
+      "text_style": {
+        "font_record": "file://./../../../../../../../../libs/foundry/records/ui/buildingblocks/fontstyles/blenderpro-bold.json",
+        "resolved_font_record": {
+          "_RecordId_": "e1908cd4-147d-468b-848a-79b21d19f58d",
+          "_RecordName_": "BuildingBlocks_FontStyle.BlenderPro-Bold",
+          "_RecordTag_": "Unknown",
+          "_RecordValue_": {
+            "_Type_": "BuildingBlocks_FontStyle",
+            "font": "$Text1Bold",
+            "imageSizePercent": 0.75,
+            "isBold": true,
+            "leadingModifier": 0.0,
+            "leftMarginModifier": 0.0,
+            "numImageReplacementSpaces": 5,
+            "paintFile": "UI/fonts/Install/BlenderPro-Bold.slug",
+            "scaleModifier": 1.0,
+            "topMarginModifier": 0.0
+          }
+        },
+        "font_size": {
+          "kind": "fixed",
+          "value": 21.56
+        },
+        "line_spacing": -3.5933332,
+        "alignment": "Center",
+        "vertical_alignment": "Center",
+        "anchor_to_parent_x": 0.5,
+        "anchor_to_parent_y": 0.5,
+        "colour": null,
+        "label_style": "Heading2"
+      },
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [
+        "5e5c7c8f-847b-46c5-ad80-a57c941391ab",
+        "0964d22f-3a22-4052-92e4-eaf77f975423"
+      ],
+      "resolved_style_tags": [
+        {
+          "uuid": "5e5c7c8f-847b-46c5-ad80-a57c941391ab",
+          "tag_name": "Animate_1"
+        },
+        {
+          "uuid": "0964d22f-3a22-4052-92e4-eaf77f975423",
+          "tag_name": "UI_Generic_Flag_01"
+        }
+      ]
+    },
+    {
+      "id": 2147483653,
+      "parent_id": 2147483650,
+      "children": [
+        2147483654
+      ],
+      "node_type": "display_widget",
+      "name": "RightHeader",
+      "is_active": true,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        1.03,
+        0.0
+      ],
+      "pivot": [
+        1.0,
+        0.1
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 0.27
+        },
+        {
+          "kind": "percent",
+          "value": 0.15
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 1459.2,
+        "y": -15.228002,
+        "w": 518.4,
+        "h": 152.28001
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 2147483654,
+      "parent_id": 2147483653,
+      "children": [
+        2147483656,
+        2147483655
+      ],
+      "node_type": "display_widget",
+      "name": "TextLayout",
+      "is_active": true,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.32,
+        0.4
+      ],
+      "pivot": [
+        1.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "other",
+          "value": 0.315,
+          "behavior": "Auto"
+        },
+        {
+          "kind": "percent",
+          "value": 1.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 1700.6707,
+        "y": -5.4820795,
+        "w": 163.296,
+        "h": 152.28001
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 2147483655,
+      "parent_id": 2147483654,
+      "children": [
+        2147483658
+      ],
+      "node_type": "BuildingBlocks_ComponentLabelCaptionPair",
+      "name": "MedGel",
+      "is_active": true,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        1.0,
+        0.0
+      ],
+      "pivot": [
+        1.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "other",
+          "value": 64.0,
+          "behavior": "Auto"
+        },
+        {
+          "kind": "other",
+          "value": 64.0,
+          "behavior": "Auto"
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 1748.9667,
+        "y": -5.4820795,
+        "w": 115.0,
+        "h": 64.0
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": {
+        "state": "resolved",
+        "text": "MEDGELS"
+      },
+      "secondary_text_payload": {
+        "state": "resolved",
+        "text": "200/200"
+      },
+      "secondary_text_style": {
+        "font_record": null,
+        "resolved_font_record": null,
+        "font_size": {
+          "kind": "fixed",
+          "value": 18.0
+        },
+        "line_spacing": 0.0,
+        "alignment": "Left",
+        "vertical_alignment": "Center",
+        "colour": null,
+        "label_style": "Heading6"
+      },
+      "text_style": {
+        "font_record": "file://./../../../../../../../../libs/foundry/records/ui/buildingblocks/fontstyles/blenderpro-thin.json",
+        "resolved_font_record": {
+          "_RecordId_": "2d6f1624-0920-4a5a-b6ae-cd8cf2fcd421",
+          "_RecordName_": "BuildingBlocks_FontStyle.BlenderPro-Thin",
+          "_RecordTag_": "Unknown",
+          "_RecordValue_": {
+            "_Type_": "BuildingBlocks_FontStyle",
+            "font": "$Text1Thin",
+            "imageSizePercent": 0.75,
+            "isBold": false,
+            "leadingModifier": 0.0,
+            "leftMarginModifier": 0.0,
+            "numImageReplacementSpaces": 5,
+            "paintFile": "UI/fonts/Install/BlenderPro-Thin.slug",
+            "scaleModifier": 1.0,
+            "topMarginModifier": 0.0
+          }
+        },
+        "font_size": {
+          "kind": "fixed",
+          "value": 21.0
+        },
+        "line_spacing": 0.0,
+        "alignment": "Left",
+        "vertical_alignment": "Center",
+        "anchor_to_parent_x": 0.5,
+        "anchor_to_parent_y": 0.5,
+        "colour": null,
+        "colour_token": "Base",
+        "label_style": "Heading3"
+      },
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 2147483656,
+      "parent_id": 2147483654,
+      "children": [],
+      "node_type": "BuildingBlocks_ComponentLabelCaptionPair",
+      "name": "HospitalTier",
+      "is_active": false,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        1.0,
+        0.0
+      ],
+      "pivot": [
+        1.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "other",
+          "value": 64.0,
+          "behavior": "Auto"
+        },
+        {
+          "kind": "other",
+          "value": 64.0,
+          "behavior": "Auto"
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 1700.6707,
+        "y": -5.4820795,
+        "w": 163.296,
+        "h": 152.28001
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": {
+        "state": "resolved",
+        "text": "TREATMENT TIER"
+      },
+      "secondary_text_payload": {
+        "state": "resolved",
+        "text": "T"
+      },
+      "secondary_text_style": {
+        "font_record": null,
+        "resolved_font_record": null,
+        "font_size": {
+          "kind": "fixed",
+          "value": 18.0
+        },
+        "line_spacing": 0.0,
+        "alignment": "Left",
+        "vertical_alignment": "Center",
+        "colour": null,
+        "label_style": "Heading6"
+      },
+      "text_style": {
+        "font_record": "file://./../../../../../../../../libs/foundry/records/ui/buildingblocks/fontstyles/blenderpro-thin.json",
+        "resolved_font_record": {
+          "_RecordId_": "2d6f1624-0920-4a5a-b6ae-cd8cf2fcd421",
+          "_RecordName_": "BuildingBlocks_FontStyle.BlenderPro-Thin",
+          "_RecordTag_": "Unknown",
+          "_RecordValue_": {
+            "_Type_": "BuildingBlocks_FontStyle",
+            "font": "$Text1Thin",
+            "imageSizePercent": 0.75,
+            "isBold": false,
+            "leadingModifier": 0.0,
+            "leftMarginModifier": 0.0,
+            "numImageReplacementSpaces": 5,
+            "paintFile": "UI/fonts/Install/BlenderPro-Thin.slug",
+            "scaleModifier": 1.0,
+            "topMarginModifier": 0.0
+          }
+        },
+        "font_size": {
+          "kind": "fixed",
+          "value": 21.0
+        },
+        "line_spacing": 0.0,
+        "alignment": "Left",
+        "vertical_alignment": "Center",
+        "anchor_to_parent_x": 0.5,
+        "anchor_to_parent_y": 0.5,
+        "colour": null,
+        "colour_token": "Base",
+        "label_style": "Heading3"
+      },
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 2147483657,
+      "parent_id": 2147483651,
+      "children": [],
+      "node_type": "widget_text_field",
+      "name": "TierLevel",
+      "is_active": true,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.01,
+        0.5
+      ],
+      "pivot": [
+        0.5,
+        0.5
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "other",
+          "value": 0.9,
+          "behavior": "Auto"
+        },
+        {
+          "kind": "other",
+          "value": 1.0,
+          "behavior": "Auto"
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 311.1,
+        "y": 112.600006,
+        "w": 145.8,
+        "h": 270.0
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": {
+        "state": "resolved",
+        "text": "T3"
+      },
+      "text_style": {
+        "font_record": "file://./../../../../../../../../libs/foundry/records/ui/buildingblocks/fontstyles/blenderpro-thin.json",
+        "resolved_font_record": {
+          "_RecordId_": "2d6f1624-0920-4a5a-b6ae-cd8cf2fcd421",
+          "_RecordName_": "BuildingBlocks_FontStyle.BlenderPro-Thin",
+          "_RecordTag_": "Unknown",
+          "_RecordValue_": {
+            "_Type_": "BuildingBlocks_FontStyle",
+            "font": "$Text1Thin",
+            "imageSizePercent": 0.75,
+            "isBold": false,
+            "leadingModifier": 0.0,
+            "leftMarginModifier": 0.0,
+            "numImageReplacementSpaces": 5,
+            "paintFile": "UI/fonts/Install/BlenderPro-Thin.slug",
+            "scaleModifier": 1.0,
+            "topMarginModifier": 0.0
+          }
+        },
+        "font_size": {
+          "kind": "fixed",
+          "value": 103.5
+        },
+        "line_spacing": -20.7,
+        "alignment": "Left",
+        "vertical_alignment": "Center",
+        "anchor_to_parent_x": 0.5,
+        "anchor_to_parent_y": 0.5,
+        "colour": null,
+        "label_style": "Title3"
+      },
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [
+        "174b3e40-1b7b-4f01-a7dc-6420b7367d6b"
+      ],
+      "resolved_style_tags": [
+        {
+          "uuid": "174b3e40-1b7b-4f01-a7dc-6420b7367d6b",
+          "tag_name": "Bright"
+        }
+      ]
+    },
+    {
+      "id": 2147483658,
+      "parent_id": 2147483655,
+      "children": [],
+      "node_type": "BuildingBlocks_WidgetLinearProgressMeter",
+      "name": "MedGelFillMeter",
+      "is_active": true,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.0,
+        1.0
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "fixed",
+          "value": 115.0
+        },
+        {
+          "kind": "fixed",
+          "value": 15.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 1748.9667,
+        "y": 58.51792,
+        "w": 115.0,
+        "h": 15.0
+      },
+      "background_fill_colour": null,
+      "segmented_fill": {
+        "enabled": true,
+        "angle": 0.0,
+        "segment_size": 3.0,
+        "segment_spacing_size": 5.0,
+        "segment_x_offset": 0.0,
+        "segmented_bar_fill": false
+      },
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "meter_progress": 1.0,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [
+        "921da883-aa9a-4d57-980b-ae093f30ab7b",
+        "93c8a6ad-ba64-4391-9498-2772e87a3554"
+      ],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 2147483659,
+      "parent_id": 2147483651,
+      "children": [
+        2147483663
+      ],
+      "node_type": "widget_canvas",
+      "name": "Canvas_TextFrame2",
+      "is_active": true,
+      "layer": 4,
+      "alpha": 0.62,
+      "anchor": [
+        0.0,
+        0.0
+      ],
+      "pivot": [
+        0.06,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 1.0
+        },
+        {
+          "kind": "percent",
+          "value": 1.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 289.91998,
+        "y": 112.60001,
+        "w": 1344.0,
+        "h": 270.0
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 2147483660,
+      "parent_id": 2147483652,
+      "children": [
+        2147483666
+      ],
+      "node_type": "widget_canvas",
+      "name": "Canvas_TextFrame",
+      "is_active": true,
+      "layer": 4,
+      "alpha": 1.0,
+      "anchor": [
+        0.5,
+        0.5
+      ],
+      "pivot": [
+        0.5,
+        0.5
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 1.0
+        },
+        {
+          "kind": "percent",
+          "value": 1.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 288.0,
+        "y": 398.2186,
+        "w": 1344.0,
+        "h": 60.0
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 2147483661,
+      "parent_id": 2147483650,
+      "children": [
+        2147483669,
+        2147483672
+      ],
+      "node_type": "widget_canvas",
+      "name": "TouchHere",
+      "is_active": true,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.0,
+        0.0
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "fixed",
+          "value": 400.0
+        },
+        {
+          "kind": "fixed",
+          "value": 400.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 760.0,
+        "y": 473.8372,
+        "w": 400.0,
+        "h": 400.0
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 2147483662,
+      "parent_id": 2147483651,
+      "children": [],
+      "node_type": "display_widget",
+      "name": "<unnamed>",
+      "is_active": true,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.0,
+        0.0
+      ],
+      "pivot": [
+        0.45,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "fixed",
+          "value": 180.0
+        },
+        {
+          "kind": "percent",
+          "value": 1.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 289.56,
+        "y": 112.60001,
+        "w": 180.0,
+        "h": 270.0
+      },
+      "background_fill_colour": [
+        0.4509804,
+        0.7764706,
+        0.99607843,
+        0.2
+      ],
+      "background_fill_colour_token": "Base",
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 2147483663,
+      "parent_id": 2147483659,
+      "children": [
+        2147483664,
+        2147483665
+      ],
+      "node_type": "display_widget",
+      "name": "BaseTextBackground",
+      "is_active": true,
+      "layer": 4,
+      "alpha": 0.62,
+      "anchor": [
+        0.5,
+        0.5
+      ],
+      "pivot": [
+        0.5,
+        0.5
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 1.0
+        },
+        {
+          "kind": "percent",
+          "value": 1.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 289.91998,
+        "y": 112.60001,
+        "w": 1344.0,
+        "h": 270.0
+      },
+      "background_fill_colour": [
+        0.015686275,
+        0.03137255,
+        0.09019608,
+        0.7
+      ],
+      "background_fill_colour_token": "Background",
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 2147483664,
+      "parent_id": 2147483663,
+      "children": [],
+      "node_type": "BuildingBlocks_WidgetSeparator",
+      "name": "Seperator_text_bottom",
+      "is_active": true,
+      "layer": 5,
+      "alpha": 0.186,
+      "anchor": [
+        0.0,
+        1.0
+      ],
+      "pivot": [
+        0.0,
+        0.5
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 1.0
+        },
+        {
+          "kind": "fixed",
+          "value": 8.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 289.91998,
+        "y": 378.6,
+        "w": 1344.0,
+        "h": 8.0
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_colour_token": "Accent1",
+      "stroke_extent": 1.0,
+      "colour_blend_mode": "additive",
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 2147483665,
+      "parent_id": 2147483663,
+      "children": [],
+      "node_type": "BuildingBlocks_WidgetSeparator",
+      "name": "Seperator_text_bottom",
+      "is_active": true,
+      "layer": 5,
+      "alpha": 0.186,
+      "anchor": [
+        0.0,
+        0.0
+      ],
+      "pivot": [
+        0.0,
+        0.5
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 1.0
+        },
+        {
+          "kind": "fixed",
+          "value": 8.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 289.91998,
+        "y": 108.60001,
+        "w": 1344.0,
+        "h": 8.0
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_colour_token": "Accent1",
+      "stroke_extent": 1.0,
+      "colour_blend_mode": "additive",
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 2147483666,
+      "parent_id": 2147483660,
+      "children": [
+        2147483667,
+        2147483668
+      ],
+      "node_type": "display_widget",
+      "name": "BaseTextBackground",
+      "is_active": true,
+      "layer": 4,
+      "alpha": 1.0,
+      "anchor": [
+        0.5,
+        0.5
+      ],
+      "pivot": [
+        0.5,
+        0.5
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 1.0
+        },
+        {
+          "kind": "percent",
+          "value": 1.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 288.0,
+        "y": 398.2186,
+        "w": 1344.0,
+        "h": 60.0
+      },
+      "background_fill_colour": [
+        0.015686275,
+        0.03137255,
+        0.09019608,
+        0.7
+      ],
+      "background_fill_colour_token": "Background",
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 2147483667,
+      "parent_id": 2147483666,
+      "children": [],
+      "node_type": "BuildingBlocks_WidgetSeparator",
+      "name": "Seperator_text_bottom",
+      "is_active": true,
+      "layer": 5,
+      "alpha": 0.3,
+      "anchor": [
+        0.0,
+        1.0
+      ],
+      "pivot": [
+        0.0,
+        0.5
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 1.0
+        },
+        {
+          "kind": "fixed",
+          "value": 8.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 288.0,
+        "y": 454.2186,
+        "w": 1344.0,
+        "h": 8.0
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_colour_token": "Accent1",
+      "stroke_extent": 1.0,
+      "colour_blend_mode": "additive",
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 2147483668,
+      "parent_id": 2147483666,
+      "children": [],
+      "node_type": "BuildingBlocks_WidgetSeparator",
+      "name": "Seperator_text_bottom",
+      "is_active": true,
+      "layer": 5,
+      "alpha": 0.3,
+      "anchor": [
+        0.0,
+        0.0
+      ],
+      "pivot": [
+        0.0,
+        0.5
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 1.0
+        },
+        {
+          "kind": "fixed",
+          "value": 8.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 288.0,
+        "y": 394.2186,
+        "w": 1344.0,
+        "h": 8.0
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_colour_token": "Accent1",
+      "stroke_extent": 1.0,
+      "colour_blend_mode": "additive",
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 2147483669,
+      "parent_id": 2147483661,
+      "children": [
+        2147483670,
+        2147483671,
+        2147483673
+      ],
+      "node_type": "display_widget",
+      "name": "TouchHere_FingerPrint",
+      "is_active": true,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.5,
+        0.45
+      ],
+      "pivot": [
+        0.5,
+        0.5
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 0.66
+        },
+        {
+          "kind": "percent",
+          "value": 0.66
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 828.0,
+        "y": 521.83716,
+        "w": 264.0,
+        "h": 264.0
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [
+        "0964d22f-3a22-4052-92e4-eaf77f975423"
+      ],
+      "resolved_style_tags": [
+        {
+          "uuid": "0964d22f-3a22-4052-92e4-eaf77f975423",
+          "tag_name": "UI_Generic_Flag_01"
+        }
+      ]
+    },
+    {
+      "id": 2147483670,
+      "parent_id": 2147483669,
+      "children": [],
+      "node_type": "widget_custom_shape",
+      "name": "Fingerprint",
+      "is_active": true,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.48,
+        0.51
+      ],
+      "pivot": [
+        0.5,
+        0.5
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 0.85
+        },
+        {
+          "kind": "percent",
+          "value": 0.85
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 842.51996,
+        "y": 544.27716,
+        "w": 224.40001,
+        "h": 224.40001
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": [
+        0.2627451,
+        0.8666667,
+        0.5764706,
+        1.0
+      ],
+      "stroke_colour_token": "Accent2",
+      "stroke_extent": 1.0,
+      "icon_tint_colour": [
+        0.4509804,
+        0.7764706,
+        0.99607843,
+        1.0
+      ],
+      "icon_tint_colour_token": "Accent1",
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": "UI/Textures/Vector/General/FingerPrint.svg",
+      "custom_shape": {
+        "shape_type": null,
+        "shape": null,
+        "svg_path": "UI/Textures/Vector/General/FingerPrint.svg",
+        "render_shape": true,
+        "enable_nine_slice_rect": false,
+        "nine_slice_rect": [
+          0.25,
+          0.25,
+          0.75,
+          0.75
+        ],
+        "nine_slice_scale": 1.0
+      },
+      "style_tag_uuids": [
+        "78e9510d-b3ff-494a-96e0-a61089c26274"
+      ],
+      "resolved_style_tags": [
+        {
+          "uuid": "78e9510d-b3ff-494a-96e0-a61089c26274",
+          "tag_name": "Modify"
+        }
+      ]
+    },
+    {
+      "id": 2147483671,
+      "parent_id": 2147483669,
+      "children": [],
+      "node_type": "BuildingBlocks_WidgetCircle",
+      "name": "CircleEcho_First",
+      "is_active": true,
+      "layer": 5,
+      "alpha": 0.0,
+      "anchor": [
+        0.5,
+        0.5
+      ],
+      "pivot": [
+        0.5,
+        0.5
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 0.77
+        },
+        {
+          "kind": "percent",
+          "value": 0.77
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 858.36,
+        "y": 552.19714,
+        "w": 203.28,
+        "h": 203.28
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": [
+        0.2627451,
+        0.8666667,
+        0.5764706,
+        1.0
+      ],
+      "stroke_colour_token": "Accent2",
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [
+        "78e9510d-b3ff-494a-96e0-a61089c26274"
+      ],
+      "resolved_style_tags": [
+        {
+          "uuid": "78e9510d-b3ff-494a-96e0-a61089c26274",
+          "tag_name": "Modify"
+        }
+      ]
+    },
+    {
+      "id": 2147483672,
+      "parent_id": 2147483661,
+      "children": [],
+      "node_type": "widget_text_field",
+      "name": "TouchToStart",
+      "is_active": true,
+      "layer": 5,
+      "alpha": 0.66,
+      "anchor": [
+        0.0,
+        0.86
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 1.0
+        },
+        {
+          "kind": "other",
+          "value": 1.0,
+          "behavior": "Auto"
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 760.0,
+        "y": 817.83716,
+        "w": 400.0,
+        "h": 400.0
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": {
+        "state": "resolved",
+        "text": "TOUCH TO START"
+      },
+      "text_style": {
+        "font_record": "file://./../../../../../../../../libs/foundry/records/ui/buildingblocks/fontstyles/blenderpro-thin.json",
+        "resolved_font_record": {
+          "_RecordId_": "2d6f1624-0920-4a5a-b6ae-cd8cf2fcd421",
+          "_RecordName_": "BuildingBlocks_FontStyle.BlenderPro-Thin",
+          "_RecordTag_": "Unknown",
+          "_RecordValue_": {
+            "_Type_": "BuildingBlocks_FontStyle",
+            "font": "$Text1Thin",
+            "imageSizePercent": 0.75,
+            "isBold": false,
+            "leadingModifier": 0.0,
+            "leftMarginModifier": 0.0,
+            "numImageReplacementSpaces": 5,
+            "paintFile": "UI/fonts/Install/BlenderPro-Thin.slug",
+            "scaleModifier": 1.0,
+            "topMarginModifier": 0.0
+          }
+        },
+        "font_size": {
+          "kind": "fixed",
+          "value": 41.0
+        },
+        "line_spacing": 0.0,
+        "alignment": "Center",
+        "vertical_alignment": "Top",
+        "anchor_to_parent_x": 0.5,
+        "anchor_to_parent_y": 0.5,
+        "colour": null,
+        "label_style": "Heading1"
+      },
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [
+        "78e9510d-b3ff-494a-96e0-a61089c26274"
+      ],
+      "resolved_style_tags": [
+        {
+          "uuid": "78e9510d-b3ff-494a-96e0-a61089c26274",
+          "tag_name": "Modify"
+        }
+      ]
+    },
+    {
+      "id": 2147483673,
+      "parent_id": 2147483669,
+      "children": [],
+      "node_type": "BuildingBlocks_WidgetCircle",
+      "name": "CircleEcho_Second",
+      "is_active": true,
+      "layer": 5,
+      "alpha": 0.0,
+      "anchor": [
+        0.5,
+        0.5
+      ],
+      "pivot": [
+        0.5,
+        0.5
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 0.77
+        },
+        {
+          "kind": "percent",
+          "value": 0.77
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 858.36,
+        "y": 552.19714,
+        "w": 203.28,
+        "h": 203.28
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": [
+        0.2627451,
+        0.8666667,
+        0.5764706,
+        1.0
+      ],
+      "stroke_colour_token": "Accent2",
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [
+        "78e9510d-b3ff-494a-96e0-a61089c26274"
+      ],
+      "resolved_style_tags": [
+        {
+          "uuid": "78e9510d-b3ff-494a-96e0-a61089c26274",
+          "tag_name": "Modify"
+        }
+      ]
+    },
+    {
+      "id": 2147483674,
+      "parent_id": 2147483648,
+      "children": [
+        2147483679,
+        2147483680,
+        2147483690,
+        2147483675,
+        2147483676
+      ],
+      "node_type": "display_widget",
+      "name": "Root",
+      "is_active": true,
+      "layer": 0,
+      "alpha": 1.0,
+      "anchor": [
+        0.0,
+        1.0
+      ],
+      "pivot": [
+        0.0,
+        1.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 1.0
+        },
+        {
+          "kind": "percent",
+          "value": 1.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 0.0,
+        "y": 972.0,
+        "w": 1920.0,
+        "h": 108.0
+      },
+      "background_fill_colour": null,
+      "background_fill_colour_token": "Background",
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [
+        "2474af2a-0e21-4809-9c01-7f0cee355fb6"
+      ],
+      "resolved_style_tags": [
+        {
+          "uuid": "2474af2a-0e21-4809-9c01-7f0cee355fb6",
+          "tag_name": "Animate_19"
+        }
+      ]
+    },
+    {
+      "id": 2147483675,
+      "parent_id": 2147483674,
+      "children": [
+        2147483681,
+        2147483682,
+        2147483683,
+        2147483684,
+        2147483685,
+        2147483686,
+        2147483687,
+        2147483688,
+        2147483689
+      ],
+      "node_type": "display_widget",
+      "name": "base_animatedelements",
+      "is_active": false,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.0,
+        0.0
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "fixed",
+          "value": 64.0
+        },
+        {
+          "kind": "fixed",
+          "value": 64.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 0.0,
+        "y": 972.0,
+        "w": 64.0,
+        "h": 64.0
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [
+        "493563b0-d7cb-48db-93e7-a6a1cb301afb"
+      ],
+      "resolved_style_tags": [
+        {
+          "uuid": "493563b0-d7cb-48db-93e7-a6a1cb301afb",
+          "tag_name": "Animate_9"
+        }
+      ]
+    },
+    {
+      "id": 2147483676,
+      "parent_id": 2147483674,
+      "children": [
+        2147483677,
+        2147483678
+      ],
+      "node_type": "display_widget",
+      "name": "TextLayout",
+      "is_active": true,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.65,
+        0.5
+      ],
+      "pivot": [
+        0.0,
+        0.5
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "other",
+          "value": 0.315,
+          "behavior": "Auto"
+        },
+        {
+          "kind": "other",
+          "value": 1.0,
+          "behavior": "Auto"
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 1248.0,
+        "y": 972.0,
+        "w": 604.8,
+        "h": 108.0
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 2147483677,
+      "parent_id": 2147483676,
+      "children": [],
+      "node_type": "BuildingBlocks_ComponentLabelCaptionPair",
+      "name": "OperatorName",
+      "is_active": false,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.0,
+        0.0
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "other",
+          "value": 64.0,
+          "behavior": "Auto"
+        },
+        {
+          "kind": "other",
+          "value": 64.0,
+          "behavior": "Auto"
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 1248.0,
+        "y": 972.0,
+        "w": 604.8,
+        "h": 108.0
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": {
+        "state": "resolved",
+        "text": "OPERATOR NAME"
+      },
+      "text_style": {
+        "font_record": "file://./../../../../../../../../libs/foundry/records/ui/buildingblocks/fontstyles/blenderpro-thin.json",
+        "resolved_font_record": {
+          "_RecordId_": "2d6f1624-0920-4a5a-b6ae-cd8cf2fcd421",
+          "_RecordName_": "BuildingBlocks_FontStyle.BlenderPro-Thin",
+          "_RecordTag_": "Unknown",
+          "_RecordValue_": {
+            "_Type_": "BuildingBlocks_FontStyle",
+            "font": "$Text1Thin",
+            "imageSizePercent": 0.75,
+            "isBold": false,
+            "leadingModifier": 0.0,
+            "leftMarginModifier": 0.0,
+            "numImageReplacementSpaces": 5,
+            "paintFile": "UI/fonts/Install/BlenderPro-Thin.slug",
+            "scaleModifier": 1.0,
+            "topMarginModifier": 0.0
+          }
+        },
+        "font_size": {
+          "kind": "fixed",
+          "value": 21.0
+        },
+        "line_spacing": 0.0,
+        "alignment": "Left",
+        "vertical_alignment": "Center",
+        "anchor_to_parent_x": 0.5,
+        "anchor_to_parent_y": 0.5,
+        "colour": null,
+        "colour_token": "Base",
+        "label_style": "Heading3"
+      },
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 2147483678,
+      "parent_id": 2147483676,
+      "children": [],
+      "node_type": "BuildingBlocks_ComponentLabelCaptionPair",
+      "name": "PatientName",
+      "is_active": false,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.0,
+        0.0
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "other",
+          "value": 64.0,
+          "behavior": "Auto"
+        },
+        {
+          "kind": "other",
+          "value": 64.0,
+          "behavior": "Auto"
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 1248.0,
+        "y": 972.0,
+        "w": 604.8,
+        "h": 108.0
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": {
+        "state": "resolved",
+        "text": "PATIENT NAME"
+      },
+      "secondary_text_payload": {
+        "state": "resolved",
+        "text": "No patient in bed"
+      },
+      "secondary_text_style": {
+        "font_record": null,
+        "resolved_font_record": null,
+        "font_size": {
+          "kind": "fixed",
+          "value": 18.0
+        },
+        "line_spacing": 0.0,
+        "alignment": "Left",
+        "vertical_alignment": "Center",
+        "colour": null,
+        "label_style": "Heading6"
+      },
+      "text_style": {
+        "font_record": "file://./../../../../../../../../libs/foundry/records/ui/buildingblocks/fontstyles/blenderpro-thin.json",
+        "resolved_font_record": {
+          "_RecordId_": "2d6f1624-0920-4a5a-b6ae-cd8cf2fcd421",
+          "_RecordName_": "BuildingBlocks_FontStyle.BlenderPro-Thin",
+          "_RecordTag_": "Unknown",
+          "_RecordValue_": {
+            "_Type_": "BuildingBlocks_FontStyle",
+            "font": "$Text1Thin",
+            "imageSizePercent": 0.75,
+            "isBold": false,
+            "leadingModifier": 0.0,
+            "leftMarginModifier": 0.0,
+            "numImageReplacementSpaces": 5,
+            "paintFile": "UI/fonts/Install/BlenderPro-Thin.slug",
+            "scaleModifier": 1.0,
+            "topMarginModifier": 0.0
+          }
+        },
+        "font_size": {
+          "kind": "fixed",
+          "value": 21.0
+        },
+        "line_spacing": 0.0,
+        "alignment": "Left",
+        "vertical_alignment": "Center",
+        "anchor_to_parent_x": 0.5,
+        "anchor_to_parent_y": 0.5,
+        "colour": null,
+        "colour_token": "Base",
+        "label_style": "Heading3"
+      },
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 2147483679,
+      "parent_id": 2147483674,
+      "children": [],
+      "node_type": "BuildingBlocks_WidgetManufacturerLogo",
+      "name": "Logo",
+      "is_active": true,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.98,
+        0.7
+      ],
+      "pivot": [
+        1.0,
+        0.5
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "fixed",
+          "value": 120.0
+        },
+        {
+          "kind": "fixed",
+          "value": 140.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 1761.6001,
+        "y": 977.6,
+        "w": 120.0,
+        "h": 140.0
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [
+        "0964d22f-3a22-4052-92e4-eaf77f975423"
+      ],
+      "resolved_style_tags": [
+        {
+          "uuid": "0964d22f-3a22-4052-92e4-eaf77f975423",
+          "tag_name": "UI_Generic_Flag_01"
+        }
+      ]
+    },
+    {
+      "id": 2147483680,
+      "parent_id": 2147483674,
+      "children": [],
+      "node_type": "widget_image",
+      "name": "Image_bottom_bar",
+      "is_active": true,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.0,
+        0.8
+      ],
+      "pivot": [
+        0.13,
+        1.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "fixed",
+          "value": 1400.0
+        },
+        {
+          "kind": "fixed",
+          "value": 64.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": -182.0,
+        "y": 994.4,
+        "w": 1400.0,
+        "h": 64.0
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "icon_tint_colour_token": "Base",
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": "UI/Textures/I_InteractiveScreens/Med/i_med_bioc_bottom-bar.tif",
+      "custom_shape": null,
+      "style_tag_uuids": [
+        "0758381f-9464-48e9-bc71-3cea0e1d5928"
+      ],
+      "resolved_style_tags": [
+        {
+          "uuid": "0758381f-9464-48e9-bc71-3cea0e1d5928",
+          "tag_name": "Animate_8"
+        }
+      ]
+    },
+    {
+      "id": 2147483681,
+      "parent_id": 2147483675,
+      "children": [],
+      "node_type": "display_widget",
+      "name": "<unnamed>",
+      "is_active": false,
+      "layer": 1,
+      "alpha": 1.0,
+      "anchor": [
+        0.42,
+        0.65
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "fixed",
+          "value": 105.0
+        },
+        {
+          "kind": "fixed",
+          "value": 21.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 0.0,
+        "h": 0.0
+      },
+      "background_fill_colour": [
+        0.0,
+        0.44313726,
+        0.7372549,
+        1.0
+      ],
+      "background_fill_colour_token": "Accent1",
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "colour_blend_mode": "additive",
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [
+        "87689f97-ab0e-4da2-ac1f-374208652b80",
+        "f5f19a0a-a6a9-4d27-a904-ab23cddaf4ad"
+      ],
+      "resolved_style_tags": [
+        {
+          "uuid": "87689f97-ab0e-4da2-ac1f-374208652b80",
+          "tag_name": "UI_Generic_Flag_03"
+        },
+        {
+          "uuid": "f5f19a0a-a6a9-4d27-a904-ab23cddaf4ad",
+          "tag_name": "Animate_3"
+        }
+      ]
+    },
+    {
+      "id": 2147483682,
+      "parent_id": 2147483675,
+      "children": [],
+      "node_type": "BuildingBlocks_WidgetCircle",
+      "name": "<unnamed>",
+      "is_active": false,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.035,
+        0.7
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "fixed",
+          "value": 15.0
+        },
+        {
+          "kind": "fixed",
+          "value": 15.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 0.0,
+        "h": 0.0
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [
+        "888423a5-eae7-49f2-9761-09e254279fc0"
+      ],
+      "resolved_style_tags": [
+        {
+          "uuid": "888423a5-eae7-49f2-9761-09e254279fc0",
+          "tag_name": "Animate_2"
+        }
+      ]
+    },
+    {
+      "id": 2147483683,
+      "parent_id": 2147483675,
+      "children": [],
+      "node_type": "display_widget",
+      "name": "<unnamed>",
+      "is_active": false,
+      "layer": 5,
+      "alpha": 0.21,
+      "anchor": [
+        0.891,
+        0.43
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "fixed",
+          "value": 70.0
+        },
+        {
+          "kind": "fixed",
+          "value": 40.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 0.0,
+        "h": 0.0
+      },
+      "background_fill_colour": [
+        0.2627451,
+        0.8666667,
+        0.5764706,
+        1.0
+      ],
+      "background_fill_colour_token": "Accent2",
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "colour_blend_mode": "additive",
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [
+        "40fcf959-8e9e-4be4-8805-729a4508e025"
+      ],
+      "resolved_style_tags": [
+        {
+          "uuid": "40fcf959-8e9e-4be4-8805-729a4508e025",
+          "tag_name": "Animate_7"
+        }
+      ]
+    },
+    {
+      "id": 2147483684,
+      "parent_id": 2147483675,
+      "children": [],
+      "node_type": "display_widget",
+      "name": "<unnamed>",
+      "is_active": false,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.785,
+        0.43
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "fixed",
+          "value": 70.0
+        },
+        {
+          "kind": "fixed",
+          "value": 40.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 0.0,
+        "h": 0.0
+      },
+      "background_fill_colour": [
+        0.015686275,
+        0.03137255,
+        0.09019608,
+        1.0
+      ],
+      "background_fill_colour_token": "Background",
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [
+        "40fcf959-8e9e-4be4-8805-729a4508e025"
+      ],
+      "resolved_style_tags": [
+        {
+          "uuid": "40fcf959-8e9e-4be4-8805-729a4508e025",
+          "tag_name": "Animate_7"
+        }
+      ]
+    },
+    {
+      "id": 2147483685,
+      "parent_id": 2147483675,
+      "children": [],
+      "node_type": "display_widget",
+      "name": "<unnamed>",
+      "is_active": false,
+      "layer": 5,
+      "alpha": 0.4,
+      "anchor": [
+        0.17,
+        0.6
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "fixed",
+          "value": 100.0
+        },
+        {
+          "kind": "fixed",
+          "value": 5.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 0.0,
+        "h": 0.0
+      },
+      "background_fill_colour": null,
+      "background_fill_colour_token": "Moderate",
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [
+        "87689f97-ab0e-4da2-ac1f-374208652b80",
+        "5e5c7c8f-847b-46c5-ad80-a57c941391ab"
+      ],
+      "resolved_style_tags": [
+        {
+          "uuid": "87689f97-ab0e-4da2-ac1f-374208652b80",
+          "tag_name": "UI_Generic_Flag_03"
+        },
+        {
+          "uuid": "5e5c7c8f-847b-46c5-ad80-a57c941391ab",
+          "tag_name": "Animate_1"
+        }
+      ]
+    },
+    {
+      "id": 2147483686,
+      "parent_id": 2147483675,
+      "children": [],
+      "node_type": "display_widget",
+      "name": "<unnamed>",
+      "is_active": false,
+      "layer": 5,
+      "alpha": 0.4,
+      "anchor": [
+        0.17,
+        0.7
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "fixed",
+          "value": 200.0
+        },
+        {
+          "kind": "fixed",
+          "value": 5.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 0.0,
+        "h": 0.0
+      },
+      "background_fill_colour": [
+        0.2627451,
+        0.8666667,
+        0.5764706,
+        1.0
+      ],
+      "background_fill_colour_token": "Accent2",
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "colour_blend_mode": "additive",
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [
+        "5e5c7c8f-847b-46c5-ad80-a57c941391ab"
+      ],
+      "resolved_style_tags": [
+        {
+          "uuid": "5e5c7c8f-847b-46c5-ad80-a57c941391ab",
+          "tag_name": "Animate_1"
+        }
+      ]
+    },
+    {
+      "id": 2147483687,
+      "parent_id": 2147483675,
+      "children": [],
+      "node_type": "display_widget",
+      "name": "<unnamed>",
+      "is_active": false,
+      "layer": 5,
+      "alpha": 0.4,
+      "anchor": [
+        0.17,
+        0.8
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "fixed",
+          "value": 180.0
+        },
+        {
+          "kind": "fixed",
+          "value": 5.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 0.0,
+        "h": 0.0
+      },
+      "background_fill_colour": [
+        0.0,
+        0.44313726,
+        0.7372549,
+        1.0
+      ],
+      "background_fill_colour_token": "Accent1",
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "colour_blend_mode": "additive",
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [
+        "20f04d29-1543-405a-969c-9efa19c39ef5",
+        "5e5c7c8f-847b-46c5-ad80-a57c941391ab"
+      ],
+      "resolved_style_tags": [
+        {
+          "uuid": "20f04d29-1543-405a-969c-9efa19c39ef5",
+          "tag_name": "UI_Generic_Flag_04"
+        },
+        {
+          "uuid": "5e5c7c8f-847b-46c5-ad80-a57c941391ab",
+          "tag_name": "Animate_1"
+        }
+      ]
+    },
+    {
+      "id": 2147483688,
+      "parent_id": 2147483675,
+      "children": [],
+      "node_type": "display_widget",
+      "name": "<unnamed>",
+      "is_active": false,
+      "layer": 5,
+      "alpha": 0.4,
+      "anchor": [
+        0.29,
+        0.9
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "fixed",
+          "value": 130.0
+        },
+        {
+          "kind": "fixed",
+          "value": 5.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 0.0,
+        "h": 0.0
+      },
+      "background_fill_colour": [
+        0.2627451,
+        0.8666667,
+        0.5764706,
+        1.0
+      ],
+      "background_fill_colour_token": "Accent2",
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "colour_blend_mode": "additive",
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [
+        "40fcf959-8e9e-4be4-8805-729a4508e025"
+      ],
+      "resolved_style_tags": [
+        {
+          "uuid": "40fcf959-8e9e-4be4-8805-729a4508e025",
+          "tag_name": "Animate_7"
+        }
+      ]
+    },
+    {
+      "id": 2147483689,
+      "parent_id": 2147483675,
+      "children": [],
+      "node_type": "display_widget",
+      "name": "<unnamed>",
+      "is_active": false,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.7,
+        0.4
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "fixed",
+          "value": 5.0
+        },
+        {
+          "kind": "fixed",
+          "value": 5.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 0.0,
+        "h": 0.0
+      },
+      "background_fill_colour": [
+        0.2627451,
+        0.8666667,
+        0.5764706,
+        1.0
+      ],
+      "background_fill_colour_token": "Accent2",
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "colour_blend_mode": "additive",
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [
+        "40fcf959-8e9e-4be4-8805-729a4508e025"
+      ],
+      "resolved_style_tags": [
+        {
+          "uuid": "40fcf959-8e9e-4be4-8805-729a4508e025",
+          "tag_name": "Animate_7"
+        }
+      ]
+    },
+    {
+      "id": 2147483690,
+      "parent_id": 2147483674,
+      "children": [],
+      "node_type": "display_widget",
+      "name": "base_background",
+      "is_active": true,
+      "layer": 0,
+      "alpha": 1.0,
+      "anchor": [
+        0.0,
+        0.0
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "percent",
+          "value": 1.0
+        },
+        {
+          "kind": "percent",
+          "value": 1.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 0.0,
+        "y": 972.0,
+        "w": 1920.0,
+        "h": 108.0
+      },
+      "background_fill_colour": [
+        0.015686275,
+        0.03137255,
+        0.09019608,
+        0.65
+      ],
+      "background_fill_colour_token": "Background",
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    },
+    {
+      "id": 2147483691,
+      "parent_id": 2147483649,
+      "children": [],
+      "node_type": "display_widget",
+      "name": "Medical Screens Audio Canvas",
+      "is_active": true,
+      "layer": 5,
+      "alpha": 1.0,
+      "anchor": [
+        0.0,
+        0.0
+      ],
+      "pivot": [
+        0.0,
+        0.0
+      ],
+      "authored_position": [
+        0.0,
+        0.0
+      ],
+      "authored_size": [
+        {
+          "kind": "fixed",
+          "value": 64.0
+        },
+        {
+          "kind": "fixed",
+          "value": 64.0
+        }
+      ],
+      "padding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "margin": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "computed_rect": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 64.0,
+        "h": 64.0
+      },
+      "background_fill_colour": null,
+      "border": {
+        "top": {
+          "width": 0.0,
+          "colour": null
+        },
+        "right": {
+          "width": 0.0,
+          "colour": null
+        },
+        "bottom": {
+          "width": 0.0,
+          "colour": null
+        },
+        "left": {
+          "width": 0.0,
+          "colour": null
+        }
+      },
+      "stroke_colour": null,
+      "stroke_extent": 1.0,
+      "icon_tint_colour": null,
+      "text_payload": null,
+      "text_style": null,
+      "asset_ref": null,
+      "custom_shape": null,
+      "style_tag_uuids": [],
+      "resolved_style_tags": []
+    }
+  ]
+}

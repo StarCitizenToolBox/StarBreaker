@@ -94,8 +94,10 @@ fn synthetic_hybrid_document() -> UiIrDocument {
             ],
             padding: [0.0, 0.0, 0.0, 0.0],
             margin: [0.0, 0.0, 0.0, 0.0],
+            overflow_mode: None,
             computed_rect: UiIrRect { x: 12.0, y: 10.0, w: 96.0, h: 44.0 },
             background_fill_colour: Some([0.0, 0.0, 1.0, 0.65]),
+            corner_radius: None,
             background_fill_colour_token: Some("Accent2".to_string()),
             segmented_fill: None,
             border: Some(UiIrBorder {
@@ -107,6 +109,7 @@ fn synthetic_hybrid_document() -> UiIrDocument {
             stroke_colour: None,
             stroke_colour_token: None,
             stroke_extent: None,
+            colour_blend_mode: None,
             icon_tint_colour: None,
             icon_tint_colour_token: None,
             icon_preset: None,

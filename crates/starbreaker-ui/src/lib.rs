@@ -39,6 +39,7 @@ pub mod swf_assets;
 pub mod swf_render;
 pub mod text;
 pub mod ui_ir;
+pub mod ui_snapshot;
 
 pub use error::UiError;
 
@@ -72,4 +73,11 @@ pub use ui_ir::{
     UI_IR_SCHEMA_VERSION, UiIrDocument, UiIrNode, UiIrRect, UiIrTextPayload, UiIrValue,
     UiIrTextStyle, UiRendererHint, compile_ui_ir_from_scene, stable_hash_ui_ir,
     validate_ui_ir_document,
+};
+
+pub use ui_snapshot::{
+    UI_SNAPSHOT_SCHEMA_VERSION, UiScreenSnapshot, UiSnapshotComparison, UiSnapshotElement,
+    UiSnapshotElementCategory, UiSnapshotTolerance, UiRendererMetadataElement,
+    UiRendererMetadataSnapshot, compare_renderer_metadata_snapshots, compare_snapshots,
+    renderer_metadata_snapshot_from_ui_ir, snapshot_from_ui_ir,
 };

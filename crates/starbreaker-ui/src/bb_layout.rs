@@ -35,7 +35,7 @@ use std::collections::BTreeMap;
 use image::{Rgba, RgbaImage};
 use log::warn;
 
-use crate::bb_scene::{BbNodeId, BbNodeType, BbScene, BbValue};
+use crate::bb_scene::{BbNode, BbNodeId, BbNodeType, BbScene, BbValue};
 
 const ADDITIVE_ALTERNATE_REVERSE_POSITION_PHASE_RATIO: f32 = 2.0 / 3.0;
 const SYNTHETIC_NODE_ID_BASE: BbNodeId = 0x8000_0000;
@@ -910,6 +910,11 @@ fn layout_flex_no_grow_children(
                 } if behavior == "Auto" && value > 1.0
             )
         };
+        let is_label_caption_pair_node = matches!(
+            &node.ty,
+            BbNodeType::Other(kind)
+                if kind.eq_ignore_ascii_case("BuildingBlocks_ComponentLabelCaptionPair")
+        );
         let has_main_axis_intrinsic_override = if is_row {
             textfield_auto_intrinsic_override(node, &node.sizing.width, container.w, csx, true).is_some()
                 || component_button_auto_intrinsic_override(node, &node.sizing.width, csx).is_some()
@@ -917,7 +922,10 @@ fn layout_flex_no_grow_children(
             textfield_auto_intrinsic_override(node, &node.sizing.height, container.h, csy, false).is_some()
                 || component_button_auto_intrinsic_override(node, &node.sizing.height, csy).is_some()
         };
-        if auto_main && (is_button_component && auto_intrinsic_hint || has_main_axis_intrinsic_override) {
+        if auto_main
+            && (is_button_component && auto_intrinsic_hint
+                || (has_main_axis_intrinsic_override && !is_label_caption_pair_node))
+        {
             auto_main = false;
         }
         let right_edge_auto_hint = node.pivot.x >= 0.99
@@ -940,10 +948,7 @@ fn layout_flex_no_grow_children(
                     _ => None,
                 }
             };
-            let is_label_caption_pair = matches!(
-                &node.ty,
-                BbNodeType::Other(kind) if kind.eq_ignore_ascii_case("BuildingBlocks_ComponentLabelCaptionPair")
-            );
+            let is_label_caption_pair = is_label_caption_pair_node;
             if let Some(auto_ratio) = normalized_auto {
                 if is_row {
                     w = container.w * auto_ratio;
@@ -953,53 +958,106 @@ fn layout_flex_no_grow_children(
                 auto_main = false;
             } else if is_label_caption_pair {
                 if is_row {
-                    // For row-flow label/caption pairs, derive intrinsic
-                    // footprint from authored Auto sizing and child content.
-                    // This avoids container-fraction heuristics that
-                    // over-stretch compact metric labels.
+                    let is_right_anchored_pair = node.anchor.x >= 0.99 || node.pivot.x >= 0.99;
                     let has_active_children = node.children.iter().any(|child_id| {
                         scene
                             .nodes
                             .get(child_id)
                             .is_some_and(|child| child.is_active)
                     });
+
+                    // Child-backed pairs (e.g. progress-meter stacks) derive
+                    // width from authored Auto plus active child footprint.
                     if has_active_children {
                         if let BbValue::Other { value, behavior } = &node.sizing.width
                             && behavior == "Auto" && *value > 1.0
                         {
                             w = *value * csx;
                         }
-                        if let BbValue::Other { value, behavior } = &node.sizing.height
+                    }
+
+                    // Childless non-right-anchored row pairs share available
+                    // width with peer pairs to avoid clipping long text labels.
+                    if !has_active_children && !is_right_anchored_pair {
+                        let active_pair_count = children
+                            .iter()
+                            .filter_map(|candidate_id| scene.nodes.get(candidate_id))
+                            .filter(|candidate| {
+                                if !candidate.is_active {
+                                    return false;
+                                }
+                                let is_pair = matches!(
+                                    &candidate.ty,
+                                    BbNodeType::Other(kind)
+                                        if kind.eq_ignore_ascii_case("BuildingBlocks_ComponentLabelCaptionPair")
+                                );
+                                if !is_pair {
+                                    return false;
+                                }
+                                if is_placeholder_only_label_caption_pair(candidate) {
+                                    return false;
+                                }
+                                let candidate_has_active_children = candidate.children.iter().any(|child_id| {
+                                    scene
+                                        .nodes
+                                        .get(child_id)
+                                        .is_some_and(|child| child.is_active)
+                                });
+                                let candidate_right_anchored = candidate.anchor.x >= 0.99 || candidate.pivot.x >= 0.99;
+                                !candidate_has_active_children && !candidate_right_anchored
+                            })
+                            .count();
+                        if active_pair_count > 0 {
+                            let total_spacing = item_spacing * (active_pair_count.saturating_sub(1) as f32);
+                            let shared_main = (container.w - total_spacing) / active_pair_count as f32;
+                            w = shared_main.max(0.0);
+                        }
+                    }
+
+                    // Childless right-side metric pairs stay at authored Auto
+                    // intrinsic width so they do not consume full row width.
+                    if !has_active_children && is_right_anchored_pair {
+                        if let BbValue::Other { value, behavior } = &node.sizing.width
                             && behavior == "Auto" && *value > 1.0
                         {
+                            w = *value * csx;
+                        }
+                    }
+
+                    if let BbValue::Other { value, behavior } = &node.sizing.height
+                        && behavior == "Auto" && *value > 1.0
+                    {
+                        if !has_active_children && !is_right_anchored_pair {
+                            h = container.h;
+                        } else {
                             h = *value * csy;
                         }
-                        for child_id in &node.children {
-                            let Some(child) = scene.nodes.get(child_id) else {
-                                continue;
-                            };
-                            if !child.is_active {
-                                continue;
-                            }
-                            let child_w = resolve_value_for_node(
-                                child,
-                                &child.sizing.width,
-                                container.w,
-                                container.h,
-                                csx,
-                                true,
-                            );
-                            let child_h = resolve_value_for_node(
-                                child,
-                                &child.sizing.height,
-                                container.h,
-                                container.w,
-                                csy,
-                                false,
-                            );
-                            w = w.max(child_w.max(0.0));
-                            h = h.max(child_h.max(0.0));
+                    }
+                    for child_id in &node.children {
+                        let Some(child) = scene.nodes.get(child_id) else {
+                            continue;
+                        };
+                        if !child.is_active {
+                            continue;
                         }
+                        let child_w = resolve_value_for_node(
+                            child,
+                            &child.sizing.width,
+                            container.w,
+                            container.h,
+                            csx,
+                            true,
+                        );
+                        let child_h = resolve_value_for_node(
+                            child,
+                            &child.sizing.height,
+                            container.h,
+                            container.w,
+                            csy,
+                            false,
+                        );
+                        w = w.max(child_w.max(0.0));
+                        h = h.max(child_h.max(0.0));
                     }
                     auto_main = false;
                 } else {
@@ -1331,6 +1389,37 @@ fn centered_intrinsic_text_column_spacing_applies(
         })
         .count();
     intrinsic_textfields >= 2
+}
+
+fn is_placeholder_only_label_caption_pair(node: &BbNode) -> bool {
+    if !matches!(
+        &node.ty,
+        BbNodeType::Other(kind)
+            if kind.eq_ignore_ascii_case("BuildingBlocks_ComponentLabelCaptionPair")
+    ) {
+        return false;
+    }
+
+    let caption = node
+        .raw
+        .get("captionProperties")
+        .and_then(|cp| cp.get("caption"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .unwrap_or_default();
+    if !caption.eq_ignore_ascii_case("@LOC_PLACEHOLDER") {
+        return false;
+    }
+
+    let secondary_caption = node
+        .raw
+        .get("captionProperties")
+        .and_then(|cp| cp.get("caption2"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .unwrap_or_default();
+
+    secondary_caption.is_empty() || secondary_caption.eq_ignore_ascii_case("@LOC_PLACEHOLDER")
 }
 
 fn centered_intrinsic_text_column_adjustment(
@@ -2615,6 +2704,88 @@ mod tests {
         let r2 = result.rects[&3];
         assert!((r1.w - 287.4).abs() < 1.0, "expected first pair width ≈ 287.4, got {}", r1.w);
         assert!((r2.w - 287.4).abs() < 1.0, "expected second pair width ≈ 287.4, got {}", r2.w);
+        assert!((r2.x - (r1.x + r1.w + 30.0)).abs() < 1.0, "expected second pair after 30px spacing, got x={}", r2.x);
+    }
+
+    #[test]
+    fn flex_row_right_anchored_label_caption_pairs_keep_intrinsic_width() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let root = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![2, 3],
+            ty: BbNodeType::DisplayWidget,
+            name: "text-layout".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(604.8), height: BbValue::Fixed(108.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2 { x: 1.0, y: 0.5 },
+            anchor: Vec2 { x: 1.0, y: 0.5 },
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({
+                "layoutPolicy": {
+                    "_Type_": "BuildingBlocks_FlexContainer",
+                    "direction": "Row",
+                    "wrap": "NoWrap",
+                    "axisJustification": "Start",
+                    "crossAxisJustification": "Start",
+                    "itemAlignment": "Start",
+                    "columnSpacing": 30.0,
+                    "rowSpacing": 0.0
+                }
+            }),
+        };
+
+        let child = |id: u32, name: &str| BbNode {
+            id,
+            parent: Some(1),
+            children: vec![],
+            ty: BbNodeType::Other("BuildingBlocks_ComponentLabelCaptionPair".into()),
+            name: name.into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing {
+                width: BbValue::Other { value: 64.0, behavior: "Auto".into() },
+                height: BbValue::Other { value: 64.0, behavior: "Auto".into() },
+            },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2 { x: 1.0, y: 0.0 },
+            anchor: Vec2 { x: 1.0, y: 0.0 },
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, root);
+        nodes.insert(2, child(2, "operator"));
+        nodes.insert(3, child(3, "patient"));
+        let scene = BbScene { canvas_size: (604.8, 108.0), roots: vec![1], nodes, operations: vec![] };
+
+        let result = layout(&scene, 605, 108);
+        let r1 = result.rects[&2];
+        let r2 = result.rects[&3];
+        assert!((r1.w - 64.0).abs() < 0.5, "expected first right-anchored pair intrinsic width ≈ 64, got {}", r1.w);
+        assert!((r2.w - 64.0).abs() < 0.5, "expected second right-anchored pair intrinsic width ≈ 64, got {}", r2.w);
         assert!((r2.x - (r1.x + r1.w + 30.0)).abs() < 1.0, "expected second pair after 30px spacing, got x={}", r2.x);
     }
 
