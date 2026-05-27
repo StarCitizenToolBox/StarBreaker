@@ -205,7 +205,7 @@ fn draw_non_text_node(
             {
                 // Header root containers are layout scaffolding, not visible chrome.
             } else {
-                fill_rect_ts(pixmap, tsk_rect, fill, node.alpha);
+                fill_rect_ts_with_mode(pixmap, tsk_rect, fill, node.alpha, node_colour_blend_mode(node));
             }
         }
     }
@@ -428,6 +428,14 @@ fn resolve_colour_token(ctx: &ComposeContext<'_>, token: &str) -> Option<[f32; 4
         "bg" => style_colour_slot_rgba(ctx, 9),
         "backlight" | "contactagressive" | "contactaggressive" => style_colour_slot_rgba(ctx, 11),
         _ => None,
+    }
+}
+
+fn resolve_surface_colour_token(ctx: &ComposeContext<'_>, token: &str) -> Option<[f32; 4]> {
+    let key = token.trim().to_ascii_lowercase();
+    match key.as_str() {
+        "accent1" | "accent5" | "contactunknown" => style_colour_slot_rgba(ctx, 4),
+        _ => resolve_colour_token(ctx, token),
     }
 }
 
@@ -1682,15 +1690,15 @@ fn draw_widget_separator(
         .or_else(|| {
             node.stroke_colour_token
                 .as_deref()
-                .and_then(|token| resolve_colour_token(ctx, token))
+                .and_then(|token| resolve_surface_colour_token(ctx, token))
         })
         .or(node.background_fill_colour)
         .or_else(|| {
             node.background_fill_colour_token
                 .as_deref()
-                .and_then(|token| resolve_colour_token(ctx, token))
+                .and_then(|token| resolve_surface_colour_token(ctx, token))
         })
-        .or_else(|| resolve_colour_token(ctx, "Accent5"))
+        .or_else(|| resolve_surface_colour_token(ctx, "Accent5"))
         .unwrap_or_else(|| style_primary_rgba(ctx));
     fill_rect_ts_with_mode(pixmap, draw_rect, colour, alpha, node_colour_blend_mode(node));
 }
@@ -2272,6 +2280,10 @@ mod tests {
 
         assert_eq!(resolve_colour_token(&ctx, "Base"), Some(style_primary_rgba(&ctx)));
         assert_eq!(resolve_colour_token(&ctx, "Accent1"), Some(style_primary_rgba(&ctx)));
+        assert_eq!(
+            resolve_surface_colour_token(&ctx, "Accent1"),
+            Some([0.0, 113.0 / 255.0, 188.0 / 255.0, 1.0])
+        );
         assert_eq!(resolve_colour_token(&ctx, "Accent5"), Some([0.0, 113.0 / 255.0, 188.0 / 255.0, 1.0]));
 
         let mut node = blank_node("widget_text_field");

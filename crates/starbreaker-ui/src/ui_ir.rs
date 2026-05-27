@@ -799,6 +799,10 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
         });
 
         let allow_background_fill = raw_background_enabled(&node.raw);
+        let background_fill_colour_token = background_fill_colour_token_from_raw(&node.raw, allow_background_fill);
+        let colour_blend_mode = separator_colour_blend_mode_from_raw(node).or_else(|| {
+            background_colour_blend_mode_from_raw(node, background_fill_colour_token.as_deref(), allow_background_fill)
+        });
 
         nodes.push(UiIrNode {
             id,
@@ -845,13 +849,13 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
                 })
                 .flatten(),
             corner_radius: node_corner_radius(node),
-            background_fill_colour_token: background_fill_colour_token_from_raw(&node.raw, allow_background_fill),
+            background_fill_colour_token,
             segmented_fill: segmented_fill_from_raw(node),
             border: border_from_node(node),
             stroke_colour,
             stroke_colour_token,
             stroke_extent,
-            colour_blend_mode: separator_colour_blend_mode_from_raw(node),
+            colour_blend_mode,
             icon_tint_colour: node
                 .icon
                 .as_ref()
@@ -1458,6 +1462,30 @@ fn separator_colour_blend_mode_from_raw(
         .unwrap_or(false);
 
     (svg_path_empty && render_shape && enable_color_overlay).then_some(UiIrColourBlendMode::Additive)
+}
+
+fn background_colour_blend_mode_from_raw(
+    node: &crate::bb_scene::BbNode,
+    colour_token: Option<&str>,
+    allow_background_fill: bool,
+) -> Option<UiIrColourBlendMode> {
+    if !allow_background_fill || !matches!(node.ty, BbNodeType::DisplayWidget) {
+        return None;
+    }
+    let token = colour_token?.trim();
+    if !token.to_ascii_lowercase().starts_with("accent") {
+        return None;
+    }
+
+    let has_authored_background_colour = node
+        .raw
+        .get("background")
+        .and_then(|background| background.get("color"))
+        .is_some_and(|value| !value.is_null())
+        || node.raw.get("BackgroundColor").is_some()
+        || node.raw.get("FillColor").is_some();
+
+    has_authored_background_colour.then_some(UiIrColourBlendMode::Additive)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -3589,6 +3617,57 @@ mod tests {
         let panel = ir.nodes.iter().find(|node| node.name == "style_background_panel").expect("panel node");
         assert_eq!(panel.background_fill_colour, Some([0.015, 0.031, 0.09, 0.5]));
         assert_eq!(panel.background_fill_colour_token.as_deref(), Some("Background"));
+    }
+
+    #[test]
+    fn compile_ir_marks_authored_accent_backgrounds_as_additive() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestAccentBackgroundBlend",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "accent_panel",
+                        "isActive": true,
+                        "background": {
+                            "enable": true,
+                            "color": {
+                                "_Type_": "BuildingBlocks_ColorStyle",
+                                "color": "Accent1",
+                                "alpha": 1.0
+                            }
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-accent-background-blend",
+            Some("BuildingBlocks_Canvas.TestAccentBackgroundBlend"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let panel = ir.nodes.iter().find(|node| node.name == "accent_panel").expect("panel node");
+        assert_eq!(panel.background_fill_colour_token.as_deref(), Some("Accent1"));
+        assert_eq!(panel.colour_blend_mode, Some(UiIrColourBlendMode::Additive));
     }
 
     #[test]

@@ -120,7 +120,7 @@ fn resolve_node_background_color(node: &mut BbNode, palette_source: &serde_json:
     let Some(color_value) = background_color_value.or(authored_background_color_value) else {
         return;
     };
-    let Some(color) = parse_color_value(color_value, palette_source) else {
+    let Some(color) = parse_color_value(color_value, palette_source, ColorStyleRole::Surface) else {
         return;
     };
 
@@ -345,7 +345,7 @@ fn apply_inline_color_overlay(node: &mut BbNode, palette_source: &serde_json::Va
         .raw
         .get("color")
         .or_else(|| node.raw.get("svgFill").and_then(|v| v.get("color")));
-    if let Some(color) = color_value.and_then(|value| parse_color_value(value, palette_source)) {
+    if let Some(color) = color_value.and_then(|value| parse_color_value(value, palette_source, ColorStyleRole::Foreground)) {
         let token = color_value.and_then(color_style_token).map(str::to_owned);
         apply_color_field("FillColor", color, token.as_deref(), node);
     }
@@ -384,7 +384,8 @@ fn apply_modifier(
         "BuildingBlocks_FieldModifierColor" => {
             if let Some(value) = value {
                 let token = color_style_token(value).map(str::to_owned);
-                if let Some(color) = parse_color_value(value, palette_source) {
+                let role = color_style_role_for_field(field_name, node);
+                if let Some(color) = parse_color_value(value, palette_source, role) {
                     apply_color_field(field_name, color, token.as_deref(), node);
                 }
             }
@@ -716,7 +717,40 @@ fn apply_record_ref_field(field_name: &str, value: &str, node: &mut BbNode) {
 /// Supports literal `{r,g,b,a}` values and `BuildingBlocks_ColorStyle` named
 /// palette slots. Named slots are resolved against the style record's
 /// `colorStyles[]` array using the standard BuildingBlocks slot ordering.
-fn parse_color_value(value: &serde_json::Value, palette_source: &serde_json::Value) -> Option<[f32; 4]> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ColorStyleRole {
+    Foreground,
+    Surface,
+}
+
+fn color_style_role_for_field(field_name: &str, node: &BbNode) -> ColorStyleRole {
+    if field_name.eq_ignore_ascii_case("FillColor")
+        && matches!(node.ty, BbNodeType::WidgetCustomShape | BbNodeType::WidgetIcon | BbNodeType::WidgetImage)
+        && color_overlay_enabled(node)
+    {
+        return ColorStyleRole::Foreground;
+    }
+    ColorStyleRole::Surface
+}
+
+fn color_overlay_enabled(node: &BbNode) -> bool {
+    node.raw
+        .get("enableColorOverlay")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        || node
+            .raw
+            .get("svgFill")
+            .and_then(|v| v.get("enableColorOverlay"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+}
+
+fn parse_color_value(
+    value: &serde_json::Value,
+    palette_source: &serde_json::Value,
+    role: ColorStyleRole,
+) -> Option<[f32; 4]> {
     if value
         .get("_Type_")
         .and_then(|ty| ty.as_str())
@@ -724,11 +758,11 @@ fn parse_color_value(value: &serde_json::Value, palette_source: &serde_json::Val
     {
         return value
             .get("color")
-            .and_then(|color| parse_color_value(color, palette_source));
+            .and_then(|color| parse_color_value(color, palette_source, role));
     }
 
     if value.get("color").and_then(|v| v.as_str()).is_some() && value.get("r").is_none() {
-        return parse_named_color(value, palette_source);
+        return parse_named_color(value, palette_source, role);
     }
     value.as_object().map(parse_literal_color)
 }
@@ -758,10 +792,14 @@ fn parse_literal_color(color_obj: &serde_json::Map<String, serde_json::Value>) -
     }
 }
 
-fn parse_named_color(value: &serde_json::Value, palette_source: &serde_json::Value) -> Option<[f32; 4]> {
+fn parse_named_color(
+    value: &serde_json::Value,
+    palette_source: &serde_json::Value,
+    role: ColorStyleRole,
+) -> Option<[f32; 4]> {
     let name = color_style_token(value)?;
     let alpha = value.get("alpha").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
-    let slot = color_style_slot_index(name)?;
+    let slot = color_style_slot_index(name, role)?;
     let color_styles = palette_source
         .get("colorStyles")
         .or_else(|| palette_source.get("_RecordValue_").and_then(|v| v.get("colorStyles")))?
@@ -772,13 +810,14 @@ fn parse_named_color(value: &serde_json::Value, palette_source: &serde_json::Val
     Some(color)
 }
 
-fn color_style_slot_index(name: &str) -> Option<usize> {
+fn color_style_slot_index(name: &str, role: ColorStyleRole) -> Option<usize> {
     match name {
-        "Bright" | "Base" | "Accent1" => Some(0),
+        "Bright" | "Base" => Some(0),
+        "Accent1" if role == ColorStyleRole::Foreground => Some(0),
         "Accent2" | "Positive" | "Success" => Some(1),
         "Accent3" | "Warning" => Some(2),
         "Accent4" | "Critical" | "Negative" => Some(3),
-        "Accent5" | "ContactUnknown" => Some(4),
+        "Accent1" | "Accent5" | "ContactUnknown" => Some(4),
         "Mid" | "ContactNeutral" => Some(5),
         "Light" | "Disabled" => Some(6),
         "Highlight" | "ContactPositiveRep" => Some(7),
@@ -1152,9 +1191,11 @@ mod tests {
     }
 
     #[test]
-    fn named_accent1_color_maps_to_primary_slot() {
+    fn named_accent1_color_maps_to_first_accent_slot() {
         let mut scene = make_test_scene();
-        scene.nodes.get_mut(&1).unwrap().background = Some(Default::default());
+        let node = scene.nodes.get_mut(&1).unwrap();
+        node.ty = BbNodeType::DisplayWidget;
+        node.background = Some(Default::default());
         let palette = json!({
             "colorStyles": [
                 { "color": { "r": 115, "g": 198, "b": 254, "a": 255 } },
@@ -1182,9 +1223,9 @@ mod tests {
         apply_brand_modifiers(&mut scene, &brand, None);
         let node = scene.nodes.get(&1).unwrap();
         let color = node.background.as_ref().unwrap().fill_colour.unwrap();
-        assert!((color[0] - 115.0 / 255.0).abs() < 0.001);
-        assert!((color[1] - 198.0 / 255.0).abs() < 0.001);
-        assert!((color[2] - 254.0 / 255.0).abs() < 0.001);
+        assert!((color[0] - 0.0 / 255.0).abs() < 0.001);
+        assert!((color[1] - 113.0 / 255.0).abs() < 0.001);
+        assert!((color[2] - 188.0 / 255.0).abs() < 0.001);
         assert_eq!(node.raw.get("FillColorToken").and_then(|value| value.as_str()), Some("Accent1"));
     }
 
