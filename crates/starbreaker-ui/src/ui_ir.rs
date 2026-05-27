@@ -1843,7 +1843,7 @@ fn resolve_effective_font_size(
 fn apply_label_style_font_scale(value: UiIrValue, label_style: Option<&str>) -> UiIrValue {
     let scale: f32 = match label_style {
         Some("Title3") => 1.15,
-        Some("Heading2") => 0.8,
+        Some("Heading2") => 0.77,
         _ => 1.0,
     };
 
