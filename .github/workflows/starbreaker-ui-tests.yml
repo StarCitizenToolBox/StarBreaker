@@ -17,5 +17,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Run starbreaker-ui tests
-        run: cargo test -p starbreaker-ui
+      - name: UI hardcoding guard
+        run: bash .github/scripts/check_ui_hardcoding.sh
+      - name: Run starbreaker-ui library tests
+        run: cargo test -p starbreaker-ui --lib
+      - name: Run Phase 5 certification dashboard drift check
+        run: cargo run -p starbreaker-ui --example phase5_certification_dashboard

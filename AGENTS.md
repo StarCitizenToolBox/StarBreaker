@@ -343,3 +343,9 @@ the `//!` first line of each file in the module directory.
   reusable Blender material node templates.
 - `docs/blender-shader-family-inventory.json` — the canonical list of
   CryEngine shader families we know about.
+- `docs/ui-fallback-register.md` — active and retired UI fallback
+  register with owner, trigger signal, and sunset target.
+- `docs/ui-architecture-runbook.md` — UI pipeline architecture and
+  troubleshooting flow for source->IR->render drift.
+- `docs/ui-regression-policy.md` — required regression coverage,
+  contributor guardrails, and CI checks for UI changes.
