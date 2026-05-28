@@ -6,6 +6,24 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 WORKSPACE_ROOT="$(cd "${REPO_ROOT}/.." && pwd)"
 ARTIFACT_DIR="${REPO_ROOT}/test-artifacts/ui"
 FREEZE_FILE="${REPO_ROOT}/crates/starbreaker-ui/tests/fixtures/ui_regression_freeze.json"
+VALIDATION_MODE="full"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --quick)
+      VALIDATION_MODE="quick"
+      shift
+      ;;
+    --full)
+      VALIDATION_MODE="full"
+      shift
+      ;;
+    *)
+      echo "error: unknown argument: $1 (expected --quick or --full)" >&2
+      exit 1
+      ;;
+  esac
+done
 
 mapfile -t MANIFEST_CANDIDATES < <(find "${REPO_ROOT}/crates/starbreaker-ui/tests/fixtures" -type f -name '*snapshot_manifest.json' | sort)
 DEFAULT_MANIFEST_PATH=""
@@ -19,14 +37,16 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! command -v magick >/dev/null 2>&1; then
-  echo "error: ImageMagick 'magick' command is required but not installed" >&2
-  exit 1
-fi
+if [[ "${VALIDATION_MODE}" == "full" ]]; then
+  if ! command -v magick >/dev/null 2>&1; then
+    echo "error: ImageMagick 'magick' command is required but not installed" >&2
+    exit 1
+  fi
 
-if ! command -v sha256sum >/dev/null 2>&1; then
-  echo "error: sha256sum is required but not installed" >&2
-  exit 1
+  if ! command -v sha256sum >/dev/null 2>&1; then
+    echo "error: sha256sum is required but not installed" >&2
+    exit 1
+  fi
 fi
 
 if [[ -z "${MANIFEST_PATH}" || ! -f "${MANIFEST_PATH}" ]]; then
@@ -40,7 +60,7 @@ if [[ -z "${MANIFEST_PATH}" || ! -f "${MANIFEST_PATH}" ]]; then
   exit 1
 fi
 
-if [[ ! -d "${ARTIFACT_DIR}" ]]; then
+if [[ "${VALIDATION_MODE}" == "full" && ! -d "${ARTIFACT_DIR}" ]]; then
   echo "error: artifact directory missing: ${ARTIFACT_DIR}" >&2
   exit 1
 fi
@@ -68,19 +88,20 @@ fi
 errors=0
 checked=0
 
-while IFS=$'\t' read -r target_id source_png tier; do
-  [[ -n "${target_id}" ]] || continue
-  checked=$((checked + 1))
+if [[ "${VALIDATION_MODE}" == "full" ]]; then
+  while IFS=$'\t' read -r target_id source_png tier; do
+    [[ -n "${target_id}" ]] || continue
+    checked=$((checked + 1))
 
-  if [[ "${source_png}" = /* ]]; then
-    source_path="${source_png}"
-  elif [[ "${source_png}" = ships/* ]]; then
-    source_path="${WORKSPACE_ROOT}/${source_png}"
-  else
-    source_path="${REPO_ROOT}/${source_png}"
-  fi
+    if [[ "${source_png}" = /* ]]; then
+      source_path="${source_png}"
+    elif [[ "${source_png}" = ships/* ]]; then
+      source_path="${WORKSPACE_ROOT}/${source_png}"
+    else
+      source_path="${REPO_ROOT}/${source_png}"
+    fi
 
-  artifact_path="${ARTIFACT_DIR}/${target_id}.png"
+    artifact_path="${ARTIFACT_DIR}/${target_id}.png"
 
   if [[ ! -f "${source_path}" ]]; then
     echo "error: missing source image for ${target_id}: ${source_path}" >&2
@@ -124,8 +145,20 @@ while IFS=$'\t' read -r target_id source_png tier; do
     errors=$((errors + 1))
   fi
 
-  echo "ok: ${target_id} (${tier})"
-done < <(jq -r '.targets[] | [.id, .source_generated_png, .tier] | @tsv' "${MANIFEST_PATH}")
+    echo "ok: ${target_id} (${tier})"
+  done < <(jq -r '.targets[] | [.id, .source_generated_png, .tier] | @tsv' "${MANIFEST_PATH}")
+
+  while IFS= read -r artifact_file; do
+    artifact_base="$(basename "${artifact_file}")"
+    artifact_id="${artifact_base%.png}"
+    if ! jq -e --arg id "${artifact_id}" '.targets | any(.id == $id)' "${MANIFEST_PATH}" >/dev/null 2>&1; then
+      echo "error: undeclared artifact produced in freeze scope: ${artifact_file}" >&2
+      errors=$((errors + 1))
+    fi
+  done < <(find "${ARTIFACT_DIR}" -maxdepth 1 -type f -name '*.png' | sort)
+else
+  checked="$(jq '.targets | length' "${MANIFEST_PATH}")"
+fi
 
 if [[ -f "${FREEZE_FILE}" ]]; then
   if ! jq -e '.schema_version == 1 and (.artifacts | type == "array")' "${FREEZE_FILE}" >/dev/null 2>&1; then
@@ -143,8 +176,11 @@ if [[ -f "${FREEZE_FILE}" ]]; then
       errors=$((errors + 1))
     fi
 
-    while IFS=$'\t' read -r id artifact_rel frozen_hash frozen_w frozen_h frozen_channels; do
+      while IFS=$'\t' read -r id artifact_rel frozen_hash frozen_w frozen_h frozen_channels; do
       [[ -n "${id}" ]] || continue
+        if [[ "${VALIDATION_MODE}" != "full" ]]; then
+          continue
+        fi
       if [[ "${artifact_rel}" = /* ]]; then
         frozen_artifact_path="${artifact_rel}"
       else

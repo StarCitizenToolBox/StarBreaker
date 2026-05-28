@@ -39,11 +39,16 @@ Example: add a new platinum target and then regenerate artifacts.
   --source-generated-png ships/Data/UI/Generated/ship/drak/Clipper/clipper_new_panel.png
 
 ./scripts/generate_ui_regression_artifacts.sh
-./scripts/validate_ui_regression_artifacts.sh
+./scripts/validate_ui_regression_artifacts.sh --full
 ./scripts/freeze_ui_regression_artifacts.sh \
   --approver "<name>" \
   --reason "Approve baseline refresh"
 ```
+
+Modes for validator:
+
+- Quick mode (manifest + freeze lock coherence): `./scripts/validate_ui_regression_artifacts.sh --quick`
+- Full mode (source/artifact/freeze image checks): `./scripts/validate_ui_regression_artifacts.sh --full`
 
 ## Update Procedure
 
@@ -66,6 +71,10 @@ Example: add a new platinum target and then regenerate artifacts.
    - what source rule changed,
    - what tests were run.
 11. Re-run `cargo test -p starbreaker-ui` before merge.
+
+Policy:
+
+- Failing regression checks are product regressions to investigate and fix, not tests to loosen or baselines to rewrite blindly.
 
 ## Review Checklist
 

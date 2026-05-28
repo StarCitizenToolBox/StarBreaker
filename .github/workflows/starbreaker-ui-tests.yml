@@ -19,6 +19,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: UI hardcoding guard
         run: bash .github/scripts/check_ui_hardcoding.sh
+      - name: Validate regression manifest and freeze lockfile (quick)
+        run: bash scripts/validate_ui_regression_artifacts.sh --quick
       - name: Run starbreaker-ui library tests
         run: cargo test -p starbreaker-ui --lib
       - name: Run manifest regression integration suites
