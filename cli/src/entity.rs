@@ -103,6 +103,11 @@ fn write_decomposed_file(
     Ok(())
 }
 
+fn should_write_ui_only_decomposed_file(relative_path: &str) -> bool {
+    let normalized = relative_path.replace('\\', "/").to_ascii_lowercase();
+    normalized.starts_with("data/ui/") || normalized.ends_with("/scene.json")
+}
+
 fn collect_existing_decomposed_assets(output_root: &Path, p4k: &MappedP4k) -> Result<HashSet<String>> {
     let data_root = output_root.join("Data");
     let mut existing = HashSet::new();
@@ -255,7 +260,9 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{prepare_decomposed_output_root, source_asset_candidates};
+    use super::{
+        prepare_decomposed_output_root, should_write_ui_only_decomposed_file, source_asset_candidates,
+    };
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -297,6 +304,29 @@ mod tests {
         assert_eq!(std::fs::read(target_package.join("scene.json")).unwrap(), b"old");
         assert_eq!(std::fs::read(sibling_package.join("scene.json")).unwrap(), b"sibling");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ui_only_filter_includes_ui_assets_and_scene_sidecars() {
+        assert!(should_write_ui_only_decomposed_file(
+            "Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_i_door_small_drak.png"
+        ));
+        assert!(should_write_ui_only_decomposed_file(
+            "data/ui/generated/ship/drak/clipper/buildingblocks_canvas_i_door_small_drak.png"
+        ));
+        assert!(should_write_ui_only_decomposed_file(
+            "Packages/DRAK Clipper_LOD0_TEX0/scene.json"
+        ));
+    }
+
+    #[test]
+    fn ui_only_filter_excludes_non_ui_assets() {
+        assert!(!should_write_ui_only_decomposed_file(
+            "Data/Objects/ships/drak/clipper/clipper_lod0.blend"
+        ));
+        assert!(!should_write_ui_only_decomposed_file(
+            "Data/Textures/ships/drak/clipper/albedo.dds"
+        ));
     }
 }
 
@@ -564,6 +594,9 @@ fn export(
             );
             prepare_decomposed_output_root(&output, &package_name)?;
             for file in &decomposed.files {
+                if opts.ui_only_files && !should_write_ui_only_decomposed_file(&file.relative_path) {
+                    continue;
+                }
                 let output_path = output.join(&file.relative_path);
                 if let Some(parent) = output_path.parent() {
                     std::fs::create_dir_all(parent)
@@ -658,6 +691,9 @@ fn export_blend(
             .ok_or_else(|| CliError::InvalidInput("entity export returned no decomposed files".into()))?;
 
         for file in &decomposed.files {
+            if opts.ui_only_files && !should_write_ui_only_decomposed_file(&file.relative_path) {
+                continue;
+            }
             let output_path = output_dir.join(&file.relative_path);
             if let Some(parent) = output_path.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| CliError::IoPath {

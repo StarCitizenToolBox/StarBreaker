@@ -67,6 +67,10 @@ pub struct ExportOpts {
     /// Include shield helper meshes and shield attachments in exports
     #[arg(long)]
     pub include_shields: bool,
+    /// Write only UI outputs and required sidecars in decomposed exports.
+    /// This preserves UI PNG parity with full export while reducing output churn.
+    #[arg(long)]
+    pub ui_only_files: bool,
 }
 
 impl From<&ExportOpts> for starbreaker_3d::ExportOptions {
