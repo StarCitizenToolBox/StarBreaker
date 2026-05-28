@@ -6,7 +6,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ui_snapshot::{
-    UiScreenSnapshot, UiSnapshotComparison, UiSnapshotTolerance, compare_snapshots,
+    UiScreenSnapshot, UiSnapshotComparison, UiSnapshotElementCategory, UiSnapshotTolerance,
+    compare_snapshots,
 };
 
 /// Manifest schema version for generic UI regression target lists.
@@ -117,12 +118,105 @@ where
             path: target.current_path.clone(),
             message: error.to_string(),
         })?;
+        let mut comparison = compare_snapshots(&baseline, &current, target.tier.snapshot_tolerance());
+        apply_target_category_checks(target, &baseline, &current, &mut comparison);
         results.push(UiRegressionTargetResult {
             id: target.id.clone(),
-            comparison: compare_snapshots(&baseline, &current, target.tier.snapshot_tolerance()),
+            comparison,
         });
     }
     Ok(results)
+}
+
+fn apply_target_category_checks(
+    target: &UiRegressionTarget,
+    baseline: &UiScreenSnapshot,
+    current: &UiScreenSnapshot,
+    comparison: &mut UiSnapshotComparison,
+) {
+    match target.category {
+        UiRegressionCategory::Image => {
+            require_category_present(
+                target,
+                baseline,
+                current,
+                UiSnapshotElementCategory::Image,
+                comparison,
+            );
+        }
+        UiRegressionCategory::Shape => {
+            require_category_present(
+                target,
+                baseline,
+                current,
+                UiSnapshotElementCategory::Shape,
+                comparison,
+            );
+        }
+        UiRegressionCategory::Text => {
+            require_category_present(
+                target,
+                baseline,
+                current,
+                UiSnapshotElementCategory::Text,
+                comparison,
+            );
+        }
+        UiRegressionCategory::Font => {
+            require_category_present(
+                target,
+                baseline,
+                current,
+                UiSnapshotElementCategory::Text,
+                comparison,
+            );
+            for baseline_element in baseline
+                .elements
+                .iter()
+                .filter(|element| element.visible && element.category == UiSnapshotElementCategory::Text)
+            {
+                if let Some(current_element) = current
+                    .elements
+                    .iter()
+                    .find(|element| element.visible && element.identity == baseline_element.identity)
+                {
+                    if baseline_element.text_font_identity != current_element.text_font_identity {
+                        comparison.failures.push(format!(
+                            "{}: font category identity drift baseline={:?} current={:?}",
+                            baseline_element.identity,
+                            baseline_element.text_font_identity,
+                            current_element.text_font_identity
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    comparison.passed = comparison.failures.is_empty();
+}
+
+fn require_category_present(
+    target: &UiRegressionTarget,
+    baseline: &UiScreenSnapshot,
+    current: &UiScreenSnapshot,
+    category: UiSnapshotElementCategory,
+    comparison: &mut UiSnapshotComparison,
+) {
+    let baseline_has = baseline
+        .elements
+        .iter()
+        .any(|element| element.visible && element.category == category);
+    let current_has = current
+        .elements
+        .iter()
+        .any(|element| element.visible && element.category == category);
+    if !baseline_has || !current_has {
+        comparison.failures.push(format!(
+            "{}: target category {:?} missing in baseline/current snapshot",
+            target.id, category
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -172,7 +266,7 @@ mod tests {
             schema_version: UI_REGRESSION_MANIFEST_SCHEMA_VERSION,
             targets: vec![UiRegressionTarget {
                 id: "medical1".to_string(),
-                category: UiRegressionCategory::Image,
+                category: UiRegressionCategory::Text,
                 baseline_path: "baseline".to_string(),
                 current_path: "current".to_string(),
                 tier: UiRegressionTier::Platinum,
@@ -219,6 +313,79 @@ mod tests {
         assert_eq!(error.target_id, "medical2");
         assert_eq!(error.path, "missing");
         assert_eq!(error.message, "not found");
+    }
+
+    #[test]
+    fn category_runner_requires_expected_image_elements() {
+        let manifest = UiRegressionManifest {
+            schema_version: UI_REGRESSION_MANIFEST_SCHEMA_VERSION,
+            targets: vec![UiRegressionTarget {
+                id: "medical-image".to_string(),
+                category: UiRegressionCategory::Image,
+                baseline_path: "baseline".to_string(),
+                current_path: "current".to_string(),
+                tier: UiRegressionTier::Platinum,
+                roi: None,
+            }],
+        };
+
+        let mut snapshots = HashMap::new();
+        snapshots.insert("baseline".to_string(), sample_snapshot(0.0));
+        snapshots.insert("current".to_string(), sample_snapshot(0.0));
+
+        let results = compare_manifest_targets_with_loader(&manifest, |path| {
+            snapshots
+                .get(path)
+                .cloned()
+                .ok_or_else(|| format!("missing snapshot: {path}"))
+        })
+        .expect("comparison should succeed");
+
+        assert!(!results[0].comparison.passed);
+        assert!(results[0]
+            .comparison
+            .failures
+            .iter()
+            .any(|line| line.contains("target category Image missing")));
+    }
+
+    #[test]
+    fn font_category_runner_flags_font_identity_drift() {
+        let manifest = UiRegressionManifest {
+            schema_version: UI_REGRESSION_MANIFEST_SCHEMA_VERSION,
+            targets: vec![UiRegressionTarget {
+                id: "medical-font".to_string(),
+                category: UiRegressionCategory::Font,
+                baseline_path: "baseline".to_string(),
+                current_path: "current".to_string(),
+                tier: UiRegressionTier::Platinum,
+                roi: None,
+            }],
+        };
+
+        let mut baseline = sample_snapshot(0.0);
+        let mut current = sample_snapshot(0.0);
+        baseline.elements[0].text_font_identity = Some("font:regular".to_string());
+        current.elements[0].text_font_identity = Some("font:bold".to_string());
+
+        let mut snapshots = HashMap::new();
+        snapshots.insert("baseline".to_string(), baseline);
+        snapshots.insert("current".to_string(), current);
+
+        let results = compare_manifest_targets_with_loader(&manifest, |path| {
+            snapshots
+                .get(path)
+                .cloned()
+                .ok_or_else(|| format!("missing snapshot: {path}"))
+        })
+        .expect("comparison should succeed");
+
+        assert!(!results[0].comparison.passed);
+        assert!(results[0]
+            .comparison
+            .failures
+            .iter()
+            .any(|line| line.contains("font category identity drift")));
     }
 
     fn sample_snapshot(x: f32) -> UiScreenSnapshot {
