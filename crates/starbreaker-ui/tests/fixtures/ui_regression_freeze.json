@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "frozen_at": "2026-05-28T15:47:32Z",
+  "frozen_at": "2026-05-28T15:57:21Z",
   "approver": "Star Destroyer",
-  "reason": "Phase 3 initial baseline freeze for approved targets",
+  "reason": "Normalize channel tokens in freeze metadata",
   "signature": null,
   "manifest_path": "crates/starbreaker-ui/tests/fixtures/medical_ir/medical_snapshot_manifest.json",
   "artifacts": [
@@ -14,7 +14,7 @@
       "sha256": "cc16cf760781c2c2ecce80499593a52707670b50601fa849dea29c87f1af1d6e",
       "width": 1920,
       "height": 1080,
-      "channels": "srgba 4.0"
+      "channels": "srgba"
     },
     {
       "id": "medical2",
@@ -24,7 +24,7 @@
       "sha256": "2dab2a273eee10bb0b6fc961b8a1ee2fd0a508ba5e2a69a43e1aeaa9a58f1a84",
       "width": 1920,
       "height": 1080,
-      "channels": "srgba 4.0"
+      "channels": "srgba"
     },
     {
       "id": "clipper_small_door",
@@ -34,7 +34,7 @@
       "sha256": "ccd70a713eaa075a2dfedf8a6d527bcba6fb058c3637fb50044365716f71173d",
       "width": 1920,
       "height": 1080,
-      "channels": "srgba 4.0"
+      "channels": "srgba"
     }
   ]
 }

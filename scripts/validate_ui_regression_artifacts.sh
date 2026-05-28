@@ -111,6 +111,8 @@ while IFS=$'\t' read -r target_id source_png tier; do
 
   read -r src_w src_h src_channels <<< "${source_meta}"
   read -r out_w out_h out_channels <<< "${artifact_meta}"
+  src_channels="$(echo "${src_channels}" | awk '{print tolower($1)}')"
+  out_channels="$(echo "${out_channels}" | awk '{print tolower($1)}')"
 
   if [[ "${src_w}" != "${out_w}" || "${src_h}" != "${out_h}" ]]; then
     echo "error: dimension mismatch for ${target_id}: source=${src_w}x${src_h} artifact=${out_w}x${out_h}" >&2
@@ -163,6 +165,8 @@ if [[ -f "${FREEZE_FILE}" ]]; then
         continue
       fi
       read -r actual_w actual_h actual_channels <<< "${actual_meta}"
+      actual_channels="$(echo "${actual_channels}" | awk '{print tolower($1)}')"
+      frozen_channels="$(echo "${frozen_channels}" | awk '{print tolower($1)}')"
 
       if [[ "${actual_hash}" != "${frozen_hash}" ]]; then
         echo "error: freeze hash mismatch for ${id}: expected=${frozen_hash} actual=${actual_hash}" >&2

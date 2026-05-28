@@ -159,7 +159,8 @@ while IFS=$'\t' read -r target_id source_png tier; do
 
   hash="$(sha256sum "${artifact_path}" | awk '{print $1}')"
   meta="$(magick identify -format '%w %h %[channels]' "${artifact_path}")"
-  read -r width height channels <<< "${meta}"
+  read -r width height channels_raw <<< "${meta}"
+  channels="$(echo "${channels_raw}" | awk '{print tolower($1)}')"
 
   jq -n \
     --arg id "${target_id}" \
