@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "frozen_at": "2026-05-28T15:47:32Z",
+  "approver": "Star Destroyer",
+  "reason": "Phase 3 initial baseline freeze for approved targets",
+  "signature": null,
+  "manifest_path": "crates/starbreaker-ui/tests/fixtures/medical_ir/medical_snapshot_manifest.json",
+  "artifacts": [
+    {
+      "id": "medical1",
+      "tier": "platinum",
+      "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_i_med_medicalbed_a.png",
+      "artifact_path": "test-artifacts/ui/medical1.png",
+      "sha256": "cc16cf760781c2c2ecce80499593a52707670b50601fa849dea29c87f1af1d6e",
+      "width": 1920,
+      "height": 1080,
+      "channels": "srgba 4.0"
+    },
+    {
+      "id": "medical2",
+      "tier": "platinum",
+      "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_i_med_medicalendofbed_a.png",
+      "artifact_path": "test-artifacts/ui/medical2.png",
+      "sha256": "2dab2a273eee10bb0b6fc961b8a1ee2fd0a508ba5e2a69a43e1aeaa9a58f1a84",
+      "width": 1920,
+      "height": 1080,
+      "channels": "srgba 4.0"
+    },
+    {
+      "id": "clipper_small_door",
+      "tier": "gold",
+      "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_i_door_small_drak.png",
+      "artifact_path": "test-artifacts/ui/clipper_small_door.png",
+      "sha256": "ccd70a713eaa075a2dfedf8a6d527bcba6fb058c3637fb50044365716f71173d",
+      "width": 1920,
+      "height": 1080,
+      "channels": "srgba 4.0"
+    }
+  ]
+}

@@ -88,8 +88,8 @@ while IFS=$'\t' read -r target_id source_png tier; do
     continue
   fi
 
-  source_meta="$(magick identify -format '%w\t%h\t%[channels]' "${source_path}" 2>/dev/null || true)"
-  artifact_meta="$(magick identify -format '%w\t%h\t%[channels]' "${artifact_path}" 2>/dev/null || true)"
+  source_meta="$(magick identify -format '%w %h %[channels]' "${source_path}" 2>/dev/null || true)"
+  artifact_meta="$(magick identify -format '%w %h %[channels]' "${artifact_path}" 2>/dev/null || true)"
 
   if [[ -z "${source_meta}" ]]; then
     echo "error: failed to inspect source image for ${target_id}: ${source_path}" >&2
@@ -103,8 +103,8 @@ while IFS=$'\t' read -r target_id source_png tier; do
     continue
   fi
 
-  IFS=$'\t' read -r src_w src_h src_channels <<< "${source_meta}"
-  IFS=$'\t' read -r out_w out_h out_channels <<< "${artifact_meta}"
+  read -r src_w src_h src_channels <<< "${source_meta}"
+  read -r out_w out_h out_channels <<< "${artifact_meta}"
 
   if [[ "${src_w}" != "${out_w}" || "${src_h}" != "${out_h}" ]]; then
     echo "error: dimension mismatch for ${target_id}: source=${src_w}x${src_h} artifact=${out_w}x${out_h}" >&2

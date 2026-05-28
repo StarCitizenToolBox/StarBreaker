@@ -27,6 +27,8 @@ Medical1 and Medical2 are treated as gold-standard outputs. Deviations are presu
 - Add or update a manifest target: `./scripts/add_ui_regression_target.sh`
 - Generate local artifact images from manifest targets: `./scripts/generate_ui_regression_artifacts.sh`
 - Validate manifest/artifact/source integrity: `./scripts/validate_ui_regression_artifacts.sh`
+- Freeze approved artifact hashes/metadata: `./scripts/freeze_ui_regression_artifacts.sh`
+- Unfreeze by approved reason (archives prior freeze): `./scripts/unfreeze_ui_regression_artifacts.sh`
 
 Example: add a new platinum target and then regenerate artifacts.
 
@@ -38,6 +40,9 @@ Example: add a new platinum target and then regenerate artifacts.
 
 ./scripts/generate_ui_regression_artifacts.sh
 ./scripts/validate_ui_regression_artifacts.sh
+./scripts/freeze_ui_regression_artifacts.sh \
+  --approver "<name>" \
+  --reason "Approve baseline refresh"
 ```
 
 ## Update Procedure
@@ -48,18 +53,19 @@ Example: add a new platinum target and then regenerate artifacts.
 4. Refresh local visual artifacts via `./scripts/generate_ui_regression_artifacts.sh`.
   - Generated files are written to `StarBreaker/test-artifacts/ui`.
 5. Run `./scripts/validate_ui_regression_artifacts.sh` to verify manifest/source/artifact consistency.
-6. Re-run focused validation before any baseline updates:
+6. Freeze approved baselines via `./scripts/freeze_ui_regression_artifacts.sh --approver "<name>" --reason "<why>"`.
+7. Re-run focused validation before any baseline updates:
    - `cargo test -p starbreaker-ui ui_snapshot --lib`
   - `cargo test -p starbreaker-ui --test manifest_snapshot_regression -- --nocapture`
   - `cargo test -p starbreaker-ui --test manifest_visual_regression -- --nocapture`
   - `cargo test -p starbreaker-ui --test manifest_live_ir_guard -- --nocapture`
-7. If the failure is a regression signal, investigate and fix the product path first; do not touch the baselines.
-8. If source IR has legitimately changed, refresh fixture IR files from the approved capture flow.
-9. Keep each baseline update in an explicit commit with a message that includes:
+8. If the failure is a regression signal, investigate and fix the product path first; do not touch the baselines.
+9. If source IR has legitimately changed, refresh fixture IR files from the approved capture flow.
+10. Keep each baseline update in an explicit commit with a message that includes:
    - why drift is expected,
    - what source rule changed,
    - what tests were run.
-10. Re-run `cargo test -p starbreaker-ui` before merge.
+11. Re-run `cargo test -p starbreaker-ui` before merge.
 
 ## Review Checklist
 
