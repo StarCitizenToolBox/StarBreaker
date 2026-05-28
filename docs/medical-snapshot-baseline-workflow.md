@@ -18,7 +18,9 @@ Medical1 and Medical2 are treated as gold-standard outputs. Deviations are presu
   - `crates/starbreaker-ui/tests/fixtures/medical_ir/medical1-screen_16x9_a-ir.json`
   - `crates/starbreaker-ui/tests/fixtures/medical_ir/medical2-mesh_end_screen_plane-ir.json`
 - Regression tests:
-  - `crates/starbreaker-ui/tests/medical_snapshot_regression.rs`
+  - `crates/starbreaker-ui/tests/manifest_snapshot_regression.rs`
+  - `crates/starbreaker-ui/tests/manifest_visual_regression.rs`
+  - `crates/starbreaker-ui/tests/manifest_live_ir_guard.rs`
 
 ## Update Procedure
 
@@ -26,7 +28,9 @@ Medical1 and Medical2 are treated as gold-standard outputs. Deviations are presu
 2. Confirm the failure is not an obvious regression signal such as visible placeholder text, unresolved placeholder keys, or missing major UI elements.
 2. Re-run focused validation before any baseline updates:
    - `cargo test -p starbreaker-ui ui_snapshot --lib`
-   - `cargo test -p starbreaker-ui --test medical_snapshot_regression`
+  - `cargo test -p starbreaker-ui --test manifest_snapshot_regression -- --nocapture`
+  - `cargo test -p starbreaker-ui --test manifest_visual_regression -- --nocapture`
+  - `cargo test -p starbreaker-ui --test manifest_live_ir_guard -- --nocapture`
 3. If the failure is a regression signal, investigate and fix the product path first; do not touch the baselines.
 4. If source IR has legitimately changed, refresh fixture IR files from the approved capture flow.
 5. Keep each baseline update in an explicit commit with a message that includes:
@@ -39,5 +43,5 @@ Medical1 and Medical2 are treated as gold-standard outputs. Deviations are presu
 
 - No screen/name-specific production hardcoding was introduced.
 - Drift diagnostics are field-granular and actionable.
-- Medical snapshot tests fail for controlled drift and pass for expected state.
+- Manifest snapshot tests fail for controlled drift and pass for expected state.
 - Baseline refresh approval is explicit and recorded; placeholder-text regressions were ruled out before any fixture update.
