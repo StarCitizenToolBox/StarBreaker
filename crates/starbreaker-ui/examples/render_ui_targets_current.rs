@@ -375,28 +375,72 @@ fn main() -> Result<(), String> {
     let ui_target_b_output = comparison_dir.join("ui_target_b-current.png");
     let locate_query = std::env::var("SB_UI_LOCATE").ok().filter(|s| !s.trim().is_empty());
 
-    render_target(
-        &ui_target_a_output,
-        "534bab84-299b-479a-a4af-4469df112ea7",
-        "ui_target_a-phase2-render",
-        &fetcher,
-        &style_fetcher,
-        &file_fetcher,
-        localization_map.clone(),
-        loc_fetcher,
-        animation_sample_percent,
-    )?;
-    render_target(
-        &ui_target_b_output,
-        "e9ad809d-ebcf-43a3-bb20-120f64556aef",
-        "ui_target_b-phase2-render",
-        &fetcher,
-        &style_fetcher,
-        &file_fetcher,
-        localization_map,
-        loc_fetcher,
-        animation_sample_percent,
-    )?;
+    if loc_fetcher.is_none() {
+        let loc_a = localization_map.clone();
+        let loc_b = localization_map.clone();
+        std::thread::scope(|scope| {
+            let render_a = scope.spawn(|| {
+                render_target(
+                    &ui_target_a_output,
+                    "534bab84-299b-479a-a4af-4469df112ea7",
+                    "ui_target_a-phase2-render",
+                    &fetcher,
+                    &style_fetcher,
+                    &file_fetcher,
+                    loc_a,
+                    None,
+                    animation_sample_percent,
+                )
+            });
+            let render_b = scope.spawn(|| {
+                render_target(
+                    &ui_target_b_output,
+                    "e9ad809d-ebcf-43a3-bb20-120f64556aef",
+                    "ui_target_b-phase2-render",
+                    &fetcher,
+                    &style_fetcher,
+                    &file_fetcher,
+                    loc_b,
+                    None,
+                    animation_sample_percent,
+                )
+            });
+
+            let result_a = render_a
+                .join()
+                .map_err(|_| "ui_target_a render thread panicked".to_string())?;
+            let result_b = render_b
+                .join()
+                .map_err(|_| "ui_target_b render thread panicked".to_string())?;
+
+            result_a?;
+            result_b?;
+            Ok::<(), String>(())
+        })?;
+    } else {
+        render_target(
+            &ui_target_a_output,
+            "534bab84-299b-479a-a4af-4469df112ea7",
+            "ui_target_a-phase2-render",
+            &fetcher,
+            &style_fetcher,
+            &file_fetcher,
+            localization_map.clone(),
+            loc_fetcher,
+            animation_sample_percent,
+        )?;
+        render_target(
+            &ui_target_b_output,
+            "e9ad809d-ebcf-43a3-bb20-120f64556aef",
+            "ui_target_b-phase2-render",
+            &fetcher,
+            &style_fetcher,
+            &file_fetcher,
+            localization_map,
+            loc_fetcher,
+            animation_sample_percent,
+        )?;
+    }
 
     if let Some(query) = locate_query.as_deref() {
         let ui_target_a_binding = UiBindingView {

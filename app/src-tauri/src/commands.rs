@@ -1584,16 +1584,18 @@ pub async fn start_export(
         let errors = AtomicUsize::new(0);
         let succeeded_ids: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
-        // 0 = auto (half cores), otherwise use the requested count.
-        let num_threads = if requested_threads > 0 {
+        // 0 = auto (use available cores minus one spare core), otherwise use
+        // the requested count from the UI slider.
+        let requested_or_auto_threads = if requested_threads > 0 {
             requested_threads
         } else {
-            (std::thread::available_parallelism()
+            std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(4)
-                / 2)
-            .max(2)
+                .saturating_sub(1)
+                .max(1)
         };
+        let num_threads = requested_or_auto_threads.min(total.max(1));
         let pool = match rayon::ThreadPoolBuilder::new()
             .num_threads(num_threads)
             .build()
@@ -1726,10 +1728,14 @@ fn export_single(
         .ok_or_else(|| AppError::Internal("record not found".into()))?;
     let idx = starbreaker_datacore::loadout::EntityIndex::new(db);
     let tree = starbreaker_datacore::loadout::resolve_loadout_indexed(&idx, record);
-    let reusable_asset_paths = {
+    let use_reusable_assets =
+        opts.kind == starbreaker_3d::ExportKind::Decomposed && !overwrite_existing_assets;
+    let reusable_asset_paths = if use_reusable_assets {
         let mut paths = existing_asset_paths.clone();
         paths.extend(export_session_asset_paths.lock().unwrap().iter().cloned());
         paths
+    } else {
+        HashSet::new()
     };
     let existing_asset_loader = |relative_path: &str| {
         read_reusable_decomposed_asset(output_path, &reusable_asset_paths, relative_path)
@@ -1748,9 +1754,17 @@ fn export_single(
             ..opts.clone()
         },
         progress,
-        Some(&reusable_asset_paths),
+        if use_reusable_assets {
+            Some(&reusable_asset_paths)
+        } else {
+            None
+        },
         Some(existing_interior_assets),
-        Some(&existing_asset_loader),
+        if use_reusable_assets {
+            Some(&existing_asset_loader)
+        } else {
+            None
+        },
     )?;
     match result.kind {
         starbreaker_3d::ExportKind::Bundled => {
