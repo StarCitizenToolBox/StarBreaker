@@ -65,6 +65,7 @@ pub struct UiScreenSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct UiSnapshotTolerance {
     pub numeric_relative: f32,
+    pub font_size_relative: f32,
     pub numeric_screen_floor_ratio: f32,
     pub rgba_channel_abs: f32,
 }
@@ -73,6 +74,7 @@ impl Default for UiSnapshotTolerance {
     fn default() -> Self {
         Self {
             numeric_relative: 0.10,
+            font_size_relative: 0.10,
             numeric_screen_floor_ratio: 0.002,
             rgba_channel_abs: 0.10,
         }
@@ -306,7 +308,7 @@ pub fn compare_snapshots(
             baseline_max_dim,
             tolerance,
         );
-        compare_optional_numeric(
+        compare_optional_font_numeric(
             &mut failures,
             identity,
             "line_spacing",
@@ -435,6 +437,37 @@ fn compare_optional_numeric(
     }
 }
 
+fn compare_optional_font_numeric(
+    failures: &mut Vec<String>,
+    identity: &str,
+    field: &str,
+    baseline: Option<f32>,
+    current: Option<f32>,
+    baseline_max_dim: f32,
+    tolerance: UiSnapshotTolerance,
+) {
+    match (baseline, current) {
+        (Some(base), Some(cur)) => {
+            let threshold = hybrid_threshold_with_relative(
+                base,
+                baseline_max_dim,
+                tolerance.font_size_relative,
+                tolerance.numeric_screen_floor_ratio,
+            );
+            let abs_delta = (base - cur).abs();
+            if abs_delta > threshold {
+                failures.push(format!(
+                    "{identity}: {field} drift baseline={base:.4} current={cur:.4} delta={abs_delta:.4} threshold={threshold:.4}"
+                ));
+            }
+        }
+        (None, None) => {}
+        _ => failures.push(format!(
+            "{identity}: {field} presence drift baseline={baseline:?} current={current:?}"
+        )),
+    }
+}
+
 fn compare_optional_rgba(
     failures: &mut Vec<String>,
     identity: &str,
@@ -466,8 +499,22 @@ fn hybrid_threshold(
     baseline_max_dim: f32,
     tolerance: UiSnapshotTolerance,
 ) -> f32 {
-    let relative_limit = baseline.abs() * tolerance.numeric_relative;
-    let screen_floor_limit = baseline_max_dim * tolerance.numeric_screen_floor_ratio;
+    hybrid_threshold_with_relative(
+        baseline,
+        baseline_max_dim,
+        tolerance.numeric_relative,
+        tolerance.numeric_screen_floor_ratio,
+    )
+}
+
+fn hybrid_threshold_with_relative(
+    baseline: f32,
+    baseline_max_dim: f32,
+    numeric_relative: f32,
+    numeric_screen_floor_ratio: f32,
+) -> f32 {
+    let relative_limit = baseline.abs() * numeric_relative;
+    let screen_floor_limit = baseline_max_dim * numeric_screen_floor_ratio;
     relative_limit.max(screen_floor_limit)
 }
 
@@ -823,6 +870,36 @@ mod tests {
                 .failures
                 .iter()
                 .any(|failure| failure.contains("unexpected new visible element"))
+        );
+    }
+
+    #[test]
+    fn compare_snapshots_uses_font_size_relative_for_line_spacing() {
+        let baseline = base_document(vec![base_node(1, 1)]);
+        let mut current = baseline.clone();
+        current.nodes[0]
+            .text_style
+            .as_mut()
+            .expect("text style should exist")
+            .line_spacing = Some(2.08);
+
+        let baseline_snapshot = snapshot_from_ui_ir(&baseline);
+        let current_snapshot = snapshot_from_ui_ir(&current);
+        let comparison = compare_snapshots(
+            &baseline_snapshot,
+            &current_snapshot,
+            UiSnapshotTolerance {
+                numeric_relative: 0.01,
+                font_size_relative: 0.05,
+                numeric_screen_floor_ratio: 0.001,
+                rgba_channel_abs: 0.05,
+            },
+        );
+
+        assert!(
+            comparison.passed,
+            "line_spacing drift within font-size tolerance should pass: {:?}",
+            comparison.failures
         );
     }
 

@@ -48,11 +48,13 @@ impl UiRegressionTier {
         match self {
             Self::Platinum => UiSnapshotTolerance {
                 numeric_relative: 0.01,
+                font_size_relative: 0.05,
                 numeric_screen_floor_ratio: 0.001,
                 rgba_channel_abs: 0.05,
             },
             Self::Gold => UiSnapshotTolerance {
                 numeric_relative: 0.05,
+                font_size_relative: 0.10,
                 numeric_screen_floor_ratio: 0.002,
                 rgba_channel_abs: 0.10,
             },
@@ -250,13 +252,15 @@ mod tests {
     }
 
     #[test]
-    fn tier_tolerances_match_phase2_contract() {
+    fn tier_tolerances_match_phase3_contract() {
         let platinum = UiRegressionTier::Platinum.snapshot_tolerance();
         assert_eq!(platinum.numeric_relative, 0.01);
+        assert_eq!(platinum.font_size_relative, 0.05);
         assert_eq!(platinum.rgba_channel_abs, 0.05);
 
         let gold = UiRegressionTier::Gold.snapshot_tolerance();
         assert_eq!(gold.numeric_relative, 0.05);
+        assert_eq!(gold.font_size_relative, 0.10);
         assert_eq!(gold.rgba_channel_abs, 0.10);
     }
 
