@@ -39,6 +39,7 @@ pub mod swf_assets;
 pub mod swf_render;
 pub mod text;
 pub mod ui_ir;
+pub mod ui_regression_manifest;
 pub mod ui_snapshot;
 
 pub use error::UiError;
@@ -80,4 +81,9 @@ pub use ui_snapshot::{
     UiSnapshotElementCategory, UiSnapshotTolerance, UiRendererMetadataElement,
     UiRendererMetadataSnapshot, compare_renderer_metadata_snapshots, compare_snapshots,
     renderer_metadata_snapshot_from_ui_ir, snapshot_from_ui_ir,
+};
+
+pub use ui_regression_manifest::{
+    UI_REGRESSION_MANIFEST_SCHEMA_VERSION, UiRegressionCategory, UiRegressionManifest,
+    UiRegressionRoi, UiRegressionTarget, UiRegressionTier,
 };
