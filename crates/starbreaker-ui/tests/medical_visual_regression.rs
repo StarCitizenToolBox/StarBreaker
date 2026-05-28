@@ -1,5 +1,9 @@
 use std::path::PathBuf;
-use starbreaker_ui::UiIrDocument;
+use starbreaker_ui::{
+    UiIrDocument, UiRegressionManifest, UiScreenSnapshot, compare_manifest_targets_with_loader,
+    snapshot_from_ui_ir,
+};
+use std::collections::HashMap;
 
 fn comparison_paths(name: &str) -> (PathBuf, PathBuf) {
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -11,6 +15,49 @@ fn comparison_paths(name: &str) -> (PathBuf, PathBuf) {
         comparison_dir.join(format!("{name}-reference.png")),
         comparison_dir.join(format!("{name}-current.png")),
     )
+}
+
+fn medical_ir_manifest() -> UiRegressionManifest {
+    serde_json::from_str(include_str!("fixtures/medical_ir/medical_snapshot_manifest.json"))
+        .expect("medical manifest fixture should parse")
+}
+
+fn medical_manifest_snapshot_lookup() -> HashMap<String, UiScreenSnapshot> {
+    let medical1: UiIrDocument = serde_json::from_str(include_str!(
+        "fixtures/medical_ir/medical1-screen_16x9_a-ir.json"
+    ))
+    .expect("medical1 IR fixture should parse");
+    let medical2: UiIrDocument = serde_json::from_str(include_str!(
+        "fixtures/medical_ir/medical2-mesh_end_screen_plane-ir.json"
+    ))
+    .expect("medical2 IR fixture should parse");
+
+    HashMap::from([
+        ("medical1.baseline".to_string(), snapshot_from_ui_ir(&medical1)),
+        ("medical1.current".to_string(), snapshot_from_ui_ir(&medical1)),
+        ("medical2.baseline".to_string(), snapshot_from_ui_ir(&medical2)),
+        ("medical2.current".to_string(), snapshot_from_ui_ir(&medical2)),
+    ])
+}
+
+fn assert_medical_manifest_runner_preflight() {
+    let manifest = medical_ir_manifest();
+    let snapshots = medical_manifest_snapshot_lookup();
+    let results = compare_manifest_targets_with_loader(&manifest, |path| {
+        snapshots
+            .get(path)
+            .cloned()
+            .ok_or_else(|| format!("missing snapshot fixture for {path}"))
+    })
+    .expect("manifest runner should load all medical fixture snapshots");
+    for result in results {
+        assert!(
+            result.comparison.passed,
+            "manifest snapshot preflight failed for {}: {:?}",
+            result.id,
+            result.comparison.failures
+        );
+    }
 }
 
 fn cyan_text_coverage(img: &image::RgbaImage, x0: u32, y0: u32, x1: u32, y1: u32) -> f32 {
@@ -208,6 +255,7 @@ fn assert_roi_coverage_ratio(
 
 #[test]
 fn medical1_visual_regression_guard() {
+    assert_medical_manifest_runner_preflight();
     // Medical1 has more animated cyan geometry in the central ROI than medical2,
     // so we use a slightly wider lower bound to avoid false font-size failures.
     assert_medical_visual_regression_guard("medical1", 0.55, 1.25);
@@ -215,6 +263,7 @@ fn medical1_visual_regression_guard() {
 
 #[test]
 fn medical2_visual_regression_guard() {
+    assert_medical_manifest_runner_preflight();
     assert_medical_visual_regression_guard("medical2", 0.75, 1.25);
 }
 
