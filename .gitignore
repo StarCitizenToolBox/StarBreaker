@@ -11,6 +11,7 @@ research/
 /scripts/*
 !/scripts/generate_ui_regression_artifacts.sh
 !/scripts/add_ui_regression_target.sh
+!/scripts/validate_ui_regression_artifacts.sh
 test-artifacts/
 docs-local/
 .claude/
