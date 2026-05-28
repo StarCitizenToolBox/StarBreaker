@@ -39,7 +39,12 @@ EOF
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-DEFAULT_MANIFEST_PATH="$(find "${REPO_ROOT}/crates/starbreaker-ui/tests/fixtures" -type f -name '*snapshot_manifest.json' | sort | head -n 1)"
+mapfile -t MANIFEST_CANDIDATES < <(find "${REPO_ROOT}/crates/starbreaker-ui/tests/fixtures" -type f -name '*snapshot_manifest.json' | sort)
+
+DEFAULT_MANIFEST_PATH=""
+if [[ "${#MANIFEST_CANDIDATES[@]}" -eq 1 ]]; then
+  DEFAULT_MANIFEST_PATH="${MANIFEST_CANDIDATES[0]}"
+fi
 
 TARGET_ID=""
 TIER=""
@@ -108,6 +113,12 @@ fi
 
 if [[ -z "${MANIFEST_PATH}" || ! -f "${MANIFEST_PATH}" ]]; then
   echo "error: UI regression manifest not found: ${MANIFEST_PATH}" >&2
+  if [[ "${#MANIFEST_CANDIDATES[@]}" -gt 1 ]]; then
+    echo "error: multiple manifest candidates found; pass --manifest or set UI_REGRESSION_MANIFEST_PATH" >&2
+    for candidate in "${MANIFEST_CANDIDATES[@]}"; do
+      echo "  - ${candidate}" >&2
+    done
+  fi
   exit 1
 fi
 
@@ -147,9 +158,19 @@ if ! jq -e . "${MANIFEST_PATH}" >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! jq -e '.targets | type == "array"' "${MANIFEST_PATH}" >/dev/null 2>&1; then
+  echo "error: manifest must contain a top-level targets array: ${MANIFEST_PATH}" >&2
+  exit 1
+fi
+
 exists="$(jq --arg id "${TARGET_ID}" 'any(.targets[]; .id == $id)' "${MANIFEST_PATH}")"
 if [[ "${exists}" == "true" && "${REPLACE_EXISTING}" -ne 1 ]]; then
   echo "error: target id already exists: ${TARGET_ID} (use --replace to update)" >&2
+  exit 1
+fi
+
+if [[ "${exists}" != "true" && "${REPLACE_EXISTING}" -eq 1 ]]; then
+  echo "error: cannot --replace missing target id: ${TARGET_ID}" >&2
   exit 1
 fi
 
@@ -172,8 +193,7 @@ jq \
   --argjson h "${ROI_H}" \
   --argjson replace_existing "${REPLACE_EXISTING}" \
   '
-  . as $root
-  | {
+  {
       id: $id,
       category: $category,
       baseline_path: $baseline_path,
