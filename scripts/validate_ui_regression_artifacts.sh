@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 WORKSPACE_ROOT="$(cd "${REPO_ROOT}/.." && pwd)"
 ARTIFACT_DIR="${REPO_ROOT}/test-artifacts/ui"
+FREEZE_FILE="${REPO_ROOT}/crates/starbreaker-ui/tests/fixtures/ui_regression_freeze.json"
 
 mapfile -t MANIFEST_CANDIDATES < <(find "${REPO_ROOT}/crates/starbreaker-ui/tests/fixtures" -type f -name '*snapshot_manifest.json' | sort)
 DEFAULT_MANIFEST_PATH=""
@@ -20,6 +21,11 @@ fi
 
 if ! command -v magick >/dev/null 2>&1; then
   echo "error: ImageMagick 'magick' command is required but not installed" >&2
+  exit 1
+fi
+
+if ! command -v sha256sum >/dev/null 2>&1; then
+  echo "error: sha256sum is required but not installed" >&2
   exit 1
 fi
 
@@ -118,6 +124,63 @@ while IFS=$'\t' read -r target_id source_png tier; do
 
   echo "ok: ${target_id} (${tier})"
 done < <(jq -r '.targets[] | [.id, .source_generated_png, .tier] | @tsv' "${MANIFEST_PATH}")
+
+if [[ -f "${FREEZE_FILE}" ]]; then
+  if ! jq -e '.schema_version == 1 and (.artifacts | type == "array")' "${FREEZE_FILE}" >/dev/null 2>&1; then
+    echo "error: invalid freeze file schema: ${FREEZE_FILE}" >&2
+    errors=$((errors + 1))
+  else
+    manifest_ids_file="$(mktemp)"
+    freeze_ids_file="$(mktemp)"
+
+    jq -r '.targets[].id' "${MANIFEST_PATH}" | sort > "${manifest_ids_file}"
+    jq -r '.artifacts[].id' "${FREEZE_FILE}" | sort > "${freeze_ids_file}"
+
+    if ! diff -u "${manifest_ids_file}" "${freeze_ids_file}" >/dev/null 2>&1; then
+      echo "error: freeze file target ids do not match manifest ids: ${FREEZE_FILE}" >&2
+      errors=$((errors + 1))
+    fi
+
+    while IFS=$'\t' read -r id artifact_rel frozen_hash frozen_w frozen_h frozen_channels; do
+      [[ -n "${id}" ]] || continue
+      if [[ "${artifact_rel}" = /* ]]; then
+        frozen_artifact_path="${artifact_rel}"
+      else
+        frozen_artifact_path="${REPO_ROOT}/${artifact_rel}"
+      fi
+
+      if [[ ! -f "${frozen_artifact_path}" ]]; then
+        echo "error: freeze artifact missing for ${id}: ${frozen_artifact_path}" >&2
+        errors=$((errors + 1))
+        continue
+      fi
+
+      actual_hash="$(sha256sum "${frozen_artifact_path}" | awk '{print $1}')"
+      actual_meta="$(magick identify -format '%w %h %[channels]' "${frozen_artifact_path}" 2>/dev/null || true)"
+      if [[ -z "${actual_meta}" ]]; then
+        echo "error: freeze artifact inspect failed for ${id}: ${frozen_artifact_path}" >&2
+        errors=$((errors + 1))
+        continue
+      fi
+      read -r actual_w actual_h actual_channels <<< "${actual_meta}"
+
+      if [[ "${actual_hash}" != "${frozen_hash}" ]]; then
+        echo "error: freeze hash mismatch for ${id}: expected=${frozen_hash} actual=${actual_hash}" >&2
+        errors=$((errors + 1))
+      fi
+      if [[ "${actual_w}" != "${frozen_w}" || "${actual_h}" != "${frozen_h}" ]]; then
+        echo "error: freeze dimension mismatch for ${id}: expected=${frozen_w}x${frozen_h} actual=${actual_w}x${actual_h}" >&2
+        errors=$((errors + 1))
+      fi
+      if [[ "${actual_channels}" != "${frozen_channels}" ]]; then
+        echo "error: freeze channel mismatch for ${id}: expected=${frozen_channels} actual=${actual_channels}" >&2
+        errors=$((errors + 1))
+      fi
+    done < <(jq -r '.artifacts[] | [.id, .artifact_path, .sha256, (.width|tostring), (.height|tostring), .channels] | @tsv' "${FREEZE_FILE}")
+
+    rm -f "${manifest_ids_file}" "${freeze_ids_file}"
+  fi
+fi
 
 if [[ "${checked}" -eq 0 ]]; then
   echo "error: no targets found in manifest: ${MANIFEST_PATH}" >&2

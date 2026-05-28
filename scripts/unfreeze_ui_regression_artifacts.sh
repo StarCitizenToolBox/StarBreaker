@@ -84,7 +84,7 @@ fi
 
 mkdir -p "${ARCHIVE_DIR}"
 
-stamp="$(date -u +"%Y%m%dT%H%M%SZ")"
+stamp="$(date -u +"%Y%m%dT%H%M%S.%NZ")"
 archive_file="${ARCHIVE_DIR}/ui_regression_freeze_${stamp}.json"
 unfrozen_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 

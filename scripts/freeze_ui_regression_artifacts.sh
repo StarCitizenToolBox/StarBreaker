@@ -140,8 +140,12 @@ while IFS=$'\t' read -r target_id source_png tier; do
     source_path="${REPO_ROOT}/${source_png}"
   fi
 
-  artifact_rel="test-artifacts/ui/${target_id}.png"
-  artifact_path="${REPO_ROOT}/${artifact_rel}"
+  artifact_path="${ARTIFACT_DIR}/${target_id}.png"
+  if [[ "${artifact_path}" == "${REPO_ROOT}/"* ]]; then
+    artifact_rel="${artifact_path#${REPO_ROOT}/}"
+  else
+    artifact_rel="${artifact_path}"
+  fi
 
   if [[ ! -f "${source_path}" ]]; then
     echo "error: source image missing for ${target_id}: ${source_path}" >&2
