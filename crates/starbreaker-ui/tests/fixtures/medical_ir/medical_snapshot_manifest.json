@@ -6,6 +6,7 @@
       "category": "image",
       "baseline_path": "medical1.baseline",
       "current_path": "medical1.current",
+      "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_i_med_medicalbed_a.png",
       "tier": "platinum",
       "roi": {
         "x": 0.0,
@@ -19,6 +20,7 @@
       "category": "image",
       "baseline_path": "medical2.baseline",
       "current_path": "medical2.current",
+      "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_i_med_medicalendofbed_a.png",
       "tier": "platinum",
       "roi": {
         "x": 0.0,
@@ -32,6 +34,7 @@
       "category": "image",
       "baseline_path": "clipper_small_door.baseline",
       "current_path": "clipper_small_door.current",
+      "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_i_door_small_drak.png",
       "tier": "gold",
       "roi": {
         "x": 0.0,

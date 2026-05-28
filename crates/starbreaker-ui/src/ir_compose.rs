@@ -664,7 +664,24 @@ fn expand_nontransparent_bounds_to_target(img: RgbaImage, target_w: u32, target_
     let crop_w = max_x - min_x + 1;
     let crop_h = max_y - min_y + 1;
     let cropped = imageops::crop_imm(&img, min_x, min_y, crop_w, crop_h).to_image();
-    imageops::resize(&cropped, target_w.max(1), target_h.max(1), imageops::FilterType::Lanczos3)
+
+    let tw = target_w.max(1);
+    let th = target_h.max(1);
+    let scale = ((tw as f32) / (crop_w as f32)).min((th as f32) / (crop_h as f32));
+    let resized_w = ((crop_w as f32) * scale).round().max(1.0) as u32;
+    let resized_h = ((crop_h as f32) * scale).round().max(1.0) as u32;
+    let resized = imageops::resize(
+        &cropped,
+        resized_w,
+        resized_h,
+        imageops::FilterType::Lanczos3,
+    );
+
+    let mut canvas = RgbaImage::new(tw, th);
+    let offset_x = ((tw - resized_w) / 2) as i64;
+    let offset_y = ((th - resized_h) / 2) as i64;
+    imageops::overlay(&mut canvas, &resized, offset_x, offset_y);
+    canvas
 }
 
 fn rasterize_svg_for_node(
