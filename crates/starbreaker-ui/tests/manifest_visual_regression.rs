@@ -185,6 +185,16 @@ fn assert_manifest_visual_regression_guard(
 ) {
     let (reference_path, current_path) = comparison_paths(name);
     if !reference_path.is_file() || !current_path.is_file() {
+        let require_artifacts = std::env::var("STARBREAKER_UI_REQUIRE_VISUAL_ARTIFACTS")
+            .map(|value| value == "1")
+            .unwrap_or(false);
+        if require_artifacts {
+            panic!(
+                "missing required visual regression artifacts for {name}: reference={} current={}",
+                reference_path.display(),
+                current_path.display()
+            );
+        }
         eprintln!(
             "skipping {name} visual regression guard (missing files: reference={} current={})",
             reference_path.display(),

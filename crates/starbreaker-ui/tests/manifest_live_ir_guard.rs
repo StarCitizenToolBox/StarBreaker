@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use starbreaker_ui::pipeline::AssetFetcher;
 use starbreaker_ui::{
     CanvasFetcher, PipelineInputs, StyleFetcher, SwfFetcher, UiBindingView, UiError,
-    UiIrDocument, UiRegressionCategory, UiRegressionManifest, UiScreenSnapshot, UiSnapshotElement,
+    UiIrDocument, UiRegressionManifest, UiScreenSnapshot, UiSnapshotElement,
     compare_manifest_targets_with_loader, compile_ir_for_binding, snapshot_from_ui_ir,
 };
 
@@ -164,30 +164,16 @@ fn live_snapshot_manifest() -> UiRegressionManifest {
     manifest
         .targets
         .retain(|target| target.id == "medical1" || target.id == "medical2");
-    for target in &mut manifest.targets {
-        target.category = UiRegressionCategory::Text;
-    }
     manifest
 }
 
 fn focused_movement_snapshot(snapshot: &UiScreenSnapshot) -> UiScreenSnapshot {
-    let monitored_texts = ["PATIENT NAME", "No patient in bed", "MEDGELS", "200/200"];
     let mut elements: Vec<UiSnapshotElement> = snapshot
         .elements
         .iter()
-        .filter(|element| {
-            element
-                .text_payload
-                .as_deref()
-                .is_some_and(|text| monitored_texts.contains(&text))
-                || element
-                    .node_type
-                    .eq_ignore_ascii_case("component_general_button_secondary")
-        })
         .cloned()
         .map(|mut element| {
-            // Compare only movement-critical fields so source/style refreshes do
-            // not mask layout regressions for these tracked UI anchors.
+            // Preserve element sets/categories while normalizing style noise.
             element.alpha = 1.0;
             element.blend_mode = None;
             element.asset_identity = None;
