@@ -209,6 +209,19 @@ impl BindingResolver {
 
 }
 
+fn case_modifier_from_raw(node_raw: &serde_json::Value) -> &str {
+    node_raw
+        .get("caseModifier")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            node_raw
+                .get("labelProperties")
+                .and_then(|lp| lp.get("caseModifier"))
+                .and_then(|v| v.as_str())
+        })
+        .unwrap_or("")
+}
+
 /// Outcome of [`BindingResolver::resolve_text_detailed`].
 pub struct ResolvedText {
     pub text: String,
@@ -314,26 +327,13 @@ impl BindingResolver {
                 // localization key — look it up before using as-is.
                 if lit.starts_with('@') {
                     if let Some(resolved) = defaults.lookup_localization(lit) {
-                        return ResolvedText { text: resolved.to_owned(), is_name_derived: false };
+                            return ResolvedText {
+                                text: apply_case_modifier(resolved, case_modifier_from_raw(node_raw)),
+                                is_name_derived: false,
+                            };
                     }
                 }
                 return ResolvedText { text: lit.to_owned(), is_name_derived: false };
-            }
-        }
-
-        // `locString` is an alternative loc-key field on WidgetText nodes.
-        // It typically contains `@LOC_EMPTY` (→ empty sentinel) but may carry
-        // a real key, so we check it after `text` and skip the empty sentinel.
-        if let Some(loc_key) = node_raw
-            .get("locString")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty() && s.starts_with('@'))
-        {
-            if let Some(resolved) = defaults.lookup_localization(loc_key) {
-                if !resolved.is_empty() {
-                    return ResolvedText { text: resolved.to_owned(), is_name_derived: false };
-                }
             }
         }
 
@@ -347,13 +347,8 @@ impl BindingResolver {
         {
             if let Some(resolved) = defaults.lookup_localization(loc_key) {
                 if !resolved.is_empty() {
-                    let case_modifier = node_raw
-                        .get("labelProperties")
-                        .and_then(|lp| lp.get("caseModifier"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
                     return ResolvedText {
-                        text: apply_case_modifier(resolved, case_modifier),
+                        text: apply_case_modifier(resolved, case_modifier_from_raw(node_raw)),
                         is_name_derived: false,
                     };
                 }
@@ -401,13 +396,8 @@ impl BindingResolver {
                 }
                 if let Some(s) = self.eval_localized_ptr(input_ptr, defaults, &mut seen) {
                     if !s.is_empty() {
-                        let case_modifier = node_raw
-                            .get("labelProperties")
-                            .and_then(|lp| lp.get("caseModifier"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
                         return ResolvedText {
-                            text: apply_case_modifier(&s, case_modifier),
+                            text: apply_case_modifier(&s, case_modifier_from_raw(node_raw)),
                             is_name_derived: false,
                         };
                     }
@@ -426,18 +416,33 @@ impl BindingResolver {
             }
         }
 
+        // `locString` is an alternative loc-key field on WidgetText nodes.
+        // It typically contains `@LOC_EMPTY` (→ empty sentinel) but may carry
+        // a real key. Evaluate this after binding operations so field bindings
+        // (e.g. LocalizedFromIntegerSwitch) can override authored fallback text.
+        if let Some(loc_key) = node_raw
+            .get("locString")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && s.starts_with('@'))
+        {
+            if let Some(resolved) = defaults.lookup_localization(loc_key) {
+                if !resolved.is_empty() {
+                    return ResolvedText {
+                        text: apply_case_modifier(resolved, case_modifier_from_raw(node_raw)),
+                        is_name_derived: false,
+                    };
+                }
+            }
+        }
+
         // Localized component parameter (e.g. annunciator chiclet labels).
         // Injected by bb_resolve::inject_param_overrides from paramInputValues.
         if let Some(loc_key) = self.widget_to_loc_key.get(&node_id) {
             if let Some(resolved) = defaults.lookup_localization(loc_key) {
                 log::trace!("compose pass2: node={node_id} loc_key={loc_key:?} → {resolved:?}");
-                let case_modifier = node_raw
-                    .get("labelProperties")
-                    .and_then(|lp| lp.get("caseModifier"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
                 return ResolvedText {
-                    text: apply_case_modifier(resolved, case_modifier),
+                    text: apply_case_modifier(resolved, case_modifier_from_raw(node_raw)),
                     is_name_derived: false,
                 };
             }
@@ -1109,6 +1114,36 @@ mod tests {
         let raw = json!({"locString": "@mykey"});
         let result = resolver.resolve_text_detailed(0, &raw, &defaults);
         assert_eq!(result.text, "My Label");
+    }
+
+    #[test]
+    fn loc_string_field_respects_case_modifier() {
+        let resolver = resolver();
+        let mut defaults = DefaultValueRegistry::default();
+        defaults.merge_localization([("mykey".to_string(), "My Label".to_string())].into());
+
+        let raw = json!({
+            "locString": "@mykey",
+            "labelProperties": {
+                "caseModifier": "Upper"
+            }
+        });
+        let result = resolver.resolve_text_detailed(0, &raw, &defaults);
+        assert_eq!(result.text, "MY LABEL");
+    }
+
+    #[test]
+    fn top_level_case_modifier_applies_to_loc_string_field() {
+        let resolver = resolver();
+        let mut defaults = DefaultValueRegistry::default();
+        defaults.merge_localization([("mykey".to_string(), "My Label".to_string())].into());
+
+        let raw = json!({
+            "locString": "@mykey",
+            "caseModifier": "Upper"
+        });
+        let result = resolver.resolve_text_detailed(0, &raw, &defaults);
+        assert_eq!(result.text, "MY LABEL");
     }
 
     #[test]

@@ -70,6 +70,8 @@ pub struct UiIrNode {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub corner_radius: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub background_fill_alpha: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub background_fill_colour_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub segmented_fill: Option<UiIrSegmentedFill>,
@@ -96,9 +98,25 @@ pub struct UiIrNode {
     pub meter_progress: Option<f32>,
     pub text_style: Option<UiIrTextStyle>,
     pub asset_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asset_layout: Option<UiIrAssetLayout>,
     pub custom_shape: Option<UiIrCustomShape>,
     pub style_tag_uuids: Vec<String>,
     pub resolved_style_tags: Vec<UiIrStyleTag>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UiIrAssetLayout {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scaling_behavior: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contain_position_x: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contain_position_y: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flip_horizontal: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flip_vertical: Option<bool>,
 }
 
 /// Typed representation of authored fixed/relative values.
@@ -192,12 +210,56 @@ fn default_vertical_alignment() -> String {
     "Center".to_string()
 }
 
+fn asset_layout_from_raw(raw: &serde_json::Value) -> Option<UiIrAssetLayout> {
+    let svg_fill = raw.get("svgFill")?;
+    let scaling_behavior = svg_fill
+        .get("scalingBehavior")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let contain_position_x = svg_fill
+        .get("containPositionX")
+        .and_then(|value| value.as_f64())
+        .map(|value| value as f32);
+    let contain_position_y = svg_fill
+        .get("containPositionY")
+        .and_then(|value| value.as_f64())
+        .map(|value| value as f32);
+    let flip_horizontal = svg_fill
+        .get("flipHorizontal")
+        .and_then(|value| value.as_bool())
+        .filter(|value| *value);
+    let flip_vertical = svg_fill
+        .get("flipVertical")
+        .and_then(|value| value.as_bool())
+        .filter(|value| *value);
+
+    if scaling_behavior.is_none()
+        && contain_position_x.is_none()
+        && contain_position_y.is_none()
+        && flip_horizontal.is_none()
+        && flip_vertical.is_none()
+    {
+        return None;
+    }
+
+    Some(UiIrAssetLayout {
+        scaling_behavior,
+        contain_position_x,
+        contain_position_y,
+        flip_horizontal,
+        flip_vertical,
+    })
+}
+
 fn effective_font_record(
     node: &BbNode,
     standard_text_styles: &HashMap<String, StandardTextStyle>,
 ) -> Option<String> {
     node.raw
         .get("FontStyleRecord")
+        .or_else(|| node.raw.get("fontStyle"))
         .or_else(|| node.raw.get("fontRecord"))
         .and_then(|value| value.as_str())
         .filter(|value| !value.is_empty())
@@ -394,8 +456,20 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
         );
     }
 
+    let mut ordered_ids = layout.draw_order.clone();
+    let mut seen_ids: std::collections::HashSet<BbNodeId> =
+        ordered_ids.iter().copied().collect();
+    for &id in scene.nodes.keys() {
+        if seen_ids.insert(id) {
+            ordered_ids.push(id);
+        }
+    }
+
     let mut nodes = Vec::with_capacity(scene.nodes.len());
-    for (&id, node) in &scene.nodes {
+    for id in ordered_ids {
+        let Some(node) = scene.nodes.get(&id) else {
+            continue;
+        };
         let layout_rect = layout.rects.get(&id).copied().unwrap_or_default();
         let has_text_intent = node_has_text_intent(node);
         let resolved_text = has_text_intent
@@ -725,11 +799,13 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
             .as_ref()
             .and_then(|style| style.alpha_override)
             .unwrap_or_else(|| effective_alpha_for_node(id, node, scene, animation_sample_percent));
+        let svg_fill_overlay_alpha = svg_fill_overlay_alpha_from_raw(&node.raw);
         let alpha = alpha_base
             * separator_style
                 .as_ref()
                 .and_then(|style| style.colour_alpha)
-                .unwrap_or(1.0);
+                .unwrap_or(1.0)
+            * svg_fill_overlay_alpha.unwrap_or(1.0);
         let stroke_colour = stroke_colour_from_raw(&node.raw)
             .or_else(|| separator_style.as_ref().and_then(|style| style.colour));
         let stroke_colour_token = stroke_colour_token_from_raw(&node.raw).or_else(|| {
@@ -791,6 +867,7 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
                 })
                 .flatten(),
             corner_radius: node_corner_radius(node),
+            background_fill_alpha: background_fill_alpha_from_raw(&node.raw, allow_background_fill),
             background_fill_colour_token,
             segmented_fill: segmented_fill_from_raw(node),
             border: border_from_node(node),
@@ -802,6 +879,7 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
                 .icon
                 .as_ref()
                 .and_then(|i| i.tint_colour)
+                .or_else(|| svg_fill_overlay_colour_from_raw(&node.raw))
                 .or_else(|| custom_shape.as_ref().and_then(|_| fill_colour_from_raw_for_text(&node.raw))),
             icon_tint_colour_token: icon_tint_colour_token_from_raw(
                 &node.raw,
@@ -814,6 +892,7 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
             meter_progress,
             text_style,
             asset_ref,
+            asset_layout: asset_layout_from_raw(&node.raw),
             custom_shape,
             style_tag_uuids: node.style_tag_uuids.clone(),
             resolved_style_tags,
@@ -1112,6 +1191,8 @@ fn is_footer_brand_label_context(scene: &BbScene, mut parent_id: BbNodeId) -> bo
 }
 
 fn background_fill_colour_token_from_raw(raw: &serde_json::Value, allow_fill_colour: bool) -> Option<String> {
+    let background_enabled = raw_background_enabled(raw);
+
     raw.get("BackgroundColorToken")
         .and_then(|value| value.as_str())
         .map(str::trim)
@@ -1128,17 +1209,53 @@ fn background_fill_colour_token_from_raw(raw: &serde_json::Value, allow_fill_col
                 .map(str::to_owned)
         })
         .or_else(|| {
-            raw.get("background")
-                .and_then(|background| background.get("color"))
-                .and_then(colour_style_token)
-                .or_else(|| raw.get("BackgroundColor").and_then(colour_style_token))
-                .or_else(|| {
-                    if allow_fill_colour {
-                        raw.get("FillColor").and_then(colour_style_token)
-                    } else {
-                        None
-                    }
-                })
+            if background_enabled {
+                raw.get("background")
+                    .and_then(|background| background.get("color"))
+                    .and_then(colour_style_token)
+                    .or_else(|| raw.get("BackgroundColor").and_then(colour_style_token))
+            } else {
+                None
+            }
+            .or_else(|| {
+                if allow_fill_colour {
+                    raw.get("FillColor").and_then(colour_style_token)
+                } else {
+                    None
+                }
+            })
+        })
+}
+
+fn colour_style_alpha(value: &serde_json::Value) -> Option<f32> {
+    value
+        .get("_Type_")
+        .and_then(|v| v.as_str())
+        .filter(|ty| *ty == "BuildingBlocks_ColorStyle")?;
+
+    value
+        .get("alpha")
+        .and_then(|v| v.as_f64())
+        .map(|value| (value as f32).clamp(0.0, 1.0))
+}
+
+fn background_fill_alpha_from_raw(raw: &serde_json::Value, allow_fill_colour: bool) -> Option<f32> {
+    let background_enabled = raw_background_enabled(raw);
+
+    if background_enabled {
+        raw.get("background")
+            .and_then(|background| background.get("color"))
+            .and_then(colour_style_alpha)
+            .or_else(|| raw.get("BackgroundColor").and_then(colour_style_alpha))
+    } else {
+        None
+    }
+        .or_else(|| {
+            if allow_fill_colour {
+                raw.get("FillColor").and_then(colour_style_alpha)
+            } else {
+                None
+            }
         })
 }
 
@@ -1601,6 +1718,7 @@ fn icon_tint_colour_token_from_raw(raw: &serde_json::Value, allow_fill_colour: b
     raw.get("iconProperties")
         .and_then(|properties| properties.get("color"))
         .and_then(colour_style_token)
+        .or_else(|| svg_fill_overlay_colour_token_from_raw(raw))
         .or_else(|| {
             allow_fill_colour.then(|| {
                 raw.get("FillColorToken")
@@ -1615,15 +1733,138 @@ fn icon_tint_colour_token_from_raw(raw: &serde_json::Value, allow_fill_colour: b
         })
 }
 
+fn svg_fill_overlay_colour_from_raw(raw: &serde_json::Value) -> Option<[f32; 4]> {
+    let svg_fill = raw.get("svgFill")?;
+    let render_shape = svg_fill
+        .get("renderShape")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let enable_color_overlay = svg_fill
+        .get("enableColorOverlay")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if !render_shape || !enable_color_overlay {
+        return None;
+    }
+
+    parse_raw_colour(svg_fill.get("color")?)
+}
+
+fn svg_fill_overlay_colour_token_from_raw(raw: &serde_json::Value) -> Option<String> {
+    let svg_fill = raw.get("svgFill")?;
+    let render_shape = svg_fill
+        .get("renderShape")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let enable_color_overlay = svg_fill
+        .get("enableColorOverlay")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if !render_shape || !enable_color_overlay {
+        return None;
+    }
+
+    svg_fill.get("color").and_then(colour_style_token)
+}
+
+fn svg_fill_overlay_alpha_from_raw(raw: &serde_json::Value) -> Option<f32> {
+    let svg_fill = raw.get("svgFill")?;
+    let render_shape = svg_fill
+        .get("renderShape")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let enable_color_overlay = svg_fill
+        .get("enableColorOverlay")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if !render_shape || !enable_color_overlay {
+        return None;
+    }
+
+    svg_fill
+        .get("color")
+        .and_then(|value| value.get("alpha"))
+        .and_then(|value| value.as_f64())
+        .map(|value| (value as f32).clamp(0.0, 1.0))
+}
+
 fn text_colour_token_from_raw(raw: &serde_json::Value) -> Option<String> {
     raw.get("FillColorToken")
         .and_then(|value| value.as_str())
         .map(str::trim)
         .filter(|token| !token.is_empty())
         .map(str::to_owned)
+        .or_else(|| raw.get("color").and_then(colour_style_token))
         .or_else(|| raw.get("textColor").and_then(colour_style_token))
         .or_else(|| raw.get("textColour").and_then(colour_style_token))
         .or_else(|| raw.get("FillColor").and_then(colour_style_token))
+}
+
+fn auto_font_size_enabled(raw: &serde_json::Value) -> bool {
+    raw.get("autoFontSize")
+        .or_else(|| raw.get("AutoFontSize"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
+fn auto_font_size_from_signals(
+    node: &crate::bb_scene::BbNode,
+    node_rect_h: f32,
+    resolved_text: Option<&str>,
+) -> Option<f32> {
+    if !auto_font_size_enabled(&node.raw) {
+        return None;
+    }
+
+    let text = resolved_text.map(str::trim).filter(|value| !value.is_empty())?;
+    let text_len = text.chars().count();
+    let multiline = text.lines().nth(1).is_some();
+    let base_size = if matches!(node.ty, BbNodeType::WidgetText) {
+        if multiline {
+            (node_rect_h * 0.42).clamp(24.0, 160.0)
+        } else {
+            (node_rect_h * 0.72).clamp(36.0, 220.0)
+        }
+    } else if multiline {
+        (node_rect_h * 0.18).clamp(18.0, 72.0)
+    } else {
+        (node_rect_h * 0.28).clamp(18.0, 96.0)
+    };
+    let overflow_threshold = if multiline {
+        18
+    } else if matches!(node.ty, BbNodeType::WidgetText) {
+        8
+    } else {
+        10
+    };
+    let reduction_per_char = if matches!(node.ty, BbNodeType::WidgetText) {
+        1.2
+    } else {
+        2.0
+    };
+    let reduction_cap = if matches!(node.ty, BbNodeType::WidgetText) {
+        0.2
+    } else {
+        0.35
+    };
+    let overflow = text_len.saturating_sub(overflow_threshold) as f32;
+    let reduction = (overflow * reduction_per_char).min(base_size * reduction_cap);
+    let sized = (base_size - reduction).max(18.0);
+
+    if matches!(node.ty, BbNodeType::WidgetText) {
+        if let Some(authored_font_size) = font_size_fixed_value_from_raw(node) {
+            let short_single_line = !multiline && text_len <= 12;
+            let floor = if short_single_line {
+                (authored_font_size * 4.0).max(18.0)
+            } else {
+                18.0
+            };
+            let ceiling = (authored_font_size * 4.0).max(floor);
+            return Some(sized.clamp(floor, ceiling));
+        }
+    }
+
+    Some(sized)
 }
 
 fn semantic_text_colour_token_from_style_tags(
@@ -1765,6 +2006,13 @@ fn resolve_effective_font_size(
                 label_style.as_deref(),
             );
         }
+    }
+
+    if let Some(size) = auto_font_size_from_signals(node, node_rect_h, resolved_text) {
+        return apply_label_style_font_scale(
+            UiIrValue::Fixed { value: size },
+            label_style.as_deref(),
+        );
     }
 
     // Prefer the latest raw font size because direct style/brand modifiers are
@@ -3565,6 +3813,34 @@ mod tests {
                         }
                     },
                     {
+                        "_Pointer_": "ptr:3",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "disabled_border_strip",
+                        "isActive": true,
+                        "background": {
+                            "enable": false,
+                            "color": {
+                                "_Type_": "BuildingBlocks_ColorStyle",
+                                "color": "Base",
+                                "alpha": 0.2
+                            }
+                        },
+                        "svgFill": {
+                            "svgPath": "UI/Textures/Vector/Drake/Hazardlines_header1.svg",
+                            "renderShape": true,
+                            "enableColorOverlay": true,
+                            "color": {
+                                "_Type_": "BuildingBlocks_ColorStyle",
+                                "color": "Base",
+                                "alpha": 0.2
+                            }
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    },
+                    {
                         "_Pointer_": "ptr:2",
                         "_Type_": "BuildingBlocks_DisplayWidget",
                         "name": "enabled_panel",
@@ -3606,6 +3882,15 @@ mod tests {
         let card_root = ir.nodes.iter().find(|node| node.name == "card_root").expect("card root node");
         assert_eq!(card_root.background_fill_colour, None);
         assert_eq!(card_root.background_fill_colour_token, None);
+
+        let disabled_border_strip = ir
+            .nodes
+            .iter()
+            .find(|node| node.name == "disabled_border_strip")
+            .expect("disabled border strip node");
+        assert_eq!(disabled_border_strip.background_fill_colour, None);
+        assert_eq!(disabled_border_strip.background_fill_colour_token, None);
+        assert_eq!(disabled_border_strip.background_fill_alpha, None);
 
         let enabled_panel = ir.nodes.iter().find(|node| node.name == "enabled_panel").expect("enabled panel node");
         assert_eq!(enabled_panel.background_fill_colour, None);
@@ -4038,6 +4323,122 @@ mod tests {
     }
 
     #[test]
+    fn compile_ir_prefers_svg_fill_overlay_token_and_alpha() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestSvgFillOverlayTint",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "overlay",
+                        "isActive": true,
+                        "alpha": 1.0,
+                        "sizing": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 8.0}
+                        },
+                        "svgFill": {
+                            "svgPath": "UI/Textures/Vector/Drake/Drake_lowerline.svg",
+                            "renderShape": true,
+                            "enableColorOverlay": true,
+                            "color": {
+                                "_Type_": "BuildingBlocks_ColorStyle",
+                                "color": "Accent2",
+                                "alpha": 0.2
+                            }
+                        },
+                        "background": {
+                            "enable": false,
+                            "color": {
+                                "_Type_": "BuildingBlocks_ColorStyle",
+                                "color": "Base",
+                                "alpha": 1.0
+                            }
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-svg-fill-overlay-token",
+            Some("BuildingBlocks_Canvas.TestSvgFillOverlayTint"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "overlay").expect("overlay node");
+        assert_eq!(node.icon_tint_colour_token.as_deref(), Some("Accent2"));
+        assert!((node.alpha - 0.2).abs() < 0.001, "expected overlay alpha 0.2, got {}", node.alpha);
+    }
+
+    #[test]
+    fn compile_ir_emits_svg_flip_flags_in_asset_layout() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestSvgFlipFlags",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "arrow_right",
+                        "isActive": true,
+                        "sizing": {
+                            "width": {"behavior": "Fixed", "value": 20.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        },
+                        "svgFill": {
+                            "svgPath": "UI/Textures/Vector/H_HUDScreens/Ships/DRAK/drake_holo_hud_pixel_arrow.svg",
+                            "renderShape": true,
+                            "enableColorOverlay": true,
+                            "flipHorizontal": true,
+                            "flipVertical": false,
+                            "scalingBehavior": "Contain",
+                            "containPositionX": 0.5,
+                            "containPositionY": 0.5
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-svg-flip-flags",
+            Some("BuildingBlocks_Canvas.TestSvgFlipFlags"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "arrow_right").expect("arrow_right node");
+        let layout = node.asset_layout.as_ref().expect("asset layout");
+        assert_eq!(layout.flip_horizontal, Some(true));
+        assert_eq!(layout.flip_vertical, None);
+    }
+
+    #[test]
     fn compile_ir_treats_authored_procedural_separator_strip_as_fill() {
         let canvas = serde_json::json!({
             "_RecordName_": "BuildingBlocks_Canvas.TestAuthoredSeparatorStrip",
@@ -4447,6 +4848,7 @@ mod tests {
                 },
                 background_fill_colour: None,
                 corner_radius: None,
+                background_fill_alpha: None,
                 background_fill_colour_token: None,
                 segmented_fill: None,
                 border: None,
@@ -4463,6 +4865,7 @@ mod tests {
                 meter_progress: None,
                 text_style: None,
                 asset_ref: None,
+                asset_layout: None,
                 custom_shape: None,
                 style_tag_uuids: Vec::new(),
                 resolved_style_tags: Vec::new(),
@@ -4822,6 +5225,152 @@ mod tests {
         let node = &ir.nodes[0];
         let style = node.text_style.as_ref().expect("text style");
         assert_eq!(style.font_size, UiIrValue::Fixed { value: 42.0 });
+    }
+
+    #[test]
+    fn compile_ir_widget_text_preserves_loc_string_case_colour_and_auto_font_size() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.WidgetTextStatus",
+            "_RecordValue_": {
+                "size": {"x": 200, "y": 200},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetText",
+                        "name": "status",
+                        "locString": "@mykey",
+                        "color": {
+                            "_Type_": "BuildingBlocks_ColorStyle",
+                            "color": "Base",
+                            "alpha": 1.0
+                        },
+                        "fontStyle": "file://./../../../../../../../libs/foundry/records/ui/buildingblocks/fontstyles/audimatmono-regular.json",
+                        "autoFontSize": true,
+                        "fontSize": 16.0,
+                        "labelProperties": {
+                            "caseModifier": "Upper"
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 120.0},
+                            "height": {"behavior": "Fixed", "value": 80.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let mut defaults = defaults();
+        defaults.insert_localization("mykey", "Closed".to_string());
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-widget-text-status",
+            None,
+            (200, 200),
+            &defaults,
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = &ir.nodes[0];
+        assert_eq!(
+            node.text_payload,
+            Some(UiIrTextPayload::Resolved {
+                text: "CLOSED".to_string(),
+            })
+        );
+        let style = node.text_style.as_ref().expect("text style");
+        assert_eq!(
+            style.font_record.as_deref(),
+            Some("file://./../../../../../../../libs/foundry/records/ui/buildingblocks/fontstyles/audimatmono-regular.json")
+        );
+        assert_eq!(style.resolved_font_record, None);
+        assert_eq!(style.colour_token.as_deref(), Some("Base"));
+        assert!(
+            matches!(style.font_size, UiIrValue::Fixed { value } if value > 16.0),
+            "auto-sized text should exceed the stale authored font size: {:?}",
+            style.font_size
+        );
+    }
+
+    #[test]
+    fn compile_ir_widget_text_auto_font_size_caps_runaway_growth_on_large_slots() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.WidgetTextLargeSlot",
+            "_RecordValue_": {
+                "size": {"x": 1920, "y": 1080},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetText",
+                        "name": "status",
+                        "locString": "@mykey",
+                        "color": {
+                            "_Type_": "BuildingBlocks_ColorStyle",
+                            "color": "Base",
+                            "alpha": 1.0
+                        },
+                        "autoFontSize": true,
+                        "fontSize": 16.0,
+                        "textAlignment": "Center",
+                        "verticalAlignment": "Center",
+                        "wordWrap": false,
+                        "caseModifier": "Upper",
+                        "sizing": {
+                            "_Type_": "BuildingBlocks_Size",
+                            "width": {"_Type_": "BuildingBlocks_FixedOrRelativeValue", "behavior": "Percent", "value": 0.6},
+                            "height": {"_Type_": "BuildingBlocks_FixedOrRelativeValue", "behavior": "PercentOfX", "value": 0.3},
+                            "depth": {"_Type_": "BuildingBlocks_FixedOrRelativeValue", "behavior": "Fixed", "value": 0.0},
+                            "minWidth": {"_Type_": "BuildingBlocks_FixedOrRelativeValue", "behavior": "Fixed", "value": 0.0},
+                            "minHeight": {"_Type_": "BuildingBlocks_FixedOrRelativeValue", "behavior": "Fixed", "value": 0.0},
+                            "maxWidth": {"_Type_": "BuildingBlocks_FixedOrRelativeValue", "behavior": "Fixed", "value": 0.0},
+                            "maxHeight": {"_Type_": "BuildingBlocks_FixedOrRelativeValue", "behavior": "Fixed", "value": 0.0},
+                            "enableMinWidth": false,
+                            "enableMinHeight": false,
+                            "enableMaxWidth": false,
+                            "enableMaxHeight": false
+                        },
+                        "anchor": {"x": 0.5, "y": 0.6, "z": 0.0},
+                        "pivot": {"x": 0.5, "y": 0.5, "z": 0.0}
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let mut defaults = defaults();
+        defaults.insert_localization("mykey", "Closed".to_string());
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-widget-text-large-slot",
+            None,
+            (1920, 1080),
+            &defaults,
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = &ir.nodes[0];
+        let style = node.text_style.as_ref().expect("text style");
+        assert!(
+            matches!(style.font_size, UiIrValue::Fixed { value } if (63.9..=64.1).contains(&value)),
+            "auto-sized widget text should stay within the short-status authored-size band: {:?}",
+            style.font_size
+        );
     }
 
     #[test]

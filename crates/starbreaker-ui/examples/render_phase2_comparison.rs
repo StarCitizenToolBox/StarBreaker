@@ -98,6 +98,7 @@ fn synthetic_hybrid_document() -> UiIrDocument {
             computed_rect: UiIrRect { x: 12.0, y: 10.0, w: 96.0, h: 44.0 },
             background_fill_colour: Some([0.0, 0.0, 1.0, 0.65]),
             corner_radius: None,
+            background_fill_alpha: None,
             background_fill_colour_token: Some("Accent2".to_string()),
             segmented_fill: None,
             border: Some(UiIrBorder {
@@ -119,6 +120,7 @@ fn synthetic_hybrid_document() -> UiIrDocument {
             meter_progress: None,
             text_style: None::<UiIrTextStyle>,
             asset_ref: None,
+            asset_layout: None,
             custom_shape: None,
             style_tag_uuids: Vec::new(),
             resolved_style_tags: Vec::new(),

@@ -172,12 +172,18 @@ pub fn layout_with_animation_sample(
     let mut rects: BTreeMap<BbNodeId, Rect> = BTreeMap::new();
     let mut draw_order: Vec<BbNodeId> = Vec::new();
 
-    // Collect roots and sort them for determinism: (layer, id).
+    // Collect roots and sort deterministically while preserving authored order
+    // when synthetic ids are present (pointerless nodes get high synthetic ids).
     let mut roots: Vec<BbNodeId> = scene.roots.clone();
-    roots.sort_by_key(|&id| {
-        let layer = scene.nodes.get(&id).map(|n| n.layer).unwrap_or(0);
-        (layer, id)
-    });
+    let has_synthetic_roots = roots.iter().any(|id| *id >= SYNTHETIC_NODE_ID_BASE);
+    if has_synthetic_roots {
+        roots.sort_by_key(|&id| scene.nodes.get(&id).map(|n| n.layer).unwrap_or(0));
+    } else {
+        roots.sort_by_key(|&id| {
+            let layer = scene.nodes.get(&id).map(|n| n.layer).unwrap_or(0);
+            (layer, id)
+        });
+    }
 
     for root_id in roots {
         layout_node(

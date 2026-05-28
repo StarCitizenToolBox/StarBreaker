@@ -186,26 +186,44 @@ struct ManufacturerStyleFetcher<'a> {
     db: &'a Database<'a>,
 }
 
+fn manufacturer_style_match_score(stem_lower: &str, manufacturer_lower: &str) -> Option<i32> {
+    if stem_lower == format!("s_{manufacturer_lower}_hud") {
+        return Some(0);
+    }
+    if stem_lower == format!("s_{manufacturer_lower}") {
+        return Some(1);
+    }
+    if stem_lower.starts_with(&format!("s_{manufacturer_lower}_")) {
+        return Some(2);
+    }
+    if stem_lower == manufacturer_lower {
+        return Some(3);
+    }
+    if stem_lower.contains(manufacturer_lower) {
+        return Some(4);
+    }
+    None
+}
+
 impl<'a> StyleFetcher for ManufacturerStyleFetcher<'a> {
     fn fetch_manufacturer_style(&self, manufacturer_id: &str) -> Result<ManufacturerStyle, UiError> {
         let loader = StyleLoader::for_manufacturer(manufacturer_id);
         let needle = manufacturer_id.to_ascii_lowercase();
 
-        let candidates: Vec<_> = self
+        let mut candidates: Vec<_> = self
             .db
             .records_by_type_name("BuildingBlocks_Style")
             .filter_map(|record| {
                 let full = self.db.resolve_string2(record.name_offset).to_string();
                 let stem = full.rsplit('.').next().unwrap_or(&full).to_ascii_lowercase();
-                if stem.contains(&needle) {
-                    Some((full, record))
-                } else {
-                    None
-                }
+                let bucket = manufacturer_style_match_score(&stem, &needle)?;
+                Some((bucket, stem, full, record))
             })
             .collect();
 
-        if let Some((full_name, record)) = candidates.first() {
+        candidates.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
+        if let Some((_, _, full_name, record)) = candidates.first() {
             match starbreaker_datacore::export::to_json_compact(self.db, record) {
                 Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
                     Ok(value) => match loader.parse_buildingblocks_style_record(&value) {

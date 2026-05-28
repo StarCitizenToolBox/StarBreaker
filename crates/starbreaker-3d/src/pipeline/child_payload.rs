@@ -1044,36 +1044,30 @@ fn collect_physical_screen_canvases(
 /// Build a map from MFD view-type enum name (e.g. `"eView_TargetStatus"`) to
 /// `(canvas_guid, canvas_record_name)` by scanning all `SMFDView` records.
 /// `eView_Off` entries are excluded since they carry no renderable content.
-///
-/// `landscapeCanvas` is a DataCore Reference field.  Materializing the whole
-/// `SMFDView` record with `skip_references = true` converts it to
-/// `Value::Guid(record_id)` — the correct way to extract the target GUID.
 fn build_mfd_view_canvas_map(db: &Database) -> HashMap<String, (String, Option<String>)> {
-    use starbreaker_datacore::query::execute::materialize_struct_as_value_no_refs;
-    use starbreaker_datacore::reader::SpanReader;
+    use starbreaker_datacore::types::CigGuid;
 
     let mut map = HashMap::new();
     for record in db.records_by_type_name("SMFDView") {
-        let instance_bytes =
-            db.get_instance(record.struct_index, record.instance_index as i32);
-        let mut reader = SpanReader::new(instance_bytes);
-        let smfd_value =
-            match materialize_struct_as_value_no_refs(db, record.struct_index, &mut reader) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
+        let Some(view_type_compiled) = db.compile_path::<String>(record.struct_id(), "viewType").ok() else {
+            continue;
+        };
+        let Some(canvas_compiled) = db
+            .compile_path::<CigGuid>(record.struct_id(), "landscapeCanvas")
+            .ok()
+        else {
+            continue;
+        };
 
-        // viewType is DataType::EnumChoice → Value::Enum(str).
-        let view_type = match value_object(&smfd_value, "viewType") {
-            Some(Value::Enum(vt)) if !vt.is_empty() && *vt != "eView_Off" => (*vt).to_string(),
-            Some(Value::String(vt)) if !vt.is_empty() && *vt != "eView_Off" => (*vt).to_string(),
+        let view_type = match db.query_single::<String>(&view_type_compiled, record).ok().flatten() {
+            Some(vt) if !vt.is_empty() && vt != "eView_Off" => vt,
             _ => continue,
         };
-        // landscapeCanvas is DataType::Reference → Value::Guid(record_id) in materialized struct.
-        let canvas_guid = match value_object(&smfd_value, "landscapeCanvas") {
-            Some(Value::Guid(guid)) => guid.to_string(),
-            _ => continue,
+        let canvas_guid = match db.query_single::<CigGuid>(&canvas_compiled, record).ok().flatten() {
+            Some(guid) => guid.to_string(),
+            None => continue,
         };
+
         let name = parse_guid(&canvas_guid)
             .and_then(|g| db.record_by_id(&g))
             .map(|r| db.resolve_string2(r.name_offset).to_string())
@@ -1193,37 +1187,59 @@ fn default_display_screen_state(
     record: &Record,
     db: &Database,
 ) -> (Option<String>, Option<[u8; 4]>, Option<u16>) {
-    let Some(states) = query_value_path(db, record, "Components[SCItemDisplayScreenComponentParams].screenStates")
-    else {
+    let names = db
+        .compile_path::<String>(
+            record.struct_id(),
+            "Components[SCItemDisplayScreenComponentParams].screenStates[SDisplayScreenState].statename",
+        )
+        .ok()
+        .and_then(|compiled| db.query::<String>(&compiled, record).ok())
+        .unwrap_or_default();
+    if names.is_empty() {
         return (None, None, None);
-    };
-    let states = match states {
-        Value::Array(values) => values,
-        other => vec![other],
-    };
-    let selected = states
+    }
+
+    let lights_on = db
+        .compile_path::<bool>(
+            record.struct_id(),
+            "Components[SCItemDisplayScreenComponentParams].screenStates[SDisplayScreenState].stateLightParams.lightOn",
+        )
+        .ok()
+        .and_then(|compiled| db.query::<bool>(&compiled, record).ok())
+        .unwrap_or_default();
+    let colors = query_value_vec_path(
+        db,
+        record,
+        "Components[SCItemDisplayScreenComponentParams].screenStates[SDisplayScreenState].stateLightParams.color",
+    );
+    let intensities = query_value_vec_path(
+        db,
+        record,
+        "Components[SCItemDisplayScreenComponentParams].screenStates[SDisplayScreenState].stateLightParams.intensity",
+    );
+
+    let selected_idx = names
         .iter()
-        .find(|state| {
-            value_object_string(state, "statename").as_deref() == Some("Normal")
-                && value_object(state, "stateLightParams")
-                    .and_then(|params| value_object_bool(params, "lightOn"))
-                    .unwrap_or(false)
+        .enumerate()
+        .find(|(index, name)| {
+            *name == "Normal"
+                && lights_on.get(*index).copied().unwrap_or(false)
         })
+        .map(|(index, _)| index)
         .or_else(|| {
-            states.iter().find(|state| {
-                value_object_string(state, "statename")
-                    .is_some_and(|name| !name.is_empty())
-            })
+            names.iter()
+                .enumerate()
+                .find(|(_, name)| !name.is_empty())
+                .map(|(index, _)| index)
         });
-    let Some(selected) = selected else {
+    let Some(selected_idx) = selected_idx else {
         return (None, None, None);
     };
-    let default_state_name = value_object_string(selected, "statename");
-    let default_light_color = value_object(selected, "stateLightParams")
-        .and_then(|params| value_object(params, "color"))
-        .and_then(value_rgba8);
-    let default_light_intensity_milli = value_object(selected, "stateLightParams")
-        .and_then(|params| value_object(params, "intensity"))
+
+    let default_state_name = names.get(selected_idx).cloned();
+    let default_light_color = colors.get(selected_idx).and_then(value_rgba8);
+    let default_light_intensity_milli = intensities
+        .get(selected_idx)
         .and_then(value_f64)
         .map(|value| (value.clamp(0.0, 65.535) * 1000.0).round() as u16);
     (
@@ -1255,6 +1271,13 @@ fn query_value_path<'a>(db: &'a Database<'a>, record: &'a Record, path: &str) ->
         .ok()
         .and_then(|compiled| db.query_no_references(&compiled, record).ok())
         .and_then(|mut values| if values.is_empty() { None } else { Some(values.remove(0)) })
+}
+
+fn query_value_vec_path<'a>(db: &'a Database<'a>, record: &'a Record, path: &str) -> Vec<Value<'a>> {
+    db.compile_path::<Value>(record.struct_id(), path)
+        .ok()
+        .and_then(|compiled| db.query_no_references(&compiled, record).ok())
+        .unwrap_or_default()
 }
 
 fn first_non_null_layer_view_canvas(db: &Database, record: &Record) -> Option<String> {
@@ -1318,13 +1341,6 @@ fn value_object_string(value: &Value<'_>, key: &str) -> Option<String> {
     match value_object(value, key) {
         Some(Value::String(text)) if !text.is_empty() => Some((*text).to_string()),
         Some(Value::Guid(guid)) => Some(guid.to_string()),
-        _ => None,
-    }
-}
-
-fn value_object_bool(value: &Value<'_>, key: &str) -> Option<bool> {
-    match value_object(value, key) {
-        Some(Value::Bool(flag)) => Some(*flag),
         _ => None,
     }
 }

@@ -370,15 +370,26 @@ pub(crate) fn resolve_children(
             // Probe whether mesh companion exists.
             // CDF files don't have companion files — check for the CDF itself.
             let p4k_geom_path = datacore_path_to_p4k(geom_path);
-            let has_geometry = if geom_path.to_lowercase().ends_with(".cdf") {
-                p4k.entry_case_insensitive(&p4k_geom_path).is_some()
+            let (has_geometry, metadata_only_geometry) = if geom_path.to_lowercase().ends_with(".cdf") {
+                (p4k.entry_case_insensitive(&p4k_geom_path).is_some(), false)
             } else {
                 let companion = resolve_companion_path(p4k, &p4k_geom_path, opts.lod_level);
-                p4k.entry_case_insensitive(&companion).is_some()
+                let companion_exists = p4k.entry_case_insensitive(&companion).is_some();
+                let metadata_only = !companion_exists
+                    && p4k.entry_case_insensitive(&p4k_geom_path).is_some();
+                (companion_exists, metadata_only)
             };
 
             if !has_geometry {
-                log::warn!("  {} -> mesh not found: {}", node.entity_name, p4k_geom_path);
+                if metadata_only_geometry {
+                    log::debug!(
+                        "  {} -> metadata-only helper geometry (no render mesh): {}",
+                        node.entity_name,
+                        p4k_geom_path
+                    );
+                } else {
+                    log::warn!("  {} -> mesh not found: {}", node.entity_name, p4k_geom_path);
+                }
             }
 
             if node.offset_position != [0.0; 3] || node.offset_rotation != [0.0; 3] {

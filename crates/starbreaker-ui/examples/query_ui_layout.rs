@@ -334,9 +334,11 @@ fn main() -> Result<(), String> {
         if name_lc.contains(&query_lc) || ty_lc.contains(&query_lc) {
             hits += 1;
             println!(
-                "id={} parent={:?} name='{}' type='{}' x={:.1} y={:.1} w={:.1} h={:.1}",
+                "id={} parent={:?} active={} alpha={:.3} name='{}' type='{}' x={:.1} y={:.1} w={:.1} h={:.1}",
                 node.id,
                 node.parent_id,
+                node.is_active,
+                node.alpha,
                 node.name,
                 node.node_type,
                 node.computed_rect.x,
@@ -351,6 +353,15 @@ fn main() -> Result<(), String> {
                 draw_rect.y,
                 draw_rect.w,
                 draw_rect.h
+            );
+            println!(
+                "  fill bg={:?} bg_token={:?} icon_tint={:?} icon_tint_token={:?} stroke={:?} stroke_token={:?}",
+                node.background_fill_colour,
+                node.background_fill_colour_token,
+                node.icon_tint_colour,
+                node.icon_tint_colour_token,
+                node.stroke_colour,
+                node.stroke_colour_token,
             );
             if let Some(asset_ref) = node.asset_ref.as_deref() {
                 println!("  asset_ref {}", asset_ref);

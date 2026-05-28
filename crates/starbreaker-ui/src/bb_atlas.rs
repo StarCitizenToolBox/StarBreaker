@@ -172,7 +172,7 @@ impl<'a> AtlasLibrary<'a> {
             if alt == canonical {
                 continue;
             }
-            warn!(
+            debug!(
                 "atlas: '{}' not found; trying MFD fallback '{}'",
                 canonical, alt
             );

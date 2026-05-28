@@ -75,6 +75,47 @@ pub fn rasterize_svg(
     RgbaImage::from_raw(target_w, target_h, bytes)
 }
 
+pub fn rasterize_svg_contained(
+    svg_bytes: &[u8],
+    target_w: u32,
+    target_h: u32,
+    fill_override: Option<[f32; 4]>,
+    contain_position_x: f32,
+    contain_position_y: f32,
+) -> Option<RgbaImage> {
+    if target_w == 0 || target_h == 0 {
+        return None;
+    }
+
+    let opts = usvg::Options::default();
+    let tree = usvg::Tree::from_data(svg_bytes, &opts)
+        .map_err(|e| {
+            warn!("bb_svg: SVG parse failed: {}", e);
+            e
+        })
+        .ok()?;
+
+    let source_w = tree.size().width();
+    let source_h = tree.size().height();
+    if source_w <= 0.0 || source_h <= 0.0 {
+        warn!("bb_svg: SVG has invalid size {}×{}", source_w, source_h);
+        return None;
+    }
+
+    let scale = (target_w as f32 / source_w).min(target_h as f32 / source_h);
+    let render_w = (source_w * scale).round().max(1.0).min(target_w as f32) as u32;
+    let render_h = (source_h * scale).round().max(1.0).min(target_h as f32) as u32;
+    let rendered = rasterize_svg(svg_bytes, render_w, render_h, fill_override)?;
+
+    let mut out = RgbaImage::new(target_w, target_h);
+    let free_x = target_w.saturating_sub(render_w);
+    let free_y = target_h.saturating_sub(render_h);
+    let draw_x = (free_x as f32 * contain_position_x.clamp(0.0, 1.0)).round() as i64;
+    let draw_y = (free_y as f32 * contain_position_y.clamp(0.0, 1.0)).round() as i64;
+    imageops::overlay(&mut out, &rendered, draw_x, draw_y);
+    Some(out)
+}
+
 /// Rasterise an SVG using BuildingBlocks-style nine-slice scaling.
 ///
 /// `nine_slice_rect` is `[left, top, right, bottom]` in normalized source-space
@@ -231,6 +272,19 @@ mod tests {
             px[0] > px[1] && px[0] > px[2] && px[3] > 0,
             "centre pixel should be red-ish, got {px:?}"
         );
+    }
+
+    #[test]
+    fn contain_raster_preserves_source_aspect_ratio() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="5">
+            <rect width="10" height="5" fill="white"/>
+        </svg>"#;
+        let img = rasterize_svg_contained(svg, 20, 20, None, 0.5, 0.5).expect("should rasterize");
+
+        assert_eq!(img.get_pixel(10, 4).0[3], 0, "top padding should remain transparent");
+        assert!(img.get_pixel(10, 5).0[3] > 0, "contained image should start below the top padding");
+        assert!(img.get_pixel(10, 14).0[3] > 0, "contained image should fill the centered band");
+        assert_eq!(img.get_pixel(10, 15).0[3], 0, "bottom padding should remain transparent");
     }
 
     #[test]

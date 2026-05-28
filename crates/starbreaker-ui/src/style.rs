@@ -201,9 +201,10 @@ impl StyleLoader {
             .get("_RecordValue_")
             .and_then(|v| v.get("colorStyles"))
             .and_then(|v| v.as_array())
+            .or_else(|| record_json.get("colorStyles").and_then(|v| v.as_array()))
             .ok_or_else(|| {
                 UiError::ParseError(
-                    "BuildingBlocks_Style record missing _RecordValue_.colorStyles[]".to_string(),
+                    "BuildingBlocks_Style record missing colorStyles[]".to_string(),
                 )
             })?;
 
