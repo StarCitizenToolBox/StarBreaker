@@ -85,6 +85,11 @@ if ! jq -e '.targets | all(.source_generated_png != null and (.source_generated_
   exit 1
 fi
 
+if [[ ! -f "${FREEZE_FILE}" ]]; then
+  echo "error: freeze file not found: ${FREEZE_FILE}" >&2
+  exit 1
+fi
+
 errors=0
 checked=0
 
@@ -160,11 +165,10 @@ else
   checked="$(jq '.targets | length' "${MANIFEST_PATH}")"
 fi
 
-if [[ -f "${FREEZE_FILE}" ]]; then
-  if ! jq -e '.schema_version == 1 and (.artifacts | type == "array")' "${FREEZE_FILE}" >/dev/null 2>&1; then
-    echo "error: invalid freeze file schema: ${FREEZE_FILE}" >&2
-    errors=$((errors + 1))
-  else
+if ! jq -e '.schema_version == 1 and (.artifacts | type == "array")' "${FREEZE_FILE}" >/dev/null 2>&1; then
+  echo "error: invalid freeze file schema: ${FREEZE_FILE}" >&2
+  errors=$((errors + 1))
+else
     manifest_ids_file="$(mktemp)"
     freeze_ids_file="$(mktemp)"
 
@@ -219,7 +223,6 @@ if [[ -f "${FREEZE_FILE}" ]]; then
     done < <(jq -r '.artifacts[] | [.id, .artifact_path, .sha256, (.width|tostring), (.height|tostring), .channels] | @tsv' "${FREEZE_FILE}")
 
     rm -f "${manifest_ids_file}" "${freeze_ids_file}"
-  fi
 fi
 
 if [[ "${checked}" -eq 0 ]]; then
