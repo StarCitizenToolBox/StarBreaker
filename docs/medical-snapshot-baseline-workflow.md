@@ -76,6 +76,96 @@ Policy:
 
 - Failing regression checks are product regressions to investigate and fix, not tests to loosen or baselines to rewrite blindly.
 
+## Regression Failure Playbook
+
+### Reproduce Locally
+
+1. Refresh local artifacts from the manifest:
+  - `./scripts/generate_ui_regression_artifacts.sh`
+2. Validate lock/manfiest/artifact coherence:
+  - quick: `./scripts/validate_ui_regression_artifacts.sh --quick`
+  - full: `./scripts/validate_ui_regression_artifacts.sh --full`
+3. Run focused regression suites:
+  - `cargo test -p starbreaker-ui --test manifest_snapshot_regression -- --nocapture`
+  - `cargo test -p starbreaker-ui --test manifest_visual_regression -- --nocapture`
+  - `cargo test -p starbreaker-ui --test manifest_live_ir_guard -- --nocapture`
+
+### Read Delta Output
+
+1. Start from the first failing target id in test output.
+2. Note failure class: geometry, text/font, color/channel, missing artifact, undeclared artifact, freeze mismatch.
+3. Use the printed file paths (source artifact, generated artifact, freeze path) as the investigation entrypoints.
+4. Treat tolerance failures as behavior deltas, not automatic baseline-update signals.
+
+### Required Investigation Sequence
+
+1. Source data layer:
+  - manifest target entry
+  - `source_generated_png` path
+  - relevant canvas/style/IR fixture records
+2. Renderer/transform layer:
+  - renderer logic and comparator behavior for the failing class
+3. Output layer:
+  - generated artifact file
+  - freeze lock hash/dim/channel entry
+
+### Prohibited Responses
+
+- Do not loosen tier tolerances to make a failure pass without a source-backed rule change.
+- Do not rewrite or freeze new baselines to hide unexplained regressions.
+- Do not bypass validator failures by removing freeze entries or skipping target ids.
+
+## Baseline Onboarding Guide For New Targets
+
+### Tier Selection (Platinum vs Gold)
+
+- `platinum`:
+  - critical UI surfaces where drift must stay tight
+  - use for medical, safety, and high-trust readouts
+- `gold`:
+  - important but moderately variable surfaces
+  - use where controlled drift is acceptable
+- Final tier choice remains user-approved.
+
+### Baseline Capture Procedure
+
+1. Add target metadata to manifest:
+  - `./scripts/add_ui_regression_target.sh --id <id> --tier <gold|platinum> --source-generated-png <path>`
+2. Generate artifacts from manifest:
+  - `./scripts/generate_ui_regression_artifacts.sh`
+3. Validate consistency:
+  - `./scripts/validate_ui_regression_artifacts.sh --full`
+4. Freeze with explicit approval/reason:
+  - `./scripts/freeze_ui_regression_artifacts.sh --approver "<name>" --reason "<why>"`
+
+### Approval Workflow And Review Checklist
+
+1. Visual approval from user/operator on generated target image.
+2. Structural validation pass (`--full`) with no errors.
+3. Regression suites pass for snapshot, visual, and live guards.
+4. Commit message explains reason and impacted target ids.
+
+### Required Metadata Per Target
+
+- `id`
+- `tier`
+- `category`
+- `source_generated_png`
+- `baseline_path`
+- `current_path`
+- `roi` (`x`, `y`, `w`, `h`)
+
+## Baseline Examples
+
+### Platinum Examples
+
+- `medical1`
+- `medical2`
+
+### Gold Example
+
+- `clipper_small_door`
+
 ## Review Checklist
 
 - No screen/name-specific production hardcoding was introduced.
