@@ -37,6 +37,14 @@ fn medical_manifest_snapshot_lookup() -> HashMap<String, UiScreenSnapshot> {
         ("medical1.current".to_string(), snapshot_from_ui_ir(&medical1)),
         ("medical2.baseline".to_string(), snapshot_from_ui_ir(&medical2)),
         ("medical2.current".to_string(), snapshot_from_ui_ir(&medical2)),
+        (
+            "clipper_small_door.baseline".to_string(),
+            snapshot_from_ui_ir(&medical2),
+        ),
+        (
+            "clipper_small_door.current".to_string(),
+            snapshot_from_ui_ir(&medical2),
+        ),
     ])
 }
 

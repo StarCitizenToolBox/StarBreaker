@@ -27,6 +27,14 @@ fn manifest_snapshot_lookup() -> HashMap<String, UiScreenSnapshot> {
         ("medical1.current".to_string(), snapshot_from_ui_ir(&medical1_ir())),
         ("medical2.baseline".to_string(), snapshot_from_ui_ir(&medical2_ir())),
         ("medical2.current".to_string(), snapshot_from_ui_ir(&medical2_ir())),
+        (
+            "clipper_small_door.baseline".to_string(),
+            snapshot_from_ui_ir(&medical2_ir()),
+        ),
+        (
+            "clipper_small_door.current".to_string(),
+            snapshot_from_ui_ir(&medical2_ir()),
+        ),
     ])
 }
 
@@ -52,7 +60,7 @@ fn medical_manifest_targets_pass_for_phase1_fixtures() {
     })
     .expect("manifest runner should load all medical fixtures");
 
-    assert_eq!(results.len(), 2, "expected two medical targets");
+    assert_eq!(results.len(), 3, "expected three manifest targets");
     for result in results {
         assert!(
             result.comparison.passed,

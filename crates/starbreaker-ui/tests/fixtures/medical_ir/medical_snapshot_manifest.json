@@ -26,6 +26,19 @@
         "w": 1.0,
         "h": 1.0
       }
+    },
+    {
+      "id": "clipper_small_door",
+      "category": "image",
+      "baseline_path": "clipper_small_door.baseline",
+      "current_path": "clipper_small_door.current",
+      "tier": "gold",
+      "roi": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 1.0,
+        "h": 1.0
+      }
     }
   ]
 }
