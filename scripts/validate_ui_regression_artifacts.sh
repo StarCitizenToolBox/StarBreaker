@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 WORKSPACE_ROOT="$(cd "${REPO_ROOT}/.." && pwd)"
 ARTIFACT_DIR="${REPO_ROOT}/test-artifacts/ui"
-FREEZE_FILE="${REPO_ROOT}/crates/starbreaker-ui/tests/fixtures/ui_regression_freeze.json"
+FREEZE_FILE="${UI_REGRESSION_FREEZE_PATH:-${REPO_ROOT}/crates/starbreaker-ui/tests/fixtures/ui_regression_freeze.json}"
 VALIDATION_MODE="full"
 
 while [[ $# -gt 0 ]]; do

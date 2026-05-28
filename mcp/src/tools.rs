@@ -81,6 +81,26 @@ pub struct SearchRecordsRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UiRegressionRegistryRequest {
+    #[schemars(description = "Optional manifest path. Defaults to crates/starbreaker-ui/tests/fixtures/ui_ir/ui_snapshot_manifest.json")]
+    pub manifest_path: Option<String>,
+    #[schemars(description = "Optional freeze lock path. Defaults to crates/starbreaker-ui/tests/fixtures/ui_regression_freeze.json")]
+    pub freeze_path: Option<String>,
+    #[schemars(description = "Optional case-insensitive substring filter applied to target ids")]
+    pub target_filter: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UiRegressionValidateRequest {
+    #[schemars(description = "Validation mode: quick or full (default quick)")]
+    pub mode: Option<String>,
+    #[schemars(description = "Optional manifest path. Defaults to crates/starbreaker-ui/tests/fixtures/ui_ir/ui_snapshot_manifest.json")]
+    pub manifest_path: Option<String>,
+    #[schemars(description = "Optional freeze lock path. Defaults to crates/starbreaker-ui/tests/fixtures/ui_regression_freeze.json")]
+    pub freeze_path: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ImagePreviewRequest {
     #[schemars(description = "File path within P4k (DDS, PNG, JPG, etc.). For DDS, .tif extension is auto-converted to .dds")]
     pub path: String,
@@ -445,6 +465,284 @@ impl StarBreakerMcp {
             "p4k_path": data.p4k_path,
             "entries": data.p4k.entries().len(),
             "datacore_bytes": data.dcb_bytes.len(),
+        }))
+        .unwrap_or_else(|e| format!("JSON error: {e}"))
+    }
+
+    #[tool(description = "Inspect UI regression targets by reconciling manifest and freeze metadata. Returns deterministic JSON with target ids, tiers, source paths, freeze hash presence, and status (`matched`, `in_manifest_only`, `in_freeze_only`).")]
+    fn ui_regression_registry(&self, Parameters(req): Parameters<UiRegressionRegistryRequest>) -> String {
+        fn error_json(code: &str, message: String) -> String {
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "error_code": code,
+                "message": message,
+            }))
+            .unwrap_or_else(|_| format!("{{\"error_code\":\"{code}\"}}"))
+        }
+
+        fn as_array<'a>(root: &'a serde_json::Value, key: &str) -> Result<&'a Vec<serde_json::Value>, String> {
+            root.get(key)
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| format!("missing or invalid '{key}' array"))
+        }
+
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".."));
+
+        let manifest_rel = req
+            .manifest_path
+            .unwrap_or_else(|| "crates/starbreaker-ui/tests/fixtures/ui_ir/ui_snapshot_manifest.json".to_string());
+        let freeze_rel = req
+            .freeze_path
+            .unwrap_or_else(|| "crates/starbreaker-ui/tests/fixtures/ui_regression_freeze.json".to_string());
+
+        let resolve = |path: &str| -> PathBuf {
+            let p = Path::new(path);
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                repo_root.join(p)
+            }
+        };
+
+        let manifest_path = resolve(&manifest_rel);
+        let freeze_path = resolve(&freeze_rel);
+
+        let manifest_raw = match std::fs::read_to_string(&manifest_path) {
+            Ok(s) => s,
+            Err(e) => {
+                return error_json(
+                    "manifest_read_failed",
+                    format!("failed to read manifest '{}': {e}", manifest_path.display()),
+                )
+            }
+        };
+        let freeze_raw = match std::fs::read_to_string(&freeze_path) {
+            Ok(s) => s,
+            Err(e) => {
+                return error_json(
+                    "freeze_read_failed",
+                    format!("failed to read freeze '{}': {e}", freeze_path.display()),
+                )
+            }
+        };
+
+        let manifest_json: serde_json::Value = match serde_json::from_str(&manifest_raw) {
+            Ok(v) => v,
+            Err(e) => {
+                return error_json(
+                    "manifest_parse_failed",
+                    format!("failed to parse manifest '{}': {e}", manifest_path.display()),
+                )
+            }
+        };
+        let freeze_json: serde_json::Value = match serde_json::from_str(&freeze_raw) {
+            Ok(v) => v,
+            Err(e) => {
+                return error_json(
+                    "freeze_parse_failed",
+                    format!("failed to parse freeze '{}': {e}", freeze_path.display()),
+                )
+            }
+        };
+
+        let manifest_schema = manifest_json.get("schema_version").and_then(|v| v.as_u64());
+        let freeze_schema = freeze_json.get("schema_version").and_then(|v| v.as_u64());
+        if manifest_schema != Some(1) || freeze_schema != Some(1) || manifest_schema != freeze_schema {
+            return error_json(
+                "schema_mismatch",
+                format!(
+                    "manifest/freeze schema mismatch: manifest={manifest_schema:?} freeze={freeze_schema:?}; expected both to be 1"
+                ),
+            );
+        }
+
+        let targets = match as_array(&manifest_json, "targets") {
+            Ok(v) => v,
+            Err(msg) => return error_json("manifest_invalid", msg),
+        };
+        let artifacts = match as_array(&freeze_json, "artifacts") {
+            Ok(v) => v,
+            Err(msg) => return error_json("freeze_invalid", msg),
+        };
+
+        let mut manifest_map: std::collections::BTreeMap<String, serde_json::Value> =
+            std::collections::BTreeMap::new();
+        for target in targets {
+            let Some(id) = target.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            manifest_map.insert(id.to_string(), target.clone());
+        }
+
+        let mut freeze_map: std::collections::BTreeMap<String, serde_json::Value> =
+            std::collections::BTreeMap::new();
+        for artifact in artifacts {
+            let Some(id) = artifact.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            freeze_map.insert(id.to_string(), artifact.clone());
+        }
+
+        let filter = req.target_filter.map(|s| s.to_ascii_lowercase());
+        let mut all_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        all_ids.extend(manifest_map.keys().cloned());
+        all_ids.extend(freeze_map.keys().cloned());
+
+        let mut rows = Vec::new();
+        let mut matched = 0usize;
+        let mut in_manifest_only = 0usize;
+        let mut in_freeze_only = 0usize;
+
+        for id in all_ids {
+            if let Some(ref needle) = filter {
+                if !id.to_ascii_lowercase().contains(needle) {
+                    continue;
+                }
+            }
+
+            let manifest_target = manifest_map.get(&id);
+            let freeze_target = freeze_map.get(&id);
+
+            let status = match (manifest_target, freeze_target) {
+                (Some(_), Some(_)) => {
+                    matched += 1;
+                    "matched"
+                }
+                (Some(_), None) => {
+                    in_manifest_only += 1;
+                    "in_manifest_only"
+                }
+                (None, Some(_)) => {
+                    in_freeze_only += 1;
+                    "in_freeze_only"
+                }
+                (None, None) => continue,
+            };
+
+            let manifest_tier = manifest_target
+                .and_then(|v| v.get("tier"))
+                .and_then(|v| v.as_str());
+            let freeze_tier = freeze_target
+                .and_then(|v| v.get("tier"))
+                .and_then(|v| v.as_str());
+            let source_generated_png = manifest_target
+                .and_then(|v| v.get("source_generated_png"))
+                .and_then(|v| v.as_str())
+                .or_else(|| freeze_target.and_then(|v| v.get("source_generated_png")).and_then(|v| v.as_str()));
+            let freeze_hash = freeze_target
+                .and_then(|v| v.get("sha256"))
+                .and_then(|v| v.as_str());
+
+            rows.push(serde_json::json!({
+                "id": id,
+                "status": status,
+                "manifest_tier": manifest_tier,
+                "freeze_tier": freeze_tier,
+                "tier_mismatch": manifest_tier.is_some() && freeze_tier.is_some() && manifest_tier != freeze_tier,
+                "source_generated_png": source_generated_png,
+                "freeze_hash": freeze_hash,
+                "has_freeze_hash": freeze_hash.is_some(),
+            }));
+        }
+
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "manifest_path": manifest_path,
+            "freeze_path": freeze_path,
+            "summary": {
+                "total_targets": rows.len(),
+                "matched": matched,
+                "in_manifest_only": in_manifest_only,
+                "in_freeze_only": in_freeze_only,
+            },
+            "targets": rows,
+        }))
+        .unwrap_or_else(|e| format!("JSON error: {e}"))
+    }
+
+    #[tool(description = "Run UI regression baseline integrity validation (quick/full) and return structured JSON output including pass/fail status, exit code, and captured stdout/stderr.")]
+    fn ui_regression_validate(&self, Parameters(req): Parameters<UiRegressionValidateRequest>) -> String {
+        fn error_json(code: &str, message: String) -> String {
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "error_code": code,
+                "message": message,
+            }))
+            .unwrap_or_else(|_| format!("{{\"error_code\":\"{code}\"}}"))
+        }
+
+        let mode = req
+            .mode
+            .unwrap_or_else(|| "quick".to_string())
+            .to_ascii_lowercase();
+        let mode_flag = match mode.as_str() {
+            "quick" => "--quick",
+            "full" => "--full",
+            _ => {
+                return error_json(
+                    "invalid_mode",
+                    format!("invalid mode '{mode}' (expected 'quick' or 'full')"),
+                )
+            }
+        };
+
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".."));
+        let script_path = repo_root.join("scripts/validate_ui_regression_artifacts.sh");
+        if !script_path.is_file() {
+            return error_json(
+                "validator_missing",
+                format!("validator script not found: {}", script_path.display()),
+            );
+        }
+
+        let default_manifest = "crates/starbreaker-ui/tests/fixtures/ui_ir/ui_snapshot_manifest.json".to_string();
+        let default_freeze = "crates/starbreaker-ui/tests/fixtures/ui_regression_freeze.json".to_string();
+
+        let resolve = |path: &str| -> PathBuf {
+            let p = Path::new(path);
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                repo_root.join(p)
+            }
+        };
+
+        let manifest_path = resolve(req.manifest_path.as_deref().unwrap_or(&default_manifest));
+        let freeze_path = resolve(req.freeze_path.as_deref().unwrap_or(&default_freeze));
+
+        let output = std::process::Command::new("bash")
+            .arg(&script_path)
+            .arg(mode_flag)
+            .env("UI_REGRESSION_MANIFEST_PATH", &manifest_path)
+            .env("UI_REGRESSION_FREEZE_PATH", &freeze_path)
+            .current_dir(&repo_root)
+            .output();
+
+        let output = match output {
+            Ok(out) => out,
+            Err(e) => return error_json("validator_exec_failed", format!("failed to execute validator: {e}")),
+        };
+
+        let exit_code = output.status.code().unwrap_or(-1);
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "mode": mode,
+            "manifest_path": manifest_path,
+            "freeze_path": freeze_path,
+            "passed": output.status.success(),
+            "exit_code": exit_code,
+            "stdout": stdout,
+            "stderr": stderr,
+            "error_code": if output.status.success() { serde_json::Value::Null } else { serde_json::Value::String("validation_failed".to_string()) },
         }))
         .unwrap_or_else(|e| format!("JSON error: {e}"))
     }
@@ -1722,6 +2020,136 @@ impl ServerHandler for StarBreakerMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "Star Citizen game data server. Query DataCore records, entity loadouts, and P4k archive files.",
         )
+    }
+}
+
+#[cfg(test)]
+mod ui_regression_registry_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn ui_regression_registry_defaults_report_expected_targets() {
+        let server = StarBreakerMcp::new(None);
+        let response = server.ui_regression_registry(Parameters(UiRegressionRegistryRequest {
+            manifest_path: None,
+            freeze_path: None,
+            target_filter: None,
+        }));
+
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("registry response should be valid JSON");
+
+        assert_eq!(json.get("schema_version").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(
+            json.get("summary")
+                .and_then(|v| v.get("total_targets"))
+                .and_then(|v| v.as_u64()),
+            Some(3)
+        );
+        assert_eq!(
+            json.get("summary")
+                .and_then(|v| v.get("matched"))
+                .and_then(|v| v.as_u64()),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn ui_regression_registry_filter_limits_results() {
+        let server = StarBreakerMcp::new(None);
+        let response = server.ui_regression_registry(Parameters(UiRegressionRegistryRequest {
+            manifest_path: None,
+            freeze_path: None,
+            target_filter: Some("ui_target_a".to_string()),
+        }));
+
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("registry response should be valid JSON");
+        let targets = json
+            .get("targets")
+            .and_then(|v| v.as_array())
+            .expect("targets array should exist");
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(
+            targets[0].get("id").and_then(|v| v.as_str()),
+            Some("ui_target_a")
+        );
+    }
+
+    #[test]
+    fn ui_regression_registry_surfaces_manifest_read_errors() {
+        let server = StarBreakerMcp::new(None);
+        let response = server.ui_regression_registry(Parameters(UiRegressionRegistryRequest {
+            manifest_path: Some("does/not/exist.json".to_string()),
+            freeze_path: None,
+            target_filter: None,
+        }));
+
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("error response should be valid JSON");
+        assert_eq!(
+            json.get("error_code").and_then(|v| v.as_str()),
+            Some("manifest_read_failed")
+        );
+    }
+
+    #[test]
+    fn ui_regression_registry_surfaces_schema_mismatch() {
+        let server = StarBreakerMcp::new(None);
+
+        let tmp_root = std::env::temp_dir().join(format!(
+            "starbreaker_mcp_registry_schema_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp_root).expect("temp dir should be created");
+
+        let manifest_path = tmp_root.join("manifest.json");
+        let freeze_path = tmp_root.join("freeze.json");
+
+        let mut mf = std::fs::File::create(&manifest_path).expect("manifest file create");
+        writeln!(mf, "{{\"schema_version\":1,\"targets\":[]}}")
+            .expect("manifest write");
+
+        let mut ff = std::fs::File::create(&freeze_path).expect("freeze file create");
+        writeln!(ff, "{{\"schema_version\":2,\"artifacts\":[]}}")
+            .expect("freeze write");
+
+        let response = server.ui_regression_registry(Parameters(UiRegressionRegistryRequest {
+            manifest_path: Some(manifest_path.to_string_lossy().to_string()),
+            freeze_path: Some(freeze_path.to_string_lossy().to_string()),
+            target_filter: None,
+        }));
+
+        let _ = std::fs::remove_dir_all(&tmp_root);
+
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("error response should be valid JSON");
+        assert_eq!(
+            json.get("error_code").and_then(|v| v.as_str()),
+            Some("schema_mismatch")
+        );
+    }
+
+    #[test]
+    fn ui_regression_validate_rejects_invalid_mode() {
+        let server = StarBreakerMcp::new(None);
+        let response = server.ui_regression_validate(Parameters(UiRegressionValidateRequest {
+            mode: Some("fast".to_string()),
+            manifest_path: None,
+            freeze_path: None,
+        }));
+
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("validator response should be valid JSON");
+        assert_eq!(
+            json.get("error_code").and_then(|v| v.as_str()),
+            Some("invalid_mode")
+        );
     }
 }
 
