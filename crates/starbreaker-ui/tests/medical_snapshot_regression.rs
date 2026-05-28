@@ -1,6 +1,7 @@
 use starbreaker_ui::{
-    UiIrDocument, UiRegressionManifest, UiScreenSnapshot, UiSnapshotTolerance,
-    compare_manifest_targets_with_loader, compare_snapshots, snapshot_from_ui_ir,
+    UI_REGRESSION_MANIFEST_SCHEMA_VERSION, UiIrDocument, UiRegressionCategory,
+    UiRegressionManifest, UiRegressionTarget, UiRegressionTier, UiScreenSnapshot,
+    compare_manifest_targets_with_loader, snapshot_from_ui_ir,
 };
 use std::collections::HashMap;
 
@@ -36,6 +37,37 @@ fn manifest_snapshot_lookup() -> HashMap<String, UiScreenSnapshot> {
             snapshot_from_ui_ir(&medical2_ir()),
         ),
     ])
+}
+
+fn run_generic_comparison(
+    target_id: &str,
+    category: UiRegressionCategory,
+    baseline: UiScreenSnapshot,
+    current: UiScreenSnapshot,
+) -> starbreaker_ui::UiSnapshotComparison {
+    let manifest = UiRegressionManifest {
+        schema_version: UI_REGRESSION_MANIFEST_SCHEMA_VERSION,
+        targets: vec![UiRegressionTarget {
+            id: target_id.to_string(),
+            category,
+            baseline_path: "baseline".to_string(),
+            current_path: "current".to_string(),
+            tier: UiRegressionTier::Platinum,
+            roi: None,
+        }],
+    };
+    let snapshots = HashMap::from([
+        ("baseline".to_string(), baseline),
+        ("current".to_string(), current),
+    ]);
+    let results = compare_manifest_targets_with_loader(&manifest, |path| {
+        snapshots
+            .get(path)
+            .cloned()
+            .ok_or_else(|| format!("missing snapshot fixture for {path}"))
+    })
+    .expect("generic manifest runner should execute comparison");
+    results.into_iter().next().expect("one target expected").comparison
 }
 
 #[test]
@@ -98,7 +130,12 @@ fn medical_snapshot_comparator_flags_text_case_drift() {
 
     let baseline = snapshot_from_ui_ir(&baseline_doc);
     let current = snapshot_from_ui_ir(&current_doc);
-    let comparison = compare_snapshots(&baseline, &current, UiSnapshotTolerance::default());
+    let comparison = run_generic_comparison(
+        "medical1_text_case",
+        UiRegressionCategory::Text,
+        baseline,
+        current,
+    );
 
     assert!(!comparison.passed, "case drift should fail comparator");
     assert!(
@@ -139,7 +176,12 @@ fn medical_snapshot_comparator_flags_new_visible_shape() {
 
     let baseline = snapshot_from_ui_ir(&baseline_doc);
     let current = snapshot_from_ui_ir(&current_doc);
-    let comparison = compare_snapshots(&baseline, &current, UiSnapshotTolerance::default());
+    let comparison = run_generic_comparison(
+        "medical2_new_shape",
+        UiRegressionCategory::Shape,
+        baseline,
+        current,
+    );
 
     assert!(
         !comparison.passed,
@@ -171,7 +213,12 @@ fn medical_snapshot_comparator_flags_geometry_drift() {
 
     let baseline = snapshot_from_ui_ir(&baseline_doc);
     let current = snapshot_from_ui_ir(&current_doc);
-    let comparison = compare_snapshots(&baseline, &current, UiSnapshotTolerance::default());
+    let comparison = run_generic_comparison(
+        "medical1_geometry",
+        UiRegressionCategory::Text,
+        baseline,
+        current,
+    );
 
     assert!(!comparison.passed, "geometry drift should fail comparator");
     assert!(
@@ -198,7 +245,12 @@ fn medical_snapshot_comparator_flags_colour_drift() {
 
     let baseline = snapshot_from_ui_ir(&baseline_doc);
     let current = snapshot_from_ui_ir(&current_doc);
-    let comparison = compare_snapshots(&baseline, &current, UiSnapshotTolerance::default());
+    let comparison = run_generic_comparison(
+        "medical2_colour",
+        UiRegressionCategory::Text,
+        baseline,
+        current,
+    );
 
     assert!(!comparison.passed, "colour drift should fail comparator");
     assert!(
@@ -225,7 +277,12 @@ fn medical_snapshot_comparator_flags_font_identity_drift() {
 
     let baseline = snapshot_from_ui_ir(&baseline_doc);
     let current = snapshot_from_ui_ir(&current_doc);
-    let comparison = compare_snapshots(&baseline, &current, UiSnapshotTolerance::default());
+    let comparison = run_generic_comparison(
+        "medical1_font",
+        UiRegressionCategory::Font,
+        baseline,
+        current,
+    );
 
     assert!(!comparison.passed, "font identity drift should fail comparator");
     assert!(
@@ -251,7 +308,12 @@ fn medical_snapshot_comparator_flags_draw_order_drift() {
 
     let baseline = snapshot_from_ui_ir(&baseline_doc);
     let current = snapshot_from_ui_ir(&current_doc);
-    let comparison = compare_snapshots(&baseline, &current, UiSnapshotTolerance::default());
+    let comparison = run_generic_comparison(
+        "medical2_draw_order",
+        UiRegressionCategory::Text,
+        baseline,
+        current,
+    );
 
     assert!(!comparison.passed, "draw-order drift should fail comparator");
     assert!(
