@@ -1,6 +1,8 @@
 use starbreaker_ui::{
-    UiIrDocument, UiSnapshotTolerance, compare_snapshots, snapshot_from_ui_ir,
+    UiIrDocument, UiRegressionManifest, UiScreenSnapshot, UiSnapshotTolerance,
+    compare_manifest_targets_with_loader, compare_snapshots, snapshot_from_ui_ir,
 };
+use std::collections::HashMap;
 
 fn medical1_ir() -> UiIrDocument {
     serde_json::from_str(include_str!("fixtures/medical_ir/medical1-screen_16x9_a-ir.json"))
@@ -14,12 +16,50 @@ fn medical2_ir() -> UiIrDocument {
     .expect("medical2 IR fixture should parse")
 }
 
+fn medical_manifest() -> UiRegressionManifest {
+    serde_json::from_str(include_str!("fixtures/medical_ir/medical_snapshot_manifest.json"))
+        .expect("medical regression manifest fixture should parse")
+}
+
+fn manifest_snapshot_lookup() -> HashMap<String, UiScreenSnapshot> {
+    HashMap::from([
+        ("medical1.baseline".to_string(), snapshot_from_ui_ir(&medical1_ir())),
+        ("medical1.current".to_string(), snapshot_from_ui_ir(&medical1_ir())),
+        ("medical2.baseline".to_string(), snapshot_from_ui_ir(&medical2_ir())),
+        ("medical2.current".to_string(), snapshot_from_ui_ir(&medical2_ir())),
+    ])
+}
+
 #[test]
 fn medical_snapshots_are_deterministic_for_phase1_fixtures() {
     for document in [medical1_ir(), medical2_ir()] {
         let first = snapshot_from_ui_ir(&document);
         let second = snapshot_from_ui_ir(&document);
         assert_eq!(first, second, "snapshot extraction must be deterministic");
+    }
+}
+
+#[test]
+fn medical_manifest_targets_pass_for_phase1_fixtures() {
+    let manifest = medical_manifest();
+    let snapshots = manifest_snapshot_lookup();
+
+    let results = compare_manifest_targets_with_loader(&manifest, |path| {
+        snapshots
+            .get(path)
+            .cloned()
+            .ok_or_else(|| format!("missing snapshot fixture for {path}"))
+    })
+    .expect("manifest runner should load all medical fixtures");
+
+    assert_eq!(results.len(), 2, "expected two medical targets");
+    for result in results {
+        assert!(
+            result.comparison.passed,
+            "manifest target {} should pass baseline comparison: {:?}",
+            result.id,
+            result.comparison.failures
+        );
     }
 }
 

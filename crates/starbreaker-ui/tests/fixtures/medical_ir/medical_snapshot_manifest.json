@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "targets": [
+    {
+      "id": "medical1",
+      "category": "image",
+      "baseline_path": "medical1.baseline",
+      "current_path": "medical1.current",
+      "tier": "platinum",
+      "roi": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 1.0,
+        "h": 1.0
+      }
+    },
+    {
+      "id": "medical2",
+      "category": "image",
+      "baseline_path": "medical2.baseline",
+      "current_path": "medical2.current",
+      "tier": "platinum",
+      "roi": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 1.0,
+        "h": 1.0
+      }
+    }
+  ]
+}

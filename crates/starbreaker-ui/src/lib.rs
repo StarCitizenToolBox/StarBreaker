@@ -85,5 +85,6 @@ pub use ui_snapshot::{
 
 pub use ui_regression_manifest::{
     UI_REGRESSION_MANIFEST_SCHEMA_VERSION, UiRegressionCategory, UiRegressionManifest,
-    UiRegressionRoi, UiRegressionTarget, UiRegressionTier,
+    UiRegressionRoi, UiRegressionRunError, UiRegressionTarget, UiRegressionTargetResult,
+    UiRegressionTier, compare_manifest_targets_with_loader,
 };
