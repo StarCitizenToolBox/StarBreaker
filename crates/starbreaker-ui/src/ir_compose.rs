@@ -623,65 +623,11 @@ fn rasterize_custom_shape_svg(
     }?;
 
     if shape.render_shape.unwrap_or(false) {
-        Some(expand_nontransparent_bounds_to_target(rendered, target_w, target_h))
+        // Preserve authored SVG geometry without post-raster crop/stretch.
+        Some(rendered)
     } else {
         Some(rendered)
     }
-}
-
-fn expand_nontransparent_bounds_to_target(img: RgbaImage, target_w: u32, target_h: u32) -> RgbaImage {
-    let (width, height) = img.dimensions();
-    if width == 0 || height == 0 {
-        return img;
-    }
-
-    let mut min_x = width;
-    let mut min_y = height;
-    let mut max_x = 0u32;
-    let mut max_y = 0u32;
-    let mut found = false;
-
-    for y in 0..height {
-        for x in 0..width {
-            if img.get_pixel(x, y)[3] > 0 {
-                found = true;
-                min_x = min_x.min(x);
-                min_y = min_y.min(y);
-                max_x = max_x.max(x);
-                max_y = max_y.max(y);
-            }
-        }
-    }
-
-    if !found {
-        return img;
-    }
-
-    if min_x == 0 && min_y == 0 && max_x + 1 == width && max_y + 1 == height {
-        return img;
-    }
-
-    let crop_w = max_x - min_x + 1;
-    let crop_h = max_y - min_y + 1;
-    let cropped = imageops::crop_imm(&img, min_x, min_y, crop_w, crop_h).to_image();
-
-    let tw = target_w.max(1);
-    let th = target_h.max(1);
-    let scale = ((tw as f32) / (crop_w as f32)).min((th as f32) / (crop_h as f32));
-    let resized_w = ((crop_w as f32) * scale).round().max(1.0) as u32;
-    let resized_h = ((crop_h as f32) * scale).round().max(1.0) as u32;
-    let resized = imageops::resize(
-        &cropped,
-        resized_w,
-        resized_h,
-        imageops::FilterType::Lanczos3,
-    );
-
-    let mut canvas = RgbaImage::new(tw, th);
-    let offset_x = ((tw - resized_w) / 2) as i64;
-    let offset_y = ((th - resized_h) / 2) as i64;
-    imageops::overlay(&mut canvas, &resized, offset_x, offset_y);
-    canvas
 }
 
 fn rasterize_svg_for_node(
