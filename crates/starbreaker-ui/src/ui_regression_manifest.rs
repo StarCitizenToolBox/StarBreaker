@@ -5,7 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ui_snapshot::UiSnapshotTolerance;
+use crate::ui_snapshot::{
+    UiScreenSnapshot, UiSnapshotComparison, UiSnapshotTolerance, compare_snapshots,
+};
 
 /// Manifest schema version for generic UI regression target lists.
 pub const UI_REGRESSION_MANIFEST_SCHEMA_VERSION: u32 = 1;
@@ -79,9 +81,55 @@ impl UiRegressionManifest {
     }
 }
 
+/// Per-target result from a manifest-driven comparison run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UiRegressionTargetResult {
+    pub id: String,
+    pub comparison: UiSnapshotComparison,
+}
+
+/// Errors raised while loading baseline/current snapshots for a target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UiRegressionRunError {
+    pub target_id: String,
+    pub path: String,
+    pub message: String,
+}
+
+/// Execute generic snapshot comparisons for every target in a manifest.
+pub fn compare_manifest_targets_with_loader<F, E>(
+    manifest: &UiRegressionManifest,
+    mut snapshot_loader: F,
+) -> Result<Vec<UiRegressionTargetResult>, UiRegressionRunError>
+where
+    F: FnMut(&str) -> Result<UiScreenSnapshot, E>,
+    E: std::fmt::Display,
+{
+    let mut results = Vec::with_capacity(manifest.targets.len());
+    for target in &manifest.targets {
+        let baseline = snapshot_loader(&target.baseline_path).map_err(|error| UiRegressionRunError {
+            target_id: target.id.clone(),
+            path: target.baseline_path.clone(),
+            message: error.to_string(),
+        })?;
+        let current = snapshot_loader(&target.current_path).map_err(|error| UiRegressionRunError {
+            target_id: target.id.clone(),
+            path: target.current_path.clone(),
+            message: error.to_string(),
+        })?;
+        results.push(UiRegressionTargetResult {
+            id: target.id.clone(),
+            comparison: compare_snapshots(&baseline, &current, target.tier.snapshot_tolerance()),
+        });
+    }
+    Ok(results)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui_snapshot::{UI_SNAPSHOT_SCHEMA_VERSION, UiSnapshotElement, UiSnapshotElementCategory};
+    use std::collections::HashMap;
 
     #[test]
     fn manifest_parses_phase2_target_shape() {
@@ -116,5 +164,96 @@ mod tests {
         let gold = UiRegressionTier::Gold.snapshot_tolerance();
         assert_eq!(gold.numeric_relative, 0.05);
         assert_eq!(gold.rgba_channel_abs, 0.10);
+    }
+
+    #[test]
+    fn comparator_runner_executes_manifest_targets() {
+        let manifest = UiRegressionManifest {
+            schema_version: UI_REGRESSION_MANIFEST_SCHEMA_VERSION,
+            targets: vec![UiRegressionTarget {
+                id: "medical1".to_string(),
+                category: UiRegressionCategory::Image,
+                baseline_path: "baseline".to_string(),
+                current_path: "current".to_string(),
+                tier: UiRegressionTier::Platinum,
+                roi: None,
+            }],
+        };
+
+        let mut snapshots = HashMap::new();
+        snapshots.insert("baseline".to_string(), sample_snapshot(0.0));
+        snapshots.insert("current".to_string(), sample_snapshot(0.0));
+
+        let results = compare_manifest_targets_with_loader(&manifest, |path| {
+            snapshots
+                .get(path)
+                .cloned()
+                .ok_or_else(|| format!("missing snapshot: {path}"))
+        })
+        .expect("comparison should succeed");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "medical1");
+        assert!(results[0].comparison.passed);
+    }
+
+    #[test]
+    fn comparator_runner_surfaces_loader_errors_with_target_context() {
+        let manifest = UiRegressionManifest {
+            schema_version: UI_REGRESSION_MANIFEST_SCHEMA_VERSION,
+            targets: vec![UiRegressionTarget {
+                id: "medical2".to_string(),
+                category: UiRegressionCategory::Image,
+                baseline_path: "missing".to_string(),
+                current_path: "current".to_string(),
+                tier: UiRegressionTier::Gold,
+                roi: None,
+            }],
+        };
+
+        let error = compare_manifest_targets_with_loader::<_, String>(&manifest, |_path| {
+            Err("not found".to_string())
+        })
+        .expect_err("loader error should bubble up");
+
+        assert_eq!(error.target_id, "medical2");
+        assert_eq!(error.path, "missing");
+        assert_eq!(error.message, "not found");
+    }
+
+    fn sample_snapshot(x: f32) -> UiScreenSnapshot {
+        UiScreenSnapshot {
+            schema_version: UI_SNAPSHOT_SCHEMA_VERSION,
+            canvas_guid: "canvas_guid".to_string(),
+            canvas_name: Some("canvas_name".to_string()),
+            target_width: 1920,
+            target_height: 1080,
+            elements: vec![UiSnapshotElement {
+                identity: "1:textfield".to_string(),
+                node_id: 1,
+                category: UiSnapshotElementCategory::Text,
+                draw_order_index: 0,
+                node_type: "text_field".to_string(),
+                visible: true,
+                x,
+                y: 0.0,
+                w: 100.0,
+                h: 20.0,
+                alpha: 1.0,
+                blend_mode: None,
+                asset_identity: None,
+                alignment: None,
+                vertical_alignment: None,
+                overflow_mode: None,
+                background_rgba: None,
+                stroke_rgba: None,
+                text_rgba: None,
+                icon_tint_rgba: None,
+                stroke_extent: None,
+                text_payload: Some("TEST".to_string()),
+                text_font_identity: Some("font:baseline".to_string()),
+                line_spacing: Some(18.0),
+            }],
+        }
     }
 }
