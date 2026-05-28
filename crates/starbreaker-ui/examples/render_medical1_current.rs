@@ -343,8 +343,7 @@ fn main() -> Result<(), String> {
     let localization_map = load_localization_map(&workspace);
     let fetcher = load_canvas_index(&canvas_root)?;
 
-    let output_dir = workspace
-        .join("docs/StarBreaker/ui-rework-artifacts/phase-2/comparison/medical1-current.png");
+    let output_dir = workspace.join("StarBreaker/test-artifacts/ui/medical1-current.png");
     if let Some(parent) = output_dir.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
@@ -371,7 +370,7 @@ fn main() -> Result<(), String> {
         .as_ref()
         .map(|fetcher| fetcher as &dyn starbreaker_ui::bb_loc::LocFetcher);
 
-    let comparison_dir = workspace.join("docs/StarBreaker/ui-rework-artifacts/phase-2/comparison");
+    let comparison_dir = workspace.join("StarBreaker/test-artifacts/ui");
     let medical1_output = comparison_dir.join("medical1-current.png");
     let medical2_output = comparison_dir.join("medical2-current.png");
     let locate_query = std::env::var("SB_UI_LOCATE").ok().filter(|s| !s.trim().is_empty());

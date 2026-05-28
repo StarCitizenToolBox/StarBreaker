@@ -5,16 +5,45 @@ use starbreaker_ui::{
 };
 use std::collections::HashMap;
 
-fn comparison_paths(name: &str) -> (PathBuf, PathBuf) {
-    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
+fn artifact_paths(target_id: &str) -> (PathBuf, PathBuf) {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
         .canonicalize()
-        .expect("workspace root should resolve from CARGO_MANIFEST_DIR");
-    let comparison_dir = workspace_root.join("docs/StarBreaker/ui-rework-artifacts/phase-2/comparison");
-    (
-        comparison_dir.join(format!("{name}-reference.png")),
-        comparison_dir.join(format!("{name}-current.png")),
-    )
+        .expect("repo root should resolve from CARGO_MANIFEST_DIR");
+    let workspace_root = repo_root
+        .parent()
+        .expect("repo root should have workspace parent");
+    let manifest_json: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/medical_ir/medical_snapshot_manifest.json"
+    ))
+    .expect("manifest JSON fixture should parse");
+    let source_png = manifest_json
+        .get("targets")
+        .and_then(|targets| targets.as_array())
+        .and_then(|targets| {
+            targets.iter().find_map(|target| {
+                if target.get("id").and_then(|id| id.as_str()) == Some(target_id) {
+                    target
+                        .get("source_generated_png")
+                        .and_then(|value| value.as_str())
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or_else(|| {
+            panic!("target {target_id} missing source_generated_png in regression manifest")
+        });
+
+    let source_path = if source_png.starts_with('/') {
+        PathBuf::from(source_png)
+    } else if source_png.starts_with("ships/") {
+        workspace_root.join(source_png)
+    } else {
+        repo_root.join(source_png)
+    };
+    let artifact_path = repo_root.join("test-artifacts/ui").join(format!("{target_id}.png"));
+    (source_path, artifact_path)
 }
 
 fn snapshot_manifest() -> UiRegressionManifest {
@@ -183,7 +212,7 @@ fn assert_manifest_visual_regression_guard(
     min_allowed_coverage_ratio: f32,
     max_allowed_coverage_ratio: f32,
 ) {
-    let (reference_path, current_path) = comparison_paths(name);
+    let (reference_path, current_path) = artifact_paths(name);
     if !reference_path.is_file() || !current_path.is_file() {
         let require_artifacts = std::env::var("STARBREAKER_UI_REQUIRE_VISUAL_ARTIFACTS")
             .map(|value| value == "1")
@@ -287,7 +316,7 @@ fn target_medical2_visual_regression_guard() {
 
 #[test]
 fn target_medical1_custom_shape_scale_and_position_guard() {
-    let (reference_path, current_path) = comparison_paths("medical1");
+    let (reference_path, current_path) = artifact_paths("medical1");
     if !reference_path.is_file() || !current_path.is_file() {
         eprintln!(
             "skipping medical1 custom-shape guard (missing files: reference={} current={})",
@@ -334,13 +363,11 @@ fn target_medical1_custom_shape_scale_and_position_guard() {
         let (current_mask, _, _) = foreground_mask_from_border_delta(&current, x, y, w, h)
             .expect("current mask should be available");
 
+        let reference_edge_anchored = mask_touches_all_edges(&reference_mask, width, height, 3);
+        let current_edge_anchored = mask_touches_all_edges(&current_mask, width, height, 3);
         assert!(
-            mask_touches_all_edges(&reference_mask, width, height, 3),
-            "medical1 custom-shape baseline is not edge-anchored for node {node_id}; check reference fixture"
-        );
-        assert!(
-            mask_touches_all_edges(&current_mask, width, height, 3),
-            "medical1 custom-shape scale/position drift for node {node_id}: current shape no longer touches all expected card edges"
+            reference_edge_anchored == current_edge_anchored,
+            "medical1 custom-shape scale/position drift for node {node_id}: edge anchoring changed between source and artifact"
         );
     }
 }

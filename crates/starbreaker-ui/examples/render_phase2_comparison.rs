@@ -15,7 +15,7 @@ use starbreaker_ui::ui_ir::{
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let output_dir = PathBuf::from("../docs/StarBreaker/ui-rework-artifacts/phase-2/comparison");
+    let output_dir = PathBuf::from("../test-artifacts/ui/phase2-comparison");
     fs::create_dir_all(&output_dir)?;
 
     let document = synthetic_hybrid_document();

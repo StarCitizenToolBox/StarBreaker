@@ -288,9 +288,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut report = String::new();
     report.push_str("# Phase 3 Decision Traces\n\n");
     report.push_str("Date: 2026-05-27\n\n");
-    report.push_str("Verification images refreshed via `cargo run -p starbreaker-ui --example render_medical1_current`:\n");
-    report.push_str("- `docs/StarBreaker/ui-rework-artifacts/phase-2/comparison/medical1-current.png`\n");
-    report.push_str("- `docs/StarBreaker/ui-rework-artifacts/phase-2/comparison/medical2-current.png`\n\n");
+    report.push_str("Verification images refreshed via `./scripts/generate_ui_regression_artifacts.sh`:\n");
+    report.push_str("- `StarBreaker/test-artifacts/ui/medical1.png`\n");
+    report.push_str("- `StarBreaker/test-artifacts/ui/medical2.png`\n\n");
     report.push_str(&trace_for_canvas(
         "534bab84-299b-479a-a4af-4469df112ea7",
         "medical1-phase3-trace",

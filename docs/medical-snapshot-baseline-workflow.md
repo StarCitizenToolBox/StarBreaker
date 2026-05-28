@@ -26,18 +26,20 @@ Medical1 and Medical2 are treated as gold-standard outputs. Deviations are presu
 
 1. Confirm the drift is intentional and source-driven (not a hardcoded workaround).
 2. Confirm the failure is not an obvious regression signal such as visible placeholder text, unresolved placeholder keys, or missing major UI elements.
-2. Re-run focused validation before any baseline updates:
+3. Refresh local visual artifacts via `./scripts/generate_ui_regression_artifacts.sh`.
+  - Generated files are written to `StarBreaker/test-artifacts/ui`.
+4. Re-run focused validation before any baseline updates:
    - `cargo test -p starbreaker-ui ui_snapshot --lib`
   - `cargo test -p starbreaker-ui --test manifest_snapshot_regression -- --nocapture`
   - `cargo test -p starbreaker-ui --test manifest_visual_regression -- --nocapture`
   - `cargo test -p starbreaker-ui --test manifest_live_ir_guard -- --nocapture`
-3. If the failure is a regression signal, investigate and fix the product path first; do not touch the baselines.
-4. If source IR has legitimately changed, refresh fixture IR files from the approved capture flow.
-5. Keep each baseline update in an explicit commit with a message that includes:
+5. If the failure is a regression signal, investigate and fix the product path first; do not touch the baselines.
+6. If source IR has legitimately changed, refresh fixture IR files from the approved capture flow.
+7. Keep each baseline update in an explicit commit with a message that includes:
    - why drift is expected,
    - what source rule changed,
    - what tests were run.
-6. Re-run `cargo test -p starbreaker-ui` before merge.
+8. Re-run `cargo test -p starbreaker-ui` before merge.
 
 ## Review Checklist
 
