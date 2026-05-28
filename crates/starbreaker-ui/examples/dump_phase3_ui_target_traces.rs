@@ -289,11 +289,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     report.push_str("# Phase 3 Decision Traces\n\n");
     report.push_str("Date: 2026-05-27\n\n");
     report.push_str("Verification images refreshed via `./scripts/generate_ui_regression_artifacts.sh`:\n");
-    report.push_str("- `StarBreaker/test-artifacts/ui/medical1.png`\n");
-    report.push_str("- `StarBreaker/test-artifacts/ui/medical2.png`\n\n");
+    report.push_str("- `StarBreaker/test-artifacts/ui/ui_target_a.png`\n");
+    report.push_str("- `StarBreaker/test-artifacts/ui/ui_target_b.png`\n\n");
     report.push_str(&trace_for_canvas(
         "534bab84-299b-479a-a4af-4469df112ea7",
-        "medical1-phase3-trace",
+        "ui_target_a-phase3-trace",
         &fetcher,
         &style_fetcher,
         &file_fetcher,
@@ -301,7 +301,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?);
     report.push_str(&trace_for_canvas(
         "e9ad809d-ebcf-43a3-bb20-120f64556aef",
-        "medical2-phase3-trace",
+        "ui_target_b-phase3-trace",
         &fetcher,
         &style_fetcher,
         &file_fetcher,

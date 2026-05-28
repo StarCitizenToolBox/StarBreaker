@@ -82,7 +82,7 @@ This lets iteration continue without repeatedly asking the user to re-check half
 
 Reject a change if it does any of the following:
 
-- branches on `MedGel`, `medical1`, `medical2`, ship names, manufacturer names, or specific asset paths in production logic
+- branches on `MedGel`, `ui_target_a`, `ui_target_b`, ship names, manufacturer names, or specific asset paths in production logic
 - introduces unexplained percentages or offsets for placement
 - adds debug output that only works for one screen instead of the generic query path
 - fixes a draw-time symptom while leaving a clearly wrong upstream rect or missing metadata untouched

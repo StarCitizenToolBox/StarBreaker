@@ -233,10 +233,10 @@ mod tests {
             "schema_version": 1,
             "targets": [
                 {
-                    "id": "medical1",
+                    "id": "ui_target_a",
                     "category": "image",
-                    "baseline_path": "tests/fixtures/gold/medical1.snapshot.json",
-                    "current_path": "target/ui/medical1.snapshot.json",
+                    "baseline_path": "tests/fixtures/gold/ui_target_a.snapshot.json",
+                    "current_path": "target/ui/ui_target_a.snapshot.json",
                     "tier": "platinum",
                     "roi": { "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 }
                 }
@@ -246,7 +246,7 @@ mod tests {
         let manifest = UiRegressionManifest::from_json_str(raw).expect("manifest must parse");
         assert_eq!(manifest.schema_version, UI_REGRESSION_MANIFEST_SCHEMA_VERSION);
         assert_eq!(manifest.targets.len(), 1);
-        assert_eq!(manifest.targets[0].id, "medical1");
+        assert_eq!(manifest.targets[0].id, "ui_target_a");
         assert_eq!(manifest.targets[0].category, UiRegressionCategory::Image);
         assert_eq!(manifest.targets[0].tier, UiRegressionTier::Platinum);
     }
@@ -269,7 +269,7 @@ mod tests {
         let manifest = UiRegressionManifest {
             schema_version: UI_REGRESSION_MANIFEST_SCHEMA_VERSION,
             targets: vec![UiRegressionTarget {
-                id: "medical1".to_string(),
+                id: "ui_target_a".to_string(),
                 category: UiRegressionCategory::Text,
                 baseline_path: "baseline".to_string(),
                 current_path: "current".to_string(),
@@ -291,7 +291,7 @@ mod tests {
         .expect("comparison should succeed");
 
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].id, "medical1");
+        assert_eq!(results[0].id, "ui_target_a");
         assert!(results[0].comparison.passed);
     }
 
@@ -300,7 +300,7 @@ mod tests {
         let manifest = UiRegressionManifest {
             schema_version: UI_REGRESSION_MANIFEST_SCHEMA_VERSION,
             targets: vec![UiRegressionTarget {
-                id: "medical2".to_string(),
+                id: "ui_target_b".to_string(),
                 category: UiRegressionCategory::Image,
                 baseline_path: "missing".to_string(),
                 current_path: "current".to_string(),
@@ -314,7 +314,7 @@ mod tests {
         })
         .expect_err("loader error should bubble up");
 
-        assert_eq!(error.target_id, "medical2");
+        assert_eq!(error.target_id, "ui_target_b");
         assert_eq!(error.path, "missing");
         assert_eq!(error.message, "not found");
     }
@@ -324,7 +324,7 @@ mod tests {
         let manifest = UiRegressionManifest {
             schema_version: UI_REGRESSION_MANIFEST_SCHEMA_VERSION,
             targets: vec![UiRegressionTarget {
-                id: "medical-image".to_string(),
+                id: "sample-image".to_string(),
                 category: UiRegressionCategory::Image,
                 baseline_path: "baseline".to_string(),
                 current_path: "current".to_string(),
@@ -358,7 +358,7 @@ mod tests {
         let manifest = UiRegressionManifest {
             schema_version: UI_REGRESSION_MANIFEST_SCHEMA_VERSION,
             targets: vec![UiRegressionTarget {
-                id: "medical-font".to_string(),
+                id: "sample-font".to_string(),
                 category: UiRegressionCategory::Font,
                 baseline_path: "baseline".to_string(),
                 current_path: "current".to_string(),

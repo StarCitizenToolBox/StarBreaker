@@ -14,7 +14,7 @@ fn artifact_paths(target_id: &str) -> (PathBuf, PathBuf) {
         .parent()
         .expect("repo root should have workspace parent");
     let manifest_json: serde_json::Value = serde_json::from_str(include_str!(
-        "fixtures/medical_ir/medical_snapshot_manifest.json"
+        "fixtures/ui_ir/ui_snapshot_manifest.json"
     ))
     .expect("manifest JSON fixture should parse");
     let source_png = manifest_json
@@ -47,32 +47,32 @@ fn artifact_paths(target_id: &str) -> (PathBuf, PathBuf) {
 }
 
 fn snapshot_manifest() -> UiRegressionManifest {
-    serde_json::from_str(include_str!("fixtures/medical_ir/medical_snapshot_manifest.json"))
-        .expect("medical manifest fixture should parse")
+    serde_json::from_str(include_str!("fixtures/ui_ir/ui_snapshot_manifest.json"))
+    .expect("snapshot manifest fixture should parse")
 }
 
 fn manifest_snapshot_lookup() -> HashMap<String, UiScreenSnapshot> {
-    let medical1: UiIrDocument = serde_json::from_str(include_str!(
-        "fixtures/medical_ir/medical1-screen_16x9_a-ir.json"
+    let ui_target_a: UiIrDocument = serde_json::from_str(include_str!(
+        "fixtures/ui_ir/target_a-screen_16x9_a-ir.json"
     ))
-    .expect("medical1 IR fixture should parse");
-    let medical2: UiIrDocument = serde_json::from_str(include_str!(
-        "fixtures/medical_ir/medical2-mesh_end_screen_plane-ir.json"
+    .expect("ui_target_a IR fixture should parse");
+    let ui_target_b: UiIrDocument = serde_json::from_str(include_str!(
+        "fixtures/ui_ir/target_b-mesh_end_screen_plane-ir.json"
     ))
-    .expect("medical2 IR fixture should parse");
+    .expect("ui_target_b IR fixture should parse");
 
     HashMap::from([
-        ("medical1.baseline".to_string(), snapshot_from_ui_ir(&medical1)),
-        ("medical1.current".to_string(), snapshot_from_ui_ir(&medical1)),
-        ("medical2.baseline".to_string(), snapshot_from_ui_ir(&medical2)),
-        ("medical2.current".to_string(), snapshot_from_ui_ir(&medical2)),
+        ("ui_target_a.baseline".to_string(), snapshot_from_ui_ir(&ui_target_a)),
+        ("ui_target_a.current".to_string(), snapshot_from_ui_ir(&ui_target_a)),
+        ("ui_target_b.baseline".to_string(), snapshot_from_ui_ir(&ui_target_b)),
+        ("ui_target_b.current".to_string(), snapshot_from_ui_ir(&ui_target_b)),
         (
             "clipper_small_door.baseline".to_string(),
-            snapshot_from_ui_ir(&medical2),
+            snapshot_from_ui_ir(&ui_target_b),
         ),
         (
             "clipper_small_door.current".to_string(),
-            snapshot_from_ui_ir(&medical2),
+            snapshot_from_ui_ir(&ui_target_b),
         ),
     ])
 }
@@ -301,25 +301,25 @@ fn assert_roi_coverage_ratio(
 }
 
 #[test]
-fn target_medical1_visual_regression_guard() {
+fn target_a_visual_regression_guard() {
     assert_manifest_runner_preflight();
-    // Medical1 has more animated cyan geometry in the central ROI than medical2,
+    // ui_target_a has more animated cyan geometry in the central ROI than ui_target_b,
     // so we use a slightly wider lower bound to avoid false font-size failures.
-    assert_manifest_visual_regression_guard("medical1", 0.55, 1.25);
+    assert_manifest_visual_regression_guard("ui_target_a", 0.55, 1.25);
 }
 
 #[test]
-fn target_medical2_visual_regression_guard() {
+fn target_b_visual_regression_guard() {
     assert_manifest_runner_preflight();
-    assert_manifest_visual_regression_guard("medical2", 0.75, 1.25);
+    assert_manifest_visual_regression_guard("ui_target_b", 0.75, 1.25);
 }
 
 #[test]
-fn target_medical1_custom_shape_scale_and_position_guard() {
-    let (reference_path, current_path) = artifact_paths("medical1");
+fn target_a_custom_shape_scale_and_position_guard() {
+    let (reference_path, current_path) = artifact_paths("ui_target_a");
     if !reference_path.is_file() || !current_path.is_file() {
         eprintln!(
-            "skipping medical1 custom-shape guard (missing files: reference={} current={})",
+            "skipping ui_target_a custom-shape guard (missing files: reference={} current={})",
             reference_path.display(),
             current_path.display()
         );
@@ -327,9 +327,9 @@ fn target_medical1_custom_shape_scale_and_position_guard() {
     }
 
     let fixture: UiIrDocument = serde_json::from_str(include_str!(
-        "fixtures/medical_ir/medical1-screen_16x9_a-ir.json"
+        "fixtures/ui_ir/target_a-screen_16x9_a-ir.json"
     ))
-    .expect("medical1 IR fixture should parse");
+    .expect("ui_target_a IR fixture should parse");
     let mut custom_shape_rects: Vec<(u32, f32, f32, f32, f32)> = fixture
         .nodes
         .iter()
@@ -347,7 +347,7 @@ fn target_medical1_custom_shape_scale_and_position_guard() {
     custom_shape_rects.sort_by_key(|entry| entry.0);
     assert!(
         !custom_shape_rects.is_empty(),
-        "expected at least one asset-backed custom shape in medical1 fixture"
+        "expected at least one asset-backed custom shape in ui_target_a fixture"
     );
 
     let reference = image::open(&reference_path)
@@ -367,7 +367,7 @@ fn target_medical1_custom_shape_scale_and_position_guard() {
         let current_edge_anchored = mask_touches_all_edges(&current_mask, width, height, 3);
         assert!(
             reference_edge_anchored == current_edge_anchored,
-            "medical1 custom-shape scale/position drift for node {node_id}: edge anchoring changed between source and artifact"
+            "ui_target_a custom-shape scale/position drift for node {node_id}: edge anchoring changed between source and artifact"
         );
     }
 }

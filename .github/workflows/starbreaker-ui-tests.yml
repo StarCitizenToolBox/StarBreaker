@@ -5,13 +5,13 @@ on:
     paths:
       - crates/starbreaker-ui/**
       - scripts/**
-      - docs/medical-snapshot-baseline-workflow.md
+      - docs/ui-regression-baseline-workflow.md
       - .github/workflows/starbreaker-ui-tests.yml
   pull_request:
     paths:
       - crates/starbreaker-ui/**
       - scripts/**
-      - docs/medical-snapshot-baseline-workflow.md
+      - docs/ui-regression-baseline-workflow.md
       - .github/workflows/starbreaker-ui-tests.yml
 
 jobs:

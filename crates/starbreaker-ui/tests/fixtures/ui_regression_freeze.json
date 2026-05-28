@@ -4,23 +4,23 @@
   "approver": "Star Destroyer",
   "reason": "Normalize channel tokens in freeze metadata",
   "signature": null,
-  "manifest_path": "crates/starbreaker-ui/tests/fixtures/medical_ir/medical_snapshot_manifest.json",
+  "manifest_path": "crates/starbreaker-ui/tests/fixtures/ui_ir/ui_snapshot_manifest.json",
   "artifacts": [
     {
-      "id": "medical1",
+      "id": "ui_target_a",
       "tier": "platinum",
       "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_i_med_medicalbed_a.png",
-      "artifact_path": "test-artifacts/ui/medical1.png",
+      "artifact_path": "test-artifacts/ui/ui_target_a.png",
       "sha256": "cc16cf760781c2c2ecce80499593a52707670b50601fa849dea29c87f1af1d6e",
       "width": 1920,
       "height": 1080,
       "channels": "srgba"
     },
     {
-      "id": "medical2",
+      "id": "ui_target_b",
       "tier": "platinum",
       "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_i_med_medicalendofbed_a.png",
-      "artifact_path": "test-artifacts/ui/medical2.png",
+      "artifact_path": "test-artifacts/ui/ui_target_b.png",
       "sha256": "2dab2a273eee10bb0b6fc961b8a1ee2fd0a508ba5e2a69a43e1aeaa9a58f1a84",
       "width": 1920,
       "height": 1080,

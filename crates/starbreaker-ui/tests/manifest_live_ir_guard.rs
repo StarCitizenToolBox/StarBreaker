@@ -158,12 +158,12 @@ fn compile_target_ir(
 
 fn live_snapshot_manifest() -> UiRegressionManifest {
     let mut manifest: UiRegressionManifest = serde_json::from_str(include_str!(
-        "fixtures/medical_ir/medical_snapshot_manifest.json"
+        "fixtures/ui_ir/ui_snapshot_manifest.json"
     ))
     .expect("snapshot manifest fixture should parse");
     manifest
         .targets
-        .retain(|target| target.id == "medical1" || target.id == "medical2");
+        .retain(|target| target.id == "ui_target_a" || target.id == "ui_target_b");
     manifest
 }
 
@@ -253,13 +253,13 @@ fn load_live_and_baseline_target_irs() -> Option<(UiIrDocument, UiIrDocument, Ui
     let med2_live = compile_target_ir(&fetcher, localization_map, med2_guid);
 
     let med1_baseline: UiIrDocument = serde_json::from_str(include_str!(
-        "fixtures/medical_ir/medical1-screen_16x9_a-ir.json"
+        "fixtures/ui_ir/target_a-screen_16x9_a-ir.json"
     ))
-    .expect("medical1 baseline should parse");
+    .expect("ui_target_a baseline should parse");
     let med2_baseline: UiIrDocument = serde_json::from_str(include_str!(
-        "fixtures/medical_ir/medical2-mesh_end_screen_plane-ir.json"
+        "fixtures/ui_ir/target_b-mesh_end_screen_plane-ir.json"
     ))
-    .expect("medical2 baseline should parse");
+    .expect("ui_target_b baseline should parse");
 
     Some((med1_live, med2_live, med1_baseline, med2_baseline))
 }
@@ -275,12 +275,12 @@ fn live_manifest_targets_have_no_visible_placeholder_text() {
 
     assert!(
         med1_placeholders.is_empty(),
-        "medical1 gold-standard output contains visible placeholder text. This indicates broken UI generation, not baseline drift. Do not update baselines; investigate placeholder/default/localization handling first.\n{}",
+        "ui_target_a gold-standard output contains visible placeholder text. This indicates broken UI generation, not baseline drift. Do not update baselines; investigate placeholder/default/localization handling first.\n{}",
         med1_placeholders.join("\n")
     );
     assert!(
         med2_placeholders.is_empty(),
-        "medical2 gold-standard output contains visible placeholder text. This indicates broken UI generation, not baseline drift. Do not update baselines; investigate placeholder/default/localization handling first.\n{}",
+        "ui_target_b gold-standard output contains visible placeholder text. This indicates broken UI generation, not baseline drift. Do not update baselines; investigate placeholder/default/localization handling first.\n{}",
         med2_placeholders.join("\n")
     );
 }
@@ -295,7 +295,7 @@ fn live_manifest_targets_match_gold_standard_snapshot_geometry() {
 
     if !visible_placeholder_nodes(&med1_live).is_empty() || !visible_placeholder_nodes(&med2_live).is_empty() {
         eprintln!(
-            "skipping gold-standard geometry comparison because visible placeholder text already indicates broken medical output"
+            "skipping gold-standard geometry comparison because visible placeholder text already indicates broken target output"
         );
         return;
     }
@@ -303,19 +303,19 @@ fn live_manifest_targets_match_gold_standard_snapshot_geometry() {
     let manifest = live_snapshot_manifest();
     let snapshots = HashMap::from([
         (
-            "medical1.baseline".to_string(),
+            "ui_target_a.baseline".to_string(),
             focused_movement_snapshot(&snapshot_from_ui_ir(&med1_baseline)),
         ),
         (
-            "medical1.current".to_string(),
+            "ui_target_a.current".to_string(),
             focused_movement_snapshot(&snapshot_from_ui_ir(&med1_live)),
         ),
         (
-            "medical2.baseline".to_string(),
+            "ui_target_b.baseline".to_string(),
             focused_movement_snapshot(&snapshot_from_ui_ir(&med2_baseline)),
         ),
         (
-            "medical2.current".to_string(),
+            "ui_target_b.current".to_string(),
             focused_movement_snapshot(&snapshot_from_ui_ir(&med2_live)),
         ),
     ]);

@@ -1,8 +1,8 @@
-//! Dump canonical UI IR for the two Clipper medical canvases.
+//! Dump canonical UI IR for the two Clipper target canvases.
 //!
 //! Loads BuildingBlocks canvas records from the decomposed DataCore export under
 //! `ships/dcb_canvas/libs/foundry/records/ui/buildingblocks`, resolves the
-//! medical canvases by GUID, and writes IR JSON outputs to phase-1 artifacts.
+//! target canvases by GUID, and writes IR JSON outputs to phase-1 artifacts.
 
 use std::collections::HashMap;
 use std::fs;
@@ -196,7 +196,7 @@ fn dump_one(
         content_canvas_guid: Some(canvas_guid),
         binding_kind: Some("mfd"),
         manufacturer_id: Some("drak"),
-        helper_name: Some("medical-ir-dump"),
+        helper_name: Some("ui-target-ir-dump"),
         default_view_index: None,
         default_screen_slot: None,
     };
@@ -237,19 +237,19 @@ fn main() -> Result<(), String> {
 
     let fetcher = load_canvas_index(&canvas_root)?;
 
-    // Medical canvases from docs/ui-plan2.md mapping.
-    let medical1_guid = "534bab84-299b-479a-a4af-4469df112ea7"; // I_Med_MedicalBed_A
-    let medical2_guid = "e9ad809d-ebcf-43a3-bb20-120f64556aef"; // I_Med_MedicalEndOfBed_A
+    // Target canvases from docs/ui-plan2.md mapping.
+    let ui_target_a_guid = "534bab84-299b-479a-a4af-4469df112ea7"; // I_Med_MedicalBed_A
+    let ui_target_b_guid = "e9ad809d-ebcf-43a3-bb20-120f64556aef"; // I_Med_MedicalEndOfBed_A
 
     let out_root = workspace.join("docs/StarBreaker/ui-rework-artifacts/phase-1/ir-dumps");
-    let out_med1 = out_root.join("medical1-screen_16x9_a-ir.json");
-    let out_med2 = out_root.join("medical2-mesh_end_screen_plane-ir.json");
+    let out_target_a = out_root.join("ui_target_a-screen_16x9_a-ir.json");
+    let out_target_b = out_root.join("ui_target_b-mesh_end_screen_plane-ir.json");
 
-    dump_one(&fetcher, localization_map.as_ref(), medical1_guid, &out_med1)?;
-    dump_one(&fetcher, localization_map.as_ref(), medical2_guid, &out_med2)?;
+    dump_one(&fetcher, localization_map.as_ref(), ui_target_a_guid, &out_target_a)?;
+    dump_one(&fetcher, localization_map.as_ref(), ui_target_b_guid, &out_target_b)?;
 
-    println!("Wrote {}", out_med1.display());
-    println!("Wrote {}", out_med2.display());
+    println!("Wrote {}", out_target_a.display());
+    println!("Wrote {}", out_target_b.display());
 
     Ok(())
 }

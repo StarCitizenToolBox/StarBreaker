@@ -17,7 +17,7 @@ This register tracks active UI fallbacks in `starbreaker-ui` and explicitly reco
 | Component | Previous Fallback | Status | Evidence |
 | --- | --- | --- | --- |
 | `crates/starbreaker-ui/src/pipeline.rs` | Pipeline-local defaults builder and split fallback policy | Retired | Consolidated to `DefaultValueRegistry::with_pipeline_defaults(...)` in Phase 4 |
-| `crates/starbreaker-ui/src/ir_compose.rs` | Name/path-based medical/manufacturer hardcoded rendering branches | Retired | Eliminated in Phase 2B source-backed IR pass and guarded by `.github/scripts/check_ui_hardcoding.sh` |
+| `crates/starbreaker-ui/src/ir_compose.rs` | Name/path-based screen/manufacturer hardcoded rendering branches | Retired | Eliminated in Phase 2B source-backed IR pass and guarded by `.github/scripts/check_ui_hardcoding.sh` |
 
 ## Operational Policy
 

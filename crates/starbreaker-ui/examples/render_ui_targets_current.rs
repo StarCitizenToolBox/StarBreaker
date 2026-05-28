@@ -255,7 +255,7 @@ fn parse_animation_sample_percent() -> Result<Option<f32>, String> {
     Ok(animation_sample_percent)
 }
 
-fn render_medical(
+fn render_target(
     output_path: &Path,
     guid: &'static str,
     helper_name: &'static str,
@@ -295,7 +295,7 @@ fn render_medical(
             output_path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .unwrap_or("medical output"),
+                .unwrap_or("target output"),
             guid
         )
     })?;
@@ -343,7 +343,7 @@ fn main() -> Result<(), String> {
     let localization_map = load_localization_map(&workspace);
     let fetcher = load_canvas_index(&canvas_root)?;
 
-    let output_dir = workspace.join("StarBreaker/test-artifacts/ui/medical1-current.png");
+    let output_dir = workspace.join("StarBreaker/test-artifacts/ui/ui_target_a-current.png");
     if let Some(parent) = output_dir.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
@@ -371,14 +371,14 @@ fn main() -> Result<(), String> {
         .map(|fetcher| fetcher as &dyn starbreaker_ui::bb_loc::LocFetcher);
 
     let comparison_dir = workspace.join("StarBreaker/test-artifacts/ui");
-    let medical1_output = comparison_dir.join("medical1-current.png");
-    let medical2_output = comparison_dir.join("medical2-current.png");
+    let ui_target_a_output = comparison_dir.join("ui_target_a-current.png");
+    let ui_target_b_output = comparison_dir.join("ui_target_b-current.png");
     let locate_query = std::env::var("SB_UI_LOCATE").ok().filter(|s| !s.trim().is_empty());
 
-    render_medical(
-        &medical1_output,
+    render_target(
+        &ui_target_a_output,
         "534bab84-299b-479a-a4af-4469df112ea7",
-        "medical1-phase2-render",
+        "ui_target_a-phase2-render",
         &fetcher,
         &style_fetcher,
         &file_fetcher,
@@ -386,10 +386,10 @@ fn main() -> Result<(), String> {
         loc_fetcher,
         animation_sample_percent,
     )?;
-    render_medical(
-        &medical2_output,
+    render_target(
+        &ui_target_b_output,
         "e9ad809d-ebcf-43a3-bb20-120f64556aef",
-        "medical2-phase2-render",
+        "ui_target_b-phase2-render",
         &fetcher,
         &style_fetcher,
         &file_fetcher,
@@ -399,17 +399,17 @@ fn main() -> Result<(), String> {
     )?;
 
     if let Some(query) = locate_query.as_deref() {
-        let medical1_binding = UiBindingView {
+        let ui_target_a_binding = UiBindingView {
             canvas_guid: Some("534bab84-299b-479a-a4af-4469df112ea7"),
             content_canvas_guid: Some("534bab84-299b-479a-a4af-4469df112ea7"),
             binding_kind: Some("mfd"),
             manufacturer_id: Some("drak"),
-            helper_name: Some("medical1-phase2-render"),
+            helper_name: Some("ui_target_a-phase2-render"),
             default_view_index: None,
             default_screen_slot: None,
         };
-        let medical1_inputs = PipelineInputs {
-            binding: &medical1_binding,
+        let ui_target_a_inputs = PipelineInputs {
+            binding: &ui_target_a_binding,
             canvas_fetcher: &fetcher,
             swf_fetcher: &file_fetcher,
             style_fetcher: &style_fetcher,
@@ -420,19 +420,19 @@ fn main() -> Result<(), String> {
             localization_map: load_localization_map(&workspace),
             loc_fetcher: None,
         };
-        print_layout_locations(&medical1_inputs, "medical1", query)?;
+        print_layout_locations(&ui_target_a_inputs, "ui_target_a", query)?;
 
-        let medical2_binding = UiBindingView {
+        let ui_target_b_binding = UiBindingView {
             canvas_guid: Some("e9ad809d-ebcf-43a3-bb20-120f64556aef"),
             content_canvas_guid: Some("e9ad809d-ebcf-43a3-bb20-120f64556aef"),
             binding_kind: Some("mfd"),
             manufacturer_id: Some("drak"),
-            helper_name: Some("medical2-phase2-render"),
+            helper_name: Some("ui_target_b-phase2-render"),
             default_view_index: None,
             default_screen_slot: None,
         };
-        let medical2_inputs = PipelineInputs {
-            binding: &medical2_binding,
+        let ui_target_b_inputs = PipelineInputs {
+            binding: &ui_target_b_binding,
             canvas_fetcher: &fetcher,
             swf_fetcher: &file_fetcher,
             style_fetcher: &style_fetcher,
@@ -443,10 +443,10 @@ fn main() -> Result<(), String> {
             localization_map: load_localization_map(&workspace),
             loc_fetcher: None,
         };
-        print_layout_locations(&medical2_inputs, "medical2", query)?;
+        print_layout_locations(&ui_target_b_inputs, "ui_target_b", query)?;
     }
 
-    println!("Wrote {}", medical1_output.display());
-    println!("Wrote {}", medical2_output.display());
+    println!("Wrote {}", ui_target_a_output.display());
+    println!("Wrote {}", ui_target_b_output.display());
     Ok(())
 }

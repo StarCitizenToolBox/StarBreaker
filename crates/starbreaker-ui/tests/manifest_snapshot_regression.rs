@@ -5,36 +5,36 @@ use starbreaker_ui::{
 };
 use std::collections::HashMap;
 
-fn medical1_ir() -> UiIrDocument {
-    serde_json::from_str(include_str!("fixtures/medical_ir/medical1-screen_16x9_a-ir.json"))
-        .expect("medical1 IR fixture should parse")
+fn target_a_ir() -> UiIrDocument {
+    serde_json::from_str(include_str!("fixtures/ui_ir/target_a-screen_16x9_a-ir.json"))
+        .expect("ui_target_a IR fixture should parse")
 }
 
-fn medical2_ir() -> UiIrDocument {
+fn target_b_ir() -> UiIrDocument {
     serde_json::from_str(include_str!(
-        "fixtures/medical_ir/medical2-mesh_end_screen_plane-ir.json"
+        "fixtures/ui_ir/target_b-mesh_end_screen_plane-ir.json"
     ))
-    .expect("medical2 IR fixture should parse")
+    .expect("ui_target_b IR fixture should parse")
 }
 
 fn snapshot_manifest() -> UiRegressionManifest {
-    serde_json::from_str(include_str!("fixtures/medical_ir/medical_snapshot_manifest.json"))
+    serde_json::from_str(include_str!("fixtures/ui_ir/ui_snapshot_manifest.json"))
         .expect("generic snapshot manifest fixture should parse")
 }
 
 fn manifest_snapshot_lookup() -> HashMap<String, UiScreenSnapshot> {
     HashMap::from([
-        ("medical1.baseline".to_string(), snapshot_from_ui_ir(&medical1_ir())),
-        ("medical1.current".to_string(), snapshot_from_ui_ir(&medical1_ir())),
-        ("medical2.baseline".to_string(), snapshot_from_ui_ir(&medical2_ir())),
-        ("medical2.current".to_string(), snapshot_from_ui_ir(&medical2_ir())),
+        ("ui_target_a.baseline".to_string(), snapshot_from_ui_ir(&target_a_ir())),
+        ("ui_target_a.current".to_string(), snapshot_from_ui_ir(&target_a_ir())),
+        ("ui_target_b.baseline".to_string(), snapshot_from_ui_ir(&target_b_ir())),
+        ("ui_target_b.current".to_string(), snapshot_from_ui_ir(&target_b_ir())),
         (
             "clipper_small_door.baseline".to_string(),
-            snapshot_from_ui_ir(&medical2_ir()),
+            snapshot_from_ui_ir(&target_b_ir()),
         ),
         (
             "clipper_small_door.current".to_string(),
-            snapshot_from_ui_ir(&medical2_ir()),
+            snapshot_from_ui_ir(&target_b_ir()),
         ),
     ])
 }
@@ -72,7 +72,7 @@ fn run_generic_comparison(
 
 #[test]
 fn manifest_snapshots_are_deterministic_for_phase1_fixtures() {
-    for document in [medical1_ir(), medical2_ir()] {
+    for document in [target_a_ir(), target_b_ir()] {
         let first = snapshot_from_ui_ir(&document);
         let second = snapshot_from_ui_ir(&document);
         assert_eq!(first, second, "snapshot extraction must be deterministic");
@@ -105,7 +105,7 @@ fn manifest_targets_pass_for_phase1_fixtures() {
 
 #[test]
 fn manifest_snapshot_comparator_flags_text_case_drift() {
-    let baseline_doc = medical1_ir();
+    let baseline_doc = target_a_ir();
     let mut current_doc = baseline_doc.clone();
 
     let text_node = current_doc
@@ -131,7 +131,7 @@ fn manifest_snapshot_comparator_flags_text_case_drift() {
     let baseline = snapshot_from_ui_ir(&baseline_doc);
     let current = snapshot_from_ui_ir(&current_doc);
     let comparison = run_generic_comparison(
-        "medical1_text_case",
+        "target_a_text_case",
         UiRegressionCategory::Text,
         baseline,
         current,
@@ -149,7 +149,7 @@ fn manifest_snapshot_comparator_flags_text_case_drift() {
 
 #[test]
 fn manifest_snapshot_comparator_flags_new_visible_shape() {
-    let baseline_doc = medical2_ir();
+    let baseline_doc = target_b_ir();
     let mut current_doc = baseline_doc.clone();
 
     let mut new_node = current_doc
@@ -177,7 +177,7 @@ fn manifest_snapshot_comparator_flags_new_visible_shape() {
     let baseline = snapshot_from_ui_ir(&baseline_doc);
     let current = snapshot_from_ui_ir(&current_doc);
     let comparison = run_generic_comparison(
-        "medical2_new_shape",
+        "target_b_new_shape",
         UiRegressionCategory::Shape,
         baseline,
         current,
@@ -198,7 +198,7 @@ fn manifest_snapshot_comparator_flags_new_visible_shape() {
 
 #[test]
 fn manifest_snapshot_comparator_flags_geometry_drift() {
-    let baseline_doc = medical1_ir();
+    let baseline_doc = target_a_ir();
     let mut current_doc = baseline_doc.clone();
 
     let node = current_doc
@@ -214,7 +214,7 @@ fn manifest_snapshot_comparator_flags_geometry_drift() {
     let baseline = snapshot_from_ui_ir(&baseline_doc);
     let current = snapshot_from_ui_ir(&current_doc);
     let comparison = run_generic_comparison(
-        "medical1_geometry",
+        "target_a_geometry",
         UiRegressionCategory::Text,
         baseline,
         current,
@@ -232,7 +232,7 @@ fn manifest_snapshot_comparator_flags_geometry_drift() {
 
 #[test]
 fn manifest_snapshot_comparator_flags_colour_drift() {
-    let baseline_doc = medical2_ir();
+    let baseline_doc = target_b_ir();
     let mut current_doc = baseline_doc.clone();
 
     let node = current_doc
@@ -246,7 +246,7 @@ fn manifest_snapshot_comparator_flags_colour_drift() {
     let baseline = snapshot_from_ui_ir(&baseline_doc);
     let current = snapshot_from_ui_ir(&current_doc);
     let comparison = run_generic_comparison(
-        "medical2_colour",
+        "target_b_colour",
         UiRegressionCategory::Text,
         baseline,
         current,
@@ -264,7 +264,7 @@ fn manifest_snapshot_comparator_flags_colour_drift() {
 
 #[test]
 fn manifest_snapshot_comparator_flags_font_identity_drift() {
-    let baseline_doc = medical1_ir();
+    let baseline_doc = target_a_ir();
     let mut current_doc = baseline_doc.clone();
 
     let node = current_doc
@@ -278,7 +278,7 @@ fn manifest_snapshot_comparator_flags_font_identity_drift() {
     let baseline = snapshot_from_ui_ir(&baseline_doc);
     let current = snapshot_from_ui_ir(&current_doc);
     let comparison = run_generic_comparison(
-        "medical1_font",
+        "target_a_font",
         UiRegressionCategory::Font,
         baseline,
         current,
@@ -296,7 +296,7 @@ fn manifest_snapshot_comparator_flags_font_identity_drift() {
 
 #[test]
 fn manifest_snapshot_comparator_flags_draw_order_drift() {
-    let baseline_doc = medical2_ir();
+    let baseline_doc = target_b_ir();
     let mut current_doc = baseline_doc.clone();
 
     let node = current_doc
@@ -309,7 +309,7 @@ fn manifest_snapshot_comparator_flags_draw_order_drift() {
     let baseline = snapshot_from_ui_ir(&baseline_doc);
     let current = snapshot_from_ui_ir(&current_doc);
     let comparison = run_generic_comparison(
-        "medical2_draw_order",
+        "target_b_draw_order",
         UiRegressionCategory::Text,
         baseline,
         current,

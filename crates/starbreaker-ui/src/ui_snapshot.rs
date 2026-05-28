@@ -1,4 +1,4 @@
-//! Medical UI snapshot schema, extraction, and drift comparison.
+//! UI snapshot schema, extraction, and drift comparison.
 //!
 //! This module provides a deterministic, metadata-first snapshot representation
 //! derived from [`crate::ui_ir::UiIrDocument`]. It is intended for regression
@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use crate::ui_ir::{UiIrColourBlendMode, UiIrDocument, UiIrNode};
 
-/// Snapshot schema version for medical structural snapshots.
+/// Snapshot schema version for structural UI snapshots.
 pub const UI_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 
 /// Category tracked by the Phase 7 structural snapshot checks.

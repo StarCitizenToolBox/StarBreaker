@@ -40,7 +40,7 @@ use swf::Tag;
 pub use crate::bb_atlas::AssetFetcher;
 
 /// Static UI captures use the midpoint of authored BuildingBlocks animations.
-/// This matches the accepted `*-current.png` medical artifacts and keeps live
+/// This matches the accepted `*-current.png` regression artifacts and keeps live
 /// ship-generated textures on the same sampled layout path.
 pub const DEFAULT_STATIC_ANIMATION_SAMPLE_PERCENT: f32 = 50.0;
 
