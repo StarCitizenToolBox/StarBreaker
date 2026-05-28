@@ -7,7 +7,10 @@ exports/
 mcp/starbreaker-mcp.exe
 mcp/starbreaker-mcp
 research/
-/scripts/
+!/scripts/
+/scripts/*
+!/scripts/generate_ui_regression_artifacts.sh
+!/scripts/add_ui_regression_target.sh
 test-artifacts/
 docs-local/
 .claude/
