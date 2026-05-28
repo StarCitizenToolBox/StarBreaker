@@ -2151,6 +2151,46 @@ mod ui_regression_registry_tests {
             Some("invalid_mode")
         );
     }
+
+    #[test]
+    fn ui_regression_validate_quick_mode_passes_with_default_fixtures() {
+        let server = StarBreakerMcp::new(None);
+        let response = server.ui_regression_validate(Parameters(UiRegressionValidateRequest {
+            mode: Some("quick".to_string()),
+            manifest_path: None,
+            freeze_path: None,
+        }));
+
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("validator response should be valid JSON");
+        assert_eq!(json.get("mode").and_then(|v| v.as_str()), Some("quick"));
+        assert_eq!(json.get("passed").and_then(|v| v.as_bool()), Some(true));
+    }
+
+    #[test]
+    fn ui_regression_validate_reports_missing_freeze_file() {
+        let server = StarBreakerMcp::new(None);
+        let response = server.ui_regression_validate(Parameters(UiRegressionValidateRequest {
+            mode: Some("quick".to_string()),
+            manifest_path: None,
+            freeze_path: Some("does/not/exist-freeze.json".to_string()),
+        }));
+
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("validator response should be valid JSON");
+        assert_eq!(json.get("passed").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(
+            json.get("error_code").and_then(|v| v.as_str()),
+            Some("validation_failed")
+        );
+        assert!(
+            json.get("stderr")
+                .and_then(|v| v.as_str())
+                .map(|s| s.contains("freeze file not found"))
+                .unwrap_or(false),
+            "expected stderr to mention missing freeze file"
+        );
+    }
 }
 
 fn format_loadout_node(
