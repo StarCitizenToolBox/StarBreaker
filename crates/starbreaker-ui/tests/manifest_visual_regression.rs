@@ -17,12 +17,12 @@ fn comparison_paths(name: &str) -> (PathBuf, PathBuf) {
     )
 }
 
-fn medical_ir_manifest() -> UiRegressionManifest {
+fn snapshot_manifest() -> UiRegressionManifest {
     serde_json::from_str(include_str!("fixtures/medical_ir/medical_snapshot_manifest.json"))
         .expect("medical manifest fixture should parse")
 }
 
-fn medical_manifest_snapshot_lookup() -> HashMap<String, UiScreenSnapshot> {
+fn manifest_snapshot_lookup() -> HashMap<String, UiScreenSnapshot> {
     let medical1: UiIrDocument = serde_json::from_str(include_str!(
         "fixtures/medical_ir/medical1-screen_16x9_a-ir.json"
     ))
@@ -48,16 +48,16 @@ fn medical_manifest_snapshot_lookup() -> HashMap<String, UiScreenSnapshot> {
     ])
 }
 
-fn assert_medical_manifest_runner_preflight() {
-    let manifest = medical_ir_manifest();
-    let snapshots = medical_manifest_snapshot_lookup();
+fn assert_manifest_runner_preflight() {
+    let manifest = snapshot_manifest();
+    let snapshots = manifest_snapshot_lookup();
     let results = compare_manifest_targets_with_loader(&manifest, |path| {
         snapshots
             .get(path)
             .cloned()
             .ok_or_else(|| format!("missing snapshot fixture for {path}"))
     })
-    .expect("manifest runner should load all medical fixture snapshots");
+    .expect("manifest runner should load all manifest fixture snapshots");
     for result in results {
         assert!(
             result.comparison.passed,
@@ -178,7 +178,7 @@ fn mask_touches_all_edges(mask: &[bool], width: usize, height: usize, band: usiz
     touches_top && touches_bottom && touches_left && touches_right
 }
 
-fn assert_medical_visual_regression_guard(
+fn assert_manifest_visual_regression_guard(
     name: &str,
     min_allowed_coverage_ratio: f32,
     max_allowed_coverage_ratio: f32,
@@ -262,21 +262,21 @@ fn assert_roi_coverage_ratio(
 }
 
 #[test]
-fn medical1_visual_regression_guard() {
-    assert_medical_manifest_runner_preflight();
+fn target_medical1_visual_regression_guard() {
+    assert_manifest_runner_preflight();
     // Medical1 has more animated cyan geometry in the central ROI than medical2,
     // so we use a slightly wider lower bound to avoid false font-size failures.
-    assert_medical_visual_regression_guard("medical1", 0.55, 1.25);
+    assert_manifest_visual_regression_guard("medical1", 0.55, 1.25);
 }
 
 #[test]
-fn medical2_visual_regression_guard() {
-    assert_medical_manifest_runner_preflight();
-    assert_medical_visual_regression_guard("medical2", 0.75, 1.25);
+fn target_medical2_visual_regression_guard() {
+    assert_manifest_runner_preflight();
+    assert_manifest_visual_regression_guard("medical2", 0.75, 1.25);
 }
 
 #[test]
-fn medical1_custom_shape_scale_and_position_guard() {
+fn target_medical1_custom_shape_scale_and_position_guard() {
     let (reference_path, current_path) = comparison_paths("medical1");
     if !reference_path.is_file() || !current_path.is_file() {
         eprintln!(

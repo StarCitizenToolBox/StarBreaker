@@ -17,9 +17,9 @@ fn medical2_ir() -> UiIrDocument {
     .expect("medical2 IR fixture should parse")
 }
 
-fn medical_manifest() -> UiRegressionManifest {
+fn snapshot_manifest() -> UiRegressionManifest {
     serde_json::from_str(include_str!("fixtures/medical_ir/medical_snapshot_manifest.json"))
-        .expect("medical regression manifest fixture should parse")
+        .expect("generic snapshot manifest fixture should parse")
 }
 
 fn manifest_snapshot_lookup() -> HashMap<String, UiScreenSnapshot> {
@@ -71,7 +71,7 @@ fn run_generic_comparison(
 }
 
 #[test]
-fn medical_snapshots_are_deterministic_for_phase1_fixtures() {
+fn manifest_snapshots_are_deterministic_for_phase1_fixtures() {
     for document in [medical1_ir(), medical2_ir()] {
         let first = snapshot_from_ui_ir(&document);
         let second = snapshot_from_ui_ir(&document);
@@ -80,8 +80,8 @@ fn medical_snapshots_are_deterministic_for_phase1_fixtures() {
 }
 
 #[test]
-fn medical_manifest_targets_pass_for_phase1_fixtures() {
-    let manifest = medical_manifest();
+fn manifest_targets_pass_for_phase1_fixtures() {
+    let manifest = snapshot_manifest();
     let snapshots = manifest_snapshot_lookup();
 
     let results = compare_manifest_targets_with_loader(&manifest, |path| {
@@ -90,7 +90,7 @@ fn medical_manifest_targets_pass_for_phase1_fixtures() {
             .cloned()
             .ok_or_else(|| format!("missing snapshot fixture for {path}"))
     })
-    .expect("manifest runner should load all medical fixtures");
+    .expect("manifest runner should load all manifest fixtures");
 
     assert_eq!(results.len(), 3, "expected three manifest targets");
     for result in results {
@@ -104,7 +104,7 @@ fn medical_manifest_targets_pass_for_phase1_fixtures() {
 }
 
 #[test]
-fn medical_snapshot_comparator_flags_text_case_drift() {
+fn manifest_snapshot_comparator_flags_text_case_drift() {
     let baseline_doc = medical1_ir();
     let mut current_doc = baseline_doc.clone();
 
@@ -148,7 +148,7 @@ fn medical_snapshot_comparator_flags_text_case_drift() {
 }
 
 #[test]
-fn medical_snapshot_comparator_flags_new_visible_shape() {
+fn manifest_snapshot_comparator_flags_new_visible_shape() {
     let baseline_doc = medical2_ir();
     let mut current_doc = baseline_doc.clone();
 
@@ -197,7 +197,7 @@ fn medical_snapshot_comparator_flags_new_visible_shape() {
 }
 
 #[test]
-fn medical_snapshot_comparator_flags_geometry_drift() {
+fn manifest_snapshot_comparator_flags_geometry_drift() {
     let baseline_doc = medical1_ir();
     let mut current_doc = baseline_doc.clone();
 
@@ -231,7 +231,7 @@ fn medical_snapshot_comparator_flags_geometry_drift() {
 }
 
 #[test]
-fn medical_snapshot_comparator_flags_colour_drift() {
+fn manifest_snapshot_comparator_flags_colour_drift() {
     let baseline_doc = medical2_ir();
     let mut current_doc = baseline_doc.clone();
 
@@ -263,7 +263,7 @@ fn medical_snapshot_comparator_flags_colour_drift() {
 }
 
 #[test]
-fn medical_snapshot_comparator_flags_font_identity_drift() {
+fn manifest_snapshot_comparator_flags_font_identity_drift() {
     let baseline_doc = medical1_ir();
     let mut current_doc = baseline_doc.clone();
 
@@ -295,7 +295,7 @@ fn medical_snapshot_comparator_flags_font_identity_drift() {
 }
 
 #[test]
-fn medical_snapshot_comparator_flags_draw_order_drift() {
+fn manifest_snapshot_comparator_flags_draw_order_drift() {
     let baseline_doc = medical2_ir();
     let mut current_doc = baseline_doc.clone();
 
