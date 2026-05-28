@@ -5,9 +5,8 @@ use std::path::{Path, PathBuf};
 use starbreaker_ui::pipeline::AssetFetcher;
 use starbreaker_ui::{
     CanvasFetcher, PipelineInputs, StyleFetcher, SwfFetcher, UiBindingView, UiError,
-    UiIrDocument, UiScreenSnapshot, UiSnapshotElement, UiSnapshotTolerance, compare_snapshots,
-    compile_ir_for_binding,
-    snapshot_from_ui_ir,
+    UiIrDocument, UiRegressionCategory, UiRegressionManifest, UiScreenSnapshot, UiSnapshotElement,
+    compare_manifest_targets_with_loader, compile_ir_for_binding, snapshot_from_ui_ir,
 };
 
 struct FsCanvasFetcher {
@@ -122,7 +121,7 @@ fn load_canvas_index(root: &Path) -> Result<FsCanvasFetcher, String> {
     Ok(FsCanvasFetcher { guid_to_path, by_name })
 }
 
-fn compile_medical_ir(
+fn compile_target_ir(
     fetcher: &FsCanvasFetcher,
     localization_map: Option<HashMap<String, String>>,
     canvas_guid: &str,
@@ -136,7 +135,7 @@ fn compile_medical_ir(
         content_canvas_guid: Some(canvas_guid),
         binding_kind: Some("mfd"),
         manufacturer_id: Some("drak"),
-        helper_name: Some("medical-live-ir-guard"),
+        helper_name: Some("manifest-live-ir-guard"),
         default_view_index: None,
         default_screen_slot: None,
     };
@@ -154,7 +153,21 @@ fn compile_medical_ir(
         loc_fetcher: None,
     };
 
-    compile_ir_for_binding(&inputs).expect("medical IR compile should succeed")
+    compile_ir_for_binding(&inputs).expect("target IR compile should succeed")
+}
+
+fn live_snapshot_manifest() -> UiRegressionManifest {
+    let mut manifest: UiRegressionManifest = serde_json::from_str(include_str!(
+        "fixtures/medical_ir/medical_snapshot_manifest.json"
+    ))
+    .expect("snapshot manifest fixture should parse");
+    manifest
+        .targets
+        .retain(|target| target.id == "medical1" || target.id == "medical2");
+    for target in &mut manifest.targets {
+        target.category = UiRegressionCategory::Text;
+    }
+    manifest
 }
 
 fn focused_movement_snapshot(snapshot: &UiScreenSnapshot) -> UiScreenSnapshot {
@@ -227,7 +240,7 @@ fn visible_placeholder_nodes(document: &UiIrDocument) -> Vec<String> {
         .collect()
 }
 
-fn load_live_and_baseline_medical_irs() -> Option<(UiIrDocument, UiIrDocument, UiIrDocument, UiIrDocument)> {
+fn load_live_and_baseline_target_irs() -> Option<(UiIrDocument, UiIrDocument, UiIrDocument, UiIrDocument)> {
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
         .canonicalize()
@@ -235,7 +248,7 @@ fn load_live_and_baseline_medical_irs() -> Option<(UiIrDocument, UiIrDocument, U
     let canvas_root = workspace_root.join("ships/dcb_canvas/libs/foundry/records");
     if !canvas_root.is_dir() {
         eprintln!(
-            "skipping live medical IR guard (missing records root: {})",
+            "skipping live manifest IR guard (missing records root: {})",
             canvas_root.display()
         );
         return None;
@@ -250,8 +263,8 @@ fn load_live_and_baseline_medical_irs() -> Option<(UiIrDocument, UiIrDocument, U
     let med1_guid = "534bab84-299b-479a-a4af-4469df112ea7";
     let med2_guid = "e9ad809d-ebcf-43a3-bb20-120f64556aef";
 
-    let med1_live = compile_medical_ir(&fetcher, localization_map.clone(), med1_guid);
-    let med2_live = compile_medical_ir(&fetcher, localization_map, med2_guid);
+    let med1_live = compile_target_ir(&fetcher, localization_map.clone(), med1_guid);
+    let med2_live = compile_target_ir(&fetcher, localization_map, med2_guid);
 
     let med1_baseline: UiIrDocument = serde_json::from_str(include_str!(
         "fixtures/medical_ir/medical1-screen_16x9_a-ir.json"
@@ -266,8 +279,8 @@ fn load_live_and_baseline_medical_irs() -> Option<(UiIrDocument, UiIrDocument, U
 }
 
 #[test]
-fn live_medical_ir_gold_standard_has_no_visible_placeholder_text() {
-    let Some((med1_live, med2_live, _, _)) = load_live_and_baseline_medical_irs() else {
+fn live_manifest_targets_have_no_visible_placeholder_text() {
+    let Some((med1_live, med2_live, _, _)) = load_live_and_baseline_target_irs() else {
         return;
     };
 
@@ -287,9 +300,9 @@ fn live_medical_ir_gold_standard_has_no_visible_placeholder_text() {
 }
 
 #[test]
-fn live_medical_ir_matches_gold_standard_snapshot_geometry() {
+fn live_manifest_targets_match_gold_standard_snapshot_geometry() {
     let Some((med1_live, med2_live, med1_baseline, med2_baseline)) =
-        load_live_and_baseline_medical_irs()
+        load_live_and_baseline_target_irs()
     else {
         return;
     };
@@ -301,25 +314,39 @@ fn live_medical_ir_matches_gold_standard_snapshot_geometry() {
         return;
     }
 
-    let med1_cmp = compare_snapshots(
-        &focused_movement_snapshot(&snapshot_from_ui_ir(&med1_baseline)),
-        &focused_movement_snapshot(&snapshot_from_ui_ir(&med1_live)),
-        UiSnapshotTolerance::default(),
-    );
-    let med2_cmp = compare_snapshots(
-        &focused_movement_snapshot(&snapshot_from_ui_ir(&med2_baseline)),
-        &focused_movement_snapshot(&snapshot_from_ui_ir(&med2_live)),
-        UiSnapshotTolerance::default(),
-    );
+    let manifest = live_snapshot_manifest();
+    let snapshots = HashMap::from([
+        (
+            "medical1.baseline".to_string(),
+            focused_movement_snapshot(&snapshot_from_ui_ir(&med1_baseline)),
+        ),
+        (
+            "medical1.current".to_string(),
+            focused_movement_snapshot(&snapshot_from_ui_ir(&med1_live)),
+        ),
+        (
+            "medical2.baseline".to_string(),
+            focused_movement_snapshot(&snapshot_from_ui_ir(&med2_baseline)),
+        ),
+        (
+            "medical2.current".to_string(),
+            focused_movement_snapshot(&snapshot_from_ui_ir(&med2_live)),
+        ),
+    ]);
+    let results = compare_manifest_targets_with_loader(&manifest, |path| {
+        snapshots
+            .get(path)
+            .cloned()
+            .ok_or_else(|| format!("missing snapshot fixture for {path}"))
+    })
+    .expect("manifest runner should compare live snapshots against baselines");
 
-    assert!(
-        med1_cmp.passed,
-        "medical1 gold-standard live IR drift. Do not update baselines unless the drift is intentional, source-backed, and explicitly approved.\n{}",
-        med1_cmp.failures.join("\n")
-    );
-    assert!(
-        med2_cmp.passed,
-        "medical2 gold-standard live IR drift. Do not update baselines unless the drift is intentional, source-backed, and explicitly approved.\n{}",
-        med2_cmp.failures.join("\n")
-    );
+    for result in results {
+        assert!(
+            result.comparison.passed,
+            "{} gold-standard live IR drift. Do not update baselines unless the drift is intentional, source-backed, and explicitly approved.\n{}",
+            result.id,
+            result.comparison.failures.join("\n")
+        );
+    }
 }
