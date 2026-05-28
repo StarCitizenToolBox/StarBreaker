@@ -491,7 +491,10 @@ fn build_archive_indexes(entries: Vec<P4kEntry>) -> Result<CentralDirectory, P4k
     // Case-insensitive sorted index for entry_case_insensitive.
     let mut sorted_lower_index: Vec<u32> = (0..entries.len() as u32).collect();
     sorted_lower_index.sort_unstable_by(|&a, &b| {
-        lowercase_names[a as usize].cmp(&lowercase_names[b as usize])
+        lowercase_names[a as usize]
+            .cmp(&lowercase_names[b as usize])
+            .then_with(|| entries[a as usize].name.cmp(&entries[b as usize].name))
+            .then_with(|| a.cmp(&b))
     });
 
     Ok((entries, path_index, sorted_index, lowercase_names, sorted_lower_index))

@@ -52,7 +52,7 @@ use starbreaker_blend::{
 use crate::error::Error;
 use crate::decomposed::DecomposedInput;
 use crate::pipeline::{
-    load_interior_mesh_asset, DecomposedExport, ExportedFile, ExportedFileKind, ExportOptions,
+    load_interior_mesh_asset, preload_interior_meshes, DecomposedExport, ExportedFile, ExportedFileKind, ExportOptions,
     LoadedInteriors, PngCache, port_flags_mark_invisible,
 };
 use crate::types::{Mesh, SubMesh};
@@ -914,10 +914,29 @@ pub fn write_decomposed_export_blend(
         material_mode: crate::pipeline::MaterialMode::Colors,
         ..opts.clone()
     };
-    let mut interior_png_cache = PngCache::new();
+    let preloaded_interior_meshes = preload_interior_meshes(&input.interiors, p4k, &interior_mesh_opts);
+    let mut preloaded_interior_mesh_map: HashMap<String, Option<(Mesh, Option<crate::mtl::MtlFile>, Option<crate::nmc::NodeMeshCombo>)>> = input
+        .interiors
+        .unique_cgfs
+        .iter()
+        .zip(preloaded_interior_meshes.into_iter())
+        .map(|(entry, loaded)| {
+            (
+                crate::decomposed::interior_asset_lookup_key(&entry.cgf_path, entry.material_path.as_deref()),
+                loaded,
+            )
+        })
+        .collect();
     let mut interior_mesh_loader = |entry: &crate::pipeline::InteriorCgfEntry|
         -> Option<(Mesh, Option<crate::mtl::MtlFile>, Option<crate::nmc::NodeMeshCombo>)> {
-        let loaded = load_interior_mesh_asset(p4k, entry, &interior_mesh_opts, &mut interior_png_cache)?;
+        let lookup_key = crate::decomposed::interior_asset_lookup_key(&entry.cgf_path, entry.material_path.as_deref());
+        let loaded = preloaded_interior_mesh_map
+            .remove(&lookup_key)
+            .flatten()
+            .or_else(|| {
+                let mut interior_png_cache = PngCache::new();
+                load_interior_mesh_asset(p4k, entry, &interior_mesh_opts, &mut interior_png_cache)
+            })?;
         let (mesh, materials, nmc) = loaded.clone();
         let mesh_asset = crate::decomposed::mesh_asset_relative_path(
             p4k,

@@ -132,6 +132,8 @@ pub struct ExportOptions {
     /// Example: `ship` writes manifests to `Packages/ship/<package>/...` while
     /// still keeping shared assets under `Data/...`.
     pub decomposed_package_subdir: Option<String>,
+    /// Decomposed fast path: emit only UI-generated images and required scene manifests.
+    pub ui_only_files: bool,
 }
 
 impl Default for ExportOptions {
@@ -152,6 +154,7 @@ impl Default for ExportOptions {
             apply_default_animation_pose: true,
             default_animation_tags: vec!["landing_gear_extend".to_string()],
             decomposed_package_subdir: None,
+            ui_only_files: false,
         }
     }
 }

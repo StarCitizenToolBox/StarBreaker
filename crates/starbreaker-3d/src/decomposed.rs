@@ -3,6 +3,7 @@ use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
 use gltf_json as json;
+use rayon::prelude::*;
 use starbreaker_common::progress::{report as report_progress, Progress};
 use starbreaker_dds;
 use starbreaker_datacore::Database;
@@ -996,21 +997,33 @@ pub(crate) fn write_decomposed_export(
         existing_asset_paths,
     )?;
     let root_material_sidecar = root_material_view.sidecar_materials.as_ref().map(|materials| {
-        write_material_sidecar(
-            &mut files,
-            p4k,
-            &mut png_cache,
-            &mut texture_cache,
-            &palettes_manifest_path,
-            &input.entity_name,
-            &input.geometry_path,
-            &input.material_path,
-            materials,
-            &root_material_view.sidecar_original_indices,
-            opts.texture_mip,
-            existing_asset_paths,
-            &mut mtl_cache,
-        )
+        if opts.ui_only_files {
+            projected_material_sidecar_path(
+                p4k,
+                materials,
+                &input.material_path,
+                &input.geometry_path,
+                &input.entity_name,
+                opts.texture_mip,
+                &mut mtl_cache,
+            )
+        } else {
+            write_material_sidecar(
+                &mut files,
+                p4k,
+                &mut png_cache,
+                &mut texture_cache,
+                &palettes_manifest_path,
+                &input.entity_name,
+                &input.geometry_path,
+                &input.material_path,
+                materials,
+                &root_material_view.sidecar_original_indices,
+                opts.texture_mip,
+                existing_asset_paths,
+                &mut mtl_cache,
+            )
+        }
     });
     let mut engine_glow_targets = Vec::new();
     register_livery_usage(
@@ -1033,22 +1046,34 @@ pub(crate) fn write_decomposed_export(
                 .material_path
                 .as_deref()
                 .unwrap_or(&input.material_path);
-            let identity: Vec<u32> = (0..materials.materials.len() as u32).collect();
-            write_material_sidecar(
-                &mut files,
-                p4k,
-                &mut png_cache,
-                &mut texture_cache,
-                &palettes_manifest_path,
-                &input.entity_name,
-                &input.geometry_path,
-                variant_material_path,
-                materials,
-                &identity,
-                opts.texture_mip,
-                existing_asset_paths,
-                &mut mtl_cache,
-            )
+            if opts.ui_only_files {
+                projected_material_sidecar_path(
+                    p4k,
+                    materials,
+                    variant_material_path,
+                    &input.geometry_path,
+                    &input.entity_name,
+                    opts.texture_mip,
+                    &mut mtl_cache,
+                )
+            } else {
+                let identity: Vec<u32> = (0..materials.materials.len() as u32).collect();
+                write_material_sidecar(
+                    &mut files,
+                    p4k,
+                    &mut png_cache,
+                    &mut texture_cache,
+                    &palettes_manifest_path,
+                    &input.entity_name,
+                    &input.geometry_path,
+                    variant_material_path,
+                    materials,
+                    &identity,
+                    opts.texture_mip,
+                    existing_asset_paths,
+                    &mut mtl_cache,
+                )
+            }
         });
         paint_variant_json.push(serde_json::json!({
             "subgeometry_tag": variant.subgeometry_tag,
@@ -1098,21 +1123,33 @@ pub(crate) fn write_decomposed_export(
             existing_asset_paths,
         )?;
         let material_sidecar = child_material_view.sidecar_materials.as_ref().map(|materials| {
-            write_material_sidecar(
-                &mut files,
-                p4k,
-                &mut png_cache,
-                &mut texture_cache,
-                &palettes_manifest_path,
-                &child.entity_name,
-                &child.geometry_path,
-                &child.material_path,
-                materials,
-                &child_material_view.sidecar_original_indices,
-                opts.texture_mip,
-                existing_asset_paths,
-                &mut mtl_cache,
-            )
+            if opts.ui_only_files {
+                projected_material_sidecar_path(
+                    p4k,
+                    materials,
+                    &child.material_path,
+                    &child.geometry_path,
+                    &child.entity_name,
+                    opts.texture_mip,
+                    &mut mtl_cache,
+                )
+            } else {
+                write_material_sidecar(
+                    &mut files,
+                    p4k,
+                    &mut png_cache,
+                    &mut texture_cache,
+                    &palettes_manifest_path,
+                    &child.entity_name,
+                    &child.geometry_path,
+                    &child.material_path,
+                    materials,
+                    &child_material_view.sidecar_original_indices,
+                    opts.texture_mip,
+                    existing_asset_paths,
+                    &mut mtl_cache,
+                )
+            }
         });
         if should_export_engine_glow_targets(child) {
             engine_glow_targets.extend(build_thruster_engine_glow_targets(
@@ -1136,23 +1173,17 @@ pub(crate) fn write_decomposed_export(
             &child.entity_name,
             material_sidecar.as_deref(),
         );
-        let ui_bindings = child
-            .ui_bindings
-            .iter()
-            .map(|binding| {
-                generated_ui_binding_record(
-                    &mut files,
-                    binding,
-                    db,
-                    p4k,
-                    opts.texture_mip,
-                    &input.entity_name,
-                    &input.geometry_path,
-                    &scene_manifest_path,
-                    root_manufacturer_id.as_deref(),
-                )
-            })
-            .collect();
+        let ui_bindings = generate_ui_binding_records(
+            &mut files,
+            &child.ui_bindings,
+            db,
+            p4k,
+            opts.texture_mip,
+            &input.entity_name,
+            &input.geometry_path,
+            &scene_manifest_path,
+            root_manufacturer_id.as_deref(),
+        );
 
         let resolved_transform = resolved_child_transforms[index];
         child_instances.push(SceneInstanceRecord {
@@ -1209,6 +1240,8 @@ pub(crate) fn write_decomposed_export(
     let mut failed_interior_asset_cache: HashSet<String> = HashSet::new();
     let mut interior_records = Vec::with_capacity(input.interiors.containers.len());
     let mut interior_placement_elapsed = std::time::Duration::ZERO;
+    let mut interior_asset_resolve_elapsed = std::time::Duration::ZERO;
+    let mut interior_ui_binding_elapsed = std::time::Duration::ZERO;
     let mut interior_light_elapsed = std::time::Duration::ZERO;
     let container_count = input.interiors.containers.len();
     let total_interior_placements = input
@@ -1224,8 +1257,31 @@ pub(crate) fn write_decomposed_export(
             .as_ref()
             .map(|palette| register_palette(&mut palette_records, palette));
         let mut placements = Vec::with_capacity(container.placements.len());
+        let ui_binding_start = Instant::now();
+        let precomputed_placement_ui = container
+            .placements
+            .par_iter()
+            .map(|placement| {
+                generate_ui_binding_records_detached(
+                    &placement.ui_bindings,
+                    db,
+                    p4k,
+                    opts.texture_mip,
+                    &input.entity_name,
+                    &input.geometry_path,
+                    &scene_manifest_path,
+                    root_manufacturer_id.as_deref(),
+                )
+            })
+            .collect::<Vec<_>>();
+        interior_ui_binding_elapsed += ui_binding_start.elapsed();
         let placement_start = Instant::now();
-        for placement in &container.placements {
+        for (placement, (ui_bindings, file_records)) in container
+            .placements
+            .iter()
+            .zip(precomputed_placement_ui.into_iter())
+        {
+            let asset_resolve_start = Instant::now();
             let entry = &input.interiors.unique_cgfs[placement.mesh_index];
             // Per-placement palette override (loadout-attached children like
             // fire-extinguisher tanks with their own `kegr_red_black` palette)
@@ -1249,6 +1305,7 @@ pub(crate) fn write_decomposed_export(
                 .map(|path| normalize_source_path(p4k, path));
             let cache_key = interior_asset_lookup_key(&normalized_cgf_path, normalized_material_path.as_deref());
             if failed_interior_asset_cache.contains(&cache_key) {
+                interior_asset_resolve_elapsed += asset_resolve_start.elapsed();
                 processed_interior_placements += 1;
                 if total_interior_placements > 0 {
                     let fraction =
@@ -1286,6 +1343,7 @@ pub(crate) fn write_decomposed_export(
                     reusable
                 } else {
                     let Some((mesh, materials, _nmc)) = load_interior_mesh(entry) else {
+                        interior_asset_resolve_elapsed += asset_resolve_start.elapsed();
                         log::warn!("failed to build decomposed interior asset for {}", entry.cgf_path);
                         failed_interior_asset_cache.insert(cache_key);
                         processed_interior_placements += 1;
@@ -1330,21 +1388,33 @@ pub(crate) fn write_decomposed_export(
                         material_sidecar_relative_path(&source_material_path, &entry.name, opts.texture_mip)
                     });
                     let material_sidecar = interior_material_view.sidecar_materials.as_ref().map(|materials| {
-                        write_material_sidecar(
-                            &mut files,
-                            p4k,
-                            &mut png_cache,
-                            &mut texture_cache,
-                            &palettes_manifest_path,
-                            &entry.name,
-                            &entry.cgf_path,
-                            entry.material_path.as_deref().unwrap_or(""),
-                            materials,
-                            &interior_material_view.sidecar_original_indices,
-                            opts.texture_mip,
-                            existing_asset_paths,
-                            &mut mtl_cache,
-                        )
+                        if opts.ui_only_files {
+                            projected_material_sidecar_path(
+                                p4k,
+                                materials,
+                                entry.material_path.as_deref().unwrap_or(""),
+                                &entry.cgf_path,
+                                &entry.name,
+                                opts.texture_mip,
+                                &mut mtl_cache,
+                            )
+                        } else {
+                            write_material_sidecar(
+                                &mut files,
+                                p4k,
+                                &mut png_cache,
+                                &mut texture_cache,
+                                &palettes_manifest_path,
+                                &entry.name,
+                                &entry.cgf_path,
+                                entry.material_path.as_deref().unwrap_or(""),
+                                materials,
+                                &interior_material_view.sidecar_original_indices,
+                                opts.texture_mip,
+                                existing_asset_paths,
+                                &mut mtl_cache,
+                            )
+                        }
                     });
                     let reuse_existing_mesh_asset = (files.contains_key(&requested_mesh_asset)
                         || existing_asset_paths.is_some_and(|paths| paths.contains(&requested_mesh_asset.to_ascii_lowercase())))
@@ -1375,6 +1445,7 @@ pub(crate) fn write_decomposed_export(
                     (mesh_asset, material_sidecar)
                 }
             };
+            interior_asset_resolve_elapsed += asset_resolve_start.elapsed();
 
             register_livery_usage(
                 &mut livery_usage,
@@ -1383,6 +1454,12 @@ pub(crate) fn write_decomposed_export(
                 &entry.name,
                 material_sidecar.as_deref(),
             );
+
+            for (export_path, png_bytes) in file_records {
+                if !files.contains_key(&export_path) {
+                    insert_binary_file(&mut files, export_path, png_bytes);
+                }
+            }
 
             placements.push(InteriorPlacementRecord {
                 cgf_path: normalize_source_path(p4k, &entry.cgf_path),
@@ -1393,23 +1470,7 @@ pub(crate) fn write_decomposed_export(
                 mesh_asset,
                 material_sidecar,
                 entity_class_guid: None,
-                ui_bindings: placement
-                    .ui_bindings
-                    .iter()
-                    .map(|binding| {
-                        generated_ui_binding_record(
-                            &mut files,
-                            binding,
-                            db,
-                            p4k,
-                            opts.texture_mip,
-                            &input.entity_name,
-                            &input.geometry_path,
-                            &scene_manifest_path,
-                            root_manufacturer_id.as_deref(),
-                        )
-                    })
-                    .collect(),
+                ui_bindings,
                 transform: placement.transform,
                 palette_id: placement_palette_id,
             });
@@ -1449,7 +1510,7 @@ pub(crate) fn write_decomposed_export(
                     }
 
                     // Fall back to standard PNG export (for SDR or unsupported formats)
-                    if let Some(png_path) = export_texture_asset(
+                    if export_texture_asset(
                         &mut files,
                         p4k,
                         &mut png_cache,
@@ -1458,8 +1519,15 @@ pub(crate) fn write_decomposed_export(
                         TextureFlavor::Generic,
                         opts.texture_mip,
                         existing_asset_paths,
-                    ) {
-                        return Some(png_path);
+                    )
+                    .is_some()
+                    {
+                        return Some(texture_relative_path(
+                            p4k,
+                            src,
+                            TextureFlavor::Generic,
+                            opts.texture_mip,
+                        ));
                     }
 
                     // Both EXR and PNG failed. Log a warning and use white PNG fallback.
@@ -1543,6 +1611,21 @@ pub(crate) fn write_decomposed_export(
     log::info!(
         "[timing][decomposed] interior_placements: {:.2}s",
         interior_placement_elapsed.as_secs_f32()
+    );
+    log::info!(
+        "[timing][decomposed] interior_asset_resolve: {:.2}s",
+        interior_asset_resolve_elapsed.as_secs_f32()
+    );
+    log::info!(
+        "[timing][decomposed] interior_ui_bindings: {:.2}s",
+        interior_ui_binding_elapsed.as_secs_f32()
+    );
+    log::info!(
+        "[timing][decomposed] interior_placement_other: {:.2}s",
+        interior_placement_elapsed
+            .saturating_sub(interior_asset_resolve_elapsed)
+            .saturating_sub(interior_ui_binding_elapsed)
+            .as_secs_f32()
     );
     log::info!(
         "[timing][decomposed] interior_lights: {:.2}s",
@@ -1675,26 +1758,28 @@ pub(crate) fn write_decomposed_export(
         opts,
     );
     report_progress(progress, INTERIOR_ASSETS_END, "Writing manifests");
-    finalize_palette_records(
-        &mut palette_records,
-        &mut files,
-        p4k,
-        &mut png_cache,
-        &mut texture_cache,
-        opts.texture_mip,
-        existing_asset_paths,
-    );
     insert_json_file(&mut files, scene_manifest_path, scene_manifest);
-    insert_json_file(
-        &mut files,
-        palettes_manifest_path.clone(),
-        build_palette_manifest_value(&palette_records),
-    );
-    insert_json_file(
-        &mut files,
-        liveries_manifest_path,
-        build_livery_manifest_value(&livery_usage),
-    );
+    if !opts.ui_only_files {
+        finalize_palette_records(
+            &mut palette_records,
+            &mut files,
+            p4k,
+            &mut png_cache,
+            &mut texture_cache,
+            opts.texture_mip,
+            existing_asset_paths,
+        );
+        insert_json_file(
+            &mut files,
+            palettes_manifest_path.clone(),
+            build_palette_manifest_value(&palette_records),
+        );
+        insert_json_file(
+            &mut files,
+            liveries_manifest_path,
+            build_livery_manifest_value(&livery_usage),
+        );
+    }
     log::info!("[timing][decomposed] manifests: {:.2}s", phase_start.elapsed().as_secs_f32());
     log::info!("[timing][decomposed] total: {:.2}s", total_start.elapsed().as_secs_f32());
 
@@ -2013,7 +2098,13 @@ fn write_material_sidecar(
     existing_asset_paths: Option<&HashSet<String>>,
     mtl_cache: &mut HashMap<String, Option<MtlFile>>,
 ) -> String {
-    let source_material_path = material_source_path(p4k, materials, material_path, geometry_path);
+    let source_material_path = canonical_material_source_path(
+        p4k,
+        materials,
+        material_path,
+        geometry_path,
+        mtl_cache,
+    );
     let relative_path = material_sidecar_relative_path(&source_material_path, fallback_name, texture_mip);
     if files.contains_key(&relative_path) {
         return relative_path;
@@ -2557,7 +2648,6 @@ fn generated_ui_texture_for_binding(
 }
 
 fn generated_ui_binding_record(
-    files: &mut BTreeMap<String, Vec<u8>>,
     binding: &UiBinding,
     db: &Database<'_>,
     p4k: &MappedP4k,
@@ -2566,7 +2656,7 @@ fn generated_ui_binding_record(
     root_geometry_path: &str,
     scene_manifest_path: &str,
     root_manufacturer_id: Option<&str>,
-) -> UiBinding {
+) -> (UiBinding, Option<(String, Vec<u8>)>) {
     let mut binding = binding.clone();
     match crate::ui_pipeline::render_ui_binding_png(
         &binding,
@@ -2582,9 +2672,7 @@ fn generated_ui_binding_record(
                 root_manufacturer_id,
                 &binding,
             );
-            if !files.contains_key(&export_path) {
-                insert_binary_file(files, export_path.clone(), png_bytes);
-            }
+            let file_record = Some((export_path.clone(), png_bytes));
             binding.generated_image_path = Some(export_path);
             binding.generated_context_manifest_path = Some(scene_manifest_path.to_string());
             let selected_style_source = root_manufacturer_id
@@ -2666,15 +2754,87 @@ fn generated_ui_binding_record(
                 }))
                 .unwrap_or_else(|_| "{}".to_string()),
             );
+            (binding, file_record)
         }
         Err(e) => {
             log::warn!(
                 "ui render failed for helper {:?} (kind {}): {}",
                 binding.helper_name, binding.binding_kind, e
             );
+            (binding, None)
         }
     }
-    binding
+}
+
+fn generate_ui_binding_records_detached(
+    bindings: &[UiBinding],
+    db: &Database<'_>,
+    p4k: &MappedP4k,
+    texture_mip: u32,
+    root_entity_name: &str,
+    root_geometry_path: &str,
+    scene_manifest_path: &str,
+    root_manufacturer_id: Option<&str>,
+) -> (Vec<UiBinding>, Vec<(String, Vec<u8>)>) {
+    let mut generated = bindings
+        .par_iter()
+        .enumerate()
+        .map(|(idx, binding)| {
+            let (binding, file_record) = generated_ui_binding_record(
+                binding,
+                db,
+                p4k,
+                texture_mip,
+                root_entity_name,
+                root_geometry_path,
+                scene_manifest_path,
+                root_manufacturer_id,
+            );
+            (idx, binding, file_record)
+        })
+        .collect::<Vec<_>>();
+
+    generated.sort_by_key(|(idx, _, _)| *idx);
+
+    let mut ui_bindings = Vec::with_capacity(generated.len());
+    let mut file_records = Vec::new();
+    for (_, binding, file_record) in generated {
+        if let Some(file_record) = file_record {
+            file_records.push(file_record);
+        }
+        ui_bindings.push(binding);
+    }
+    (ui_bindings, file_records)
+}
+
+fn generate_ui_binding_records(
+    files: &mut BTreeMap<String, Vec<u8>>,
+    bindings: &[UiBinding],
+    db: &Database<'_>,
+    p4k: &MappedP4k,
+    texture_mip: u32,
+    root_entity_name: &str,
+    root_geometry_path: &str,
+    scene_manifest_path: &str,
+    root_manufacturer_id: Option<&str>,
+) -> Vec<UiBinding> {
+    let (ui_bindings, file_records) = generate_ui_binding_records_detached(
+        bindings,
+        db,
+        p4k,
+        texture_mip,
+        root_entity_name,
+        root_geometry_path,
+        scene_manifest_path,
+        root_manufacturer_id,
+    );
+
+    for (export_path, png_bytes) in file_records {
+        if !files.contains_key(&export_path) {
+            insert_binary_file(files, export_path, png_bytes);
+        }
+    }
+    ui_bindings
 }
 
 fn generated_ui_binding_path(
@@ -2991,6 +3151,39 @@ fn material_source_path(
     )
 }
 
+fn projected_material_sidecar_path(
+    p4k: &MappedP4k,
+    materials: &MtlFile,
+    material_path: &str,
+    geometry_path: &str,
+    fallback_name: &str,
+    texture_mip: u32,
+    mtl_cache: &mut HashMap<String, Option<MtlFile>>,
+) -> String {
+    let source_material_path = canonical_material_source_path(
+        p4k,
+        materials,
+        material_path,
+        geometry_path,
+        mtl_cache,
+    );
+    material_sidecar_relative_path(&source_material_path, fallback_name, texture_mip)
+}
+
+fn canonical_material_source_path(
+    p4k: &MappedP4k,
+    materials: &MtlFile,
+    material_path: &str,
+    geometry_path: &str,
+    mtl_cache: &mut HashMap<String, Option<MtlFile>>,
+) -> String {
+    let source_material_path = material_source_path(p4k, materials, material_path, geometry_path);
+    load_mtl_cached(p4k, mtl_cache, &source_material_path)
+        .and_then(|parsed| parsed.source_path.clone())
+        .filter(|path| !path.is_empty())
+        .unwrap_or(source_material_path)
+}
+
 fn material_source_request(materials: &MtlFile, material_path: &str, geometry_path: &str) -> String {
     if let Some(source_path) = materials.source_path.as_ref() {
         source_path.clone()
@@ -3090,7 +3283,8 @@ pub(crate) fn mesh_asset_relative_path(
     let base = if geometry_path.is_empty() {
         format!("Data/generated/{}{}", sanitize_identifier(fallback_name), extension)
     } else {
-        replace_extension(&normalize_source_path(p4k, geometry_path), extension)
+        let _ = p4k;
+        replace_extension(&normalize_requested_source_path(geometry_path), extension)
     };
     insert_stem_suffix(&base, &format!("_LOD{lod}"))
 }
