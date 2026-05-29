@@ -1184,22 +1184,26 @@ class OrchestrationMixin:
         if cached is not None:
             return cached
 
-        # Phase R3 perf fix: pass ``import_select_created_objects=False``
-        # to skip the Blender glTF addon's post-import O(n) selection
-        # pass directly via the official op param (replacing the prior
-        # monkey-patch on ``BlenderScene.select_imported_objects``). With
-        # hundreds of small template imports against a growing scene the
-        # selection step was costing ~24s on a Clipper import; the
-        # StarBreaker addon never reads selection state.
         before = {obj.as_pointer() for obj in bpy.data.objects}
-        result = bpy.ops.import_scene.gltf(
-            filepath=str(asset_path),
-            import_pack_images=False,
-            merge_vertices=False,
-            import_select_created_objects=False,
-        )
-        if "FINISHED" not in result:
-            raise RuntimeError(f"Failed to import {asset_path}")
+        if asset_path.suffix.lower() == ".blend":
+            with bpy.data.libraries.load(str(asset_path), link=False) as (data_from, data_to):
+                data_to.objects = list(data_from.objects)
+        else:
+            # Phase R3 perf fix: pass ``import_select_created_objects=False``
+            # to skip the Blender glTF addon's post-import O(n) selection
+            # pass directly via the official op param (replacing the prior
+            # monkey-patch on ``BlenderScene.select_imported_objects``). With
+            # hundreds of small template imports against a growing scene the
+            # selection step was costing ~24s on a Clipper import; the
+            # StarBreaker addon never reads selection state.
+            result = bpy.ops.import_scene.gltf(
+                filepath=str(asset_path),
+                import_pack_images=False,
+                merge_vertices=False,
+                import_select_created_objects=False,
+            )
+            if "FINISHED" not in result:
+                raise RuntimeError(f"Failed to import {asset_path}")
 
         imported = [obj for obj in bpy.data.objects if obj.as_pointer() not in before]
         imported_materials_by_pointer: dict[int, bpy.types.Material] = {}

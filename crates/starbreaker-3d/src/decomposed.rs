@@ -1024,7 +1024,7 @@ pub(crate) fn write_decomposed_export(
                 &mut mtl_cache,
             )
         }
-    });
+    }).map(|path| normalize_material_source_for_manifest(&path));
     let mut engine_glow_targets = Vec::new();
     register_livery_usage(
         &mut livery_usage,
@@ -1074,7 +1074,7 @@ pub(crate) fn write_decomposed_export(
                     &mut mtl_cache,
                 )
             }
-        });
+        }).map(|path| normalize_material_source_for_manifest(&path));
         paint_variant_json.push(serde_json::json!({
             "subgeometry_tag": variant.subgeometry_tag,
             "palette_id": palette_id,
@@ -1150,7 +1150,7 @@ pub(crate) fn write_decomposed_export(
                     &mut mtl_cache,
                 )
             }
-        });
+        }).map(|path| normalize_material_source_for_manifest(&path));
         if should_export_engine_glow_targets(child) {
             engine_glow_targets.extend(build_thruster_engine_glow_targets(
                 &child.mesh,
@@ -1379,14 +1379,16 @@ pub(crate) fn write_decomposed_export(
                         opts.format,
                     );
                     let requested_material_sidecar = interior_material_view.sidecar_materials.as_ref().map(|materials| {
-                        let source_material_path = material_source_path(
+                        projected_material_sidecar_path(
                             p4k,
                             materials,
                             entry.material_path.as_deref().unwrap_or(""),
                             &entry.cgf_path,
-                        );
-                        material_sidecar_relative_path(&source_material_path, &entry.name, opts.texture_mip)
-                    });
+                            &entry.name,
+                            opts.texture_mip,
+                            &mut mtl_cache,
+                        )
+                    }).map(|path| normalize_material_source_for_manifest(&path));
                     let material_sidecar = interior_material_view.sidecar_materials.as_ref().map(|materials| {
                         if opts.ui_only_files {
                             projected_material_sidecar_path(
@@ -1415,7 +1417,7 @@ pub(crate) fn write_decomposed_export(
                                 &mut mtl_cache,
                             )
                         }
-                    });
+                    }).map(|path| normalize_material_source_for_manifest(&path));
                     let reuse_existing_mesh_asset = (files.contains_key(&requested_mesh_asset)
                         || existing_asset_paths.is_some_and(|paths| paths.contains(&requested_mesh_asset.to_ascii_lowercase())))
                         && requested_material_sidecar
@@ -3175,13 +3177,23 @@ fn canonical_material_source_path(
     materials: &MtlFile,
     material_path: &str,
     geometry_path: &str,
-    mtl_cache: &mut HashMap<String, Option<MtlFile>>,
+    _mtl_cache: &mut HashMap<String, Option<MtlFile>>,
 ) -> String {
-    let source_material_path = material_source_path(p4k, materials, material_path, geometry_path);
-    load_mtl_cached(p4k, mtl_cache, &source_material_path)
-        .and_then(|parsed| parsed.source_path.clone())
-        .filter(|path| !path.is_empty())
-        .unwrap_or(source_material_path)
+    let source_material_path = material_source_path(p4k, materials, material_path, geometry_path)
+        .replace('\\', "/");
+    normalize_material_source_for_manifest(&source_material_path)
+}
+
+fn normalize_material_source_for_manifest(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    if normalized
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data/"))
+    {
+        format!("Data/{}", normalized[5..].to_ascii_lowercase())
+    } else {
+        normalized.to_ascii_lowercase()
+    }
 }
 
 fn material_source_request(materials: &MtlFile, material_path: &str, geometry_path: &str) -> String {
@@ -3256,7 +3268,9 @@ fn reusable_interior_asset_paths(
         return None;
     }
 
-    let material_source = requested_material_source_path(p4k, entry.material_path.as_deref(), &entry.cgf_path);
+    let material_source = normalize_material_source_for_manifest(
+        &requested_material_source_path(p4k, entry.material_path.as_deref(), &entry.cgf_path),
+    );
     let material_sidecar = material_sidecar_relative_path(&material_source, &entry.name, texture_mip);
     if existing_asset_set_contains(existing_asset_paths, &material_sidecar) {
         Some((mesh_asset, Some(material_sidecar)))
@@ -3290,10 +3304,11 @@ pub(crate) fn mesh_asset_relative_path(
 }
 
 fn material_sidecar_relative_path(source_material_path: &str, fallback_name: &str, mip: u32) -> String {
-    let base = if source_material_path.is_empty() {
+    let normalized_source_material_path = normalize_material_source_for_manifest(source_material_path);
+    let base = if normalized_source_material_path.is_empty() {
         format!("Data/generated/{}.materials.json", sanitize_identifier(fallback_name))
     } else {
-        replace_extension(source_material_path, ".materials.json")
+        replace_extension(&normalized_source_material_path, ".materials.json")
     };
     insert_stem_suffix(&base, &format!("_TEX{mip}"))
 }
@@ -5499,5 +5514,12 @@ mod tests {
         assert_eq!(path0, "Data/Objects/Ships/Test/hull_TEX0.materials.json");
         assert_eq!(path2, "Data/Objects/Ships/Test/hull_TEX2.materials.json");
         assert_ne!(path0, path2);
+    }
+
+    #[test]
+    fn material_sidecar_relative_path_normalizes_case() {
+        let path = material_sidecar_relative_path("Data/Objects/Spaceships/Ships/DRAK/Clipper/EXTERIOR/DRAK_CLIPPER_EXT.mtl", "f", 0);
+
+        assert_eq!(path, "Data/objects/spaceships/ships/drak/clipper/exterior/drak_clipper_ext_TEX0.materials.json");
     }
 }
