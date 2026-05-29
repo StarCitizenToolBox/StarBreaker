@@ -2,8 +2,8 @@
 fn hardcoding_guard_tests_exist_in_core_renderer_files() {
     let guarded_files = [
         (
-            "compose.rs",
-            include_str!("../src/compose.rs"),
+            "compose/tests.rs",
+            include_str!("../src/compose/tests.rs"),
             "fn compose_source_does_not_reintroduce_forbidden_hardcoded_markers()",
         ),
         (
