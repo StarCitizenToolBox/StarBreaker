@@ -6,6 +6,7 @@ use crate::bb_scene::BbNodeId;
 
 mod build;
 mod eval;
+mod eval_bool;
 mod eval_string;
 mod resolve_text;
 #[cfg(test)]
