@@ -1135,21 +1135,41 @@ pub(crate) fn collect_mfd_default_canvases(
         "Components[SCItemSeatDashboardParams].MFDParams.primaryMFD.geometryName",
     );
 
-    let base = "Components[SCItemSeatDashboardParams].MFDParams.modeConfiguration.defaultConfiguration";
-    let primary_view = query_string_path(
+    let default_base =
+        "Components[SCItemSeatDashboardParams].MFDParams.modeConfiguration.defaultConfiguration";
+    let default_primary_view = query_string_path(
         db,
         dashboard_entity_record,
-        &format!("{base}.primaryMFDScreenView"),
+        &format!("{default_base}.primaryMFDScreenView"),
     );
-    let secondary_views: Vec<Option<String>> = (1..=5)
+    let default_secondary_views: Vec<Option<String>> = (1..=5)
         .map(|i| {
             query_string_path(
                 db,
                 dashboard_entity_record,
-                &format!("{base}.secondaryMFDScreen{i}View"),
+                &format!("{default_base}.secondaryMFDScreen{i}View"),
             )
         })
         .collect();
+
+    // Prefer no-casts operator-mode profiles when present: these match in-game
+    // startup MFD layouts for dashboards that don't use cast screens.
+    let no_casts_profiles = collect_operator_mode_profiles(
+        db,
+        dashboard_entity_record,
+        "Components[SCItemSeatDashboardParams].MFDParams.modeConfiguration.operatorModeViewConfigurationsNoCasts[SMFDOperatorModeConfig]",
+    );
+    let cast_profiles = collect_operator_mode_profiles(
+        db,
+        dashboard_entity_record,
+        "Components[SCItemSeatDashboardParams].MFDParams.modeConfiguration.operatorModeViewConfigurations[SMFDOperatorModeConfig]",
+    );
+    let (primary_view, secondary_views) = select_mfd_mode_views(
+        default_primary_view,
+        default_secondary_views,
+        &no_casts_profiles,
+        &cast_profiles,
+    );
 
     let view_canvas = build_mfd_view_canvas_map(db);
     let mut result = HashMap::new();
@@ -1270,6 +1290,86 @@ fn query_string_path(db: &Database, record: &Record, path: &str) -> Option<Strin
         .ok()
         .and_then(|compiled| db.query_single::<String>(&compiled, record).ok().flatten())
         .filter(|value| !value.is_empty())
+}
+
+fn query_string_vec_path(db: &Database, record: &Record, path: &str) -> Vec<String> {
+    db.compile_path::<String>(record.struct_id(), path)
+        .ok()
+        .and_then(|compiled| db.query::<String>(&compiled, record).ok())
+        .unwrap_or_default()
+}
+
+fn collect_operator_mode_profiles(
+    db: &Database,
+    record: &Record,
+    base_path: &str,
+) -> Vec<(Option<String>, Vec<Option<String>>)> {
+    let primary = query_string_vec_path(db, record, &format!("{base_path}.primaryMFDScreenView"));
+    let secondary: Vec<Vec<String>> = (1..=5)
+        .map(|i| {
+            query_string_vec_path(
+                db,
+                record,
+                &format!("{base_path}.secondaryMFDScreen{i}View"),
+            )
+        })
+        .collect();
+
+    let mut count = primary.len();
+    for entries in &secondary {
+        count = count.max(entries.len());
+    }
+
+    let mut profiles = Vec::with_capacity(count);
+    for index in 0..count {
+        let primary_view = primary
+            .get(index)
+            .cloned()
+            .filter(|value| !value.is_empty());
+        let secondary_views: Vec<Option<String>> = secondary
+            .iter()
+            .map(|entries| entries.get(index).cloned().filter(|value| !value.is_empty()))
+            .collect();
+        profiles.push((primary_view, secondary_views));
+    }
+    profiles
+}
+
+fn is_view_off(view: &str) -> bool {
+    view.is_empty() || view == "eView_Off"
+}
+
+fn mode_profile_has_visible_view(primary: Option<&str>, secondary: &[Option<String>]) -> bool {
+    if let Some(value) = primary {
+        if !is_view_off(value) {
+            return true;
+        }
+    }
+    secondary
+        .iter()
+        .flatten()
+        .any(|value| !is_view_off(value.as_str()))
+}
+
+fn select_mfd_mode_views(
+    default_primary: Option<String>,
+    default_secondary: Vec<Option<String>>,
+    no_casts_profiles: &[(Option<String>, Vec<Option<String>>)],
+    cast_profiles: &[(Option<String>, Vec<Option<String>>)],
+) -> (Option<String>, Vec<Option<String>>) {
+    if let Some((primary, secondary)) = no_casts_profiles
+        .iter()
+        .find(|(primary, secondary)| mode_profile_has_visible_view(primary.as_deref(), secondary))
+    {
+        return (primary.clone(), secondary.clone());
+    }
+    if let Some((primary, secondary)) = cast_profiles
+        .iter()
+        .find(|(primary, secondary)| mode_profile_has_visible_view(primary.as_deref(), secondary))
+    {
+        return (primary.clone(), secondary.clone());
+    }
+    (default_primary, default_secondary)
 }
 
 fn query_stringish_path(db: &Database, record: &Record, path: &str) -> Option<String> {
@@ -1588,5 +1688,69 @@ mod tests {
             assert_ne!(*view, "eView_SelfStatus", "leftCastView must not be assigned to any slot");
             assert_ne!(*view, "eView_TargetStatus", "rightCastView must not be assigned to any slot");
         }
+    }
+
+    #[test]
+    fn mfd_mode_selection_prefers_no_casts_profile() {
+        let default_primary = Some("eView_ResourceNetwork".to_string());
+        let default_secondary = oviews(&[
+            Some("eView_Scanning"),
+            Some("eView_Diagnostics"),
+            None,
+            None,
+            None,
+        ]);
+        let no_casts_profiles = vec![
+            (
+                Some("eView_SelfStatus".to_string()),
+                oviews(&[
+                    Some("eView_TargetStatus"),
+                    Some("eView_ResourceNetwork"),
+                    Some("eView_Scanning"),
+                    None,
+                    None,
+                ]),
+            ),
+        ];
+
+        let (primary, secondary) = select_mfd_mode_views(
+            default_primary,
+            default_secondary,
+            &no_casts_profiles,
+            &[],
+        );
+
+        assert_eq!(primary.as_deref(), Some("eView_SelfStatus"));
+        assert_eq!(secondary[0].as_deref(), Some("eView_TargetStatus"));
+        assert_eq!(secondary[1].as_deref(), Some("eView_ResourceNetwork"));
+    }
+
+    #[test]
+    fn mfd_mode_selection_falls_back_to_default_when_profiles_off() {
+        let default_primary = Some("eView_ResourceNetwork".to_string());
+        let default_secondary = oviews(&[
+            Some("eView_Scanning"),
+            Some("eView_Diagnostics"),
+            None,
+            None,
+            None,
+        ]);
+        let off_profile = vec![
+            (
+                Some("eView_Off".to_string()),
+                oviews(&[Some("eView_Off"), Some("eView_Off"), None, None, None]),
+            ),
+        ];
+
+        let (primary, secondary) = select_mfd_mode_views(
+            default_primary,
+            default_secondary,
+            &off_profile,
+            &off_profile,
+        );
+
+        assert_eq!(primary.as_deref(), Some("eView_ResourceNetwork"));
+        assert_eq!(secondary[0].as_deref(), Some("eView_Scanning"));
+        assert_eq!(secondary[1].as_deref(), Some("eView_Diagnostics"));
     }
 }
