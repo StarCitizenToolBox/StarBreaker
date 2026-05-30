@@ -1,34 +1,34 @@
-//! BuildingBlocks layout engine — pixel-space rect resolver.
-//!
-//! Turns a merged [`BbScene`] (produced by [`crate::bb_resolve`]) into a
-//! [`LayoutResult`] that maps every [`BbNodeId`] to a [`Rect`] in screen-pixel
-//! coordinates, plus a deterministic DFS draw order.
-//!
-//! # Coordinate system
-//! Screen-space, +x right, +y down, units = pixels.  The BB authoring system
-//! also uses +x right, +y down (verified: in the Clipper reference screenshots
-//! a node at `position.y = 100` canvas units appears below the top edge).
-//!
-//! # Percent sizing
-//! `BbValue::Percent(p)` stores the raw `value` from the DataCore JSON.  In
-//! every tested fixture `1.0` represents 100 % of the parent dimension (i.e.
-//! the value is already a fraction, **not** a 0–100 percentage).  The task
-//! specification stated "0–100" but fixture inspection (`MC_S_Target_Master`,
-//! `BB_ScreenRadar`, etc.) shows `value: 1` for "fill parent" and `value: 0.08`
-//! for an 8 % column.  We therefore compute `parent_inner.w * p` directly.
-//!
-//! # Margin simplification (Phase A1)
-//! For Phase A1, `margin` is applied as a top-left offset only: positive
-//! `margin.left` shifts the outer rect rightward, positive `margin.top` shifts
-//! it downward.  Full TRBL margin layout (e.g. shrinking the available space
-//! for siblings) is deferred to Phase A3.
-//!
-//! # Stacking
-//! BB does not use flexbox by default.  All siblings are laid out using the
-//! same parent inner rect as origin (z-order overlay).  If a parent node's
-//! `_Type_` is `BuildingBlocks_FlexContainer` (or its raw JSON indicates a flex
-//! layout policy), a warning is logged and the same overlay fallback is used.
-//! Flex support is deferred to Phase A6.
+// BuildingBlocks layout engine — pixel-space rect resolver.
+//
+// Turns a merged [`BbScene`] (produced by [`crate::bb_resolve`]) into a
+// [`LayoutResult`] that maps every [`BbNodeId`] to a [`Rect`] in screen-pixel
+// coordinates, plus a deterministic DFS draw order.
+//
+// # Coordinate system
+// Screen-space, +x right, +y down, units = pixels.  The BB authoring system
+// also uses +x right, +y down (verified: in the Clipper reference screenshots
+// a node at `position.y = 100` canvas units appears below the top edge).
+//
+// # Percent sizing
+// `BbValue::Percent(p)` stores the raw `value` from the DataCore JSON.  In
+// every tested fixture `1.0` represents 100 % of the parent dimension (i.e.
+// the value is already a fraction, **not** a 0–100 percentage).  The task
+// specification stated "0–100" but fixture inspection (`MC_S_Target_Master`,
+// `BB_ScreenRadar`, etc.) shows `value: 1` for "fill parent" and `value: 0.08`
+// for an 8 % column.  We therefore compute `parent_inner.w * p` directly.
+//
+// # Margin simplification (Phase A1)
+// For Phase A1, `margin` is applied as a top-left offset only: positive
+// `margin.left` shifts the outer rect rightward, positive `margin.top` shifts
+// it downward.  Full TRBL margin layout (e.g. shrinking the available space
+// for siblings) is deferred to Phase A3.
+//
+// # Stacking
+// BB does not use flexbox by default.  All siblings are laid out using the
+// same parent inner rect as origin (z-order overlay).  If a parent node's
+// `_Type_` is `BuildingBlocks_FlexContainer` (or its raw JSON indicates a flex
+// layout policy), a warning is logged and the same overlay fallback is used.
+// Flex support is deferred to Phase A6.
 
 use std::collections::BTreeMap;
 
@@ -3560,7 +3560,7 @@ mod tests {
 
     #[test]
     fn layout_source_does_not_reintroduce_forbidden_hardcoded_or_heuristic_markers() {
-        let source = include_str!("bb_layout.rs");
+        let source = include_str!("engine.inc");
         // Hard rule: keep layout generic across assets and screens. If this
         // trips, remove marker-based workarounds and fix structural causes.
         let forbidden = [

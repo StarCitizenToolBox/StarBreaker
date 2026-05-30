@@ -1,11 +1,11 @@
-//! Canonical UI IR renderer for generic BuildingBlocks output.
-//! GOLDEN RULE: No hard-coding, heuristic workarounds, no procedural fallbacks. Avoid targetted scoping. Find the root cause and fix issues instead. Find the source data even it means doing things the hard way. This is intended to be a pipeline that is completely generic that can work for any UI on any ship and must not have targetted hacks that won't fix the issue in other places. This will keep the code lean and generic. Think how the game-engine would implement it.
-//!
-//! This module is the first Phase 2 step toward deterministic renderer
-//! consumption of [`crate::ui_ir::UiIrDocument`]. It renders the generic BB
-//! path directly from IR fields that were materialized in Phase 1: layout,
-//! fill colours, borders, asset references, and resolved text payload/style.
-//!
+// Canonical UI IR renderer for generic BuildingBlocks output.
+// GOLDEN RULE: No hard-coding, heuristic workarounds, no procedural fallbacks. Avoid targetted scoping. Find the root cause and fix issues instead. Find the source data even it means doing things the hard way. This is intended to be a pipeline that is completely generic that can work for any UI on any ship and must not have targetted hacks that won't fix the issue in other places. This will keep the code lean and generic. Think how the game-engine would implement it.
+//
+// This module is the first Phase 2 step toward deterministic renderer
+// consumption of [`crate::ui_ir::UiIrDocument`]. It renders the generic BB
+// path directly from IR fields that were materialized in Phase 1: layout,
+// fill colours, borders, asset references, and resolved text payload/style.
+//
 
 use image::RgbaImage;
 use image::imageops;
@@ -3017,7 +3017,7 @@ mod tests {
     #[test]
     fn render_ui_ir_document_renders_text_from_golden_fixture() {
         let document: UiIrDocument = serde_json::from_str(include_str!(
-            "../tests/fixtures/ui_ir/expected_testroot_ir.json"
+            "../../tests/fixtures/ui_ir/expected_testroot_ir.json"
         ))
         .expect("golden fixture should parse");
         let fetcher = StubFetcher { images: HashMap::new() };
@@ -3234,7 +3234,7 @@ mod tests {
 
     #[test]
     fn compose_source_does_not_reintroduce_forbidden_hardcoded_markers() {
-        let source = include_str!("ir_compose.rs");
+        let source = include_str!("engine.inc");
         // Hard rule: do not add heuristic marker names. If this trips, fix the
         // structural root cause so composition remains generic across screens.
         // Renaming around this assertion is not an acceptable workaround.

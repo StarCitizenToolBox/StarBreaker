@@ -1,43 +1,43 @@
-//! BuildingBlocks canvas graph resolver.
-//!
-//! Two-pass drill-down from a root `BuildingBlocks_Canvas` JSON record:
-//!
-//! **Pass 1** — `defaultStyles` / `brandStyles` canvas-reference modifiers.
-//! Selects the *default-state* entry from `defaultStyles.entries[]` (or a
-//! matching `brandStyles[]` entry) and fetches its
-//! `CanvasReferenceRecord`-typed modifier value.  The default-state entry is:
-//! 1. The first entry whose `conditionsList` is absent or empty
-//!    (unconditional — always active regardless of game state).
-//! 2. Failing that, the entry whose condition tag matches the scene node with
-//!    the highest style-tag count ("most-tagged node" heuristic — the primary
-//!    content slot carries more tags than sub-component slots).
-//! 3. Last resort: the first entry overall (used when no scene-node heuristic
-//!    applies, e.g. `MC_S_Target_Master` which has exactly one conditional
-//!    entry that is effectively the default).
-//!
-//! Selecting a single entry prevents runtime mode-switching canvases (e.g.
-//! `GunsMode`, `NavMode`, `TurretMode` on `MC_S_Self_Master`) from all being
-//! merged into the static render at once.  Each fetched child canvas is
-//! itself resolved recursively (up to `MAX_CANVAS_DEPTH` total levels), so
-//! deep hierarchies like
-//! `MC_S_Power_Master → GEN_MC_S_Power → gen_mc_s_powerlists → …` are fully
-//! expanded in one call.
-//!
-//! **Pass 2** — `WidgetCanvas.canvas` field.
-//! Some host canvases (e.g. `M_MFD_Screen`) have an empty `defaultStyles` and
-//! carry all their content via a `BuildingBlocks_WidgetCanvas` node whose
-//! `canvas` field is a `file://` URL pointing to the real content canvas.
-//! Pass 2 follows those references recursively so the merged scene includes
-//! the full content hierarchy.  Both passes share the same depth counter and
-//! a global `visited` path set to guard against cycles.
-//!
-//! **Mode-switch guard** — `conditional_canvas_norms`.
-//! All canvas URLs referenced by *any* conditional entry (regardless of which
-//! entry Pass 1 selected) are collected into `conditional_canvas_norms`.
-//! Pass 2 skips any URL in this set that was not visited by Pass 1, preventing
-//! WidgetCanvas nodes that serve as mode-switchable slots (e.g. `canvas_NavMode`
-//! pointing to `gen_mc_s_nav.json`) from being followed when a different mode
-//! was selected in Pass 1.
+// BuildingBlocks canvas graph resolver.
+//
+// Two-pass drill-down from a root `BuildingBlocks_Canvas` JSON record:
+//
+// **Pass 1** — `defaultStyles` / `brandStyles` canvas-reference modifiers.
+// Selects the *default-state* entry from `defaultStyles.entries[]` (or a
+// matching `brandStyles[]` entry) and fetches its
+// `CanvasReferenceRecord`-typed modifier value.  The default-state entry is:
+// 1. The first entry whose `conditionsList` is absent or empty
+//    (unconditional — always active regardless of game state).
+// 2. Failing that, the entry whose condition tag matches the scene node with
+//    the highest style-tag count ("most-tagged node" heuristic — the primary
+//    content slot carries more tags than sub-component slots).
+// 3. Last resort: the first entry overall (used when no scene-node heuristic
+//    applies, e.g. `MC_S_Target_Master` which has exactly one conditional
+//    entry that is effectively the default).
+//
+// Selecting a single entry prevents runtime mode-switching canvases (e.g.
+// `GunsMode`, `NavMode`, `TurretMode` on `MC_S_Self_Master`) from all being
+// merged into the static render at once.  Each fetched child canvas is
+// itself resolved recursively (up to `MAX_CANVAS_DEPTH` total levels), so
+// deep hierarchies like
+// `MC_S_Power_Master → GEN_MC_S_Power → gen_mc_s_powerlists → …` are fully
+// expanded in one call.
+//
+// **Pass 2** — `WidgetCanvas.canvas` field.
+// Some host canvases (e.g. `M_MFD_Screen`) have an empty `defaultStyles` and
+// carry all their content via a `BuildingBlocks_WidgetCanvas` node whose
+// `canvas` field is a `file://` URL pointing to the real content canvas.
+// Pass 2 follows those references recursively so the merged scene includes
+// the full content hierarchy.  Both passes share the same depth counter and
+// a global `visited` path set to guard against cycles.
+//
+// **Mode-switch guard** — `conditional_canvas_norms`.
+// All canvas URLs referenced by *any* conditional entry (regardless of which
+// entry Pass 1 selected) are collected into `conditional_canvas_norms`.
+// Pass 2 skips any URL in this set that was not visited by Pass 1, preventing
+// WidgetCanvas nodes that serve as mode-switchable slots (e.g. `canvas_NavMode`
+// pointing to `gen_mc_s_nav.json`) from being followed when a different mode
+// was selected in Pass 1.
 
 use std::collections::{HashMap, HashSet};
 

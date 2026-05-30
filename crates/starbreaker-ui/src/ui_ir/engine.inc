@@ -1,7 +1,7 @@
-//! Canonical UI intermediate representation (IR) schema and compiler.
-//!
-//! This module defines a versioned, renderer-agnostic IR document that captures
-//! fidelity-critical UI data from a resolved BuildingBlocks scene.
+// Canonical UI intermediate representation (IR) schema and compiler.
+//
+// This module defines a versioned, renderer-agnostic IR document that captures
+// fidelity-critical UI data from a resolved BuildingBlocks scene.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -5801,7 +5801,7 @@ mod tests {
 
     #[test]
     fn ui_ir_source_does_not_reintroduce_forbidden_hardcoded_markers() {
-        let source = include_str!("ui_ir.rs");
+        let source = include_str!("engine.inc");
         let forbidden = [
             ["nominal_font_size_", "from_label_style"].concat(),
             ["BG", "Dots"].concat(),

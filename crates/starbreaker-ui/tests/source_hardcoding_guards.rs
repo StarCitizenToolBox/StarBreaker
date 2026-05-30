@@ -8,17 +8,17 @@ fn hardcoding_guard_tests_exist_in_core_renderer_files() {
         ),
         (
             "ir_compose.rs",
-            include_str!("../src/ir_compose.rs"),
+            include_str!("../src/ir_compose/engine.inc"),
             "fn compose_source_does_not_reintroduce_forbidden_hardcoded_markers()",
         ),
         (
             "ui_ir.rs",
-            include_str!("../src/ui_ir.rs"),
+            include_str!("../src/ui_ir/engine.inc"),
             "fn ui_ir_source_does_not_reintroduce_forbidden_hardcoded_markers()",
         ),
         (
             "bb_layout.rs",
-            include_str!("../src/bb_layout.rs"),
+            include_str!("../src/bb_layout/engine.inc"),
             "fn layout_source_does_not_reintroduce_forbidden_hardcoded_or_heuristic_markers()",
         ),
     ];
@@ -33,7 +33,7 @@ fn hardcoding_guard_tests_exist_in_core_renderer_files() {
 
 #[test]
 fn bb_layout_source_has_no_forbidden_heuristic_markers() {
-    let source = include_str!("../src/bb_layout.rs");
+    let source = include_str!("../src/bb_layout/engine.inc");
     let forbidden = [
         ["hard", "coded", "_offset"].concat(),
         ["magic", "_multiplier"].concat(),
