@@ -1078,10 +1078,18 @@ pub fn write_decomposed_export_blend(
         if file.kind == ExportedFileKind::MeshAsset {
             let blend_path = file.relative_path;
             if !blend_path.ends_with(".blend") {
-                return Err(Error::Other(format!(
-                    "native Blend export expected .blend mesh asset path, got '{}'",
+                // Non-.blend mesh assets (e.g. .glb children) cannot be processed by the
+                // native Blend pipeline; pass them through as-is.
+                log::debug!(
+                    "native Blend export skipping non-.blend mesh asset: '{}'",
                     blend_path
-                )));
+                );
+                other_files.push(ExportedFile {
+                    relative_path: blend_path,
+                    bytes: file.bytes,
+                    kind: ExportedFileKind::MeshAsset,
+                });
+                continue;
             }
             // Extract mesh name from path for Blender object naming
             let mesh_name = blend_path

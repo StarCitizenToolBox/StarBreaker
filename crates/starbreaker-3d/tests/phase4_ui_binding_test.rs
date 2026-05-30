@@ -54,7 +54,7 @@ fn parse_scene_json(result: &starbreaker_3d::ExportResult) -> serde_json::Value 
     let scene_file = decomposed
         .files
         .iter()
-        .find(|f| f.relative_path == "scene.json")
+        .find(|f| f.relative_path.ends_with("scene.json"))
         .expect("scene.json missing from decomposed export");
     serde_json::from_slice(&scene_file.bytes).expect("scene.json must be valid JSON")
 }
@@ -65,14 +65,30 @@ fn find_binding_by_helper(
     scene: &serde_json::Value,
     helper_name: &str,
 ) -> Option<serde_json::Value> {
-    let containers = scene["interior_containers"].as_array()?;
-    for container in containers {
-        let placements = container["placements"].as_array()?;
-        for placement in placements {
-            let bindings = placement["ui_bindings"].as_array()?;
-            for binding in bindings {
-                if binding["helper_name"].as_str() == Some(helper_name) {
-                    return Some(binding.clone());
+    // Search scene.json `interiors` (the decomposed export structure)
+    if let Some(interiors) = scene["interiors"].as_array() {
+        for interior in interiors {
+            if let Some(placements) = interior["placements"].as_array() {
+                for placement in placements {
+                    if let Some(bindings) = placement["ui_bindings"].as_array() {
+                        for binding in bindings {
+                            if binding["helper_name"].as_str() == Some(helper_name) {
+                                return Some(binding.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Also search top-level `children` (some exports use this layout)
+    if let Some(children) = scene["children"].as_array() {
+        for child in children {
+            if let Some(bindings) = child["ui_bindings"].as_array() {
+                for binding in bindings {
+                    if binding["helper_name"].as_str() == Some(helper_name) {
+                        return Some(binding.clone());
+                    }
                 }
             }
         }

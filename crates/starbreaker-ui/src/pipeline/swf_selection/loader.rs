@@ -9,6 +9,36 @@ use swf::Tag;
 use super::super::SwfFetcher;
 
 pub(crate) fn load_first_swf(paths: &[String], fetcher: &dyn SwfFetcher) -> SwfAssetLibrary {
+    fn merge_support_swf_assets(
+        root_lib: &mut SwfAssetLibrary,
+        fetcher: &dyn SwfFetcher,
+        pending: &mut Vec<(String, Vec<u8>)>,
+    ) {
+        let canvas_path = "Data/UI/BuildingBlocks/assets/SWF/Canvas.swf".to_string();
+        if let Ok(canvas_bytes) = fetcher.fetch_swf_bytes(&canvas_path) {
+            if let Err(e) = root_lib.merge_swf_bytes(&canvas_bytes) {
+                log::debug!(
+                    "pipeline: failed to merge BuildingBlocks canvas SWF '{}': {}",
+                    canvas_path,
+                    e
+                );
+            }
+            pending.push((canvas_path, canvas_bytes));
+        }
+
+        let shared_fonts_path = "Data/UI/fonts/Shared/fonts_en.gfx".to_string();
+        if let Ok(shared_bytes) = fetcher.fetch_swf_bytes(&shared_fonts_path) {
+            if let Err(e) = root_lib.merge_swf_bytes(&shared_bytes) {
+                log::debug!(
+                    "pipeline: failed to merge shared fonts SWF '{}': {}",
+                    shared_fonts_path,
+                    e
+                );
+            }
+            pending.push((shared_fonts_path, shared_bytes));
+        }
+    }
+
     for path in paths {
         match fetcher.fetch_swf_bytes(path) {
             Ok(bytes) => {
@@ -21,30 +51,7 @@ pub(crate) fn load_first_swf(paths: &[String], fetcher: &dyn SwfFetcher) -> SwfA
                 };
                 let mut pending = vec![(normalize_p4k_swf_path(path), bytes)];
                 let mut seen = HashSet::new();
-
-                let canvas_path = "Data/UI/BuildingBlocks/assets/SWF/Canvas.swf".to_string();
-                if let Ok(canvas_bytes) = fetcher.fetch_swf_bytes(&canvas_path) {
-                    if let Err(e) = root_lib.merge_swf_bytes(&canvas_bytes) {
-                        log::debug!(
-                            "pipeline: failed to merge BuildingBlocks canvas SWF '{}': {}",
-                            canvas_path,
-                            e
-                        );
-                    }
-                    pending.push((canvas_path, canvas_bytes));
-                }
-
-                let shared_fonts_path = "Data/UI/fonts/Shared/fonts_en.gfx".to_string();
-                if let Ok(shared_bytes) = fetcher.fetch_swf_bytes(&shared_fonts_path) {
-                    if let Err(e) = root_lib.merge_swf_bytes(&shared_bytes) {
-                        log::debug!(
-                            "pipeline: failed to merge shared fonts SWF '{}': {}",
-                            shared_fonts_path,
-                            e
-                        );
-                    }
-                    pending.push((shared_fonts_path, shared_bytes));
-                }
+                merge_support_swf_assets(&mut root_lib, fetcher, &mut pending);
 
                 while let Some((current_path, current_bytes)) = pending.pop() {
                     if !seen.insert(current_path.clone()) {
@@ -87,7 +94,40 @@ pub(crate) fn load_first_swf(paths: &[String], fetcher: &dyn SwfFetcher) -> SwfA
         b'F', b'W', b'S', 6, 21, 0, 0, 0, 0x00, 0x18, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ];
-    SwfAssetLibrary::new(minimal).expect("minimal SWF is always valid")
+    let mut root_lib = SwfAssetLibrary::new(minimal).expect("minimal SWF is always valid");
+    let mut pending = Vec::new();
+    merge_support_swf_assets(&mut root_lib, fetcher, &mut pending);
+    let mut seen = HashSet::new();
+    while let Some((current_path, current_bytes)) = pending.pop() {
+        if !seen.insert(current_path.clone()) {
+            continue;
+        }
+        for import_path in collect_import_swf_paths(&current_path, &current_bytes) {
+            if seen.contains(&import_path) {
+                continue;
+            }
+            match fetcher.fetch_swf_bytes(&import_path) {
+                Ok(import_bytes) => {
+                    if let Err(e) = root_lib.merge_swf_bytes(&import_bytes) {
+                        log::debug!(
+                            "pipeline: failed to merge imported SWF '{}': {}",
+                            import_path,
+                            e
+                        );
+                    }
+                    pending.push((import_path, import_bytes));
+                }
+                Err(e) => {
+                    log::debug!(
+                        "pipeline: import SWF fetch failed for '{}': {}",
+                        import_path,
+                        e
+                    );
+                }
+            }
+        }
+    }
+    root_lib
 }
 
 fn normalize_p4k_swf_path(path: &str) -> String {

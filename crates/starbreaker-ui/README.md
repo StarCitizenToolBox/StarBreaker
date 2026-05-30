@@ -44,6 +44,13 @@ Regression path:
 3. `ui_regression_manifest::compare_manifest_targets_with_loader`
 4. integration tests under `tests/manifest_*`
 
+## Regression Policy
+
+- Visual and snapshot regression failures are product regressions until proven otherwise.
+- First response must be root-cause investigation and code/data-flow fixes.
+- Do not change baselines, thresholds, or regression tests as an initial workaround.
+- Baseline/test updates are allowed only after root-cause fix is implemented and validated.
+
 ## Complete Rust File List (1-line each)
 
 ### Source modules (`src/`)

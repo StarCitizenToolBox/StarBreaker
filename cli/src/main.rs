@@ -162,7 +162,24 @@ fn main() {
         }
         .to_string()
     });
-    env_logger::Builder::new().parse_filters(&env_filter).init();
+    let mut logger = env_logger::Builder::new();
+    logger.parse_filters(&env_filter);
+    // Some upstream SWF assets have header length mismatches that are benign for
+    // export and currently emit noisy warnings from the dependency parser.
+    // Keep CLI output actionable by suppressing that single warning source.
+    if std::env::var("STARBREAKER_ALLOW_SWF_READ_WARN")
+        .map(|v| v != "1")
+        .unwrap_or(true)
+    {
+        logger.filter_module("swf::read", log::LevelFilter::Error);
+    }
+    if std::env::var("STARBREAKER_ALLOW_USVG_IMAGE_WARN")
+        .map(|v| v != "1")
+        .unwrap_or(true)
+    {
+        logger.filter_module("usvg::parser::image", log::LevelFilter::Error);
+    }
+    logger.init();
 
     if cli.mem_cap > 0 {
         set_mem_cap(cli.mem_cap * 1_048_576);

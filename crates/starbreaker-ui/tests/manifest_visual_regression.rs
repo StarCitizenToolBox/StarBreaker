@@ -90,7 +90,7 @@ fn assert_manifest_runner_preflight() {
     for result in results {
         assert!(
             result.comparison.passed,
-            "manifest snapshot preflight failed for {}: {:?}",
+            "manifest snapshot preflight failed for {}: {:?}\nACTION: treat this as a real product regression and fix rendering/data-flow root cause first. Do not relax thresholds or update baselines as a first step.",
             result.id,
             result.comparison.failures
         );
@@ -247,6 +247,29 @@ fn assert_manifest_visual_regression_guard(
     );
 
     let (width, height) = reference.dimensions();
+    let title_x0 = (width as f32 * 0.20) as u32;
+    let title_x1 = (width as f32 * 0.80) as u32;
+    let title_y0 = (height as f32 * 0.12) as u32;
+    let title_y1 = (height as f32 * 0.42) as u32;
+
+    // Run a font-face/weight guard first so wrong-font regressions fail before
+    // wider coverage/size checks.
+    assert_roi_coverage_ratio(
+        &reference,
+        &current,
+        title_x0,
+        title_y0,
+        title_x1,
+        title_y1,
+        name,
+        "title typography ROI",
+        "font-face/weight",
+        0.75,
+        1.25,
+        &reference_path,
+        &current_path,
+    );
+
     let x0 = (width as f32 * 0.20) as u32;
     let x1 = (width as f32 * 0.80) as u32;
     let y0 = (height as f32 * 0.20) as u32;
@@ -261,6 +284,7 @@ fn assert_manifest_visual_regression_guard(
         y1,
         name,
         "central text ROI",
+        "font-size",
         min_allowed_coverage_ratio,
         max_allowed_coverage_ratio,
         &reference_path,
@@ -277,6 +301,7 @@ fn assert_roi_coverage_ratio(
     y1: u32,
     name: &str,
     roi_name: &str,
+    regression_type: &str,
     min_allowed_coverage_ratio: f32,
     max_allowed_coverage_ratio: f32,
     reference_path: &std::path::Path,
@@ -288,13 +313,13 @@ fn assert_roi_coverage_ratio(
 
     assert!(
         coverage_ratio >= min_allowed_coverage_ratio,
-        "{name} font-size regression detected: cyan text coverage too low in {roi_name} (ratio {coverage_ratio:.3} < {min_allowed_coverage_ratio:.3}).\nreference={}\ncurrent={}",
+        "{name} {regression_type} regression detected: cyan text coverage too low in {roi_name} (ratio {coverage_ratio:.3} < {min_allowed_coverage_ratio:.3}).\nreference={}\ncurrent={}\nACTION: fix the UI/rendering root cause first. Do not update tests, thresholds, or reference artifacts as a first response.",
         reference_path.display(),
         current_path.display()
     );
     assert!(
         coverage_ratio <= max_allowed_coverage_ratio,
-        "{name} font-size regression detected: cyan text coverage too high in {roi_name} (ratio {coverage_ratio:.3} > {max_allowed_coverage_ratio:.3}).\nreference={}\ncurrent={}",
+        "{name} {regression_type} regression detected: cyan text coverage too high in {roi_name} (ratio {coverage_ratio:.3} > {max_allowed_coverage_ratio:.3}).\nreference={}\ncurrent={}\nACTION: fix the UI/rendering root cause first. Do not update tests, thresholds, or reference artifacts as a first response.",
         reference_path.display(),
         current_path.display()
     );
@@ -312,6 +337,36 @@ fn target_a_visual_regression_guard() {
 fn target_b_visual_regression_guard() {
     assert_manifest_runner_preflight();
     assert_manifest_visual_regression_guard("ui_target_b", 0.75, 1.25);
+}
+
+#[test]
+fn clipper_small_door_artifact_presence_guard() {
+    assert_manifest_runner_preflight();
+    let (reference_path, current_path) = artifact_paths("clipper_small_door");
+    assert!(
+        reference_path.is_file(),
+        "clipper_small_door source artifact missing: {}",
+        reference_path.display()
+    );
+    assert!(
+        current_path.is_file(),
+        "clipper_small_door current artifact missing: {}\nACTION: generate the target artifact first, then investigate pipeline root cause if generation fails.",
+        current_path.display()
+    );
+
+    let reference = image::open(&reference_path)
+        .expect("clipper_small_door reference image should decode")
+        .into_rgba8();
+    let current = image::open(&current_path)
+        .expect("clipper_small_door current image should decode")
+        .into_rgba8();
+    assert_eq!(
+        reference.dimensions(),
+        current.dimensions(),
+        "clipper_small_door dimensions drifted: reference={} current={}",
+        reference_path.display(),
+        current_path.display()
+    );
 }
 
 #[test]

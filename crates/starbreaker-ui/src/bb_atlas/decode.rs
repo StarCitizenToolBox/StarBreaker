@@ -1,7 +1,7 @@
 //! Decode and resize helpers for atlas bitmap/SVG assets.
 
 use image::{GenericImageView, RgbaImage, imageops};
-use log::warn;
+use log::{debug, warn};
 use tiny_skia_011 as tiny_skia;
 
 pub(super) fn decode_bytes(bytes: &[u8], ext: &str, target_w: u32, target_h: u32) -> Option<RgbaImage> {
@@ -11,7 +11,12 @@ pub(super) fn decode_bytes(bytes: &[u8], ext: &str, target_w: u32, target_h: u32
         _ => {
             let dyn_img = image::load_from_memory(bytes)
                 .map_err(|e| {
-                    warn!("atlas: image decode failed: {}", e);
+                    let msg = e.to_string();
+                    if msg.contains("format could not be determined") {
+                        debug!("atlas: skipping non-image bytes");
+                    } else {
+                        warn!("atlas: image decode failed: {}", e);
+                    }
                     e
                 })
                 .ok()?;

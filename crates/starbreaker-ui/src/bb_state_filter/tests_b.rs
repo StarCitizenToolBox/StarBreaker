@@ -277,7 +277,7 @@
     }
 
     #[test]
-    fn boolean_component_parameter_param_input_override_controls_visibility() {
+    fn boolean_component_parameter_missing_override_does_not_hide_is_active() {
         let rv = make_record_value(
             vec![],
             vec![serde_json::json!({
@@ -295,8 +295,21 @@
 
         let no_override = instantiated_false_widgets_with_param_inputs(&rv, &[]);
         assert!(
-            no_override.contains(&5),
-            "without paramInput override, defaultValue=false should hide ptr:5"
+            !no_override.contains(&5),
+            "without paramInput override, IsActive should remain visible for runtime component params"
+        );
+
+        let with_false_override = instantiated_false_widgets_with_param_inputs(
+            &rv,
+            &[serde_json::json!({
+                "_Type_": "BuildingBlocks_ComponentParameterInputBoolean",
+                "parameter": "ParamInput0",
+                "value": false
+            })],
+        );
+        assert!(
+            with_false_override.contains(&5),
+            "explicit false paramInput override should hide ptr:5"
         );
 
         let with_override = instantiated_false_widgets_with_param_inputs(

@@ -239,29 +239,135 @@ pub(super) fn contains_unset_non_state_variable(
         }
         serde_json::Value::Object(obj) => {
             let ty = obj.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
-            match ty {
-                "BuildingBlocks_BindingsBooleanVariable" => {
-                    let binding = obj.get("binding").and_then(|v| v.as_str()).unwrap_or("");
-                    !binding.is_empty() && !static_vals.contains_key(binding) && !is_state_binding(binding)
+            if let Some(binding) = obj.get("binding").and_then(|v| v.as_str()) {
+                if !binding.is_empty() && !is_state_binding(binding) {
+                    if ty == "BuildingBlocks_BindingsBooleanVariable" {
+                        if !static_vals.contains_key(binding) {
+                            return true;
+                        }
+                    } else {
+                        // Non-boolean runtime binding families (for example
+                        // IntegerVariable used by BooleanFromInteger gates)
+                        // do not have authored static defaults in staticVariables.
+                        return true;
+                    }
                 }
-                "BuildingBlocks_BindingsBooleanInvert" => obj
-                    .get("input")
-                    .is_some_and(|inner| contains_unset_non_state_variable(inner, ptr_to_op, static_vals, visited)),
-                "BuildingBlocks_BindingsBooleanEvaluateOr" | "BuildingBlocks_BindingsBooleanEvaluateAnd" => {
-                    obj.get("inputs")
-                        .and_then(|v| v.as_array())
-                        .is_some_and(|inputs| {
-                            inputs.iter().any(|inp| {
-                                contains_unset_non_state_variable(inp, ptr_to_op, static_vals, visited)
-                            })
-                        })
-                }
-                _ => false,
             }
+
+            for key in ["input", "inputL", "inputR", "inputTrue", "inputFalse"] {
+                if obj
+                    .get(key)
+                    .is_some_and(|inner| contains_unset_non_state_variable(inner, ptr_to_op, static_vals, visited))
+                {
+                    return true;
+                }
+            }
+
+            obj.get("inputs")
+                .and_then(|v| v.as_array())
+                .is_some_and(|inputs| {
+                    inputs
+                        .iter()
+                        .any(|inp| contains_unset_non_state_variable(inp, ptr_to_op, static_vals, visited))
+                })
         }
         _ => false,
     }
 }
+
+pub(super) fn contains_namespace_placeholder_variable(
+    input: &serde_json::Value,
+    ptr_to_op: &HashMap<BbNodeId, &serde_json::Value>,
+    visited: &mut HashSet<BbNodeId>,
+) -> bool {
+    match input {
+        serde_json::Value::String(s) => {
+            let Some(ptr) = parse_points_to_ptr(s) else {
+                return false;
+            };
+            if !visited.insert(ptr) {
+                return false;
+            }
+            let Some(op) = ptr_to_op.get(&ptr) else {
+                return false;
+            };
+            contains_namespace_placeholder_variable(op, ptr_to_op, visited)
+        }
+        serde_json::Value::Object(obj) => {
+            if let Some(binding) = obj.get("binding").and_then(|v| v.as_str())
+                && binding.contains("/~/")
+            {
+                return true;
+            }
+
+            for key in ["input", "inputL", "inputR", "inputTrue", "inputFalse"] {
+                if obj
+                    .get(key)
+                    .is_some_and(|inner| contains_namespace_placeholder_variable(inner, ptr_to_op, visited))
+                {
+                    return true;
+                }
+            }
+
+            obj.get("inputs")
+                .and_then(|v| v.as_array())
+                .is_some_and(|inputs| {
+                    inputs
+                        .iter()
+                        .any(|inp| contains_namespace_placeholder_variable(inp, ptr_to_op, visited))
+                })
+        }
+        _ => false,
+    }
+}
+
+pub(super) fn contains_non_boolean_runtime_binding(
+    input: &serde_json::Value,
+    ptr_to_op: &HashMap<BbNodeId, &serde_json::Value>,
+    visited: &mut HashSet<BbNodeId>,
+) -> bool {
+    match input {
+        serde_json::Value::String(s) => {
+            let Some(ptr) = parse_points_to_ptr(s) else {
+                return false;
+            };
+            if !visited.insert(ptr) {
+                return false;
+            }
+            let Some(op) = ptr_to_op.get(&ptr) else {
+                return false;
+            };
+            contains_non_boolean_runtime_binding(op, ptr_to_op, visited)
+        }
+        serde_json::Value::Object(obj) => {
+            let ty = obj.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
+            if obj.get("binding").and_then(|v| v.as_str()).is_some()
+                && !ty.eq_ignore_ascii_case("BuildingBlocks_BindingsBooleanVariable")
+            {
+                return true;
+            }
+
+            for key in ["input", "inputL", "inputR", "inputTrue", "inputFalse"] {
+                if obj
+                    .get(key)
+                    .is_some_and(|inner| contains_non_boolean_runtime_binding(inner, ptr_to_op, visited))
+                {
+                    return true;
+                }
+            }
+
+            obj.get("inputs")
+                .and_then(|v| v.as_array())
+                .is_some_and(|inputs| {
+                    inputs
+                        .iter()
+                        .any(|inp| contains_non_boolean_runtime_binding(inp, ptr_to_op, visited))
+                })
+        }
+        _ => false,
+    }
+}
+
 
 fn is_state_binding(binding: &str) -> bool {
     let lower = binding.to_ascii_lowercase();

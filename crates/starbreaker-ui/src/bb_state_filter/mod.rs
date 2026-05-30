@@ -82,7 +82,12 @@ mod tests_a;
 #[cfg(test)]
 mod tests_b;
 
+mod component_params;
+
+use self::component_params::contains_unresolved_component_parameter;
 use self::eval::{
+    contains_non_boolean_runtime_binding,
+    contains_namespace_placeholder_variable,
     contains_unset_non_state_variable,
     eval_bool_ref,
     evaluate_bool_ops,
@@ -209,11 +214,54 @@ pub fn instantiated_false_widgets_with_param_inputs_and_inherited_bindings(
         // - Instantiated: conservative false to avoid merging unknown state canvases.
         // - IsActive/Visible/Enabled: conservative true to avoid hiding runtime-gated UI cards.
         let mut val = eval.unwrap_or(field != "Instantiated");
-        if !val
-            && field != "Instantiated"
-            && contains_unset_non_state_variable(input_ref, &ptr_to_op, &static_vals, &mut HashSet::new())
-        {
-            val = true;
+        // Non-state runtime/sensor bindings (for example `/~/MapNamespace~/...`)
+        // should not hide static export content when no explicit static default
+        // is authored for them.
+        if !val {
+            let has_unresolved_component_param = contains_unresolved_component_parameter(
+                input_ref,
+                &ptr_to_op,
+                &param_overrides,
+                &mut HashSet::new(),
+            );
+            if field != "Instantiated" && has_unresolved_component_param {
+                val = true;
+            }
+        }
+        if !val {
+            let has_unset_non_state = contains_unset_non_state_variable(
+                input_ref,
+                &ptr_to_op,
+                &static_vals,
+                &mut HashSet::new(),
+            );
+            if has_unset_non_state {
+                if field == "Instantiated" && eval.is_some() {
+                    if contains_namespace_placeholder_variable(
+                        input_ref,
+                        &ptr_to_op,
+                        &mut HashSet::new(),
+                    ) {
+                        val = true;
+                    }
+                } else if field == "Instantiated" && eval.is_none() {
+                    let has_placeholder = contains_namespace_placeholder_variable(
+                        input_ref,
+                        &ptr_to_op,
+                        &mut HashSet::new(),
+                    );
+                    let has_non_boolean_runtime = contains_non_boolean_runtime_binding(
+                        input_ref,
+                        &ptr_to_op,
+                        &mut HashSet::new(),
+                    );
+                    if has_placeholder || has_non_boolean_runtime {
+                        val = true;
+                    }
+                } else {
+                    val = true;
+                }
+            }
         }
         if state_probe {
             let widget_name = ptr_to_name.get(&widget).cloned().unwrap_or_default();

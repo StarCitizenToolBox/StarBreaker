@@ -1044,34 +1044,50 @@ fn collect_physical_screen_canvases(
 /// Build a map from MFD view-type enum name (e.g. `"eView_TargetStatus"`) to
 /// `(canvas_guid, canvas_record_name)` by scanning all `SMFDView` records.
 /// `eView_Off` entries are excluded since they carry no renderable content.
+///
+/// `landscapeCanvas` is stored as a `DataType::Reference` in DataCore; references are
+/// serialised to their file path strings by `to_json_compact`, so we read that JSON
+/// to obtain the path and then match it against `BuildingBlocks_Canvas` records.
 fn build_mfd_view_canvas_map(db: &Database) -> HashMap<String, (String, Option<String>)> {
-    use starbreaker_datacore::types::CigGuid;
-
     let mut map = HashMap::new();
     for record in db.records_by_type_name("SMFDView") {
         let Some(view_type_compiled) = db.compile_path::<String>(record.struct_id(), "viewType").ok() else {
             continue;
         };
-        let Some(canvas_compiled) = db
-            .compile_path::<CigGuid>(record.struct_id(), "landscapeCanvas")
-            .ok()
-        else {
-            continue;
-        };
-
         let view_type = match db.query_single::<String>(&view_type_compiled, record).ok().flatten() {
             Some(vt) if !vt.is_empty() && vt != "eView_Off" => vt,
             _ => continue,
         };
-        let canvas_guid = match db.query_single::<CigGuid>(&canvas_compiled, record).ok().flatten() {
-            Some(guid) => guid.to_string(),
-            None => continue,
-        };
 
-        let name = parse_guid(&canvas_guid)
-            .and_then(|g| db.record_by_id(&g))
-            .map(|r| db.resolve_string2(r.name_offset).to_string())
-            .filter(|n| !n.is_empty());
+        // `landscapeCanvas` is a Reference field; read it from the JSON export which follows
+        // the reference and serialises it as the referenced record's file path string.
+        let canvas_ref = starbreaker_datacore::export::to_json_compact(db, record)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|json| {
+                json.get("_RecordValue_")?
+                    .get("landscapeCanvas")?
+                    .as_str()
+                    .map(|s| s.to_string())
+            })
+            .filter(|s| !s.is_empty() && s != "null")
+            .and_then(|path| find_canvas_record_by_path_or_guid(db, &path));
+        let Some(canvas_record) = canvas_ref else {
+            continue;
+        };
+        let canvas_guid = canvas_record.id.to_string();
+        if canvas_guid.is_empty() || is_zero_guid(&canvas_guid) {
+            continue;
+        }
+
+        let name = {
+            let resolved = db.resolve_string2(canvas_record.name_offset).to_string();
+            if resolved.is_empty() {
+                None
+            } else {
+                Some(resolved)
+            }
+        };
         // Keep the first record found for each view type (avoids duplicates).
         map.entry(view_type).or_insert((canvas_guid, name));
     }

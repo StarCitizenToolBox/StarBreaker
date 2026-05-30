@@ -20,6 +20,44 @@ fi
 
 mkdir -p "${OUTPUT_DIR}"
 
+# Refresh source-generated PNGs before copying them into test-artifacts.
+# We infer entity export targets from manifest source paths of the form:
+# ships/Data/UI/Generated/ship/<manufacturer>/<ShipName>/...
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "error: cargo is required to regenerate UI source images" >&2
+  exit 1
+fi
+
+mapfile -t _manifest_sources < <(
+  jq -r '.targets[] | select(.source_generated_png != null) | .source_generated_png' "${UI_REGRESSION_MANIFEST_PATH}" \
+    | sed '/^$/d' \
+    | sort -u
+)
+
+declare -A _entities=()
+for source_png in "${_manifest_sources[@]}"; do
+  if [[ "${source_png}" =~ ^ships/Data/UI/Generated/ship/([^/]+)/([^/]+)/ ]]; then
+    manufacturer="${BASH_REMATCH[1]}"
+    ship_name="${BASH_REMATCH[2]}"
+    ship_slug="$(echo "${ship_name}" | tr '[:upper:]' '[:lower:]' | tr ' ' '_' | tr '-' '_')"
+    entity_slug="${manufacturer}_${ship_slug}"
+    _entities["${entity_slug}"]=1
+  fi
+done
+
+if [[ "${#_entities[@]}" -eq 0 ]]; then
+  echo "error: no exportable source paths found in manifest" >&2
+  exit 1
+fi
+
+for entity_slug in "${!_entities[@]}"; do
+  echo "generating source UI images via export: ${entity_slug}"
+  (
+    cd "${REPO_ROOT}"
+    cargo run -p starbreaker -- entity export "${entity_slug}" "${WORKSPACE_ROOT}/ships" --kind decomposed --lod 0 --mip 0 --materials all
+  )
+done
+
 count=0
 while IFS=$'\t' read -r target_id source_png tier; do
   [[ -n "${target_id}" ]] || continue
