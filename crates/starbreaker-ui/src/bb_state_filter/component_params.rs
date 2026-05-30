@@ -31,7 +31,20 @@ pub(super) fn contains_unresolved_component_parameter(
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_ascii_lowercase())
                     .unwrap_or_default();
-                return !param_name.is_empty() && !param_overrides.contains_key(&param_name);
+                if param_name.is_empty() {
+                    return false;
+                }
+                if param_overrides.contains_key(&param_name) {
+                    return false;
+                }
+
+                // If the component parameter carries an authored boolean
+                // default, it is fully resolvable without a runtime override.
+                if obj.get("defaultValue").and_then(|v| v.as_bool()).is_some() {
+                    return false;
+                }
+
+                return true;
             }
 
             for key in ["input", "inputL", "inputR", "inputTrue", "inputFalse"] {

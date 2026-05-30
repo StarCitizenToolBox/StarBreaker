@@ -277,7 +277,7 @@
     }
 
     #[test]
-    fn boolean_component_parameter_missing_override_does_not_hide_is_active() {
+    fn boolean_component_parameter_default_false_hides_is_active_without_override() {
         let rv = make_record_value(
             vec![],
             vec![serde_json::json!({
@@ -295,8 +295,8 @@
 
         let no_override = instantiated_false_widgets_with_param_inputs(&rv, &[]);
         assert!(
-            !no_override.contains(&5),
-            "without paramInput override, IsActive should remain visible for runtime component params"
+            no_override.contains(&5),
+            "without paramInput override, explicit defaultValue=false should hide ptr:5"
         );
 
         let with_false_override = instantiated_false_widgets_with_param_inputs(
@@ -323,6 +323,29 @@
         assert!(
             !with_override.contains(&5),
             "paramInput override true should show ptr:5"
+        );
+    }
+
+    #[test]
+    fn boolean_component_parameter_missing_override_without_default_stays_visible() {
+        let rv = make_record_value(
+            vec![],
+            vec![serde_json::json!({
+                "_Type_": "BuildingBlocks_BindingsBooleanField",
+                "widget": "_PointsTo_:ptr:5",
+                "field": "IsActive",
+                "input": {
+                    "_Pointer_": "ptr:9",
+                    "_Type_": "BuildingBlocks_BindingsBooleanComponentParameter",
+                    "parameter": "ParamInput0"
+                }
+            })],
+        );
+
+        let no_override = instantiated_false_widgets_with_param_inputs(&rv, &[]);
+        assert!(
+            !no_override.contains(&5),
+            "without paramInput override and no defaultValue, IsActive should remain visible"
         );
     }
 

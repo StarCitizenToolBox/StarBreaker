@@ -1088,16 +1088,45 @@ fn draw_text_node(
         * TEXT_RENDER_SIZE_CALIBRATION)
         .max(1.0);
 
-    let align = node
+    let center_anchored_heading = node
+        .text_style
+        .as_ref()
+        .is_some_and(|style| {
+            node.node_type.eq_ignore_ascii_case("widget_text_field")
+                && style
+                    .label_style
+                    .as_deref()
+                    .is_some_and(|label| label.eq_ignore_ascii_case("Heading1"))
+                && style
+                    .anchor_to_parent_x
+                    .is_some_and(|anchor| (anchor - 0.5).abs() < f32::EPSILON)
+                && style
+                    .anchor_to_parent_y
+                    .is_some_and(|anchor| (anchor - 0.5).abs() < f32::EPSILON)
+                && node.anchor[0].abs() < f32::EPSILON
+                && node.anchor[1].abs() < f32::EPSILON
+                && node.pivot[0].abs() < f32::EPSILON
+                && node.pivot[1].abs() < f32::EPSILON
+        });
+
+    let align = if center_anchored_heading {
+        TextAlign::Centre
+    } else {
+        node
         .text_style
         .as_ref()
         .map(|style| TextAlign::from_bb_str(&style.alignment))
-        .unwrap_or(TextAlign::Left);
-    let vertical_align = node
+        .unwrap_or(TextAlign::Left)
+    };
+    let vertical_align = if center_anchored_heading {
+        VerticalAlign::Centre
+    } else {
+        node
         .text_style
         .as_ref()
         .map(|style| VerticalAlign::from_bb_str(&style.vertical_alignment))
-        .unwrap_or(VerticalAlign::Centre);
+        .unwrap_or(VerticalAlign::Centre)
+    };
 
     let mut colour = resolved_text_colour(node, node.text_style.as_ref(), ctx);
     colour[3] = ((colour[3] as f32) * node.alpha.clamp(0.0, 1.0)).round() as u8;

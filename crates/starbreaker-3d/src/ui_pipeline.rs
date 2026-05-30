@@ -12,11 +12,13 @@ use starbreaker_datacore::Database;
 use starbreaker_p4k::MappedP4k;
 use starbreaker_ui::{
     UiError,
-    pipeline::{CanvasFetcher, PipelineInputs, StyleFetcher, SwfFetcher, UiBindingView},
+    pipeline::{CanvasFetcher, PipelineInputs, SwfFetcher, UiBindingView},
 };
-use starbreaker_ui::style::{ManufacturerStyle, StyleLoader};
 
 use crate::types::UiBinding;
+
+mod style_fetcher;
+use style_fetcher::ManufacturerStyleFetcher;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Fetcher implementations
@@ -161,97 +163,37 @@ fn read_p4k_asset(p4k: &MappedP4k, p4k_path: &str) -> Option<Vec<u8>> {
 }
 
 fn p4k_asset_candidates(path: &str) -> Vec<String> {
+    fn push_with_data_prefix(candidates: &mut Vec<String>, candidate: String) {
+        if !candidates.iter().any(|existing| existing.eq_ignore_ascii_case(&candidate)) {
+            candidates.push(candidate.clone());
+        }
+        let lower = candidate.to_ascii_lowercase();
+        if !lower.starts_with("data\\") {
+            let prefixed = format!("Data\\{candidate}");
+            if !candidates
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(&prefixed))
+            {
+                candidates.push(prefixed);
+            }
+        }
+    }
+
     let native = path.replace('/', "\\");
-    let mut candidates = vec![native.clone()];
-    if !path.starts_with("data/") {
-        candidates.push(format!("Data\\{native}"));
+    let normalised = starbreaker_ui::bb_assets::UiAssetResolver::normalise_path(path)
+        .replace('/', "\\");
+    let mut candidates = Vec::new();
+    for seed in [native, normalised] {
+        push_with_data_prefix(&mut candidates, seed.clone());
+        if seed.to_ascii_lowercase().ends_with(".tif") {
+            if let Some(stem) = seed.strip_suffix(".tif") {
+                push_with_data_prefix(&mut candidates, format!("{stem}.dds"));
+            } else if let Some(stem) = seed.strip_suffix(".TIF") {
+                push_with_data_prefix(&mut candidates, format!("{stem}.dds"));
+            }
+        }
     }
     candidates
-}
-
-/// Resolves the manufacturer style by looking up a `BuildingBlocks_Style`
-/// record in DataCore.
-///
-/// Discovery strategy (no hardcoded ship/manufacturer names):
-/// 1. Enumerate all `BuildingBlocks_Style` records.
-/// 2. Match the record name against the manufacturer id (case-insensitive
-///    substring/suffix/prefix on the dotted-stem). Allows authored names like
-///    `BuildingBlocks_Style.DRAK_Default` or `Style_drak` to resolve for
-///    `manufacturer_id = "drak"`.
-/// 3. Parse the matched record via
-///    [`StyleLoader::parse_buildingblocks_style_record`].
-/// 4. If no record matches, fall back to the Drake amber defaults *with a
-///    warning*.  This is the only allowed fallback path.
-struct ManufacturerStyleFetcher<'a> {
-    db: &'a Database<'a>,
-}
-
-fn manufacturer_style_match_score(stem_lower: &str, manufacturer_lower: &str) -> Option<i32> {
-    if stem_lower == format!("s_{manufacturer_lower}_hud") {
-        return Some(0);
-    }
-    if stem_lower == format!("s_{manufacturer_lower}") {
-        return Some(1);
-    }
-    if stem_lower.starts_with(&format!("s_{manufacturer_lower}_")) {
-        return Some(2);
-    }
-    if stem_lower == manufacturer_lower {
-        return Some(3);
-    }
-    if stem_lower.contains(manufacturer_lower) {
-        return Some(4);
-    }
-    None
-}
-
-impl<'a> StyleFetcher for ManufacturerStyleFetcher<'a> {
-    fn fetch_manufacturer_style(&self, manufacturer_id: &str) -> Result<ManufacturerStyle, UiError> {
-        let loader = StyleLoader::for_manufacturer(manufacturer_id);
-        let needle = manufacturer_id.to_ascii_lowercase();
-
-        let mut candidates: Vec<_> = self
-            .db
-            .records_by_type_name("BuildingBlocks_Style")
-            .filter_map(|record| {
-                let full = self.db.resolve_string2(record.name_offset).to_string();
-                let stem = full.rsplit('.').next().unwrap_or(&full).to_ascii_lowercase();
-                let bucket = manufacturer_style_match_score(&stem, &needle)?;
-                Some((bucket, stem, full, record))
-            })
-            .collect();
-
-        candidates.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-
-        if let Some((_, _, full_name, record)) = candidates.first() {
-            match starbreaker_datacore::export::to_json_compact(self.db, record) {
-                Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
-                    Ok(value) => match loader.parse_buildingblocks_style_record(&value) {
-                        Ok(style) => return Ok(style),
-                        Err(e) => warn!(
-                            "ui: failed to parse BuildingBlocks_Style record '{}' for manufacturer '{}': {}; using Drake amber fallback",
-                            full_name, manufacturer_id, e
-                        ),
-                    },
-                    Err(e) => warn!(
-                        "ui: failed to deserialize BuildingBlocks_Style record '{}' for manufacturer '{}': {}; using Drake amber fallback",
-                        full_name, manufacturer_id, e
-                    ),
-                },
-                Err(e) => warn!(
-                    "ui: failed to export BuildingBlocks_Style record '{}' for manufacturer '{}': {}; using Drake amber fallback",
-                    full_name, manufacturer_id, e
-                ),
-            }
-        } else {
-            warn!(
-                "ui: no BuildingBlocks_Style record matches manufacturer '{}'; using Drake amber fallback",
-                manufacturer_id
-            );
-        }
-
-        Ok(loader.drake_amber_fallback())
-    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -289,6 +231,11 @@ pub fn render_ui_binding_png(
         .and_then(|guid| canvas_fetcher.fetch_canvas_json(guid).ok())
         .and_then(|json| authored_canvas_size(&json));
     let target_size = binding_target_size(&binding.binding_kind, authored_canvas_size);
+    let animation_sample_percent = if binding.binding_kind == "mfd" {
+        Some(0.0)
+    } else {
+        Some(starbreaker_ui::pipeline::DEFAULT_STATIC_ANIMATION_SAMPLE_PERCENT)
+    };
     let localization_map = crate::pipeline::load_localization_map(p4k);
     let ini_loc_fetcher = starbreaker_ui::bb_loc_p4k::load_global_ini(|path| p4k.read_file(path).ok());
     let inputs = PipelineInputs {
@@ -304,7 +251,7 @@ pub fn render_ui_binding_png(
         // would mask the "not yet rendered" signal.  Re-enable in Phase 13
         // once the paint engine produces real content.
         apply_postprocess: false,
-        animation_sample_percent: Some(starbreaker_ui::pipeline::DEFAULT_STATIC_ANIMATION_SAMPLE_PERCENT),
+        animation_sample_percent,
         localization_map: Some(localization_map),
         loc_fetcher: Some(&ini_loc_fetcher),
     };
@@ -340,6 +287,11 @@ pub fn compile_ui_binding_ir_json(
         .and_then(|guid| canvas_fetcher.fetch_canvas_json(guid).ok())
         .and_then(|json| authored_canvas_size(&json));
     let target_size = binding_target_size(&binding.binding_kind, authored_canvas_size);
+    let animation_sample_percent = if binding.binding_kind == "mfd" {
+        Some(0.0)
+    } else {
+        Some(starbreaker_ui::pipeline::DEFAULT_STATIC_ANIMATION_SAMPLE_PERCENT)
+    };
     let localization_map = crate::pipeline::load_localization_map(p4k);
     let ini_loc_fetcher = starbreaker_ui::bb_loc_p4k::load_global_ini(|path| p4k.read_file(path).ok());
     let inputs = PipelineInputs {
@@ -350,7 +302,7 @@ pub fn compile_ui_binding_ir_json(
         asset_fetcher: &P4kAssetFetcher { p4k },
         target_size,
         apply_postprocess: false,
-        animation_sample_percent: Some(starbreaker_ui::pipeline::DEFAULT_STATIC_ANIMATION_SAMPLE_PERCENT),
+        animation_sample_percent,
         localization_map: Some(localization_map),
         loc_fetcher: Some(&ini_loc_fetcher),
     };
@@ -396,64 +348,4 @@ fn parse_guid(value: &str) -> Option<starbreaker_datacore::starbreaker_common::C
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{authored_canvas_size, binding_target_size, datacore_ui_lookup_type_names, p4k_swf_candidates};
-    use serde_json::json;
-
-    #[test]
-    fn authored_canvas_size_reads_record_value_size() {
-        let canvas = json!({
-            "_RecordValue_": {
-                "size": { "x": 1920.0, "y": 1080.0, "z": 0.0 }
-            }
-        });
-        assert_eq!(authored_canvas_size(&canvas), Some((1920, 1080)));
-    }
-
-    #[test]
-    fn authored_canvas_size_ignores_invalid_size() {
-        let canvas = json!({
-            "_RecordValue_": {
-                "size": { "x": 0.0, "y": 1080.0, "z": 0.0 }
-            }
-        });
-        assert_eq!(authored_canvas_size(&canvas), None);
-    }
-
-    #[test]
-    fn non_mfd_prefers_authored_canvas_size() {
-        assert_eq!(binding_target_size("physical", Some((1920, 1080))), (1920, 1080));
-        assert_eq!(binding_target_size("physical", None), (2048, 1024));
-    }
-
-    #[test]
-    fn mfd_and_radar_keep_fixed_sizes() {
-        assert_eq!(binding_target_size("mfd", Some((1920, 1080))), (1600, 900));
-        assert_eq!(binding_target_size("radar", Some((1920, 1080))), (1024, 1024));
-    }
-
-    #[test]
-    fn live_ui_lookup_includes_referenced_ui_support_records() {
-        assert!(datacore_ui_lookup_type_names().contains(&"TagDatabase"));
-        assert!(datacore_ui_lookup_type_names().contains(&"BuildingBlocks_Timeline"));
-    }
-
-    #[test]
-    fn swf_candidates_normalize_forward_slashes_to_p4k_paths() {
-        assert_eq!(
-            p4k_swf_candidates("Data/UI/fonts/Shared/fonts_en.gfx"),
-            vec!["Data\\UI\\fonts\\Shared\\fonts_en.gfx".to_string()]
-        );
-    }
-
-    #[test]
-    fn swf_candidates_add_data_prefix_for_relative_paths() {
-        assert_eq!(
-            p4k_swf_candidates("UI/BuildingBlocks/assets/SWF/Canvas.swf"),
-            vec![
-                "UI\\BuildingBlocks\\assets\\SWF\\Canvas.swf".to_string(),
-                "Data\\UI\\BuildingBlocks\\assets\\SWF\\Canvas.swf".to_string(),
-            ]
-        );
-    }
-}
+mod tests;

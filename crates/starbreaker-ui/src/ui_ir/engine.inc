@@ -1871,9 +1871,23 @@ fn semantic_text_colour_token_from_style_tags(
     tags: &[UiIrStyleTag],
     label_style: Option<&str>,
 ) -> Option<String> {
-    let is_title_style = label_style
+    let style_name = label_style
         .map(str::trim)
-        .is_some_and(|style| style.starts_with("Title"));
+        .unwrap_or_default();
+    let is_title_style = !style_name.is_empty() && style_name.starts_with("Title");
+    let is_heading_style = !style_name.is_empty() && style_name.starts_with("Heading");
+
+    if is_heading_style
+        && tags.iter().any(|tag| {
+            matches!(
+                tag.tag_name.as_deref(),
+                Some("Target") | Some("TargetStatus") | Some("Text_Header")
+            )
+        })
+    {
+        return Some("Base".to_string());
+    }
+
     if !is_title_style {
         return None;
     }
