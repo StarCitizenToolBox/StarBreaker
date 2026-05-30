@@ -482,6 +482,7 @@ fn extract_item_port_meshes_from_cryxml(
         root_item_port_reference_transform,
         &mut meshes,
     );
+    inherit_colocated_item_port_rotations(&mut meshes);
     meshes
 }
 
@@ -526,7 +527,87 @@ fn extract_item_port_meshes_from_text_xml(
         buf.clear();
     }
 
+    inherit_colocated_item_port_rotations(&mut meshes);
     meshes
+}
+
+fn inherit_colocated_item_port_rotations(meshes: &mut [InteriorMesh]) {
+    for i in 0..meshes.len() {
+        if !is_identity_basis(meshes[i].transform) {
+            continue;
+        }
+
+        let position = item_port_translation(meshes[i].transform);
+        let mut candidate_rotation: Option<[[f32; 4]; 4]> = None;
+        let mut ambiguous = false;
+
+        for (j, candidate) in meshes.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            if !same_position(position, item_port_translation(candidate.transform))
+                || is_identity_basis(candidate.transform)
+            {
+                continue;
+            }
+
+            if let Some(existing) = candidate_rotation {
+                if !same_rotation(existing, candidate.transform) {
+                    ambiguous = true;
+                    break;
+                }
+            } else {
+                candidate_rotation = Some(candidate.transform);
+            }
+        }
+
+        if ambiguous {
+            continue;
+        }
+        if let Some(candidate) = candidate_rotation {
+            meshes[i].transform[0][0] = candidate[0][0];
+            meshes[i].transform[0][1] = candidate[0][1];
+            meshes[i].transform[0][2] = candidate[0][2];
+            meshes[i].transform[1][0] = candidate[1][0];
+            meshes[i].transform[1][1] = candidate[1][1];
+            meshes[i].transform[1][2] = candidate[1][2];
+            meshes[i].transform[2][0] = candidate[2][0];
+            meshes[i].transform[2][1] = candidate[2][1];
+            meshes[i].transform[2][2] = candidate[2][2];
+        }
+    }
+}
+
+fn item_port_translation(transform: [[f32; 4]; 4]) -> [f32; 3] {
+    [transform[3][0], transform[3][1], transform[3][2]]
+}
+
+fn is_identity_basis(transform: [[f32; 4]; 4]) -> bool {
+    same_rotation(
+        transform,
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+    )
+}
+
+fn same_position(a: [f32; 3], b: [f32; 3]) -> bool {
+    (a[0] - b[0]).abs() <= 1e-3 && (a[1] - b[1]).abs() <= 1e-3 && (a[2] - b[2]).abs() <= 1e-3
+}
+
+fn same_rotation(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> bool {
+    (a[0][0] - b[0][0]).abs() <= 1e-4
+        && (a[0][1] - b[0][1]).abs() <= 1e-4
+        && (a[0][2] - b[0][2]).abs() <= 1e-4
+        && (a[1][0] - b[1][0]).abs() <= 1e-4
+        && (a[1][1] - b[1][1]).abs() <= 1e-4
+        && (a[1][2] - b[1][2]).abs() <= 1e-4
+        && (a[2][0] - b[2][0]).abs() <= 1e-4
+        && (a[2][1] - b[2][1]).abs() <= 1e-4
+        && (a[2][2] - b[2][2]).abs() <= 1e-4
 }
 
 fn push_item_port_mesh(
@@ -1793,6 +1874,56 @@ mod tests {
         assert!((meshes[0].transform[3][0] - 7.625).abs() < 1e-6);
         assert!((meshes[0].transform[3][1] + 25.656252).abs() < 1e-6);
         assert!((meshes[0].transform[3][2] - 3.6906581).abs() < 1e-6);
+    }
+
+    #[test]
+    fn extract_item_port_meshes_inherits_colocated_non_identity_rotation() {
+        let xml = r#"
+            <ObjectContainer>
+              <TileXmlEntry>
+                <TileItemPortEntries>
+                  <ItemPort
+                    name="Port1_ControlPanel_Screen_DoorControl_Physical_Clipper_OpenNoneLight[int_setup]"
+                    interactionOffset="1.0,2.0,3.0"
+                    rotation="0.9238795,0,0,0.3826834" />
+                  <ItemPort
+                    name="Port2_ControlPanel_Screen_DoorControl_9x16_Small-001[int_setup]"
+                    interactionOffset="1.0,2.0,3.0"
+                    rotation="1,0,0,0" />
+                </TileItemPortEntries>
+              </TileXmlEntry>
+            </ObjectContainer>
+        "#;
+
+        let meshes = extract_item_port_meshes_from_text_xml(
+            xml,
+            glam::Mat4::IDENTITY.to_cols_array_2d(),
+            None,
+        );
+        assert_eq!(meshes.len(), 2);
+
+        let physical = meshes
+            .iter()
+            .find(|m| {
+                m.entity_class_name
+                    .as_deref()
+                    .is_some_and(|name| name.contains("Physical"))
+            })
+            .expect("physical control panel mesh");
+        let screen = meshes
+            .iter()
+            .find(|m| {
+                m.entity_class_name
+                    .as_deref()
+                    .is_some_and(|name| name.contains("9x16_Small"))
+            })
+            .expect("screen mesh");
+
+        assert!(super::same_rotation(physical.transform, screen.transform));
+        assert!(super::same_position(
+            super::item_port_translation(physical.transform),
+            super::item_port_translation(screen.transform),
+        ));
     }
 
     #[test]

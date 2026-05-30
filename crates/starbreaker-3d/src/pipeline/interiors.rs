@@ -654,6 +654,8 @@ pub(crate) fn build_interiors_from_payloads(
             }
         }
 
+        inherit_colocated_ui_rotations(&mut placements);
+
         // Resolve tint palette from the socpak's IncludedObjects palette names.
         // These are DataCore TintPaletteTree record paths — extract the short name
         // (last path component) and look up the record.
@@ -822,6 +824,88 @@ fn transform_bits_key(transform: &[[f32; 4]; 4]) -> [u32; 16] {
         }
     }
     key
+}
+
+fn inherit_colocated_ui_rotations(placements: &mut [InteriorPlacement]) {
+    for i in 0..placements.len() {
+        if !placement_has_ui_binding(&placements[i]) || !is_identity_rotation(placements[i].transform) {
+            continue;
+        }
+
+        let position = placement_position(placements[i].transform);
+        let mut candidate_rotation: Option<[[f32; 4]; 4]> = None;
+        let mut ambiguous = false;
+
+        for (j, candidate) in placements.iter().enumerate() {
+            if i == j
+                || !placement_has_ui_binding(candidate)
+                || !same_position(position, placement_position(candidate.transform))
+                || is_identity_rotation(candidate.transform)
+            {
+                continue;
+            }
+
+            if let Some(existing) = candidate_rotation {
+                if !same_rotation(existing, candidate.transform) {
+                    ambiguous = true;
+                    break;
+                }
+            } else {
+                candidate_rotation = Some(candidate.transform);
+            }
+        }
+
+        if ambiguous {
+            continue;
+        }
+        if let Some(rotation) = candidate_rotation {
+            placements[i].transform[0][0] = rotation[0][0];
+            placements[i].transform[0][1] = rotation[0][1];
+            placements[i].transform[0][2] = rotation[0][2];
+            placements[i].transform[1][0] = rotation[1][0];
+            placements[i].transform[1][1] = rotation[1][1];
+            placements[i].transform[1][2] = rotation[1][2];
+            placements[i].transform[2][0] = rotation[2][0];
+            placements[i].transform[2][1] = rotation[2][1];
+            placements[i].transform[2][2] = rotation[2][2];
+        }
+    }
+}
+
+fn placement_has_ui_binding(placement: &InteriorPlacement) -> bool {
+    !placement.ui_bindings.is_empty()
+}
+
+fn placement_position(transform: [[f32; 4]; 4]) -> [f32; 3] {
+    [transform[3][0], transform[3][1], transform[3][2]]
+}
+
+fn same_position(a: [f32; 3], b: [f32; 3]) -> bool {
+    (a[0] - b[0]).abs() <= 1e-3 && (a[1] - b[1]).abs() <= 1e-3 && (a[2] - b[2]).abs() <= 1e-3
+}
+
+fn is_identity_rotation(transform: [[f32; 4]; 4]) -> bool {
+    same_rotation(
+        transform,
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+    )
+}
+
+fn same_rotation(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> bool {
+    (a[0][0] - b[0][0]).abs() <= 1e-4
+        && (a[0][1] - b[0][1]).abs() <= 1e-4
+        && (a[0][2] - b[0][2]).abs() <= 1e-4
+        && (a[1][0] - b[1][0]).abs() <= 1e-4
+        && (a[1][1] - b[1][1]).abs() <= 1e-4
+        && (a[1][2] - b[1][2]).abs() <= 1e-4
+        && (a[2][0] - b[2][0]).abs() <= 1e-4
+        && (a[2][1] - b[2][1]).abs() <= 1e-4
+        && (a[2][2] - b[2][2]).abs() <= 1e-4
 }
 
 fn entity_class_name_matches_record_short_name(entity_class_name: &str, record_short_name: &str) -> bool {
@@ -1230,6 +1314,7 @@ pub(crate) fn preload_interior_textures(
 mod tests {
     use super::{
         child_interior_parent_target, compose_helper_relative_container_transform,
+        inherit_colocated_ui_rotations,
         normalize_root_light_only_container_transform,
         compose_root_container_transform, entity_class_name_matches_record_short_name,
         helper_node_name_matches, helper_transform_duplicates_offset,
@@ -1237,7 +1322,39 @@ mod tests {
         transform_bits_key, InteriorCgfEntry, InteriorContainerData, LoadedInteriors,
     };
     use crate::pipeline::nmc_bridge::mat4_from_array;
-    use crate::types::InteriorPlacement;
+    use crate::types::{InteriorPlacement, UiBinding};
+
+    fn test_ui_binding() -> UiBinding {
+        UiBinding {
+            binding_kind: String::new(),
+            source_entity_name: String::new(),
+            helper_name: None,
+            default_view: None,
+            default_state_is_off: false,
+            default_state_name: None,
+            default_light_color: None,
+            default_light_intensity_milli: None,
+            canvas_guid: None,
+            canvas_record_name: None,
+            canvas_record_path: None,
+            canvas_widget_canvas_path: None,
+            canvas_widget_url_postfix: None,
+            canvas_widget_url_optional: None,
+            canvas_variable_binding: None,
+            content_canvas_guid: None,
+            content_canvas_record_name: None,
+            dashboard_view_index: None,
+            dashboard_screen_slot: None,
+            owner_source_file: None,
+            runtime_image_source: None,
+            generated_image_path: None,
+            generated_context_manifest_path: None,
+            generated_resolved_source_path: None,
+            generated_backend: None,
+            generated_provenance: None,
+            generated_confidence: None,
+        }
+    }
 
     #[test]
     fn helper_node_name_matches_prefixed_helper_suffix() {
@@ -1416,6 +1533,35 @@ mod tests {
     fn transform_bits_key_matches_identical_transforms() {
         let transform = glam::Mat4::from_translation(glam::Vec3::new(1.0, 2.0, 3.0)).to_cols_array_2d();
         assert_eq!(transform_bits_key(&transform), transform_bits_key(&transform));
+    }
+
+    #[test]
+    fn inherit_colocated_ui_rotations_copies_non_identity_basis() {
+        let position = glam::Vec3::new(1.0, 2.0, 3.0);
+        let source_rotation = glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+        let source_transform = glam::Mat4::from_rotation_translation(source_rotation, position).to_cols_array_2d();
+        let target_transform = glam::Mat4::from_translation(position).to_cols_array_2d();
+        let mut placements = vec![
+            InteriorPlacement {
+                mesh_index: 0,
+                transform: source_transform,
+                palette: None,
+                ui_bindings: vec![test_ui_binding()],
+            },
+            InteriorPlacement {
+                mesh_index: 1,
+                transform: target_transform,
+                palette: None,
+                ui_bindings: vec![test_ui_binding()],
+            },
+        ];
+
+        inherit_colocated_ui_rotations(&mut placements);
+
+        assert!(super::same_rotation(
+            placements[0].transform,
+            placements[1].transform,
+        ));
     }
 
     #[test]
