@@ -654,6 +654,7 @@ pub(crate) fn build_interiors_from_payloads(
             }
         }
 
+        prune_colocated_standard_canvas_overlays(&mut placements);
         inherit_colocated_ui_rotations(&mut placements);
 
         // Resolve tint palette from the socpak's IncludedObjects palette names.
@@ -872,8 +873,54 @@ fn inherit_colocated_ui_rotations(placements: &mut [InteriorPlacement]) {
     }
 }
 
+fn prune_colocated_standard_canvas_overlays(placements: &mut Vec<InteriorPlacement>) {
+    let mut remove = vec![false; placements.len()];
+
+    for i in 0..placements.len() {
+        if !placement_has_ui_binding(&placements[i]) {
+            continue;
+        }
+        let Some(canvas) = placement_canvas_name(&placements[i]) else {
+            continue;
+        };
+        if !is_standard_canvas_name(canvas) {
+            continue;
+        }
+
+        let position = placement_position(placements[i].transform);
+        let has_colocated_peer = placements.iter().enumerate().any(|(j, candidate)| {
+            i != j
+                && placement_has_ui_binding(candidate)
+                && same_position(position, placement_position(candidate.transform))
+        });
+        if has_colocated_peer {
+            remove[i] = true;
+        }
+    }
+
+    if remove.iter().any(|flag| *flag) {
+        let mut index = 0usize;
+        placements.retain(|_| {
+            let keep = !remove[index];
+            index += 1;
+            keep
+        });
+    }
+}
+
 fn placement_has_ui_binding(placement: &InteriorPlacement) -> bool {
     !placement.ui_bindings.is_empty()
+}
+
+fn placement_canvas_name(placement: &InteriorPlacement) -> Option<&str> {
+    placement
+        .ui_bindings
+        .first()
+        .and_then(|binding| binding.canvas_record_name.as_deref())
+}
+
+fn is_standard_canvas_name(name: &str) -> bool {
+    name.to_ascii_lowercase().ends_with("_standard")
 }
 
 fn placement_position(transform: [[f32; 4]; 4]) -> [f32; 3] {
@@ -1315,6 +1362,7 @@ mod tests {
     use super::{
         child_interior_parent_target, compose_helper_relative_container_transform,
         inherit_colocated_ui_rotations,
+        prune_colocated_standard_canvas_overlays,
         normalize_root_light_only_container_transform,
         compose_root_container_transform, entity_class_name_matches_record_short_name,
         helper_node_name_matches, helper_transform_duplicates_offset,
@@ -1562,6 +1610,34 @@ mod tests {
             placements[0].transform,
             placements[1].transform,
         ));
+    }
+
+    #[test]
+    fn prune_colocated_standard_canvas_overlays_prefers_specialized_canvas() {
+        let transform = glam::Mat4::from_translation(glam::Vec3::new(1.0, 2.0, 3.0)).to_cols_array_2d();
+        let mut standard = test_ui_binding();
+        standard.canvas_record_name = Some("BuildingBlocks_Canvas.I_Door_Standard".to_string());
+        let mut specialized = test_ui_binding();
+        specialized.canvas_record_name = Some("BuildingBlocks_Canvas.I_Door_Small_DRAK".to_string());
+        let mut placements = vec![
+            InteriorPlacement {
+                mesh_index: 0,
+                transform,
+                palette: None,
+                ui_bindings: vec![standard],
+            },
+            InteriorPlacement {
+                mesh_index: 1,
+                transform,
+                palette: None,
+                ui_bindings: vec![specialized],
+            },
+        ];
+
+        prune_colocated_standard_canvas_overlays(&mut placements);
+
+        assert_eq!(placements.len(), 1);
+        assert_eq!(placements[0].mesh_index, 1);
     }
 
     #[test]
