@@ -5503,7 +5503,7 @@ mod tests {
         let path_b = material_sidecar_relative_path("Data/Objects/Ships/Drak/Clipper/hull.mtl", "other_fallback", 0);
 
         assert_eq!(path_a, path_b, "same source .mtl must produce the same sidecar path");
-        assert_eq!(path_a, "Data/Objects/Ships/Drak/Clipper/hull_TEX0.materials.json");
+        assert_eq!(path_a, "Data/objects/ships/drak/clipper/hull_TEX0.materials.json");
     }
 
     #[test]
@@ -5511,8 +5511,8 @@ mod tests {
         let path0 = material_sidecar_relative_path("Data/Objects/Ships/Test/hull.mtl", "f", 0);
         let path2 = material_sidecar_relative_path("Data/Objects/Ships/Test/hull.mtl", "f", 2);
 
-        assert_eq!(path0, "Data/Objects/Ships/Test/hull_TEX0.materials.json");
-        assert_eq!(path2, "Data/Objects/Ships/Test/hull_TEX2.materials.json");
+        assert_eq!(path0, "Data/objects/ships/test/hull_TEX0.materials.json");
+        assert_eq!(path2, "Data/objects/ships/test/hull_TEX2.materials.json");
         assert_ne!(path0, path2);
     }
 

@@ -1,0 +1,88 @@
+//! Shared test helpers for UI snapshot unit tests.
+
+use crate::ui_ir::{
+    UI_IR_SCHEMA_VERSION, UiIrColourBlendMode, UiIrDocument, UiIrNode, UiIrRect, UiIrTextPayload,
+    UiIrTextStyle, UiIrValue, UiRendererHint,
+};
+
+pub(super) fn base_node(id: u32, layer: i32) -> UiIrNode {
+    UiIrNode {
+        id,
+        parent_id: None,
+        children: vec![],
+        node_type: "widget_text_field".to_string(),
+        name: format!("node-{id}"),
+        is_active: true,
+        layer,
+        alpha: 1.0,
+        anchor: [0.0, 0.0],
+        pivot: [0.0, 0.0],
+        authored_position: [0.0, 0.0],
+        authored_size: [UiIrValue::Fixed { value: 100.0 }, UiIrValue::Fixed { value: 40.0 }],
+        padding: [0.0; 4],
+        margin: [0.0; 4],
+        overflow_mode: Some("visible".to_string()),
+        computed_rect: UiIrRect {
+            x: 10.0,
+            y: 20.0,
+            w: 100.0,
+            h: 40.0,
+        },
+        background_fill_colour: Some([0.1, 0.1, 0.1, 0.5]),
+        corner_radius: None,
+        background_fill_alpha: None,
+        background_fill_colour_token: None,
+        segmented_fill: None,
+        border: None,
+        stroke_colour: None,
+        stroke_colour_token: None,
+        stroke_extent: Some(1.0),
+        colour_blend_mode: Some(UiIrColourBlendMode::SourceOver),
+        icon_tint_colour: None,
+        icon_tint_colour_token: None,
+        icon_preset: None,
+        text_payload: Some(UiIrTextPayload::Resolved {
+            text: "HELLO".to_string(),
+        }),
+        secondary_text_payload: None,
+        secondary_text_style: None,
+        meter_progress: None,
+        text_style: Some(UiIrTextStyle {
+            font_record: Some("$Text1Book".to_string()),
+            resolved_font_record: None,
+            font_size: UiIrValue::Fixed { value: 30.0 },
+            line_spacing: Some(2.0),
+            alignment: "Center".to_string(),
+            vertical_alignment: "Center".to_string(),
+            anchor_to_parent_x: None,
+            anchor_to_parent_y: None,
+            colour: Some([0.8, 0.8, 0.8, 1.0]),
+            colour_token: None,
+            label_style: Some("Heading1".to_string()),
+        }),
+        asset_ref: None,
+        asset_layout: None,
+        custom_shape: None,
+        style_tag_uuids: vec![],
+        resolved_style_tags: vec![],
+    }
+}
+
+pub(super) fn base_document(nodes: Vec<UiIrNode>) -> UiIrDocument {
+    UiIrDocument {
+        schema_version: UI_IR_SCHEMA_VERSION,
+        canvas_guid: "test-guid".to_string(),
+        canvas_name: Some("test-canvas".to_string()),
+        target_width: 1920,
+        target_height: 1080,
+        selected_style_source: None,
+        selected_swf_source: None,
+        renderer_hint: UiRendererHint::Bb,
+        confidence: 100,
+        warnings: vec![],
+        unresolved_references: vec![],
+        resolved_asset_refs: vec![],
+        missing_asset_refs: vec![],
+        nodes,
+    }
+}

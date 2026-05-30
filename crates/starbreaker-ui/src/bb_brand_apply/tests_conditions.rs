@@ -2,7 +2,6 @@ use super::tests_support::make_test_scene;
 use super::*;
 use crate::bb_scene::BbValue;
 use serde_json::json;
-
     #[test]
     fn test_unconditional_entry_applies_to_all() {
         let mut scene = make_test_scene();
@@ -21,9 +20,7 @@ use serde_json::json;
             })],
             raw: &json!({}),
         };
-
         apply_brand_modifiers(&mut scene, &brand, None);
-
         assert_eq!(scene.nodes.get(&1).unwrap().alpha, 0.5);
     }
     #[test]
@@ -55,9 +52,7 @@ use serde_json::json;
             })],
             raw: &json!({}),
         };
-
         apply_brand_modifiers(&mut scene, &brand, None);
-
         assert_eq!(scene.nodes.get(&1).unwrap().alpha, 0.75);
     }
     #[test]
@@ -89,12 +84,9 @@ use serde_json::json;
             })],
             raw: &json!({}),
         };
-
         apply_brand_modifiers(&mut scene, &brand, None);
-
         assert_eq!(scene.nodes.get(&1).unwrap().alpha, 1.0); // Unchanged
     }
-
     #[test]
     fn test_string_modifier() {
         let mut scene = make_test_scene();
@@ -113,20 +105,16 @@ use serde_json::json;
             })],
             raw: &json!({}),
         };
-
         apply_brand_modifiers(&mut scene, &brand, None);
-
         let node = scene.nodes.get(&1).unwrap();
         assert_eq!(
             node.raw.get("SvgPath").and_then(|v| v.as_str()),
             Some("UI/Textures/test.svg")
         );
     }
-
     #[test]
     fn test_string_modifier_localization_uses_node_params() {
         struct TestLocFetcher;
-
         impl LocFetcher for TestLocFetcher {
             fn fetch_loc(&self, key: &str) -> Option<String> {
                 match key {
@@ -135,7 +123,6 @@ use serde_json::json;
                 }
             }
         }
-
         let mut scene = make_test_scene();
         scene.nodes.get_mut(&1).unwrap().raw = json!({
             "paramInputValues": [
@@ -157,18 +144,14 @@ use serde_json::json;
             })],
             raw: &json!({}),
         };
-
         apply_brand_modifiers(&mut scene, &brand, Some(&TestLocFetcher));
-
         let node = scene.nodes.get(&1).unwrap();
         assert_eq!(node.raw.get("Label").and_then(|v| v.as_str()), Some("T3"));
     }
-
     #[test]
     fn test_color_modifier_0_to_1() {
         let mut scene = make_test_scene();
         scene.nodes.get_mut(&1).unwrap().background = Some(Default::default());
-
         let brand = BrandStyle {
             identifier: "test_brand".to_string(),
             entries: &[json!({
@@ -189,9 +172,7 @@ use serde_json::json;
             })],
             raw: &json!({}),
         };
-
         apply_brand_modifiers(&mut scene, &brand, None);
-
         let node = scene.nodes.get(&1).unwrap();
         let color = node.background.as_ref().unwrap().fill_colour.unwrap();
         assert_eq!(color, [0.5, 0.75, 1.0, 1.0]);
@@ -200,7 +181,6 @@ use serde_json::json;
     fn test_color_modifier_0_to_255() {
         let mut scene = make_test_scene();
         scene.nodes.get_mut(&1).unwrap().background = Some(Default::default());
-
         let brand = BrandStyle {
             identifier: "test_brand".to_string(),
             entries: &[json!({
@@ -221,9 +201,7 @@ use serde_json::json;
             })],
             raw: &json!({}),
         };
-
         apply_brand_modifiers(&mut scene, &brand, None);
-
         let node = scene.nodes.get(&1).unwrap();
         let color = node.background.as_ref().unwrap().fill_colour.unwrap();
         // Should be normalized to 0..1
@@ -231,7 +209,6 @@ use serde_json::json;
         assert!((color[1] - 192.0 / 255.0).abs() < 0.01);
         assert!((color[2] - 1.0).abs() < 0.01);
     }
-
     #[test]
     fn test_named_base_color_maps_to_slot_zero() {
         let mut scene = make_test_scene();
@@ -271,7 +248,6 @@ use serde_json::json;
         assert!((color[2] - 254.0 / 255.0).abs() < 0.001);
         assert_eq!(color[3], 1.0);
     }
-
     #[test]
     fn named_accent1_color_maps_to_first_accent_slot() {
         let mut scene = make_test_scene();
@@ -310,7 +286,6 @@ use serde_json::json;
         assert!((color[2] - 188.0 / 255.0).abs() < 0.001);
         assert_eq!(node.raw.get("FillColorToken").and_then(|value| value.as_str()), Some("Accent1"));
     }
-
     #[test]
     fn test_boolean_modifier_is_active() {
         let mut scene = make_test_scene();
@@ -329,12 +304,9 @@ use serde_json::json;
             })],
             raw: &json!({}),
         };
-
         apply_brand_modifiers(&mut scene, &brand, None);
-
         assert_eq!(scene.nodes.get(&1).unwrap().is_active, false);
     }
-
     #[test]
     fn test_border_color_modifier() {
         let mut scene = make_test_scene();
@@ -358,15 +330,12 @@ use serde_json::json;
             })],
             raw: &json!({}),
         };
-
         apply_brand_modifiers(&mut scene, &brand, None);
-
         let node = scene.nodes.get(&1).unwrap();
         assert!(node.border.is_some());
         let color = node.border.as_ref().unwrap().top.colour.unwrap();
         assert_eq!(color, [1.0, 0.0, 0.0, 1.0]);
     }
-
     #[test]
     fn test_size_modifier() {
         let mut scene = make_test_scene();
@@ -392,11 +361,8 @@ use serde_json::json;
             })],
             raw: &json!({}),
         };
-
         apply_brand_modifiers(&mut scene, &brand, None);
-
         let node = scene.nodes.get(&1).unwrap();
         assert_eq!(node.sizing.width, BbValue::Fixed(640.0));
         assert_eq!(node.sizing.height, BbValue::Fixed(480.0));
     }
-

@@ -13,6 +13,11 @@
 //! - [`postprocess`] — Manufacturer post-process passes (tint, scanlines, vignette).
 //! - [`style`]       — Manufacturer style (tint, CRT params) loader.
 //! - [`swf_assets`]  — SWF static-atom extractor and [`SwfAssetLibrary`].
+//! - [`bb_layout`]   — BuildingBlocks layout engine (module wrapper + split implementation).
+//! - [`bb_resolve`]  — Canvas graph resolver (module wrapper + split implementation).
+//! - [`ir_compose`]  — Canonical IR renderer/compositor (module wrapper + split implementation).
+//! - [`ui_ir`]       — Canonical IR schema + compiler (module wrapper + split implementation).
+//! - [`ui_snapshot`] — Snapshot/metadata comparison and regression helpers (module split).
 
 pub mod bb_assets;
 pub mod bb_atlas;
