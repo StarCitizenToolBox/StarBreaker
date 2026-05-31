@@ -1,7 +1,7 @@
 //! Regression tests for projecting authored canvas style entries onto scenes.
 
 use super::apply_scene_style_entries;
-use crate::bb_scene::{BbNode, BbNodeType, BbScene};
+use crate::bb_scene::{BbCoordinateMethod, BbNode, BbNodeType, BbScene};
 use serde_json::json;
 use std::collections::BTreeMap;
 
@@ -64,6 +64,7 @@ fn scene_style_entries_apply_enable_background_to_matching_node() {
     );
 
     let mut scene = BbScene {
+        coordinate_method: BbCoordinateMethod::UseRaw,
         canvas_size: (100.0, 100.0),
         roots: vec![1],
         nodes,

@@ -277,11 +277,17 @@ pub fn render_for_binding_ir(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiE
     let ir = compile_ir_for_binding(inputs)?;
 
     let mut style = load_style_for_ir(&ir, inputs)?;
-    if ir
-        .canvas_name
-        .as_deref()
-        .is_some_and(|name| name.to_ascii_lowercase().contains("annunciator"))
-    {
+    let suppresses_placeholder_screen_background = ir.selected_swf_source.is_some()
+        && ir.nodes.iter().any(|node| {
+            node.node_type.eq_ignore_ascii_case("widget_image")
+                && !node.is_active
+                && node.resolved_style_tags.iter().any(|tag| {
+                    tag.tag_name
+                        .as_deref()
+                        .is_some_and(|name| name.eq_ignore_ascii_case("ScreenNameBackground"))
+                })
+        });
+    if suppresses_placeholder_screen_background {
         style.background = crate::canvas::RgbaColor {
             r: 0,
             g: 0,

@@ -318,7 +318,7 @@ fn background_fill_colour_token_from_style_tags(
     resolved_style_tags.iter().find_map(|tag| {
         let name = tag.tag_name.as_deref()?.trim().to_ascii_lowercase();
         match name.as_str() {
-            "statecritical" | "flashing" => Some("Base".to_string()),
+            "flashing" => Some("Base".to_string()),
             _ => None,
         }
     })
@@ -380,11 +380,26 @@ fn annunciator_gradient_tint_token(
         tag.tag_name.as_deref().is_some_and(|name| {
             name.eq_ignore_ascii_case("StateModerate")
                 || name.eq_ignore_ascii_case("StateCritical")
-                || name.eq_ignore_ascii_case("Flashing")
         })
     });
 
-    has_state.then(|| "Background".to_string())
+    has_state.then(|| "Base".to_string())
+}
+
+fn should_activate_annunciator_gradient(
+    node: &crate::bb_scene::BbNode,
+    resolved_style_tags: &[UiIrStyleTag],
+) -> bool {
+    if !is_annunciator_gradient_image(node) {
+        return false;
+    }
+
+    resolved_style_tags.iter().any(|tag| {
+        tag.tag_name.as_deref().is_some_and(|name| {
+            name.eq_ignore_ascii_case("StateModerate")
+                || name.eq_ignore_ascii_case("StateCritical")
+        })
+    })
 }
 
 fn colour_style_alpha(value: &serde_json::Value) -> Option<f32> {

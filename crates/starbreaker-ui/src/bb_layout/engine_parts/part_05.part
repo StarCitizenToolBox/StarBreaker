@@ -163,7 +163,7 @@ mod tests {
         let mut nodes = BTreeMap::new();
         nodes.insert(1, parent);
         nodes.insert(2, child);
-        let scene = BbScene { canvas_size: (200.0, 400.0), roots: vec![1], nodes, operations: vec![] };
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (200.0, 400.0), roots: vec![1], nodes, operations: vec![] };
 
         let result = layout(&scene, 200, 400);
         let r = result.rects[&2];
@@ -210,7 +210,7 @@ mod tests {
 
         let mut nodes = BTreeMap::new();
         nodes.insert(1, background);
-        let scene = BbScene { canvas_size: (800.0, 450.0), roots: vec![1], nodes, operations: vec![] };
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (800.0, 450.0), roots: vec![1], nodes, operations: vec![] };
 
         let result = layout(&scene, 800, 450);
         let rect = result.rects[&1];
@@ -294,7 +294,7 @@ mod tests {
         let mut nodes = BTreeMap::new();
         nodes.insert(1, parent);
         nodes.insert(2, child);
-        let scene = BbScene { canvas_size: (400.0, 300.0), roots: vec![1], nodes, operations: vec![] };
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (400.0, 300.0), roots: vec![1], nodes, operations: vec![] };
 
         let static_result = layout(&scene, 400, 300);
         let sampled_result = layout_with_animation_sample(&scene, 400, 300, Some(50.0));
@@ -353,7 +353,7 @@ mod tests {
 
         let mut nodes = BTreeMap::new();
         nodes.insert(1, node);
-        let scene = BbScene { canvas_size: (200.0, 100.0), roots: vec![1], nodes, operations: vec![] };
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (200.0, 100.0), roots: vec![1], nodes, operations: vec![] };
 
         let result = layout_with_animation_sample(&scene, 200, 100, Some(50.0));
         let rect = result.rects[&1];
@@ -413,7 +413,7 @@ mod tests {
 
         let mut nodes = BTreeMap::new();
         nodes.insert(1, node);
-        let scene = BbScene { canvas_size: (200.0, 100.0), roots: vec![1], nodes, operations: vec![] };
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (200.0, 100.0), roots: vec![1], nodes, operations: vec![] };
 
         let result = layout_with_animation_sample(&scene, 200, 100, Some(50.0));
         let rect = result.rects[&1];
@@ -484,7 +484,7 @@ mod tests {
         let mut nodes = BTreeMap::new();
         nodes.insert(1, root);
         nodes.insert(2, child);
-        let scene = BbScene { canvas_size: (200.0, 100.0), roots: vec![1], nodes, operations: vec![] };
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (200.0, 100.0), roots: vec![1], nodes, operations: vec![] };
 
         let result = layout(&scene, 200, 100);
         let root_rect = result.rects[&1];
@@ -574,7 +574,7 @@ mod tests {
         nodes.insert(1, host);
         nodes.insert(2, child_root);
         nodes.insert(3, child);
-        let scene = BbScene { canvas_size: (200.0, 100.0), roots: vec![1], nodes, operations: vec![] };
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (200.0, 100.0), roots: vec![1], nodes, operations: vec![] };
 
         let result = layout(&scene, 200, 100);
         let host_rect = result.rects[&1];
@@ -639,7 +639,7 @@ mod tests {
         let mut nodes = BTreeMap::new();
         nodes.insert(1, host);
         nodes.insert(2, child_root);
-        let scene = BbScene { canvas_size: (200.0, 100.0), roots: vec![1], nodes, operations: vec![] };
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (200.0, 100.0), roots: vec![1], nodes, operations: vec![] };
 
         let result = layout(&scene, 200, 100);
         let host_rect = result.rects[&1];
@@ -683,7 +683,7 @@ mod tests {
         let mut nodes = BTreeMap::new();
         nodes.insert(1, parent);
         nodes.insert(2, child);
-        let scene = BbScene { canvas_size: (400.0, 200.0), roots: vec![1], nodes, operations: vec![] };
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (400.0, 200.0), roots: vec![1], nodes, operations: vec![] };
 
         let result = layout(&scene, 400, 200);
         let r = result.rects[&2];
@@ -784,7 +784,7 @@ mod tests {
         nodes.insert(1, root);
         nodes.insert(2, child1);
         nodes.insert(3, child2);
-        let scene = BbScene { canvas_size: (300.0, 200.0), roots: vec![1], nodes, operations: vec![] };
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (300.0, 200.0), roots: vec![1], nodes, operations: vec![] };
         let result = layout(&scene, 300, 200);
         let r1 = result.rects[&2];
         let r2 = result.rects[&3];
@@ -870,7 +870,7 @@ mod tests {
         let mut nodes = BTreeMap::new();
         nodes.insert(1, root);
         nodes.insert(2, child);
-        let scene = BbScene { canvas_size: (300.0, 100.0), roots: vec![1], nodes, operations: vec![] };
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (300.0, 100.0), roots: vec![1], nodes, operations: vec![] };
         let result = layout(&scene, 300, 100);
         let rect = result.rects[&2];
         assert!((rect.x - 3.0).abs() < 0.5, "expected x≈3 from 1% row anchor, got {}", rect.x);
@@ -913,7 +913,7 @@ mod tests {
 
         let mut nodes = BTreeMap::new();
         nodes.insert(1, separator);
-        let scene = BbScene { canvas_size: (100.0, 100.0), roots: vec![1], nodes, operations: vec![] };
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (100.0, 100.0), roots: vec![1], nodes, operations: vec![] };
         let result = layout(&scene, 100, 100);
         let rect = result.rects[&1];
         assert!((rect.y - 10.0).abs() < 0.5, "expected centerline y=18 minus half height 8, got {}", rect.y);
@@ -990,7 +990,7 @@ mod tests {
         nodes.insert(1, root);
         nodes.insert(2, child(2, "operator"));
         nodes.insert(3, child(3, "patient"));
-        let scene = BbScene { canvas_size: (604.8, 108.0), roots: vec![1], nodes, operations: vec![] };
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (604.8, 108.0), roots: vec![1], nodes, operations: vec![] };
 
         let result = layout(&scene, 605, 108);
         let r1 = result.rects[&2];
@@ -1072,7 +1072,7 @@ mod tests {
         nodes.insert(1, root);
         nodes.insert(2, child(2, "operator"));
         nodes.insert(3, child(3, "patient"));
-        let scene = BbScene { canvas_size: (604.8, 108.0), roots: vec![1], nodes, operations: vec![] };
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (604.8, 108.0), roots: vec![1], nodes, operations: vec![] };
 
         let result = layout(&scene, 605, 108);
         let r1 = result.rects[&2];
@@ -1182,7 +1182,7 @@ mod tests {
         nodes.insert(1, root);
         nodes.insert(2, left_button);
         nodes.insert(3, exit_bed);
-        let scene = BbScene { canvas_size: (200.0, 80.0), roots: vec![1], nodes, operations: vec![] };
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (200.0, 80.0), roots: vec![1], nodes, operations: vec![] };
 
         let result = layout(&scene, 200, 80);
         let left = result.rects[&2];
@@ -1295,7 +1295,7 @@ mod tests {
         nodes.insert(2, textfield(2, "TitleText", "Title3", vec!["e6003a83-9795-4478-a61c-349f14016e5b"], 0.043));
         nodes.insert(3, textfield(3, "TouchPromptText", "Heading2", vec!["5e5c7c8f-847b-46c5-ad80-a57c941391ab"], 0.0));
         nodes.insert(4, touch);
-        let scene = BbScene { canvas_size: (1000.0, 1000.0), roots: vec![1], nodes, operations: vec![] };
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (1000.0, 1000.0), roots: vec![1], nodes, operations: vec![] };
 
         let result = layout(&scene, 1000, 1000);
         let title = result.rects[&2];
@@ -1380,7 +1380,7 @@ mod tests {
         let mut nodes = BTreeMap::new();
         nodes.insert(1, root);
         nodes.insert(2, child);
-        let scene = BbScene { canvas_size: (1000.0, 120.0), roots: vec![1], nodes, operations: vec![] };
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (1000.0, 120.0), roots: vec![1], nodes, operations: vec![] };
 
         let result = layout(&scene, 1000, 120);
         let child = result.rects[&2];
@@ -1451,7 +1451,7 @@ mod tests {
         let mut nodes = BTreeMap::new();
         nodes.insert(1, root);
         nodes.insert(2, tier);
-        let scene = BbScene { canvas_size: (1344.0, 270.0), roots: vec![1], nodes, operations: vec![] };
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (1344.0, 270.0), roots: vec![1], nodes, operations: vec![] };
 
         let result = layout(&scene, 1344, 270);
         let tier = result.rects[&2];
@@ -1601,7 +1601,7 @@ mod tests {
 
         let mut nodes = BTreeMap::new();
         nodes.insert(1, node);
-        let scene = BbScene { canvas_size: (1920.0, 1080.0), roots: vec![1], nodes, operations: vec![] };
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (1920.0, 1080.0), roots: vec![1], nodes, operations: vec![] };
 
         // Must not panic.
         let result = layout(&scene, 1600, 900);
@@ -1669,7 +1669,7 @@ mod tests {
         let mut nodes = BTreeMap::new();
         nodes.insert(1, parent);
         nodes.insert(2, child);
-        let scene = BbScene { canvas_size: (100.0, 100.0), roots: vec![1], nodes, operations: vec![] };
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (100.0, 100.0), roots: vec![1], nodes, operations: vec![] };
 
         let result = layout(&scene, 100, 100);
         let rect = result.rects[&2];
@@ -1764,7 +1764,7 @@ mod tests {
         nodes.insert(1, root);
         nodes.insert(2, text);
         nodes.insert(3, backing_canvas);
-        let scene = BbScene { canvas_size: (200.0, 100.0), roots: vec![1], nodes, operations: vec![] };
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (200.0, 100.0), roots: vec![1], nodes, operations: vec![] };
 
         let result = layout(&scene, 200, 100);
         let rect = result.rects[&3];
@@ -1815,7 +1815,7 @@ mod tests {
 
         let mut nodes = BTreeMap::new();
         nodes.insert(1, node);
-        let scene = BbScene { canvas_size: (800.0, 600.0), roots: vec![1], nodes, operations: vec![] };
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (800.0, 600.0), roots: vec![1], nodes, operations: vec![] };
 
         let result = layout(&scene, 1600, 900);
         let rect = result.rects[&1];

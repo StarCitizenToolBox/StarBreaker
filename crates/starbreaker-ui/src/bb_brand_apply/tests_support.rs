@@ -1,4 +1,4 @@
-use crate::bb_scene::{BbNode, BbNodeType, BbScene};
+use crate::bb_scene::{BbCoordinateMethod, BbNode, BbNodeType, BbScene};
 use serde_json::json;
 use std::collections::BTreeMap;
 
@@ -33,6 +33,7 @@ pub(super) fn make_test_scene() -> BbScene {
     );
 
     BbScene {
+        coordinate_method: BbCoordinateMethod::UseRaw,
         canvas_size: (1920.0, 1080.0),
         roots: vec![1],
         nodes,

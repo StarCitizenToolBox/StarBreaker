@@ -14,6 +14,9 @@ pub fn parse_bb_canvas(json: &serde_json::Value) -> Result<BbScene, String> {
         .ok_or("missing _RecordValue_.size")?;
     let canvas_w = f32_field(size, "x");
     let canvas_h = f32_field(size, "y");
+    let coordinate_method = BbCoordinateMethod::from_raw(
+        record_value.get("coordinateMethod").and_then(|value| value.as_str()),
+    );
 
     let scene_arr = record_value
         .get("scene")
@@ -100,7 +103,13 @@ pub fn parse_bb_canvas(json: &serde_json::Value) -> Result<BbScene, String> {
         .map(|(id, _)| id)
         .collect();
 
-    Ok(BbScene { canvas_size: (canvas_w, canvas_h), roots, nodes, operations })
+    Ok(BbScene {
+        canvas_size: (canvas_w, canvas_h),
+        coordinate_method,
+        roots,
+        nodes,
+        operations,
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

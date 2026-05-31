@@ -1,6 +1,6 @@
 use super::*;
 use crate::bb_atlas::AssetFetcher;
-use crate::bb_scene::BbScene;
+use crate::bb_scene::{BbCoordinateMethod, BbScene};
 use crate::canvas::{CanvasRecord, ResolvedCanvas};
 use crate::defaults::DefaultValueRegistry;
 use crate::style::StyleLoader;
@@ -37,6 +37,7 @@ impl AssetFetcher for NullFetcher {
 
 fn empty_bb_scene() -> BbScene {
     BbScene {
+        coordinate_method: BbCoordinateMethod::UseRaw,
         canvas_size: (512.0, 256.0),
         roots: vec![],
         nodes: BTreeMap::new(),

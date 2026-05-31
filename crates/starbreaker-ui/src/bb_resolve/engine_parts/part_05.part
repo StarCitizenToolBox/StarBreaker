@@ -1249,6 +1249,7 @@ mod tests {
     #[test]
     fn inject_param_overrides_synthesizes_boolean_component_parameter_values() {
         let mut child_scene = crate::bb_scene::BbScene {
+            coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw,
             canvas_size: (1920.0, 1080.0),
             roots: Vec::new(),
             nodes: std::collections::BTreeMap::new(),

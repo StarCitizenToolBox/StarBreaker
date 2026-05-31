@@ -5,10 +5,12 @@ fn merge_child_scene(
     host_parent_override: Option<BbNodeId>,
 ) {
     let BbScene {
+        coordinate_method: child_coordinate_method,
         canvas_size: child_canvas_size,
         roots: child_roots,
         nodes: child_nodes,
         operations: child_ops,
+        ..
     } = child_scene;
 
     // Build a collision-free mapping from child original IDs to new IDs.
@@ -51,6 +53,9 @@ fn merge_child_scene(
         log::warn!("bb_resolve: no host parent available for child canvas merge");
         return;
     };
+    if should_adopt_child_coordinate_method(parent_scene, host_parent_id, child_coordinate_method) {
+        parent_scene.coordinate_method = child_coordinate_method;
+    }
     let canvas_scale = child_canvas_scale_for_host(parent_scene, host_parent_id, child_canvas_size);
 
     let mut inserted_child_roots = Vec::new();
@@ -104,6 +109,27 @@ fn merge_child_scene(
         let mut seen = std::collections::BTreeSet::new();
         host.children.retain(|id| seen.insert(*id));
     }
+}
+
+fn should_adopt_child_coordinate_method(
+    parent_scene: &BbScene,
+    host_parent_id: BbNodeId,
+    child_coordinate_method: crate::bb_scene::BbCoordinateMethod,
+) -> bool {
+    if matches!(child_coordinate_method, crate::bb_scene::BbCoordinateMethod::UseRaw) {
+        return false;
+    }
+
+    let Some(host) = parent_scene.nodes.get(&host_parent_id) else {
+        return false;
+    };
+
+    matches!(host.ty, crate::bb_scene::BbNodeType::WidgetCanvas)
+        && host.parent.is_none()
+        && matches!(host.sizing.width, BbValue::Percent(value) if (value - 1.0).abs() < f32::EPSILON)
+        && matches!(host.sizing.height, BbValue::Percent(value) if (value - 1.0).abs() < f32::EPSILON)
+        && host.position.x.abs() < f32::EPSILON
+        && host.position.y.abs() < f32::EPSILON
 }
 
 fn child_canvas_scale_for_host(

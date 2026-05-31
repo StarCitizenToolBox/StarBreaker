@@ -46,12 +46,40 @@ pub type BbNodeId = u32;
 pub struct BbScene {
     /// Canvas width and height in canvas units (from `size.x` / `size.y`).
     pub canvas_size: (f32, f32),
+    /// Canvas coordinate scaling mode from `_RecordValue_.coordinateMethod`.
+    pub coordinate_method: BbCoordinateMethod,
     /// IDs of all root nodes (nodes with no parent).
     pub roots: Vec<BbNodeId>,
     /// All nodes keyed by their pointer ID, in stable insertion order.
     pub nodes: BTreeMap<BbNodeId, BbNode>,
     /// Raw BuildingBlocks operations array used for runtime bindings.
     pub operations: Vec<serde_json::Value>,
+}
+
+/// Authoring rule for mapping canvas units into the render target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BbCoordinateMethod {
+    UseRaw,
+    Auto,
+    AspectOverridesWidth,
+    AspectOverridesHeight,
+}
+
+impl Default for BbCoordinateMethod {
+    fn default() -> Self {
+        Self::UseRaw
+    }
+}
+
+impl BbCoordinateMethod {
+    pub(super) fn from_raw(value: Option<&str>) -> Self {
+        match value.unwrap_or("useRaw") {
+            "auto" => Self::Auto,
+            "aspectOverridesWidth" => Self::AspectOverridesWidth,
+            "aspectOverridesHeight" => Self::AspectOverridesHeight,
+            _ => Self::UseRaw,
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
