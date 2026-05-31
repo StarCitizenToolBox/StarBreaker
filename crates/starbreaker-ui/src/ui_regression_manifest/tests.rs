@@ -205,6 +205,7 @@ fn sample_snapshot(x: f32) -> UiScreenSnapshot {
             stroke_extent: None,
             text_payload: Some("TEST".to_string()),
             text_font_identity: Some("font:baseline".to_string()),
+            text_font_size: Some(18.0),
             line_spacing: Some(18.0),
         }],
     }

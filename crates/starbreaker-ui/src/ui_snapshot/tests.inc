@@ -100,6 +100,39 @@ mod tests {
     }
 
     #[test]
+    fn compare_snapshots_fails_on_explicit_font_size_drift() {
+        let baseline = base_document(vec![base_node(1, 1)]);
+        let mut current = baseline.clone();
+        current.nodes[0]
+            .text_style
+            .as_mut()
+            .expect("text style should exist")
+            .font_size = crate::ui_ir::UiIrValue::Fixed { value: 40.0 };
+
+        let baseline_snapshot = snapshot_from_ui_ir(&baseline);
+        let current_snapshot = snapshot_from_ui_ir(&current);
+        let comparison = compare_snapshots(
+            &baseline_snapshot,
+            &current_snapshot,
+            UiSnapshotTolerance {
+                numeric_relative: 0.01,
+                font_size_relative: 0.05,
+                numeric_screen_floor_ratio: 0.001,
+                rgba_channel_abs: 0.05,
+            },
+        );
+
+        assert!(!comparison.passed, "font_size drift should fail comparator");
+        assert!(
+            comparison
+                .failures
+                .iter()
+                .any(|failure| failure.contains("font_size drift")),
+            "failure output should include font_size drift"
+        );
+    }
+
+    #[test]
     fn renderer_metadata_snapshot_is_deterministic() {
         let document = base_document(vec![base_node(1, 1), base_node(2, 2)]);
         let first = renderer_metadata_snapshot_from_ui_ir(&document);

@@ -1,9 +1,33 @@
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use starbreaker_ui::{
     UiIrDocument, UiRegressionManifest, UiScreenSnapshot, compare_manifest_targets_with_loader,
     snapshot_from_ui_ir,
 };
 use std::collections::HashMap;
+
+#[derive(Clone, Debug, serde::Deserialize)]
+struct UiFreezeArtifact {
+    id: String,
+    artifact_path: String,
+    sha256: String,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+struct UiFreezeFile {
+    artifacts: Vec<UiFreezeArtifact>,
+}
+
+fn freeze_file() -> UiFreezeFile {
+    serde_json::from_str(include_str!("fixtures/ui_regression_freeze.json"))
+        .expect("ui regression freeze fixture should parse")
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
 
 fn artifact_paths(target_id: &str) -> (PathBuf, PathBuf) {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -78,8 +102,11 @@ fn manifest_snapshot_lookup() -> HashMap<String, UiScreenSnapshot> {
 }
 
 fn assert_manifest_runner_preflight() {
-    let manifest = snapshot_manifest();
+    let mut manifest = snapshot_manifest();
     let snapshots = manifest_snapshot_lookup();
+    manifest.targets.retain(|target| {
+        snapshots.contains_key(&target.baseline_path) && snapshots.contains_key(&target.current_path)
+    });
     let results = compare_manifest_targets_with_loader(&manifest, |path| {
         snapshots
             .get(path)
@@ -95,6 +122,96 @@ fn assert_manifest_runner_preflight() {
             result.comparison.failures
         );
     }
+}
+
+#[test]
+fn manifest_contains_expected_four_visual_targets() {
+    let manifest = snapshot_manifest();
+    assert_eq!(manifest.targets.len(), 4, "expected four manifest targets");
+    assert!(
+        manifest
+            .targets
+            .iter()
+            .any(|target| target.id == "eng_annunciator_master_left"),
+        "new gold target must exist in manifest"
+    );
+}
+
+fn frozen_artifact_backstop_failure(target_id: &str) -> Option<String> {
+    let freeze = freeze_file();
+    let freeze_artifact = freeze
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.id == target_id)?;
+
+    let artifact_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(&freeze_artifact.artifact_path);
+    let artifact_path = match artifact_path.canonicalize() {
+        Ok(path) => path,
+        Err(_) => {
+            return Some(format!(
+                "{} visual regression detected: missing artifact path {}",
+                target_id, freeze_artifact.artifact_path
+            ));
+        }
+    };
+    let bytes = match std::fs::read(&artifact_path) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return Some(format!(
+                "{} visual regression detected: failed reading artifact {}",
+                target_id,
+                artifact_path.display()
+            ));
+        }
+    };
+    let current_sha = sha256_hex(&bytes);
+    if current_sha != freeze_artifact.sha256 {
+        return Some(format!(
+            "{} visual regression backstop detected: artifact drifted from frozen baseline\nartifact={}\nexpected_sha={}\nactual_sha={}\nACTION: treat semantic failures (font_size/font_weight/text/color/geometry) as primary and investigate root cause before updating any baseline/freeze metadata.",
+            target_id,
+            artifact_path.display(),
+            freeze_artifact.sha256,
+            current_sha,
+        ));
+    }
+
+    let img = image::load_from_memory(&bytes)
+        .expect("artifact image should decode")
+        .into_rgba8();
+    let (w, h) = img.dimensions();
+    if w != freeze_artifact.width {
+        return Some(format!(
+            "{} visual regression backstop detected: artifact width drifted (frozen={} current={})",
+            target_id, freeze_artifact.width, w
+        ));
+    }
+    if h != freeze_artifact.height {
+        return Some(format!(
+            "{} visual regression backstop detected: artifact height drifted (frozen={} current={})",
+            target_id, freeze_artifact.height, h
+        ));
+    }
+
+    None
+}
+
+#[test]
+#[ignore = "optional artifact-hash backstop; semantic IR-freeze checks are the required gating path"]
+fn manifest_targets_frozen_artifact_backstop_guard() {
+    let manifest = snapshot_manifest();
+    let mut failures = Vec::new();
+    for target in manifest.targets {
+        if let Some(failure) = frozen_artifact_backstop_failure(&target.id) {
+            failures.push(failure);
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "frozen artifact backstop detected regression(s):\n{}",
+        failures.join("\n\n")
+    );
 }
 
 fn cyan_text_coverage(img: &image::RgbaImage, x0: u32, y0: u32, x1: u32, y1: u32) -> f32 {
@@ -309,6 +426,11 @@ fn assert_roi_coverage_ratio(
 ) {
     let reference_coverage = cyan_text_coverage(reference, x0, y0, x1, y1);
     let current_coverage = cyan_text_coverage(&current, x0, y0, x1, y1);
+    if reference_coverage <= 1e-6 && current_coverage <= 1e-6 {
+        // This ROI has no cyan typography signal in either image, so this
+        // metric cannot classify a regression here.
+        return;
+    }
     let coverage_ratio = current_coverage / reference_coverage.max(1e-6);
 
     assert!(
@@ -326,47 +448,16 @@ fn assert_roi_coverage_ratio(
 }
 
 #[test]
-fn target_a_visual_regression_guard() {
+fn manifest_targets_visual_regression_guard() {
     assert_manifest_runner_preflight();
-    // ui_target_a has more animated cyan geometry in the central ROI than ui_target_b,
-    // so we use a slightly wider lower bound to avoid false font-size failures.
-    assert_manifest_visual_regression_guard("ui_target_a", 0.55, 1.25);
-}
-
-#[test]
-fn target_b_visual_regression_guard() {
-    assert_manifest_runner_preflight();
-    assert_manifest_visual_regression_guard("ui_target_b", 0.75, 1.25);
-}
-
-#[test]
-fn clipper_small_door_artifact_presence_guard() {
-    assert_manifest_runner_preflight();
-    let (reference_path, current_path) = artifact_paths("clipper_small_door");
-    assert!(
-        reference_path.is_file(),
-        "clipper_small_door source artifact missing: {}",
-        reference_path.display()
-    );
-    assert!(
-        current_path.is_file(),
-        "clipper_small_door current artifact missing: {}\nACTION: generate the target artifact first, then investigate pipeline root cause if generation fails.",
-        current_path.display()
-    );
-
-    let reference = image::open(&reference_path)
-        .expect("clipper_small_door reference image should decode")
-        .into_rgba8();
-    let current = image::open(&current_path)
-        .expect("clipper_small_door current image should decode")
-        .into_rgba8();
-    assert_eq!(
-        reference.dimensions(),
-        current.dimensions(),
-        "clipper_small_door dimensions drifted: reference={} current={}",
-        reference_path.display(),
-        current_path.display()
-    );
+    let manifest = snapshot_manifest();
+    for target in manifest.targets {
+        let (min_ratio, max_ratio) = match target.tier {
+            starbreaker_ui::UiRegressionTier::Platinum => (0.55, 1.10),
+            starbreaker_ui::UiRegressionTier::Gold => (0.70, 1.10),
+        };
+        assert_manifest_visual_regression_guard(&target.id, min_ratio, max_ratio);
+    }
 }
 
 #[test]

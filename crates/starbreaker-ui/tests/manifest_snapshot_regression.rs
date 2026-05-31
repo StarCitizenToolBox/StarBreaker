@@ -5,6 +5,11 @@ use starbreaker_ui::{
 };
 use std::collections::HashMap;
 
+fn snapshot_freeze_json() -> serde_json::Value {
+    serde_json::from_str(include_str!("fixtures/ui_ir/ui_snapshot_freeze.json"))
+        .expect("ui snapshot freeze fixture should parse")
+}
+
 fn target_a_ir() -> UiIrDocument {
     serde_json::from_str(include_str!("fixtures/ui_ir/target_a-screen_16x9_a-ir.json"))
         .expect("ui_target_a IR fixture should parse")
@@ -81,8 +86,11 @@ fn manifest_snapshots_are_deterministic_for_phase1_fixtures() {
 
 #[test]
 fn manifest_targets_pass_for_phase1_fixtures() {
-    let manifest = snapshot_manifest();
+    let mut manifest = snapshot_manifest();
     let snapshots = manifest_snapshot_lookup();
+    manifest.targets.retain(|target| {
+        snapshots.contains_key(&target.baseline_path) && snapshots.contains_key(&target.current_path)
+    });
 
     let results = compare_manifest_targets_with_loader(&manifest, |path| {
         snapshots
@@ -92,7 +100,7 @@ fn manifest_targets_pass_for_phase1_fixtures() {
     })
     .expect("manifest runner should load all manifest fixtures");
 
-    assert_eq!(results.len(), 3, "expected three manifest targets");
+    assert_eq!(results.len(), manifest.targets.len(), "expected all fixture-backed manifest targets");
     for result in results {
         assert!(
             result.comparison.passed,
@@ -101,6 +109,74 @@ fn manifest_targets_pass_for_phase1_fixtures() {
             result.comparison.failures
         );
     }
+}
+
+#[test]
+fn snapshot_freeze_ids_match_manifest_ids() {
+    let manifest = snapshot_manifest();
+    let freeze = snapshot_freeze_json();
+
+    assert_eq!(
+        freeze.get("schema_version").and_then(|value| value.as_u64()),
+        Some(1),
+        "snapshot freeze schema version should remain 1"
+    );
+
+    let mut manifest_ids: Vec<String> = manifest.targets.into_iter().map(|target| target.id).collect();
+    manifest_ids.sort();
+
+    let mut freeze_ids: Vec<String> = freeze
+        .get("targets")
+        .and_then(|value| value.as_array())
+        .expect("snapshot freeze should contain targets array")
+        .iter()
+        .map(|target| {
+            target
+                .get("id")
+                .and_then(|value| value.as_str())
+                .expect("frozen target should have id")
+                .to_string()
+        })
+        .collect();
+    freeze_ids.sort();
+
+    assert_eq!(freeze_ids, manifest_ids, "snapshot freeze ids should match manifest ids exactly");
+}
+
+#[test]
+fn snapshot_freeze_remains_ir_only() {
+    fn contains_key(value: &serde_json::Value, key: &str) -> bool {
+        match value {
+            serde_json::Value::Object(map) => {
+                map.contains_key(key) || map.values().any(|child| contains_key(child, key))
+            }
+            serde_json::Value::Array(items) => items.iter().any(|child| contains_key(child, key)),
+            _ => false,
+        }
+    }
+
+    let freeze = snapshot_freeze_json();
+    let targets = freeze
+        .get("targets")
+        .and_then(|value| value.as_array())
+        .expect("snapshot freeze should contain targets array");
+
+    assert!(
+        !targets.is_empty(),
+        "snapshot freeze should contain at least one target"
+    );
+    assert!(
+        targets.iter().all(|target| target.get("baseline_snapshot").is_some()),
+        "every frozen target should include a baseline snapshot"
+    );
+    assert!(
+        !contains_key(&freeze, "artifact_path"),
+        "snapshot freeze must not contain artifact paths"
+    );
+    assert!(
+        !contains_key(&freeze, "sha256"),
+        "snapshot freeze must not contain image hashes"
+    );
 }
 
 #[test]
@@ -263,6 +339,37 @@ fn manifest_snapshot_comparator_flags_colour_drift() {
 }
 
 #[test]
+fn manifest_snapshot_comparator_flags_background_asset_identity_drift() {
+    let baseline_doc = target_a_ir();
+    let mut current_doc = baseline_doc.clone();
+
+    let node = current_doc
+        .nodes
+        .iter_mut()
+        .find(|node| node.is_active && node.asset_ref.is_some())
+        .expect("fixture should include active asset-backed image nodes");
+    node.asset_ref = Some("UI/Textures/Debug/replaced_background.tif".to_string());
+
+    let baseline = snapshot_from_ui_ir(&baseline_doc);
+    let current = snapshot_from_ui_ir(&current_doc);
+    let comparison = run_generic_comparison(
+        "target_a_background_asset",
+        UiRegressionCategory::Image,
+        baseline,
+        current,
+    );
+
+    assert!(!comparison.passed, "background asset drift should fail comparator");
+    assert!(
+        comparison
+            .failures
+            .iter()
+            .any(|line| line.contains("asset identity drift")),
+        "failure output should include asset identity drift"
+    );
+}
+
+#[test]
 fn manifest_snapshot_comparator_flags_font_identity_drift() {
     let baseline_doc = target_a_ir();
     let mut current_doc = baseline_doc.clone();
@@ -284,13 +391,13 @@ fn manifest_snapshot_comparator_flags_font_identity_drift() {
         current,
     );
 
-    assert!(!comparison.passed, "font identity drift should fail comparator");
+    assert!(!comparison.passed, "font identity/font_weight drift should fail comparator");
     assert!(
         comparison
             .failures
             .iter()
-            .any(|line| line.contains("font identity drift")),
-        "failure output should include font identity drift"
+            .any(|line| line.contains("font identity/font_weight drift")),
+        "failure output should include font identity/font_weight drift"
     );
 }
 

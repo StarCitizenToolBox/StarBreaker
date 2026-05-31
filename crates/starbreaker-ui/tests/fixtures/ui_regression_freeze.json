@@ -35,6 +35,16 @@
       "width": 1920,
       "height": 1080,
       "channels": "srgba"
+    },
+    {
+      "id": "eng_annunciator_master_left",
+      "tier": "gold",
+      "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_h_eng_annunciator_master_left.png",
+      "artifact_path": "test-artifacts/ui/eng_annunciator_master_left.png",
+      "sha256": "4d7e0a6d238bdd040f3fd68498f0137d9113dc44209c6523e9d1bfe63a87c61b",
+      "width": 1920,
+      "height": 432,
+      "channels": "srgba"
     }
   ]
 }

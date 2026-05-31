@@ -89,7 +89,7 @@ pub fn compare_snapshots(
         }
         if baseline_element.text_font_identity != current_element.text_font_identity {
             failures.push(format!(
-                "{identity}: font identity drift baseline={:?} current={:?}",
+                "{identity}: font identity/font_weight drift baseline={:?} current={:?}",
                 baseline_element.text_font_identity, current_element.text_font_identity
             ));
         }
@@ -146,6 +146,15 @@ pub fn compare_snapshots(
             "stroke_extent",
             baseline_element.stroke_extent,
             current_element.stroke_extent,
+            baseline_max_dim,
+            tolerance,
+        );
+        compare_optional_font_numeric(
+            &mut failures,
+            identity,
+            "font_size",
+            baseline_element.text_font_size,
+            current_element.text_font_size,
             baseline_max_dim,
             tolerance,
         );

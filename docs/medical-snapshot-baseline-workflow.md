@@ -9,6 +9,7 @@ Medical1 and Medical2 are treated as gold-standard outputs. Deviations are presu
 - Normal test runs must never auto-write or auto-bless baselines.
 - Snapshot baseline changes are explicit, manual, and code-reviewed.
 - Baseline updates are allowed only in dedicated commits that explain why drift is expected.
+- Adding, removing, or updating manifest regression targets requires explicit user instruction.
 - If a medical render or live IR shows obvious breakage such as visible placeholder text, stop. That is a product regression signal, not baseline drift.
 - Do not update medical baselines unless the user explicitly approves the baseline refresh after root-cause investigation.
 

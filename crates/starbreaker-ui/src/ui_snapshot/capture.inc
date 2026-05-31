@@ -51,6 +51,12 @@ pub fn snapshot_from_ui_ir(document: &UiIrDocument) -> UiScreenSnapshot {
                     .clone()
                     .or_else(|| style.resolved_font_record.as_ref().map(|record| record.to_string()))
             }),
+            text_font_size: node.text_style.as_ref().and_then(|style| match style.font_size {
+                crate::ui_ir::UiIrValue::Fixed { value } if value.is_finite() && value > 0.0 => {
+                    Some(value)
+                }
+                _ => None,
+            }),
             line_spacing: node.text_style.as_ref().and_then(|style| style.line_spacing),
         });
     }

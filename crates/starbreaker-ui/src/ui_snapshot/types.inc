@@ -47,6 +47,7 @@ pub struct UiSnapshotElement {
     pub stroke_extent: Option<f32>,
     pub text_payload: Option<String>,
     pub text_font_identity: Option<String>,
+    pub text_font_size: Option<f32>,
     pub line_spacing: Option<f32>,
 }
 

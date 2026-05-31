@@ -5,13 +5,13 @@ on:
     paths:
       - crates/starbreaker-ui/**
       - scripts/**
-      - docs/ui-regression-baseline-workflow.md
+      - crates/starbreaker-ui/docs/ui-matching-workflow.md
       - .github/workflows/starbreaker-ui-tests.yml
   pull_request:
     paths:
       - crates/starbreaker-ui/**
       - scripts/**
-      - docs/ui-regression-baseline-workflow.md
+      - crates/starbreaker-ui/docs/ui-matching-workflow.md
       - .github/workflows/starbreaker-ui-tests.yml
 
 jobs:
@@ -25,11 +25,9 @@ jobs:
         run: bash .github/scripts/check_ui_hardcoding.sh
       - name: Validate regression manifest and freeze lockfile (quick)
         run: bash scripts/validate_ui_regression_artifacts.sh --quick
+      - name: Run repo-only UI regression contract
+        run: bash scripts/validate_ui_regression_repo_only.sh
       - name: Run starbreaker-ui library tests
         run: cargo test -p starbreaker-ui --lib
-      - name: Run manifest regression integration suites
-        run: |
-          cargo test -p starbreaker-ui --test manifest_snapshot_regression -- --nocapture
-          cargo test -p starbreaker-ui --test manifest_live_ir_guard -- --nocapture
       - name: Run Phase 5 certification dashboard drift check
         run: cargo run -p starbreaker-ui --example phase5_certification_dashboard

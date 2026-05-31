@@ -2,12 +2,32 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
 use starbreaker_ui::pipeline::AssetFetcher;
 use starbreaker_ui::{
     CanvasFetcher, PipelineInputs, StyleFetcher, SwfFetcher, UiBindingView, UiError,
     UiIrDocument, UiRegressionManifest, UiScreenSnapshot, UiSnapshotElement,
     compare_manifest_targets_with_loader, compile_ir_for_binding, snapshot_from_ui_ir,
 };
+
+#[derive(Debug, Deserialize)]
+struct SnapshotFreezeFile {
+    targets: Vec<SnapshotFreezeTarget>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SnapshotFreezeTarget {
+    id: String,
+    source_generated_png: String,
+    canvas_guid: String,
+    baseline_snapshot: UiScreenSnapshot,
+}
+
+struct LiveTargetCase {
+    id: String,
+    current_ir: UiIrDocument,
+    baseline_snapshot: UiScreenSnapshot,
+}
 
 struct FsCanvasFetcher {
     guid_to_path: HashMap<String, PathBuf>,
@@ -42,14 +62,16 @@ impl SwfFetcher for DummySwfFetcher {
     }
 }
 
-struct DummyStyleFetcher;
+struct DummyStyleFetcher {
+    manufacturer_id: String,
+}
 
 impl StyleFetcher for DummyStyleFetcher {
     fn fetch_manufacturer_style(
         &self,
         _manufacturer_id: &str,
     ) -> Result<starbreaker_ui::ManufacturerStyle, UiError> {
-        Ok(starbreaker_ui::StyleLoader::for_manufacturer("drak").drake_amber_fallback())
+        Ok(starbreaker_ui::StyleLoader::for_manufacturer(&self.manufacturer_id).drake_amber_fallback())
     }
 }
 
@@ -110,12 +132,31 @@ fn load_canvas_index(root: &Path) -> Result<FsCanvasFetcher, String> {
             .strip_prefix("BuildingBlocks_Canvas.")
             .unwrap_or(&record_name)
             .to_string();
+        let path_stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("")
+            .to_string();
+        let path_rel = path
+            .strip_prefix(root)
+            .ok()
+            .and_then(|relative| relative.to_str())
+            .map(|relative| relative.replace('\\', "/"));
 
         guid_to_path.insert(record_id.clone(), path.clone());
         by_name.insert(record_name.clone(), record_id.clone());
         by_name.insert(record_name.to_ascii_lowercase(), record_id.clone());
         by_name.insert(bare_name.clone(), record_id.clone());
         by_name.insert(bare_name.to_ascii_lowercase(), record_id.clone());
+        by_name.insert(record_id.clone(), record_id.clone());
+        if !path_stem.is_empty() {
+            by_name.insert(path_stem.clone(), record_id.clone());
+            by_name.insert(path_stem.to_ascii_lowercase(), record_id.clone());
+        }
+        if let Some(rel) = path_rel {
+            by_name.insert(rel.clone(), record_id.clone());
+            by_name.insert(rel.to_ascii_lowercase(), record_id.clone());
+        }
     }
 
     Ok(FsCanvasFetcher { guid_to_path, by_name })
@@ -124,18 +165,22 @@ fn load_canvas_index(root: &Path) -> Result<FsCanvasFetcher, String> {
 fn compile_target_ir(
     fetcher: &FsCanvasFetcher,
     localization_map: Option<HashMap<String, String>>,
+    manufacturer_id: &str,
     canvas_guid: &str,
+    target_size: (u32, u32),
 ) -> UiIrDocument {
     let swf_fetcher = DummySwfFetcher;
-    let style_fetcher = DummyStyleFetcher;
+    let style_fetcher = DummyStyleFetcher {
+        manufacturer_id: manufacturer_id.to_string(),
+    };
     let asset_fetcher = DummyAssetFetcher;
 
     let binding = UiBindingView {
         canvas_guid: Some(canvas_guid),
         content_canvas_guid: Some(canvas_guid),
         binding_kind: Some("mfd"),
-        manufacturer_id: Some("drak"),
-        helper_name: Some("manifest-live-ir-guard"),
+        manufacturer_id: Some(manufacturer_id),
+        helper_name: Some("freeze-ui-snapshot-ir"),
         default_view_index: None,
         default_screen_slot: None,
     };
@@ -146,7 +191,7 @@ fn compile_target_ir(
         swf_fetcher: &swf_fetcher,
         style_fetcher: &style_fetcher,
         asset_fetcher: &asset_fetcher,
-        target_size: (1920, 1080),
+        target_size,
         apply_postprocess: false,
         animation_sample_percent: None,
         localization_map,
@@ -157,14 +202,23 @@ fn compile_target_ir(
 }
 
 fn live_snapshot_manifest() -> UiRegressionManifest {
-    let mut manifest: UiRegressionManifest = serde_json::from_str(include_str!(
-        "fixtures/ui_ir/ui_snapshot_manifest.json"
-    ))
-    .expect("snapshot manifest fixture should parse");
-    manifest
-        .targets
-        .retain(|target| target.id == "ui_target_a" || target.id == "ui_target_b");
-    manifest
+    serde_json::from_str(include_str!("fixtures/ui_ir/ui_snapshot_manifest.json"))
+        .expect("snapshot manifest fixture should parse")
+}
+
+fn snapshot_freeze() -> SnapshotFreezeFile {
+    serde_json::from_str(include_str!("fixtures/ui_ir/ui_snapshot_freeze.json"))
+        .expect("snapshot freeze fixture should parse")
+}
+
+fn manufacturer_from_source_path(source_generated_png: &str) -> String {
+    let parts: Vec<&str> = source_generated_png.split('/').collect();
+    if let Some(index) = parts.iter().position(|part| *part == "ship") {
+        if let Some(manufacturer) = parts.get(index + 1) {
+            return (*manufacturer).to_string();
+        }
+    }
+    "drak".to_string()
 }
 
 fn focused_movement_snapshot(snapshot: &UiScreenSnapshot) -> UiScreenSnapshot {
@@ -272,7 +326,7 @@ fn missing_font_metadata_nodes(document: &UiIrDocument) -> Vec<String> {
         .collect()
 }
 
-fn load_live_and_baseline_target_irs() -> Option<(UiIrDocument, UiIrDocument, UiIrDocument, UiIrDocument)> {
+fn load_live_target_cases() -> Option<Vec<LiveTargetCase>> {
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
         .canonicalize()
@@ -292,79 +346,82 @@ fn load_live_and_baseline_target_irs() -> Option<(UiIrDocument, UiIrDocument, Ui
         .ok()
         .map(|bytes| starbreaker_ui::bb_loc_p4k::parse_ini_bytes(&bytes));
 
-    let med1_guid = "534bab84-299b-479a-a4af-4469df112ea7";
-    let med2_guid = "e9ad809d-ebcf-43a3-bb20-120f64556aef";
+    let cases = snapshot_freeze()
+        .targets
+        .into_iter()
+        .map(|target| {
+            let manufacturer_id = manufacturer_from_source_path(&target.source_generated_png);
+            let target_size = (
+                target.baseline_snapshot.target_width,
+                target.baseline_snapshot.target_height,
+            );
+            let current_ir = compile_target_ir(
+                &fetcher,
+                localization_map.clone(),
+                &manufacturer_id,
+                &target.canvas_guid,
+                target_size,
+            );
 
-    let med1_live = compile_target_ir(&fetcher, localization_map.clone(), med1_guid);
-    let med2_live = compile_target_ir(&fetcher, localization_map, med2_guid);
+            LiveTargetCase {
+                id: target.id,
+                current_ir,
+                baseline_snapshot: target.baseline_snapshot,
+            }
+        })
+        .collect();
 
-    let med1_baseline: UiIrDocument = serde_json::from_str(include_str!(
-        "fixtures/ui_ir/target_a-screen_16x9_a-ir.json"
-    ))
-    .expect("ui_target_a baseline should parse");
-    let med2_baseline: UiIrDocument = serde_json::from_str(include_str!(
-        "fixtures/ui_ir/target_b-mesh_end_screen_plane-ir.json"
-    ))
-    .expect("ui_target_b baseline should parse");
-
-    Some((med1_live, med2_live, med1_baseline, med2_baseline))
+    Some(cases)
 }
 
 #[test]
 fn live_manifest_targets_have_no_visible_placeholder_text() {
-    let Some((med1_live, med2_live, _, _)) = load_live_and_baseline_target_irs() else {
+    let Some(cases) = load_live_target_cases() else {
         return;
     };
 
-    let med1_placeholders = visible_placeholder_nodes(&med1_live);
-    let med2_placeholders = visible_placeholder_nodes(&med2_live);
-
-    assert!(
-        med1_placeholders.is_empty(),
-        "ui_target_a gold-standard output contains visible placeholder text. This indicates broken UI generation, not baseline drift. Do not update baselines; investigate placeholder/default/localization handling first.\n{}",
-        med1_placeholders.join("\n")
-    );
-    assert!(
-        med2_placeholders.is_empty(),
-        "ui_target_b gold-standard output contains visible placeholder text. This indicates broken UI generation, not baseline drift. Do not update baselines; investigate placeholder/default/localization handling first.\n{}",
-        med2_placeholders.join("\n")
-    );
+    for case in cases {
+        let placeholders = visible_placeholder_nodes(&case.current_ir);
+        assert!(
+            placeholders.is_empty(),
+            "{} gold-standard output contains visible placeholder text. This indicates broken UI generation, not baseline drift. Do not update baselines; investigate placeholder/default/localization handling first.\n{}",
+            case.id,
+            placeholders.join("\n")
+        );
+    }
 }
 
 #[test]
 fn live_manifest_targets_match_gold_standard_snapshot_geometry() {
-    let Some((med1_live, med2_live, med1_baseline, med2_baseline)) =
-        load_live_and_baseline_target_irs()
-    else {
+    let Some(cases) = load_live_target_cases() else {
         return;
     };
 
-    if !visible_placeholder_nodes(&med1_live).is_empty() || !visible_placeholder_nodes(&med2_live).is_empty() {
+    if cases
+        .iter()
+        .any(|case| !visible_placeholder_nodes(&case.current_ir).is_empty())
+    {
         eprintln!(
             "skipping gold-standard geometry comparison because visible placeholder text already indicates broken target output"
         );
         return;
     }
 
-    let manifest = live_snapshot_manifest();
-    let snapshots = HashMap::from([
-        (
-            "ui_target_a.baseline".to_string(),
-            focused_movement_snapshot(&snapshot_from_ui_ir(&med1_baseline)),
-        ),
-        (
-            "ui_target_a.current".to_string(),
-            focused_movement_snapshot(&snapshot_from_ui_ir(&med1_live)),
-        ),
-        (
-            "ui_target_b.baseline".to_string(),
-            focused_movement_snapshot(&snapshot_from_ui_ir(&med2_baseline)),
-        ),
-        (
-            "ui_target_b.current".to_string(),
-            focused_movement_snapshot(&snapshot_from_ui_ir(&med2_live)),
-        ),
-    ]);
+    let mut manifest = live_snapshot_manifest();
+    let mut snapshots = HashMap::new();
+    for case in &cases {
+        snapshots.insert(
+            format!("{}.baseline", case.id),
+            focused_movement_snapshot(&case.baseline_snapshot),
+        );
+        snapshots.insert(
+            format!("{}.current", case.id),
+            focused_movement_snapshot(&snapshot_from_ui_ir(&case.current_ir)),
+        );
+    }
+    manifest.targets.retain(|target| {
+        snapshots.contains_key(&target.baseline_path) && snapshots.contains_key(&target.current_path)
+    });
     let results = compare_manifest_targets_with_loader(&manifest, |path| {
         snapshots
             .get(path)
@@ -373,33 +430,38 @@ fn live_manifest_targets_match_gold_standard_snapshot_geometry() {
     })
     .expect("manifest runner should compare live snapshots against baselines");
 
-    for result in results {
-        assert!(
-            result.comparison.passed,
-            "{} gold-standard live IR drift. Do not update baselines unless the drift is intentional, source-backed, and explicitly approved.\n{}",
-            result.id,
-            result.comparison.failures.join("\n")
-        );
-    }
+    let failures: Vec<String> = results
+        .into_iter()
+        .filter(|result| !result.comparison.passed)
+        .map(|result| {
+            format!(
+                "{} gold-standard live IR drift. Do not update baselines unless the drift is intentional, source-backed, and explicitly approved.\n{}",
+                result.id,
+                result.comparison.failures.join("\n")
+            )
+        })
+        .collect();
+
+    assert!(
+        failures.is_empty(),
+        "{}",
+        failures.join("\n\n")
+    );
 }
 
 #[test]
 fn live_manifest_targets_have_resolved_font_symbol_metadata() {
-    let Some((med1_live, med2_live, _, _)) = load_live_and_baseline_target_irs() else {
+    let Some(cases) = load_live_target_cases() else {
         return;
     };
 
-    let med1_missing = missing_font_metadata_nodes(&med1_live);
-    let med2_missing = missing_font_metadata_nodes(&med2_live);
-
-    assert!(
-        med1_missing.is_empty(),
-        "ui_target_a has active text nodes missing structural font metadata (font symbol/paintFile). This is a wrong-font risk and should be fixed in production data flow before baseline changes.\n{}",
-        med1_missing.join("\n")
-    );
-    assert!(
-        med2_missing.is_empty(),
-        "ui_target_b has active text nodes missing structural font metadata (font symbol/paintFile). This is a wrong-font risk and should be fixed in production data flow before baseline changes.\n{}",
-        med2_missing.join("\n")
-    );
+    for case in cases {
+        let missing = missing_font_metadata_nodes(&case.current_ir);
+        assert!(
+            missing.is_empty(),
+            "{} has active text nodes missing structural font metadata (font symbol/paintFile). This is a wrong-font risk and should be fixed in production data flow before baseline changes.\n{}",
+            case.id,
+            missing.join("\n")
+        );
+    }
 }
