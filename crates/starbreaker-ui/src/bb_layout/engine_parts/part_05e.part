@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod tests_d {
+    #![allow(unused_imports, dead_code)]
+
     use super::*;
     use crate::bb_scene::parse_bb_canvas;
 
