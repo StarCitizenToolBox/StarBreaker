@@ -1,0 +1,470 @@
+#[cfg(test)]
+mod tests_d {
+    use super::*;
+
+    struct TestCanvasFetcher {
+        by_guid: std::collections::HashMap<String, serde_json::Value>,
+        by_path: std::collections::HashMap<String, serde_json::Value>,
+    }
+
+    impl CanvasFetcher for TestCanvasFetcher {
+        fn fetch_canvas_json(&self, guid: &str) -> Result<serde_json::Value, crate::UiError> {
+            self.by_guid
+                .get(guid)
+                .cloned()
+                .ok_or_else(|| crate::UiError::RenderError(format!("missing guid: {guid}")))
+        }
+
+        fn fetch_canvas_by_name(
+            &self,
+            record_name: &str,
+        ) -> Result<serde_json::Value, crate::UiError> {
+            self.by_guid
+                .values()
+                .chain(self.by_path.values())
+                .find(|value| {
+                    value
+                        .get("_RecordName_")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|name| name == record_name)
+                })
+                .cloned()
+                .ok_or_else(|| crate::UiError::RenderError(format!("missing name: {record_name}")))
+        }
+
+        fn fetch_canvas_by_path(&self, path: &str) -> Result<serde_json::Value, crate::UiError> {
+            self.by_path
+                .get(path)
+                .cloned()
+                .ok_or_else(|| crate::UiError::RenderError(format!("missing path: {path}")))
+        }
+    }
+
+    fn defaults() -> crate::defaults::DefaultValueRegistry {
+        crate::defaults::DefaultValueRegistry::with_well_known_path_defaults()
+    }
+
+
+    #[test]
+    fn compile_ir_samples_animation_alpha_at_requested_percent() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestAnimationSample",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "fingerprint_like",
+                        "isActive": true,
+                        "alpha": 1.0,
+                        "text": "SCAN",
+                        "animation": {
+                            "animationTimeline": {
+                                "keyframes": [
+                                    {
+                                        "percent": 0.0,
+                                        "modifiers": [{"modifier": {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "Alpha", "value": 0.0}}]
+                                    },
+                                    {
+                                        "percent": 1.0,
+                                        "modifiers": [{"modifier": {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "Alpha", "value": 1.0}}]
+                                    }
+                                ]
+                            }
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 20.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene_with_animation_sample(
+            &scene,
+            None,
+            "guid-animation-sample",
+            Some("BuildingBlocks_Canvas.TestAnimationSample"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            Some(50.0),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "fingerprint_like").expect("sample node");
+        assert!((node.alpha - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn compile_ir_emits_border_and_stroke_metadata() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestBorderStroke",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetCanvas",
+                        "name": "bordered",
+                        "isActive": true,
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        },
+                        "border": {
+                            "top": {"width": 2.0, "color": {"r": 255.0, "g": 0.0, "b": 0.0, "a": 255.0}},
+                            "right": {"width": 3.0},
+                            "bottom": {"width": 4.0},
+                            "left": {"width": 5.0}
+                        },
+                        "StrokeColor": {"r": 0.25, "g": 0.5, "b": 0.75, "a": 1.0},
+                        "StrokeColorToken": "Accent4",
+                        "strokeExtent": 1.5,
+                        "BorderColorToken": "Accent1",
+                        "BorderColorRightToken": "Accent2"
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-border-stroke",
+            Some("BuildingBlocks_Canvas.TestBorderStroke"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "bordered").expect("bordered node");
+        let border = node.border.as_ref().expect("border metadata");
+        assert_eq!(border.top.width, 2.0);
+        assert_eq!(border.top.colour, Some([1.0, 0.0, 0.0, 1.0]));
+        assert_eq!(border.top.colour_token.as_deref(), Some("Accent1"));
+        assert_eq!(border.right.colour_token.as_deref(), Some("Accent2"));
+        assert_eq!(node.stroke_colour, Some([0.25, 0.5, 0.75, 1.0]));
+        assert_eq!(node.stroke_colour_token.as_deref(), Some("Accent4"));
+        assert_eq!(node.stroke_extent, Some(1.5));
+    }
+
+    #[test]
+    fn compile_ir_reads_svg_fill_stroke_extent() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestSvgFillStrokeExtent",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetSeparator",
+                        "name": "separator",
+                        "isActive": true,
+                        "sizing": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 8.0}
+                        },
+                        "svgFill": {
+                            "renderShape": true,
+                            "enableColorOverlay": true,
+                            "strokeExtent": 1.0
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-svg-fill-stroke-extent",
+            Some("BuildingBlocks_Canvas.TestSvgFillStrokeExtent"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "separator").expect("separator node");
+        assert_eq!(node.stroke_extent, Some(1.0));
+    }
+
+    #[test]
+    fn compile_ir_prefers_svg_fill_overlay_token_and_alpha() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestSvgFillOverlayTint",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "overlay",
+                        "isActive": true,
+                        "alpha": 1.0,
+                        "sizing": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 8.0}
+                        },
+                        "svgFill": {
+                            "svgPath": "UI/Textures/Vector/Drake/Drake_lowerline.svg",
+                            "renderShape": true,
+                            "enableColorOverlay": true,
+                            "color": {
+                                "_Type_": "BuildingBlocks_ColorStyle",
+                                "color": "Accent2",
+                                "alpha": 0.2
+                            }
+                        },
+                        "background": {
+                            "enable": false,
+                            "color": {
+                                "_Type_": "BuildingBlocks_ColorStyle",
+                                "color": "Base",
+                                "alpha": 1.0
+                            }
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-svg-fill-overlay-token",
+            Some("BuildingBlocks_Canvas.TestSvgFillOverlayTint"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "overlay").expect("overlay node");
+        assert_eq!(node.icon_tint_colour_token.as_deref(), Some("Accent2"));
+        assert!((node.alpha - 0.2).abs() < 0.001, "expected overlay alpha 0.2, got {}", node.alpha);
+    }
+
+    #[test]
+    fn compile_ir_emits_svg_flip_flags_in_asset_layout() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestSvgFlipFlags",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "arrow_right",
+                        "isActive": true,
+                        "sizing": {
+                            "width": {"behavior": "Fixed", "value": 20.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        },
+                        "svgFill": {
+                            "svgPath": "UI/Textures/Vector/H_HUDScreens/Ships/DRAK/drake_holo_hud_pixel_arrow.svg",
+                            "renderShape": true,
+                            "enableColorOverlay": true,
+                            "flipHorizontal": true,
+                            "flipVertical": false,
+                            "scalingBehavior": "Contain",
+                            "containPositionX": 0.5,
+                            "containPositionY": 0.5
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-svg-flip-flags",
+            Some("BuildingBlocks_Canvas.TestSvgFlipFlags"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "arrow_right").expect("arrow_right node");
+        let layout = node.asset_layout.as_ref().expect("asset layout");
+        assert_eq!(layout.flip_horizontal, Some(true));
+        assert_eq!(layout.flip_vertical, None);
+    }
+
+    #[test]
+    fn compile_ir_treats_authored_procedural_separator_strip_as_fill() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestAuthoredSeparatorStrip",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetSeparator",
+                        "name": "separator",
+                        "isActive": true,
+                        "sizing": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 16.0}
+                        },
+                        "svgFill": {
+                            "svgPath": "",
+                            "renderShape": true,
+                            "enableColorOverlay": true,
+                            "enableNineSliceRect": true,
+                            "strokeExtent": 1.0
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-authored-separator-strip",
+            Some("BuildingBlocks_Canvas.TestAuthoredSeparatorStrip"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "separator").expect("separator node");
+        assert_eq!(node.computed_rect.h, 16.0);
+        assert_eq!(node.stroke_extent, None);
+    }
+
+    #[test]
+    fn compile_ir_applies_horizontal_separator_source_style_colour() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestHorizontalSeparatorStyle",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetSeparator",
+                        "name": "secondary_separator",
+                        "isActive": true,
+                        "alpha": 0.5,
+                        "direction": "Horizontal",
+                        "style": "Secondary",
+                        "sizing": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 8.0}
+                        },
+                        "svgFill": {
+                            "svgPath": "",
+                            "renderShape": true,
+                            "enableColorOverlay": true,
+                            "enableNineSliceRect": true,
+                            "strokeExtent": 1.0
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+        let standard_separator = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.HorizontalSeparatorSecondaryWidgetStandard",
+            "_RecordValue_": {
+                "brandStyles": [
+                    {
+                        "brandIdentifier": "file://./../../../../../../../../libs/foundry/records/ui/buildingblocks/styles/s_bioc.json",
+                        "entries": [
+                            {
+                                "name": "Root",
+                                "modifiers": [
+                                    {
+                                        "_Type_": "BuildingBlocks_FieldModifierColor",
+                                        "field": "FillColor",
+                                        "color": {
+                                            "_Type_": "BuildingBlocks_ColorStyle",
+                                            "color": "Accent1",
+                                            "alpha": 0.3
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+        let fetcher = TestCanvasFetcher {
+            by_guid: std::collections::HashMap::new(),
+            by_path: std::collections::HashMap::from([(
+                "horizontal-secondary".to_string(),
+                standard_separator,
+            )]),
+        };
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            Some(&fetcher),
+            "guid-horizontal-separator-style",
+            Some("BuildingBlocks_Canvas.TestHorizontalSeparatorStyle"),
+            (100, 100),
+            &defaults(),
+            Some("canvas:s_bioc".to_owned()),
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir
+            .nodes
+            .iter()
+            .find(|node| node.name == "secondary_separator")
+            .expect("secondary separator node");
+        assert_eq!(node.stroke_colour_token.as_deref(), Some("Accent1"));
+        assert_eq!(node.colour_blend_mode, Some(UiIrColourBlendMode::Additive));
+        assert!((node.alpha - 0.15).abs() < 0.001, "expected styled alpha 0.15, got {}", node.alpha);
+    }
+}

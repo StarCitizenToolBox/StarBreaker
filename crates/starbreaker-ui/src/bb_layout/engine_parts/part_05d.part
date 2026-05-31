@@ -1,0 +1,480 @@
+#[cfg(test)]
+mod tests_c {
+    use super::*;
+    use crate::bb_scene::parse_bb_canvas;
+
+    fn load_fixture(name: &str) -> serde_json::Value {
+        let path = format!(
+            "{}/tests/fixtures/canvas/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read fixture {name}: {e}"));
+        serde_json::from_str(&text)
+            .unwrap_or_else(|e| panic!("cannot parse fixture {name}: {e}"))
+    }
+
+    /// R5.I-A: `PercentOfX` height (and `PercentOfY` width) must be evaluated
+    /// against THIS NODE's OWN other-axis dimension, not the parent's other
+    /// dimension.
+
+    #[test]
+    fn flex_row_right_anchored_label_caption_pairs_keep_intrinsic_width() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let root = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![2, 3],
+            ty: BbNodeType::DisplayWidget,
+            name: "text-layout".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(604.8), height: BbValue::Fixed(108.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2 { x: 1.0, y: 0.5 },
+            anchor: Vec2 { x: 1.0, y: 0.5 },
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({
+                "layoutPolicy": {
+                    "_Type_": "BuildingBlocks_FlexContainer",
+                    "direction": "Row",
+                    "wrap": "NoWrap",
+                    "axisJustification": "Start",
+                    "crossAxisJustification": "Start",
+                    "itemAlignment": "Start",
+                    "columnSpacing": 30.0,
+                    "rowSpacing": 0.0
+                }
+            }),
+        };
+
+        let child = |id: u32, name: &str| BbNode {
+            id,
+            parent: Some(1),
+            children: vec![],
+            ty: BbNodeType::Other("BuildingBlocks_ComponentLabelCaptionPair".into()),
+            name: name.into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing {
+                width: BbValue::Other { value: 64.0, behavior: "Auto".into() },
+                height: BbValue::Other { value: 64.0, behavior: "Auto".into() },
+            },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2 { x: 1.0, y: 0.0 },
+            anchor: Vec2 { x: 1.0, y: 0.0 },
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, root);
+        nodes.insert(2, child(2, "operator"));
+        nodes.insert(3, child(3, "patient"));
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (604.8, 108.0), roots: vec![1], nodes, operations: vec![] };
+
+        let result = layout(&scene, 605, 108);
+        let r1 = result.rects[&2];
+        let r2 = result.rects[&3];
+        assert!((r1.w - 64.0).abs() < 0.5, "expected first right-anchored pair intrinsic width ≈ 64, got {}", r1.w);
+        assert!((r2.w - 64.0).abs() < 0.5, "expected second right-anchored pair intrinsic width ≈ 64, got {}", r2.w);
+        assert!((r2.x - (r1.x + r1.w + 30.0)).abs() < 1.0, "expected second pair after 30px spacing, got x={}", r2.x);
+    }
+
+    #[test]
+    fn flex_row_auto_intrinsic_components_stay_in_flow_for_end_alignment() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let root = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![2, 3],
+            ty: BbNodeType::DisplayWidget,
+            name: "text-layout".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(200.0), height: BbValue::Fixed(80.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({
+                "layoutPolicy": {
+                    "_Type_": "BuildingBlocks_FlexContainer",
+                    "direction": "Row",
+                    "wrap": "NoWrap",
+                    "axisJustification": "End",
+                    "crossAxisJustification": "Start",
+                    "itemAlignment": "Start",
+                    "columnSpacing": 8.0,
+                    "rowSpacing": 0.0
+                }
+            }),
+        };
+
+        let left_button = BbNode {
+            id: 2,
+            parent: Some(1),
+            children: vec![],
+            ty: BbNodeType::ComponentGeneralButton,
+            name: "Back".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing {
+                width: BbValue::Other { value: 64.0, behavior: "Auto".into() },
+                height: BbValue::Other { value: 64.0, behavior: "Auto".into() },
+            },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2 { x: 1.0, y: 0.5 },
+            anchor: Vec2 { x: 1.0, y: 0.5 },
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+
+        let exit_bed = BbNode {
+            id: 3,
+            parent: Some(1),
+            children: vec![],
+            ty: BbNodeType::ComponentGeneralButtonSecondary,
+            name: "ExitBed".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing {
+                width: BbValue::Other { value: 64.0, behavior: "Auto".into() },
+                height: BbValue::Other { value: 64.0, behavior: "Auto".into() },
+            },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2 { x: 1.0, y: 0.5 },
+            anchor: Vec2 { x: 1.0, y: 0.5 },
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, root);
+        nodes.insert(2, left_button);
+        nodes.insert(3, exit_bed);
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (200.0, 80.0), roots: vec![1], nodes, operations: vec![] };
+
+        let result = layout(&scene, 200, 80);
+        let left = result.rects[&2];
+        let right = result.rects[&3];
+
+        assert!((right.x + right.w - 200.0).abs() < 0.5, "expected right item to align to container end, got x={} w={}", right.x, right.w);
+        assert!(left.x + left.w + 7.5 <= right.x, "expected distinct flowed items with spacing, got left={:?} right={:?}", left, right);
+        assert!(left.x >= 0.0, "expected left item to stay within container, got x={}", left.x);
+    }
+
+    #[test]
+    fn flex_column_auto_textfields_keep_intrinsic_height_slots() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let root = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![2, 3, 4],
+            ty: BbNodeType::DisplayWidget,
+            name: "root".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(1000.0), height: BbValue::Fixed(1000.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({
+                "layoutPolicy": {
+                    "_Type_": "BuildingBlocks_FlexContainer",
+                    "direction": "Column",
+                    "wrap": "NoWrapInfinite",
+                    "axisJustification": "Center",
+                    "crossAxisJustification": "Center",
+                    "itemAlignment": "Center",
+                    "columnSpacing": 0.0,
+                    "rowSpacing": 30.0
+                }
+            }),
+        };
+
+        let textfield = |id: u32, name: &str, style: &str, tags: Vec<&str>, anchor_x: f32| BbNode {
+            id,
+            parent: Some(1),
+            children: vec![],
+            ty: BbNodeType::WidgetTextField,
+            name: name.into(),
+            style_tag_uuids: tags.into_iter().map(String::from).collect(),
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing {
+                width: BbValue::Percent(0.7),
+                height: BbValue::Other { value: 1.0, behavior: "Auto".into() },
+            },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2 { x: anchor_x, y: 0.0 },
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({
+                "labelProperties": {
+                    "style": style
+                }
+            }),
+        };
+
+        let touch = BbNode {
+            id: 4,
+            parent: Some(1),
+            children: vec![],
+            ty: BbNodeType::WidgetCanvas,
+            name: "TouchHere".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(400.0), height: BbValue::Fixed(400.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, root);
+        nodes.insert(2, textfield(2, "TitleText", "Title3", vec!["e6003a83-9795-4478-a61c-349f14016e5b"], 0.043));
+        nodes.insert(3, textfield(3, "TouchPromptText", "Heading2", vec!["5e5c7c8f-847b-46c5-ad80-a57c941391ab"], 0.0));
+        nodes.insert(4, touch);
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (1000.0, 1000.0), roots: vec![1], nodes, operations: vec![] };
+
+        let result = layout(&scene, 1000, 1000);
+        let title = result.rects[&2];
+        let prompt = result.rects[&3];
+        let touch = result.rects[&4];
+
+        assert!((title.y - 105.0).abs() < 0.5, "expected centered title flow y=105, got {}", title.y);
+        assert!((title.x - 193.0).abs() < 0.5, "expected authored cross-axis anchor to offset title x, got {}", title.x);
+        assert!((title.h - 270.0).abs() < 0.5, "expected Title3 intrinsic height 270, got {}", title.h);
+        assert!((prompt.y - 390.0).abs() < 0.5, "expected prompt after title plus spacing, got {}", prompt.y);
+        assert!((prompt.y - (title.y + title.h) - 15.4).abs() < 0.5, "expected derived title-to-prompt gap, got {}", prompt.y - (title.y + title.h));
+        assert!((prompt.x - 150.0).abs() < 0.5, "expected prompt without cross-axis anchor offset at centered x, got {}", prompt.x);
+        assert!((prompt.h - 60.0).abs() < 0.5, "expected prompt intrinsic height 60, got {}", prompt.h);
+        assert!((touch.y - 466.0).abs() < 0.5, "expected touch canvas after intrinsic text slots, got {}", touch.y);
+    }
+
+    #[test]
+    fn flex_column_nowrap_infinite_start_cross_axis_applies_child_anchor() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let root = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![2],
+            ty: BbNodeType::DisplayWidget,
+            name: "root".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(1000.0), height: BbValue::Fixed(120.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({
+                "layoutPolicy": {
+                    "_Type_": "BuildingBlocks_FlexContainer",
+                    "direction": "Column",
+                    "wrap": "NoWrapInfinite",
+                    "axisJustification": "Start",
+                    "crossAxisJustification": "Start",
+                    "itemAlignment": "Start",
+                    "columnSpacing": 0.0,
+                    "rowSpacing": 0.0
+                }
+            }),
+        };
+
+        let child = BbNode {
+            id: 2,
+            parent: Some(1),
+            children: vec![],
+            ty: BbNodeType::WidgetTextField,
+            name: "WelcomeText".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Percent(1.0), height: BbValue::Fixed(40.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2 { x: 0.01, y: 0.0 },
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, root);
+        nodes.insert(2, child);
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (1000.0, 120.0), roots: vec![1], nodes, operations: vec![] };
+
+        let result = layout(&scene, 1000, 120);
+        let child = result.rects[&2];
+        assert!((child.x - 10.0).abs() < 0.5, "expected child anchor.x to offset start cross-axis x, got {}", child.x);
+    }
+
+    #[test]
+    fn inactive_bright_title3_auto_width_uses_authored_scale() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let root = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![2],
+            ty: BbNodeType::DisplayWidget,
+            name: "root".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(1344.0), height: BbValue::Fixed(270.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+
+        let tier = BbNode {
+            id: 2,
+            parent: Some(1),
+            children: vec![],
+            ty: BbNodeType::WidgetTextField,
+            name: "TierLevel".into(),
+            style_tag_uuids: vec!["174b3e40-1b7b-4f01-a7dc-6420b7367d6b".into()],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing {
+                width: BbValue::Other { value: 0.9, behavior: "Auto".into() },
+                height: BbValue::Other { value: 1.0, behavior: "Auto".into() },
+            },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2 { x: 0.5, y: 0.5 },
+            anchor: Vec2 { x: 0.01, y: 0.5 },
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({
+                "affectsLayout": false,
+                "labelProperties": {"style": "Title3"},
+                "textAlignment": "Left"
+            }),
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, root);
+        nodes.insert(2, tier);
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (1344.0, 270.0), roots: vec![1], nodes, operations: vec![] };
+
+        let result = layout(&scene, 1344, 270);
+        let tier = result.rects[&2];
+
+        assert!((tier.w - 145.8).abs() < 0.5, "expected authored Auto width scale to affect Title3 intrinsic width, got {}", tier.w);
+        assert!((tier.x + tier.w * 0.5 - 13.44).abs() < 0.5, "expected anchor/pivot to stay attached to authored 1% anchor, got x={} w={}", tier.x, tier.w);
+    }
+}

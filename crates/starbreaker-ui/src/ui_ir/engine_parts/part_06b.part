@@ -1,0 +1,429 @@
+fn textfield_long_prompt_font_size_from_signals(
+    node: &crate::bb_scene::BbNode,
+    node_rect_h: f32,
+    resolved_text: Option<&str>,
+) -> Option<f32> {
+    if !matches!(node.ty, BbNodeType::WidgetTextField) {
+        return None;
+    }
+
+    let style = label_style_name_from_raw(node)?;
+    let text_len = resolved_text
+        .map(|value| value.trim().chars().count())
+        .unwrap_or(0);
+
+    if style == "Heading1" && text_len >= 32 && node_rect_h <= 120.0 {
+        Some(LONG_HEADING1_PROMPT_FONT_SIZE)
+    } else {
+        None
+    }
+}
+
+fn standard_textfield_font_size_from_styles(
+    node: &crate::bb_scene::BbNode,
+    label_style: Option<&str>,
+    standard_text_styles: &HashMap<String, StandardTextStyle>,
+) -> Option<f32> {
+    if !matches!(node.ty, BbNodeType::WidgetTextField) {
+        return None;
+    }
+
+    let label_style = label_style?;
+    if !matches!(label_style, "Heading1" | "Heading3" | "Title4") {
+        return None;
+    }
+
+    standard_text_style_keys(label_style)
+        .into_iter()
+        .filter_map(|key| standard_text_styles.get(&key))
+        .find(|standard| {
+            if label_style == "Title4" {
+                return standard.font_size.is_some();
+            }
+            standard
+                .font_record
+                .as_deref()
+                .is_some_and(|record| {
+                    let font_style = crate::pipeline::extract_record_name(record);
+                    font_style.eq_ignore_ascii_case("blenderpro-thin")
+                })
+        })
+        .and_then(|standard| standard.font_size)
+        .filter(|font_size| font_size.is_finite() && *font_size > 0.0)
+        .map(|font_size| (font_size * STANDARD_TEXTFIELD_NOMINAL_FONT_SCALE * 10.0).round() / 10.0)
+}
+
+fn textfield_fallback_font_size_from_signals(
+    node: &crate::bb_scene::BbNode,
+    node_rect_h: f32,
+    resolved_text: Option<&str>,
+) -> Option<f32> {
+    if !matches!(node.ty, BbNodeType::WidgetTextField) {
+        return None;
+    }
+
+    let style = label_style_name_from_raw(node)?;
+    let text_len = resolved_text
+        .map(|value| value.trim().chars().count())
+        .unwrap_or(0);
+
+    match style.as_str() {
+        "Title4" => Some(56.0),
+        "Title3" => Some(90.0),
+        "Heading3" => Some(21.0),
+        "Heading2" if node_rect_h >= 220.0 && text_len > 0 && text_len <= 4 => Some(90.0),
+        "Heading2" if node_rect_h <= 80.0 => Some(28.0),
+        "Heading2" => Some(18.0),
+        "Heading6" if node_rect_h >= 48.0 => Some(18.0),
+        "Heading1" if text_len >= 32 && node_rect_h <= 120.0 => Some(LONG_HEADING1_PROMPT_FONT_SIZE),
+        "Heading1" => Some(40.0),
+        _ => None,
+    }
+}
+
+fn label_style_name_from_node_or_ancestors(
+    node_id: BbNodeId,
+    node: &crate::bb_scene::BbNode,
+    scene: &BbScene,
+) -> Option<String> {
+    if let Some(style) = label_style_name_from_raw(node) {
+        return Some(style);
+    }
+
+    let mut current = scene.nodes.get(&node_id).and_then(|n| n.parent);
+    while let Some(parent_id) = current {
+        let parent = scene.nodes.get(&parent_id)?;
+        if let Some(style) = label_style_name_from_raw(parent) {
+            return Some(style);
+        }
+        current = parent.parent;
+    }
+    None
+}
+
+fn collect_style_font_sizes(scene: &BbScene) -> HashMap<String, f32> {
+    let mut values_by_style: HashMap<String, Vec<f32>> = HashMap::new();
+
+    for node in scene.nodes.values() {
+        let Some(style_name) = label_style_name_from_raw(node) else {
+            continue;
+        };
+        let Some(value) = font_size_fixed_value_from_raw(node) else {
+            continue;
+        };
+        if value > 0.0 {
+            values_by_style.entry(style_name).or_default().push(value);
+        }
+    }
+
+    values_by_style
+        .into_iter()
+        .map(|(style, mut values)| {
+            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let median = values[values.len() / 2];
+            (style, median)
+        })
+        .collect()
+}
+
+fn resolve_record(
+    canvas_fetcher: Option<&dyn CanvasFetcher>,
+    candidates: &[&str],
+) -> Option<serde_json::Value> {
+    let fetcher = canvas_fetcher?;
+    for candidate in candidates {
+        let key = candidate.trim();
+        if key.is_empty() {
+            continue;
+        }
+        if let Ok(record) = fetcher.fetch_canvas_by_path(key) {
+            return Some(record);
+        }
+        if let Ok(record) = fetcher.fetch_canvas_by_name(key) {
+            return Some(record);
+        }
+        if let Ok(record) = fetcher.fetch_canvas_json(key) {
+            return Some(record);
+        }
+    }
+    None
+}
+
+/// Resolve a style-tag record for IR emission.
+///
+/// Resolution order:
+/// 1. Direct record fetch by `_RecordPath_`, `_RecordName_`, and UUID.
+/// 2. If those fail and `_RecordPath_` points to `tagdatabase`, fetch the
+///    tag-database record and resolve the UUID from its nested `tags[]` tree.
+///
+/// This keeps tag resolution in the core IR pipeline instead of requiring
+/// dump-specific flattening/indexing steps.
+fn resolve_style_tag_record(
+    canvas_fetcher: Option<&dyn CanvasFetcher>,
+    tag_reference: &serde_json::Value,
+    record_path: &str,
+    record_name: &str,
+    tag_uuid: &str,
+) -> Option<serde_json::Value> {
+    let tag_db_path = record_path.trim();
+    let is_tag_database_path = !tag_db_path.is_empty()
+        && tag_db_path.to_ascii_lowercase().contains("tagdatabase");
+
+    if !is_tag_database_path {
+        if let Some(record) = resolve_record(canvas_fetcher, &[record_path, record_name, tag_uuid]) {
+            return Some(record);
+        }
+    }
+
+    let fetcher = canvas_fetcher?;
+    if !is_tag_database_path {
+        if let Some(record) = resolve_record(Some(fetcher), &[tag_uuid]) {
+            return Some(record);
+        }
+    }
+
+    if !is_tag_database_path {
+        return None;
+    }
+
+    let tag_db = fetcher.fetch_canvas_by_path(tag_db_path).ok()?;
+    let tags = tag_db
+        .get("_RecordValue_")
+        .and_then(|rv| rv.get("tags"))
+        .and_then(|v| v.as_array())?;
+
+    let tag_value = tags.iter().find_map(|tag| find_tag_in_tree(tag, tag_uuid))?;
+    let resolved_record_name = tag_reference
+        .get("_RecordName_")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("Tag.{tag_uuid}"));
+
+    Some(serde_json::json!({
+        "_RecordId_": tag_uuid,
+        "_RecordName_": resolved_record_name,
+        "_RecordPath_": tag_db_path,
+        "_Type_": "Tag",
+        "_RecordValue_": trim_tag_tree_to_matched_tag(tag_value),
+    }))
+}
+
+fn find_tag_in_tree<'a>(value: &'a serde_json::Value, tag_uuid: &str) -> Option<&'a serde_json::Value> {
+    let object = value.as_object()?;
+    let matches = object
+        .get("_RecordId_")
+        .and_then(|v| v.as_str())
+        .is_some_and(|id| id == tag_uuid);
+    if matches {
+        return Some(value);
+    }
+
+    object
+        .get("children")
+        .and_then(|v| v.as_array())
+        .and_then(|children| children.iter().find_map(|child| find_tag_in_tree(child, tag_uuid)))
+}
+
+fn trim_tag_tree_to_matched_tag(tag_value: &serde_json::Value) -> serde_json::Value {
+    let Some(object) = tag_value.as_object() else {
+        return tag_value.clone();
+    };
+
+    let mut trimmed = serde_json::Map::with_capacity(object.len());
+    for (key, value) in object {
+        if key != "children" {
+            trimmed.insert(key.clone(), value.clone());
+        }
+    }
+    serde_json::Value::Object(trimmed)
+}
+
+fn convert_bb_value(value: &BbValue) -> UiIrValue {
+    match value {
+        BbValue::Fixed(v) => UiIrValue::Fixed { value: *v },
+        BbValue::Percent(v) => UiIrValue::Percent { value: *v },
+        BbValue::Other { value, behavior } => UiIrValue::Other {
+            value: *value,
+            behavior: behavior.clone(),
+        },
+    }
+}
+
+fn animation_number_keyframes(raw: &serde_json::Value, field_name: &str) -> Vec<(f64, f32)> {
+    let Some(keyframes) = raw.get("animation")
+        .and_then(|animation| animation.get("animationTimeline"))
+        .and_then(|timeline| timeline.get("keyframes"))
+        .and_then(|keyframes| keyframes.as_array())
+    else {
+        return Vec::new();
+    };
+
+    keyframes
+        .iter()
+        .flat_map(|keyframe| {
+            let percent = keyframe
+                .get("percent")
+                .and_then(|value| value.as_f64())
+                .unwrap_or(0.0);
+            keyframe
+                .get("modifiers")
+                .and_then(|modifiers| modifiers.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(move |modifier_data| {
+                    let modifier = modifier_data.get("modifier").unwrap_or(modifier_data);
+                    let is_number = modifier
+                        .get("_Type_")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|ty| ty == "BuildingBlocks_FieldModifierNumber");
+                    if !is_number {
+                        return None;
+                    }
+                    let matches_field = modifier
+                        .get("field")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|field| field == field_name);
+                    if !matches_field {
+                        return None;
+                    }
+                    modifier
+                        .get("value")
+                        .and_then(|value| value.as_f64())
+                        .map(|value| (percent, value as f32))
+                })
+        })
+        .collect()
+}
+
+fn representative_animation_alpha(raw: &serde_json::Value) -> Option<f32> {
+    animation_number_keyframes(raw, "Alpha")
+        .into_iter()
+        .map(|(_, value)| value.clamp(0.0, 1.0))
+        .max_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal))
+}
+
+fn local_alpha_for_node(
+    node: &crate::bb_scene::BbNode,
+    animation_sample_percent: Option<f32>,
+) -> f32 {
+    if is_transient_static_pulse_node(node) {
+        return 0.0;
+    }
+    if let Some(sample_percent) = animation_sample_percent {
+        sampled_animation_alpha(&node.raw, sample_percent)
+            .unwrap_or_else(|| representative_animation_alpha(&node.raw).unwrap_or(node.alpha))
+    } else {
+        representative_animation_alpha(&node.raw).unwrap_or(node.alpha)
+    }
+    .clamp(0.0, 1.0)
+}
+
+fn effective_alpha_for_node(
+    node_id: BbNodeId,
+    node: &crate::bb_scene::BbNode,
+    scene: &BbScene,
+    animation_sample_percent: Option<f32>,
+) -> f32 {
+    let mut alpha = local_alpha_for_node(node, animation_sample_percent);
+    let mut current_parent = node.parent;
+    let mut visited = HashSet::from([node_id]);
+
+    while let Some(parent_id) = current_parent {
+        if !visited.insert(parent_id) {
+            break;
+        }
+        let Some(parent) = scene.nodes.get(&parent_id) else {
+            break;
+        };
+        alpha *= local_alpha_for_node(parent, animation_sample_percent);
+        current_parent = parent.parent;
+    }
+
+    alpha.clamp(0.0, 1.0)
+}
+
+fn sampled_animation_alpha(raw: &serde_json::Value, sample_percent: f32) -> Option<f32> {
+    sampled_animation_number(raw, "Alpha", sample_percent).map(|value| value.clamp(0.0, 1.0))
+}
+
+fn sampled_animation_number(raw: &serde_json::Value, field_name: &str, sample_percent: f32) -> Option<f32> {
+    let mut keyframes = animation_number_keyframes(raw, field_name);
+    if keyframes.is_empty() {
+        return None;
+    }
+    keyframes.sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let timeline_max = keyframes.last().map(|(percent, _)| *percent).unwrap_or(1.0);
+    let sample = if timeline_max <= 1.0 {
+        sample_percent as f64 / 100.0
+    } else {
+        sample_percent as f64
+    };
+
+    let first = keyframes[0];
+    if sample <= first.0 {
+        return Some(first.1);
+    }
+
+    for window in keyframes.windows(2) {
+        let (left_percent, left_value) = window[0];
+        let (right_percent, right_value) = window[1];
+        if sample <= right_percent {
+            let span = right_percent - left_percent;
+            if span <= f64::EPSILON {
+                return Some(right_value);
+            }
+            let t = ((sample - left_percent) / span) as f32;
+            return Some(left_value + (right_value - left_value) * t);
+        }
+    }
+
+    keyframes.last().map(|(_, value)| *value)
+}
+
+fn is_transient_static_pulse_node(node: &BbNode) -> bool {
+    if !node_type_name(&node.ty).eq_ignore_ascii_case("BuildingBlocks_WidgetCircle") {
+        return false;
+    }
+
+    let looping = node
+        .raw
+        .get("animation")
+        .and_then(|animation| animation.get("loopIndefinitely"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if !looping {
+        return false;
+    }
+
+    let mut alpha_keyframes = animation_number_keyframes(&node.raw, "Alpha");
+    if alpha_keyframes.len() < 2 {
+        return false;
+    }
+    alpha_keyframes.sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let starts_hidden = alpha_keyframes.first().is_some_and(|(_, value)| *value <= 0.001);
+    let ends_hidden = alpha_keyframes.last().is_some_and(|(_, value)| *value <= 0.001);
+    let scales_over_time = !animation_number_keyframes(&node.raw, "SizeX").is_empty()
+        || !animation_number_keyframes(&node.raw, "SizeY").is_empty();
+
+    starts_hidden && ends_hidden && scales_over_time
+}
+
+fn node_type_name(node_type: &BbNodeType) -> &str {
+    match node_type {
+        BbNodeType::DisplayWidget => "display_widget",
+        BbNodeType::WidgetCanvas => "widget_canvas",
+        BbNodeType::WidgetIcon => "widget_icon",
+        BbNodeType::WidgetCard => "widget_card",
+        BbNodeType::WidgetTextField => "widget_text_field",
+        BbNodeType::ComponentGeneralButton => "component_general_button",
+        BbNodeType::ComponentGeneralButtonSecondary => "component_general_button_secondary",
+        BbNodeType::WidgetImage => "widget_image",
+        BbNodeType::WidgetText => "widget_text",
+        BbNodeType::WidgetCustomShape => "widget_custom_shape",
+        BbNodeType::WidgetBodyBackground => "widget_body_background",
+        BbNodeType::Other(s) => s,
+    }
+}
+

@@ -1,0 +1,467 @@
+#[cfg(test)]
+mod tests_c {
+    use super::*;
+
+    struct TestCanvasFetcher {
+        by_guid: std::collections::HashMap<String, serde_json::Value>,
+        by_path: std::collections::HashMap<String, serde_json::Value>,
+    }
+
+    impl CanvasFetcher for TestCanvasFetcher {
+        fn fetch_canvas_json(&self, guid: &str) -> Result<serde_json::Value, crate::UiError> {
+            self.by_guid
+                .get(guid)
+                .cloned()
+                .ok_or_else(|| crate::UiError::RenderError(format!("missing guid: {guid}")))
+        }
+
+        fn fetch_canvas_by_name(
+            &self,
+            record_name: &str,
+        ) -> Result<serde_json::Value, crate::UiError> {
+            self.by_guid
+                .values()
+                .chain(self.by_path.values())
+                .find(|value| {
+                    value
+                        .get("_RecordName_")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|name| name == record_name)
+                })
+                .cloned()
+                .ok_or_else(|| crate::UiError::RenderError(format!("missing name: {record_name}")))
+        }
+
+        fn fetch_canvas_by_path(&self, path: &str) -> Result<serde_json::Value, crate::UiError> {
+            self.by_path
+                .get(path)
+                .cloned()
+                .ok_or_else(|| crate::UiError::RenderError(format!("missing path: {path}")))
+        }
+    }
+
+    fn defaults() -> crate::defaults::DefaultValueRegistry {
+        crate::defaults::DefaultValueRegistry::with_well_known_path_defaults()
+    }
+
+
+    #[test]
+    fn compile_ir_keeps_asset_fill_colour_as_tint_not_background() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestAssetFillTint",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetImage",
+                        "name": "bottom_bar",
+                        "isActive": true,
+                        "ImagePath": "UI/Textures/I_InteractiveScreens/Med/i_med_bioc_bottom-bar.tif",
+                        "FillColor": {
+                            "_Type_": "BuildingBlocks_ColorStyle",
+                            "color": "Base",
+                            "alpha": 1.0
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-asset-fill-tint",
+            Some("BuildingBlocks_Canvas.TestAssetFillTint"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "bottom_bar").expect("bottom bar node");
+        assert_eq!(node.background_fill_colour, None);
+        assert_eq!(node.background_fill_colour_token.as_deref(), None);
+        assert_eq!(node.icon_tint_colour_token.as_deref(), Some("Base"));
+    }
+
+    #[test]
+    fn compile_ir_does_not_draw_fill_colour_on_disabled_background_containers() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestDisabledContainerFillTint",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "card_root",
+                        "isActive": true,
+                        "background": {
+                            "enable": false,
+                            "color": null
+                        },
+                        "FillColor": {
+                            "_Type_": "BuildingBlocks_ColorStyle",
+                            "color": "Bright",
+                            "alpha": 1.0
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 80.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:3",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "disabled_border_strip",
+                        "isActive": true,
+                        "background": {
+                            "enable": false,
+                            "color": {
+                                "_Type_": "BuildingBlocks_ColorStyle",
+                                "color": "Base",
+                                "alpha": 0.2
+                            }
+                        },
+                        "svgFill": {
+                            "svgPath": "UI/Textures/Vector/Drake/Hazardlines_header1.svg",
+                            "renderShape": true,
+                            "enableColorOverlay": true,
+                            "color": {
+                                "_Type_": "BuildingBlocks_ColorStyle",
+                                "color": "Base",
+                                "alpha": 0.2
+                            }
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "enabled_panel",
+                        "isActive": true,
+                        "background": {
+                            "enable": true,
+                            "color": {
+                                "_Type_": "BuildingBlocks_ColorStyle",
+                                "color": "Bright",
+                                "alpha": 1.0
+                            }
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-disabled-container-fill-tint",
+            Some("BuildingBlocks_Canvas.TestDisabledContainerFillTint"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let card_root = ir.nodes.iter().find(|node| node.name == "card_root").expect("card root node");
+        assert_eq!(card_root.background_fill_colour, None);
+        assert_eq!(card_root.background_fill_colour_token, None);
+
+        let disabled_border_strip = ir
+            .nodes
+            .iter()
+            .find(|node| node.name == "disabled_border_strip")
+            .expect("disabled border strip node");
+        assert_eq!(disabled_border_strip.background_fill_colour, None);
+        assert_eq!(disabled_border_strip.background_fill_colour_token, None);
+        assert_eq!(disabled_border_strip.background_fill_alpha, None);
+
+        let enabled_panel = ir.nodes.iter().find(|node| node.name == "enabled_panel").expect("enabled panel node");
+        assert_eq!(enabled_panel.background_fill_colour, None);
+        assert_eq!(enabled_panel.background_fill_colour_token.as_deref(), Some("Bright"));
+    }
+
+    #[test]
+    fn compile_ir_draws_explicit_background_color_on_disabled_base_background() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestExplicitBackgroundColor",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "style_background_panel",
+                        "isActive": true,
+                        "background": {
+                            "enable": false,
+                            "color": null
+                        },
+                        "BackgroundColor": {"r": 0.015, "g": 0.031, "b": 0.09, "a": 0.5},
+                        "BackgroundColorToken": "Background",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-explicit-background-color",
+            Some("BuildingBlocks_Canvas.TestExplicitBackgroundColor"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let panel = ir.nodes.iter().find(|node| node.name == "style_background_panel").expect("panel node");
+        assert_eq!(panel.background_fill_colour, Some([0.015, 0.031, 0.09, 0.5]));
+        assert_eq!(panel.background_fill_colour_token.as_deref(), Some("Background"));
+    }
+
+    #[test]
+    fn compile_ir_marks_authored_accent_backgrounds_as_additive() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestAccentBackgroundBlend",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "accent_panel",
+                        "isActive": true,
+                        "background": {
+                            "enable": true,
+                            "color": {
+                                "_Type_": "BuildingBlocks_ColorStyle",
+                                "color": "Accent1",
+                                "alpha": 1.0
+                            }
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-accent-background-blend",
+            Some("BuildingBlocks_Canvas.TestAccentBackgroundBlend"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let panel = ir.nodes.iter().find(|node| node.name == "accent_panel").expect("panel node");
+        assert_eq!(panel.background_fill_colour_token.as_deref(), Some("Accent1"));
+        assert_eq!(panel.colour_blend_mode, Some(UiIrColourBlendMode::Additive));
+    }
+
+    #[test]
+    fn compile_ir_uses_representative_animation_alpha_for_static_render() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestAnimationStart",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetCircle",
+                        "name": "pulse",
+                        "isActive": true,
+                        "alpha": 1.0,
+                        "strokeExtent": 3.0,
+                        "animation": {
+                            "animationTimeline": {
+                                "keyframes": [
+                                    {
+                                        "percent": 0.0,
+                                        "modifiers": [
+                                            {
+                                                "modifier": {
+                                                    "_Type_": "BuildingBlocks_FieldModifierNumber",
+                                                    "field": "Alpha",
+                                                    "value": 0.0
+                                                }
+                                            },
+                                            {
+                                                "modifier": {
+                                                    "_Type_": "BuildingBlocks_FieldModifierNumber",
+                                                    "field": "SizeX",
+                                                    "value": 0.44
+                                                }
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "percent": 0.4,
+                                        "modifiers": [
+                                            {
+                                                "modifier": {
+                                                    "_Type_": "BuildingBlocks_FieldModifierNumber",
+                                                    "field": "Alpha",
+                                                    "value": 1.0
+                                                }
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "percent": 0.8,
+                                        "modifiers": [
+                                            {
+                                                "modifier": {
+                                                    "_Type_": "BuildingBlocks_FieldModifierNumber",
+                                                    "field": "Alpha",
+                                                    "value": 0.0
+                                                }
+                                            },
+                                            {
+                                                "modifier": {
+                                                    "_Type_": "BuildingBlocks_FieldModifierNumber",
+                                                    "field": "SizeX",
+                                                    "value": 1.33
+                                                }
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            "loopIndefinitely": true
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 20.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "label",
+                        "isActive": true,
+                        "alpha": 1.0,
+                        "text": "TOUCH TO START",
+                        "animation": {
+                            "animationTimeline": {
+                                "keyframes": [
+                                    {
+                                        "percent": 0.0,
+                                        "modifiers": [
+                                            {
+                                                "modifier": {
+                                                    "_Type_": "BuildingBlocks_FieldModifierNumber",
+                                                    "field": "Alpha",
+                                                    "value": 0.0
+                                                }
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "percent": 0.33,
+                                        "modifiers": [
+                                            {
+                                                "modifier": {
+                                                    "_Type_": "BuildingBlocks_FieldModifierNumber",
+                                                    "field": "Alpha",
+                                                    "value": 0.66
+                                                }
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "percent": 0.99,
+                                        "modifiers": [
+                                            {
+                                                "modifier": {
+                                                    "_Type_": "BuildingBlocks_FieldModifierNumber",
+                                                    "field": "Alpha",
+                                                    "value": 0.0
+                                                }
+                                            }
+                                        ]
+                                    }
+                                ]
+                            }
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 20.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-animation-start",
+            Some("BuildingBlocks_Canvas.TestAnimationStart"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let pulse = ir.nodes.iter().find(|node| node.name == "pulse").expect("pulse node");
+        assert_eq!(pulse.alpha, 0.0);
+        assert_eq!(pulse.stroke_extent, Some(3.0));
+
+        let label = ir.nodes.iter().find(|node| node.name == "label").expect("label node");
+        assert_eq!(label.alpha, 0.66);
+    }
+}

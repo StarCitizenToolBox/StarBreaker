@@ -1,0 +1,491 @@
+#[cfg(test)]
+mod tests_g {
+    use super::*;
+    use crate::pipeline::extract_record_name;
+
+
+    fn load_fixture(name: &str) -> serde_json::Value {
+        let path = format!("{}/tests/fixtures/canvas/{name}", env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {name}: {e}"));
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("failed to parse {name}: {e}"))
+    }
+
+
+    fn one_node_canvas() -> serde_json::Value {
+        serde_json::json!({
+            "_RecordName_": "test_child",
+            "_RecordId_": "00000000-0000-0000-0000-000000000001",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "child_root"}
+                ]
+            }
+        })
+    }
+
+
+    fn three_node_canvas() -> serde_json::Value {
+        serde_json::json!({
+            "_RecordName_": "test_child3",
+            "_RecordId_": "00000000-0000-0000-0000-000000000002",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "child_root"},
+                    {"_Pointer_": "ptr:2", "_Type_": "BuildingBlocks_WidgetCanvas", "name": "c1", "parent": "_PointsTo_:ptr:1"},
+                    {"_Pointer_": "ptr:3", "_Type_": "BuildingBlocks_WidgetCanvas", "name": "c2", "parent": "_PointsTo_:ptr:1"}
+                ]
+            }
+        })
+    }
+
+
+    fn body_background_standard_fixture(texture_tag: &str) -> serde_json::Value {
+        serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.BodyBackgroundWidgetStandard",
+            "_RecordId_": "0b262f33-a075-42cb-907f-5e2fa3aa9df5",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_":"Vec3", "x": 1920.0, "y": 1080.0, "z": 0.0},
+                "defaultStyles": {
+                    "_Type_": "BuildingBlocks_DefaultStyles",
+                    "sharedStyles": null,
+                    "entries": [{
+                        "_Type_": "BuildingBlocks_StyleEntry",
+                        "name": "BackgroundTexture",
+                        "conditionsList": [{
+                            "_Type_": "BuildingBlocks_StyleConditionList",
+                            "conditions": [{
+                                "_Type_": "BuildingBlocks_StyleSelectorConditionTag",
+                                "tag": {"_RecordId_": texture_tag}
+                            }]
+                        }],
+                        "modifiers": [{
+                            "_Type_": "BuildingBlocks_FieldModifierString",
+                            "field": "ImagePath",
+                            "value": "UI/Textures/ModularKitStyles/_Default/SK_Default_BG.tif"
+                        }]
+                    }]
+                },
+                "brandStyles": [
+                    {
+                        "_Type_": "BuildingBlocks_BrandStyles",
+                        "brandIdentifier": "file://./../../../../../../../../libs/foundry/records/ui/buildingblocks/styles/s_drak.json",
+                        "entries": [{
+                            "_Type_": "BuildingBlocks_StyleEntry",
+                            "name": "Background Texture Style",
+                            "conditionsList": [{
+                                "_Type_": "BuildingBlocks_StyleConditionList",
+                                "conditions": [{
+                                    "_Type_": "BuildingBlocks_StyleSelectorConditionTag",
+                                    "tag": {"_RecordId_": texture_tag}
+                                }]
+                            }],
+                            "modifiers": [{
+                                "_Type_": "BuildingBlocks_FieldModifierString",
+                                "field": "ImagePath",
+                                "value": "UI/Textures/ModularKitStyles/DRAK/Drake_DoorPanel_Background-DarkTheme.tif"
+                            }]
+                        }]
+                    },
+                    {
+                        "_Type_": "BuildingBlocks_BrandStyles",
+                        "brandIdentifier": "file://./../../../../../../../../libs/foundry/records/ui/buildingblocks/styles/s_bioc.json",
+                        "entries": [{
+                            "_Type_": "BuildingBlocks_StyleEntry",
+                            "name": "Background Texture Style",
+                            "conditionsList": [{
+                                "_Type_": "BuildingBlocks_StyleConditionList",
+                                "conditions": [{
+                                    "_Type_": "BuildingBlocks_StyleSelectorConditionTag",
+                                    "tag": {"_RecordId_": texture_tag}
+                                }]
+                            }],
+                            "modifiers": [{
+                                "_Type_": "BuildingBlocks_FieldModifierString",
+                                "field": "ImagePath",
+                                "value": "UI/Textures/ModularKitStyles/BIOC/BIOC_bg.tif"
+                            }]
+                        }]
+                    }
+                ],
+                "scene": [],
+                "operations": [{
+                    "_Type_": "BuildingBlocks_BindingsTagFromIntegerSwitch",
+                    "values": [
+                        {"_Type_": "BuildingBlocks_IntegerTagPair", "first": 0, "second": null},
+                        {
+                            "_Type_": "BuildingBlocks_IntegerTagPair",
+                            "first": 1,
+                            "second": {"_RecordId_": texture_tag}
+                        }
+                    ]
+                }]
+            }
+        })
+    }
+
+
+    /// A host canvas (like M_MFD_Screen) with empty defaultStyles but a
+    /// WidgetCanvas node that carries a `canvas` URL to a content canvas.
+    fn host_canvas_with_widget_canvas_url(content_url: &str) -> serde_json::Value {
+        serde_json::json!({
+            "_RecordName_": "test_host",
+            "_RecordId_": "00000000-0000-0000-0000-000000000010",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 800.0, "y": 600.0, "z": 0.0},
+                "defaultStyles": {
+                    "_Type_": "BuildingBlocks_DefaultStyles",
+                    "sharedStyles": null,
+                    "entries": []
+                },
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "base_root"},
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetCanvas",
+                        "name": "canvas_content",
+                        "parent": "_PointsTo_:ptr:1",
+                        "canvas": content_url
+                    }
+                ]
+            }
+        })
+    }
+
+
+    /// Build a minimal canvas JSON that carries a single Pass 1 canvas-reference
+    /// modifier pointing to `child_url`.
+    fn canvas_with_style_ref(name: &str, child_url: &str) -> serde_json::Value {
+        serde_json::json!({
+            "_RecordName_": name,
+            "_RecordId_": "00000000-0000-0000-0000-0000000000aa",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "defaultStyles": {
+                    "_Type_": "BuildingBlocks_DefaultStyles",
+                    "sharedStyles": null,
+                    "entries": [{
+                        "matchTo": "",
+                        "modifiers": [{
+                            "field": {
+                                "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeCanvasReferenceRecord",
+                                "value": child_url
+                            }
+                        }]
+                    }]
+                },
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": format!("{name}_root")}
+                ]
+            }
+        })
+    }
+
+
+    /// Build a canvas with multiple conditional style entries, each pointing to
+    /// a different child canvas URL.
+    fn canvas_with_multi_conditional_refs(urls: &[(&str, &str)]) -> serde_json::Value {
+        let entries: Vec<serde_json::Value> = urls
+            .iter()
+            .map(|(name, url)| {
+                serde_json::json!({
+                    "name": name,
+                    "matchTo": "",
+                    "conditionsList": [{"_Type_": "BuildingBlocks_StyleConditionList", "conditions": [{"_Type_": "BuildingBlocks_StyleSelectorConditionType", "type": "Canvas"}]}],
+                    "modifiers": [{
+                        "field": {
+                            "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeCanvasReferenceRecord",
+                            "value": url
+                        }
+                    }]
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "_RecordName_": "multi_cond_root",
+            "_RecordId_": "00000000-0000-0000-0000-000000000030",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "defaultStyles": {
+                    "_Type_": "BuildingBlocks_DefaultStyles",
+                    "sharedStyles": null,
+                    "entries": entries
+                },
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "root"}
+                ]
+            }
+        })
+    }
+
+
+    #[test]
+    fn pass1_prefers_unconditional_over_first_conditional() {
+        // B7.2b: when entries have a mix of conditional and unconditional,
+        // Pass 1 must prefer the first UNCONDITIONAL entry over the first
+        // overall.
+        //
+        // Scenario: root has [conditional→child_a, unconditional→child_b].
+        // Only child_b must be merged.
+        let child_a = serde_json::json!({
+            "_RecordName_": "child_a",
+            "_RecordId_": "00000000-0000-0000-0000-000000000041",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "a_root"},
+                    {"_Pointer_": "ptr:2", "_Type_": "BuildingBlocks_WidgetTextField", "name": "text_A", "parent": "_PointsTo_:ptr:1"}
+                ]
+            }
+        });
+        let child_b = serde_json::json!({
+            "_RecordName_": "child_b",
+            "_RecordId_": "00000000-0000-0000-0000-000000000042",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "b_root"},
+                    {"_Pointer_": "ptr:2", "_Type_": "BuildingBlocks_WidgetTextField", "name": "text_B", "parent": "_PointsTo_:ptr:1"}
+                ]
+            }
+        });
+
+        // Build a root canvas with two entries: [0] conditional, [1] unconditional.
+        let root = serde_json::json!({
+            "_RecordName_": "mixed_root",
+            "_RecordId_": "00000000-0000-0000-0000-000000000040",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "defaultStyles": {
+                    "_Type_": "BuildingBlocks_DefaultStyles",
+                    "sharedStyles": null,
+                    "entries": [
+                        // Conditional entry (has conditionsList with one condition).
+                        {
+                            "_Type_": "BuildingBlocks_StyleEntry",
+                            "name": "ConditionalEntry",
+                            "conditionsList": [{"_Type_": "BuildingBlocks_StyleConditionList", "name": "cond", "conditions": [{"key": "mode", "value": "guns"}]}],
+                            "matchTo": "",
+                            "modifiers": [{
+                                "_Type_": "BuildingBlocks_StyleModifier",
+                                "field": {
+                                    "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeCanvasReferenceRecord",
+                                    "value": "file://./child_a.json"
+                                }
+                            }]
+                        },
+                        // Unconditional entry (empty conditionsList).
+                        {
+                            "_Type_": "BuildingBlocks_StyleEntry",
+                            "name": "UnconditionalEntry",
+                            "conditionsList": [],
+                            "matchTo": "",
+                            "modifiers": [{
+                                "_Type_": "BuildingBlocks_StyleModifier",
+                                "field": {
+                                    "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeCanvasReferenceRecord",
+                                    "value": "file://./child_b.json"
+                                }
+                            }]
+                        }
+                    ]
+                },
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "root"}
+                ]
+            }
+        });
+
+        let fetch_count = std::cell::Cell::new(0u32);
+        let scene = resolve_canvas_graph(&root, None, &|url| {
+            fetch_count.set(fetch_count.get() + 1);
+            Ok(match url {
+                "file://./child_a.json" => child_a.clone(),
+                "file://./child_b.json" => child_b.clone(),
+                _ => return Err(format!("unexpected fetch: {url}")),
+            })
+        })
+        .expect("resolve failed");
+
+        // Only child_b (unconditional) must be fetched.
+        assert_eq!(
+            fetch_count.get(),
+            1,
+            "expected 1 fetch (unconditional entry preferred), got {}",
+            fetch_count.get()
+        );
+
+        let names: std::collections::HashSet<&str> = scene
+            .nodes
+            .values()
+            .filter_map(|n| if n.name.is_empty() { None } else { Some(n.name.as_str()) })
+            .collect();
+        assert!(names.contains("b_root"), "b_root (unconditional) must be in merged scene");
+        assert!(!names.contains("a_root"), "a_root (conditional) must NOT appear");
+    }
+
+
+    /// When every entry in `defaultStyles.entries` is conditional, the
+    /// most-tagged-node heuristic must select the entry whose condition tag
+    /// appears on the scene node that carries the highest number of style tags.
+    ///
+    /// This mirrors the `MC_S_Self_Master` case where `canvas_GunsMode` has 2
+    /// style tags while all other canvas nodes have 1, so the GunsMode entry
+    /// (→ `gen_mc_s_weaponinfo`) must win over the first entry (→ `gen_mc_s_ammolists`).
+    #[test]
+    fn pick_default_entry_most_tagged_node_wins() {
+        // Child canvases with a single content node each.
+        let child_ammo = serde_json::json!({
+            "_RecordName_": "ammo",
+            "_RecordId_": "00000000-0000-0000-0000-000000000010",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "ammo_root"}
+                ]
+            }
+        });
+        let child_guns = serde_json::json!({
+            "_RecordName_": "guns",
+            "_RecordId_": "00000000-0000-0000-0000-000000000020",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "guns_root"}
+                ]
+            }
+        });
+
+        // Root: two conditional entries.
+        // Scene has a DisplayWidget root (ptr:1) with two WidgetCanvas children
+        // (ptr:2 = AmmoNumbers with 1 tag, ptr:3 = GunsMode with 2 tags).
+        let root = serde_json::json!({
+            "_RecordName_": "self_master",
+            "_RecordId_": "00000000-0000-0000-0000-000000000001",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 1920.0, "y": 1080.0, "z": 0.0},
+                "defaultStyles": {
+                    "_Type_": "BuildingBlocks_DefaultStyles",
+                    "sharedStyles": null,
+                    "entries": [
+                        // Entry 0 — condition tag matches canvas_AmmoNumbers (1 style tag).
+                        {
+                            "_Type_": "BuildingBlocks_StyleEntry",
+                            "name": "AmmoNumbers Canvas",
+                            "conditionsList": [{
+                                "_Type_": "BuildingBlocks_StyleConditionList",
+                                "conditions": [{
+                                    "_Type_": "BuildingBlocks_StyleSelectorConditionTag",
+                                    "tag": {"_RecordId_": "tag_ammo"}
+                                }]
+                            }],
+                            "matchTo": "",
+                            "modifiers": [{
+                                "_Type_": "BuildingBlocks_StyleModifier",
+                                "field": {
+                                    "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeCanvasReferenceRecord",
+                                    "value": "file://./ammo.json"
+                                }
+                            }]
+                        },
+                        // Entry 1 — condition tag matches canvas_GunsMode (2 style tags).
+                        {
+                            "_Type_": "BuildingBlocks_StyleEntry",
+                            "name": "GunsMode Canvas",
+                            "conditionsList": [{
+                                "_Type_": "BuildingBlocks_StyleConditionList",
+                                "conditions": [{
+                                    "_Type_": "BuildingBlocks_StyleSelectorConditionTag",
+                                    "tag": {"_RecordId_": "tag_guns_mode"}
+                                }]
+                            }],
+                            "matchTo": "",
+                            "modifiers": [{
+                                "_Type_": "BuildingBlocks_StyleModifier",
+                                "field": {
+                                    "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeCanvasReferenceRecord",
+                                    "value": "file://./guns.json"
+                                }
+                            }]
+                        }
+                    ]
+                },
+                "brandStyles": [],
+                "scene": [
+                    // Root DisplayWidget (ptr:1).
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "self_master_root"},
+                    // canvas_AmmoNumbers: 1 style tag.
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetCanvas",
+                        "name": "canvas_AmmoNumbers",
+                        "parent": "_PointsTo_:ptr:1",
+                        "styleTags": [{"_RecordId_": "tag_ammo"}]
+                    },
+                    // canvas_GunsMode: 2 style tags — the "most-tagged" node.
+                    {
+                        "_Pointer_": "ptr:3",
+                        "_Type_": "BuildingBlocks_WidgetCanvas",
+                        "name": "canvas_GunsMode",
+                        "parent": "_PointsTo_:ptr:1",
+                        "styleTags": [
+                            {"_RecordId_": "tag_guns_mode"},
+                            {"_RecordId_": "tag_extra"}
+                        ]
+                    }
+                ]
+            }
+        });
+
+        let chosen = std::cell::Cell::new(None::<&'static str>);
+        let scene = resolve_canvas_graph(&root, None, &|url| {
+            let label: &'static str = if url.contains("guns") { "guns" } else { "ammo" };
+            chosen.set(Some(label));
+            Ok(match url {
+                "file://./ammo.json" => child_ammo.clone(),
+                "file://./guns.json" => child_guns.clone(),
+                _ => return Err(format!("unexpected fetch: {url}")),
+            })
+        })
+        .expect("resolve failed");
+
+        assert_eq!(
+            chosen.get(),
+            Some("guns"),
+            "most-tagged-node heuristic must pick GunsMode entry"
+        );
+        let names: std::collections::HashSet<&str> = scene
+            .nodes
+            .values()
+            .filter_map(|n| if n.name.is_empty() { None } else { Some(n.name.as_str()) })
+            .collect();
+        assert!(names.contains("guns_root"), "guns_root must be in merged scene");
+        assert!(!names.contains("ammo_root"), "ammo_root must NOT appear");
+    }
+}

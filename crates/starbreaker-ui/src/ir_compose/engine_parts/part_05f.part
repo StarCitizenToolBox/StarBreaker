@@ -1,0 +1,342 @@
+#[cfg(test)]
+mod tests_e {
+    use super::*;
+
+    use std::collections::HashMap;
+
+    use image::Rgba;
+
+    use crate::bb_atlas::AssetFetcher;
+    use crate::canvas::RgbaColor;
+    use crate::style::{CrtParams, ManufacturerStyle};
+    use crate::ui_ir::{UI_IR_SCHEMA_VERSION, UiRendererHint, UiIrAssetLayout, UiIrCustomShape, UiIrStyleTag, UiIrTextStyle};
+
+
+    fn text_style_with_font_record(record: serde_json::Value) -> UiIrTextStyle {
+        UiIrTextStyle {
+            font_record: Some("file://./fontstyles/blenderpro-medium.json".into()),
+            resolved_font_record: Some(record),
+            font_size: UiIrValue::Fixed { value: 18.0 },
+            line_spacing: None,
+            alignment: "Left".into(),
+            vertical_alignment: "Center".into(),
+            anchor_to_parent_x: None,
+            anchor_to_parent_y: None,
+            colour: None,
+            colour_token: None,
+            label_style: None,
+        }
+    }
+
+
+    fn assert_not_uniform(img: &RgbaImage, label: &str) {
+        let (w, h) = img.dimensions();
+        let mut first: Option<[u8; 4]> = None;
+        let mut differing = 0usize;
+        for y in (0..h).step_by(4) {
+            for x in (0..w).step_by(4) {
+                let px = img.get_pixel(x, y).0;
+                match first {
+                    None => first = Some(px),
+                    Some(f) if f != px => differing += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert!(
+            differing > 0,
+            "[{label}] image is entirely one colour ({:?})",
+            first.unwrap_or([0, 0, 0, 0])
+        );
+    }
+
+
+    fn assert_non_background_fraction(
+        img: &RgbaImage,
+        bg: [u8; 4],
+        min_frac: f32,
+        label: &str,
+    ) {
+        let (w, h) = img.dimensions();
+        let mut total = 0usize;
+        let mut non_bg = 0usize;
+        for y in (0..h).step_by(4) {
+            for x in (0..w).step_by(4) {
+                total += 1;
+                let p = img.get_pixel(x, y).0;
+                let differs = p
+                    .iter()
+                    .zip(bg.iter())
+                    .any(|(a, b)| (*a as i32 - *b as i32).abs() > 16);
+                if differs {
+                    non_bg += 1;
+                }
+            }
+        }
+        let frac = non_bg as f32 / total.max(1) as f32;
+        assert!(
+            frac >= min_frac,
+            "[{label}] only {:.1}% pixels differ from bg; expected >= {:.1}%",
+            frac * 100.0,
+            min_frac * 100.0,
+        );
+    }
+
+
+    struct StubFetcher {
+        images: HashMap<String, Vec<u8>>,
+    }
+
+
+    impl AssetFetcher for StubFetcher {
+        fn fetch_image_bytes(&self, p4k_path: &str) -> Option<Vec<u8>> {
+            self.images.get(&p4k_path.to_ascii_lowercase()).cloned()
+        }
+    }
+
+
+    fn stub_style() -> ManufacturerStyle {
+        ManufacturerStyle {
+            name: "drak".to_string(),
+            primary_tint: RgbaColor { r: 240, g: 168, b: 104, a: 255 },
+            secondary_tint: None,
+            colour_slots: vec![
+                RgbaColor { r: 240, g: 168, b: 104, a: 255 },
+                RgbaColor { r: 67, g: 221, b: 147, a: 255 },
+                RgbaColor { r: 228, g: 218, b: 77, a: 255 },
+                RgbaColor { r: 201, g: 51, b: 51, a: 255 },
+                RgbaColor { r: 0, g: 113, b: 188, a: 255 },
+            ],
+            background: RgbaColor { r: 48, g: 32, b: 16, a: 255 },
+            backlight: RgbaColor { r: 102, g: 214, b: 255, a: 255 },
+            font_family_hints: Vec::new(),
+            crt: CrtParams::default(),
+        }
+    }
+
+
+    fn minimal_swf_assets() -> crate::swf_assets::SwfAssetLibrary {
+        crate::swf_assets::SwfAssetLibrary::new(vec![
+            b'F', b'W', b'S', 6, 21, 0, 0, 0,
+            0x00, 0x18, 0x00, 0x01, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ])
+        .expect("minimal swf should parse")
+    }
+
+
+    fn blank_node(node_type: &str) -> UiIrNode {
+        UiIrNode {
+            id: 1,
+            parent_id: None,
+            children: Vec::new(),
+            node_type: node_type.to_string(),
+            name: "node".to_string(),
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            anchor: [0.0, 0.0],
+            pivot: [0.0, 0.0],
+            authored_position: [0.0, 0.0],
+            authored_size: [
+                UiIrValue::Fixed { value: 10.0 },
+                UiIrValue::Fixed { value: 10.0 },
+            ],
+            padding: [0.0, 0.0, 0.0, 0.0],
+            margin: [0.0, 0.0, 0.0, 0.0],
+            overflow_mode: None,
+            computed_rect: UiIrRect { x: 0.0, y: 0.0, w: 10.0, h: 10.0 },
+            background_fill_colour: None,
+            corner_radius: None,
+            background_fill_alpha: None,
+            background_fill_colour_token: None,
+            segmented_fill: None,
+            border: None,
+            stroke_colour: None,
+            stroke_colour_token: None,
+            stroke_extent: None,
+            colour_blend_mode: None,
+            icon_tint_colour: None,
+            icon_tint_colour_token: None,
+            icon_preset: None,
+            text_payload: None,
+            secondary_text_payload: None,
+            secondary_text_style: None,
+            meter_progress: None,
+            text_style: None,
+            asset_ref: None,
+            asset_layout: None,
+            custom_shape: None,
+            style_tag_uuids: Vec::new(),
+            resolved_style_tags: Vec::new(),
+        }
+    }
+
+
+    #[test]
+    fn bottom_anchored_progress_meter_uses_label_caption_text_band_bottom() {
+        let parent = UiIrNode {
+            id: 1,
+            parent_id: None,
+            children: vec![2],
+            node_type: "BuildingBlocks_ComponentLabelCaptionPair".into(),
+            name: "pair".into(),
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            anchor: [1.0, 0.0],
+            pivot: [1.0, 0.0],
+            authored_position: [0.0, 0.0],
+            authored_size: [
+                UiIrValue::Other {
+                    value: 64.0,
+                    behavior: "Auto".into(),
+                },
+                UiIrValue::Other {
+                    value: 64.0,
+                    behavior: "Auto".into(),
+                },
+            ],
+            padding: [0.0; 4],
+            margin: [0.0; 4],
+            overflow_mode: None,
+            computed_rect: UiIrRect { x: 1736.0, y: -5.5, w: 128.0, h: 152.3 },
+            background_fill_colour: None,
+            corner_radius: None,
+            background_fill_alpha: None,
+            background_fill_colour_token: None,
+            segmented_fill: None,
+            border: None,
+            stroke_colour: None,
+            stroke_colour_token: None,
+            stroke_extent: None,
+            colour_blend_mode: None,
+            icon_tint_colour: None,
+            icon_tint_colour_token: None,
+            icon_preset: None,
+            text_payload: Some(UiIrTextPayload::Resolved {
+                text: "MEDGELS".into(),
+            }),
+            secondary_text_payload: Some(UiIrTextPayload::Resolved {
+                text: "200/200".into(),
+            }),
+            secondary_text_style: Some(UiIrTextStyle {
+                font_record: None,
+                resolved_font_record: None,
+                font_size: UiIrValue::Fixed { value: 28.0 },
+                line_spacing: None,
+                alignment: "Left".into(),
+                vertical_alignment: "Center".into(),
+                anchor_to_parent_x: None,
+                anchor_to_parent_y: None,
+                colour: None,
+                colour_token: None,
+                label_style: None,
+            }),
+            meter_progress: None,
+            text_style: Some(UiIrTextStyle {
+                font_record: None,
+                resolved_font_record: None,
+                font_size: UiIrValue::Fixed { value: 32.0 },
+                line_spacing: None,
+                alignment: "Left".into(),
+                vertical_alignment: "Center".into(),
+                anchor_to_parent_x: Some(0.0),
+                anchor_to_parent_y: Some(0.5),
+                colour: None,
+                colour_token: None,
+                label_style: None,
+            }),
+            asset_ref: None,
+            asset_layout: None,
+            custom_shape: None,
+            style_tag_uuids: vec![],
+            resolved_style_tags: vec![],
+        };
+        let meter = UiIrNode {
+            id: 2,
+            parent_id: Some(1),
+            children: vec![],
+            node_type: "BuildingBlocks_WidgetLinearProgressMeter".into(),
+            name: "meter".into(),
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            anchor: [0.0, 1.0],
+            pivot: [0.0, 0.0],
+            authored_position: [0.0, 0.0],
+            authored_size: [
+                UiIrValue::Fixed { value: 115.0 },
+                UiIrValue::Fixed { value: 15.0 },
+            ],
+            padding: [0.0; 4],
+            margin: [0.0; 4],
+            overflow_mode: None,
+            computed_rect: UiIrRect { x: 1736.0, y: 146.8, w: 115.0, h: 15.0 },
+            background_fill_colour: None,
+            corner_radius: None,
+            background_fill_alpha: None,
+            background_fill_colour_token: None,
+            segmented_fill: None,
+            border: None,
+            stroke_colour: None,
+            stroke_colour_token: None,
+            stroke_extent: None,
+            colour_blend_mode: None,
+            icon_tint_colour: None,
+            icon_tint_colour_token: None,
+            icon_preset: None,
+            text_payload: None,
+            secondary_text_payload: None,
+            secondary_text_style: None,
+            meter_progress: Some(1.0),
+            text_style: None,
+            asset_ref: None,
+            asset_layout: None,
+            custom_shape: None,
+            style_tag_uuids: vec![],
+            resolved_style_tags: vec![],
+        };
+        let document = UiIrDocument {
+            schema_version: 1,
+            canvas_guid: "test-canvas".into(),
+            canvas_name: None,
+            target_width: 1920,
+            target_height: 1080,
+            selected_style_source: None,
+            selected_swf_source: None,
+            renderer_hint: crate::ui_ir::UiRendererHint::Bb,
+            confidence: 100,
+            warnings: vec![],
+            unresolved_references: vec![],
+            resolved_asset_refs: vec![],
+            missing_asset_refs: vec![],
+            nodes: vec![parent, meter.clone()],
+        };
+
+        let rect = debug_linear_progress_meter_rect(&meter, &document).expect("meter rect");
+        let parent_text_rects = debug_text_rects(&document.nodes[0]).expect("parent text rects");
+        let expected_y = parent_text_rects
+            .secondary
+            .map(|secondary_rect| secondary_rect.y + secondary_rect.h)
+            .unwrap_or_else(|| parent_text_rects.primary.y + parent_text_rects.primary.h);
+        assert!(
+            (rect.y - expected_y).abs() < 0.1,
+            "expected meter to attach to text-band bottom {}, got {}",
+            expected_y,
+            rect.y
+        );
+
+        let parent_drawn_bounds = debug_text_drawn_bounds(&document.nodes[0]).expect("parent text bounds");
+        let drawn_padded_y = match (parent_text_rects.secondary, parent_drawn_bounds.secondary) {
+            (Some(secondary_rect), Some(secondary_drawn)) => {
+                secondary_rect.y + secondary_rect.h + (secondary_rect.h - secondary_drawn.h)
+            }
+            _ => parent_text_rects.primary.y + parent_text_rects.primary.h,
+        };
+        assert!(
+            rect.y < drawn_padded_y,
+            "expected text-band placement to avoid fallback drawn-bounds padding"
+        );
+    }
+}

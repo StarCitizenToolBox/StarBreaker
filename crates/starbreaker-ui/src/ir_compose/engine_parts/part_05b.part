@@ -1,0 +1,398 @@
+fn fit_swf_font_size_to_rect(
+    _renderer: &TextRenderer,
+    text: &str,
+    font: &FontGlyphSet,
+    rect: Rect,
+    requested_size: f32,
+    _align: TextAlign,
+    _vertical_align: VerticalAlign,
+    _line_spacing_px: Option<f32>,
+) -> f32 {
+    if text.trim().is_empty() || requested_size <= 1.0 || rect.w <= 1.0 || rect.h <= 1.0 {
+        return requested_size.max(1.0);
+    }
+
+    let height_limit = rect.h * 0.95;
+    let measured_height = swf_nominal_line_height_px(font, requested_size);
+
+    let height_scale = if measured_height > height_limit && measured_height > 0.0 {
+        height_limit / measured_height
+    } else {
+        1.0
+    };
+
+    (requested_size * height_scale).max(1.0)
+}
+
+fn swf_nominal_line_height_px(font: &FontGlyphSet, size_px: f32) -> f32 {
+    let ascent = font.ascent.map(|value| value as f32).unwrap_or(820.0);
+    let descent = font.descent.map(|value| value as f32).unwrap_or(-204.0);
+    let leading = font.leading.map(|value| value as f32).unwrap_or(0.0);
+    let units_per_em = (ascent - descent).abs().max(1.0);
+    (((ascent - descent + leading) / units_per_em) * size_px).max(1.0)
+}
+
+fn font_style_scale_modifier(style: Option<&UiIrTextStyle>) -> f32 {
+    resolved_font_record_value(style)
+        .and_then(|value| value.get("scaleModifier"))
+        .and_then(|value| value.as_f64())
+        .map(|value| value as f32)
+        .unwrap_or(1.0)
+}
+
+fn font_style_leading_modifier_px(style: Option<&UiIrTextStyle>) -> f32 {
+    let modifier = resolved_font_record_value(style)
+        .and_then(|value| value.get("leadingModifier"))
+        .and_then(|value| value.as_f64())
+        .map(|value| value as f32)
+        .unwrap_or(0.0);
+    let size_px = style.map(|style| ir_value_to_px(&style.font_size)).unwrap_or(0.0);
+    modifier * size_px
+}
+
+fn font_style_top_margin_offset_px(style: Option<&UiIrTextStyle>) -> f32 {
+    let modifier = resolved_font_record_value(style)
+        .and_then(|value| value.get("topMarginModifier"))
+        .and_then(|value| value.as_f64())
+        .map(|value| value as f32)
+        .unwrap_or(0.0);
+    let size_px = style.map(|style| ir_value_to_px(&style.font_size)).unwrap_or(0.0);
+    modifier * size_px
+}
+
+fn title3_font_weight_rank(symbol: &str, font: &FontGlyphSet) -> i32 {
+    let symbol_lower = symbol.to_ascii_lowercase();
+    let name_lower = font.name.to_ascii_lowercase();
+    let combined = format!("{} {}", symbol_lower, name_lower);
+    let name_rank = if combined.contains("thin") {
+        0
+    } else if combined.contains("light") {
+        1
+    } else if combined.contains("book") {
+        2
+    } else if combined.contains("regular") {
+        3
+    } else if combined.contains("med") || combined.contains("medium") {
+        4
+    } else if combined.contains("bold") {
+        6
+    } else {
+        5
+    };
+    name_rank + if font.is_bold { 10 } else { 0 }
+}
+
+fn derived_accent_tint(ctx: &ComposeContext<'_>) -> [f32; 4] {
+    [
+        ctx.style.backlight.r as f32 / 255.0,
+        ctx.style.backlight.g as f32 / 255.0,
+        ctx.style.backlight.b as f32 / 255.0,
+        1.0,
+    ]
+}
+
+fn resolved_text_payload(node: &UiIrNode) -> Option<&str> {
+    let payload = node.text_payload.as_ref()?;
+    match payload {
+        UiIrTextPayload::Resolved { text } => Some(text.as_str()),
+        UiIrTextPayload::Empty
+        | UiIrTextPayload::IntentionallyEmpty { .. }
+        | UiIrTextPayload::UnresolvedKey { .. } => None,
+    }
+}
+
+fn draw_ir_border(
+    pixmap: &mut Pixmap,
+    rect: Rect,
+    border: &UiIrBorder,
+    alpha: f32,
+    ctx: &ComposeContext<'_>,
+) {
+    draw_border_side(
+        pixmap,
+        Rect { x: rect.x, y: rect.y, w: rect.w, h: border.top.width },
+        border.top.colour.unwrap_or_else(|| style_primary_rgba(ctx)),
+        alpha,
+    );
+    draw_border_side(
+        pixmap,
+        Rect {
+            x: rect.x + rect.w - border.right.width,
+            y: rect.y,
+            w: border.right.width,
+            h: rect.h,
+        },
+        border.right.colour.unwrap_or_else(|| style_primary_rgba(ctx)),
+        alpha,
+    );
+    draw_border_side(
+        pixmap,
+        Rect {
+            x: rect.x,
+            y: rect.y + rect.h - border.bottom.width,
+            w: rect.w,
+            h: border.bottom.width,
+        },
+        border.bottom.colour.unwrap_or_else(|| style_primary_rgba(ctx)),
+        alpha,
+    );
+    draw_border_side(
+        pixmap,
+        Rect { x: rect.x, y: rect.y, w: border.left.width, h: rect.h },
+        border.left.colour.unwrap_or_else(|| style_primary_rgba(ctx)),
+        alpha,
+    );
+}
+
+fn draw_border_side(pixmap: &mut Pixmap, rect: Rect, colour: [f32; 4], alpha: f32) {
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return;
+    }
+    let Some(tsk_rect) = TskRect::from_xywh(rect.x, rect.y, rect.w, rect.h) else {
+        return;
+    };
+    fill_rect_ts(pixmap, tsk_rect, colour, alpha);
+}
+
+fn draw_widget_circle(node: &UiIrNode, pixmap: &mut Pixmap, rect: TskRect) {
+    let stroke_colour = node.stroke_colour.or(node.background_fill_colour);
+    let Some(stroke_colour) = stroke_colour else {
+        return;
+    };
+
+    let cx = rect.x() + rect.width() * 0.5;
+    let cy = rect.y() + rect.height() * 0.5;
+    let radius = rect.width().min(rect.height()) * 0.5;
+    if radius <= 0.5 {
+        return;
+    }
+
+    let mut pb = PathBuilder::new();
+    pb.push_circle(cx, cy, radius - 0.5);
+    let Some(path) = pb.finish() else {
+        return;
+    };
+
+    let mut paint = Paint::default();
+    paint.set_color(to_skia_color(stroke_colour, node.alpha));
+    paint.anti_alias = true;
+
+    let mut stroke = Stroke::default();
+    stroke.width = node.stroke_extent.unwrap_or(1.5).max(0.5);
+    pixmap
+        .as_mut()
+        .stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+}
+
+fn draw_widget_separator(
+    ctx: &ComposeContext<'_>,
+    pixmap: &mut Pixmap,
+    node: &UiIrNode,
+    rect: TskRect,
+    alpha: f32,
+) {
+    let draw_rect = widget_separator_draw_rect(rect, node.stroke_extent);
+    let colour = node
+        .stroke_colour
+        .or_else(|| {
+            node.stroke_colour_token
+                .as_deref()
+                .and_then(|token| resolve_surface_colour_token(ctx, token))
+        })
+        .or(node.background_fill_colour)
+        .or_else(|| {
+            node.background_fill_colour_token
+                .as_deref()
+                .and_then(|token| resolve_surface_colour_token(ctx, token))
+        })
+        .or_else(|| resolve_surface_colour_token(ctx, "Accent5"))
+        .unwrap_or_else(|| style_primary_rgba(ctx));
+    fill_rect_ts_with_mode(pixmap, draw_rect, colour, alpha, node_colour_blend_mode(node));
+}
+
+fn node_colour_blend_mode(node: &UiIrNode) -> BlendMode {
+    match node.colour_blend_mode {
+        Some(UiIrColourBlendMode::Additive) => BlendMode::Plus,
+        Some(UiIrColourBlendMode::SourceOver) | None => BlendMode::SourceOver,
+    }
+}
+
+fn widget_separator_draw_rect(rect: TskRect, stroke_extent: Option<f32>) -> TskRect {
+    let Some(stroke_extent) = stroke_extent else {
+        return rect;
+    };
+    let thickness = (stroke_extent.max(0.5) * 2.0).min(rect.height()).max(1.0);
+    TskRect::from_xywh(
+        rect.x(),
+        rect.y() + (rect.height() - thickness) * 0.5,
+        rect.width(),
+        thickness,
+    )
+    .unwrap_or(rect)
+}
+
+fn draw_rect_stroke_ts(
+    pixmap: &mut Pixmap,
+    rect: TskRect,
+    rgba: [f32; 4],
+    width: f32,
+    alpha: f32,
+) {
+    let mut pb = PathBuilder::new();
+    pb.push_rect(rect);
+    let Some(path) = pb.finish() else {
+        return;
+    };
+
+    let mut paint = Paint::default();
+    paint.set_color(to_skia_color(rgba, alpha));
+    paint.anti_alias = false;
+
+    let mut stroke = Stroke::default();
+    stroke.width = width.max(0.5);
+    pixmap
+        .as_mut()
+        .stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+}
+
+fn fill_rect_ts(pixmap: &mut Pixmap, rect: TskRect, rgba: [f32; 4], alpha: f32) {
+    fill_rect_ts_with_mode(pixmap, rect, rgba, alpha, BlendMode::SourceOver);
+}
+
+fn fill_rect_ts_with_mode(
+    pixmap: &mut Pixmap,
+    rect: TskRect,
+    rgba: [f32; 4],
+    alpha: f32,
+    blend_mode: BlendMode,
+) {
+    let mut paint = Paint::default();
+    paint.set_color(to_skia_color(rgba, alpha));
+    paint.blend_mode = blend_mode;
+    paint.anti_alias = false;
+    pixmap
+        .as_mut()
+        .fill_rect(rect, &paint, Transform::identity(), None);
+}
+
+fn blit_atlas_image_tinted(
+    pixmap: &mut Pixmap,
+    img: &RgbaImage,
+    dx: i32,
+    dy: i32,
+    tint: [f32; 4],
+    alpha: f32,
+) {
+    blit_atlas_image_tinted_with_mode(
+        pixmap,
+        img,
+        dx,
+        dy,
+        tint,
+        alpha,
+        BlendMode::SourceOver,
+    );
+}
+
+fn blit_atlas_image_tinted_with_mode(
+    pixmap: &mut Pixmap,
+    img: &RgbaImage,
+    dx: i32,
+    dy: i32,
+    tint: [f32; 4],
+    alpha: f32,
+    blend_mode: BlendMode,
+) {
+    let w = img.width();
+    let h = img.height();
+
+    let mut premul: Vec<u8> = Vec::with_capacity((w * h * 4) as usize);
+    for chunk in img.as_raw().chunks_exact(4) {
+        let r = chunk[0] as f32 / 255.0 * tint[0];
+        let g = chunk[1] as f32 / 255.0 * tint[1];
+        let b = chunk[2] as f32 / 255.0 * tint[2];
+        let a = chunk[3] as f32 / 255.0 * tint[3];
+        premul.push((r * a * 255.0).clamp(0.0, 255.0) as u8);
+        premul.push((g * a * 255.0).clamp(0.0, 255.0) as u8);
+        premul.push((b * a * 255.0).clamp(0.0, 255.0) as u8);
+        premul.push((a * 255.0).clamp(0.0, 255.0) as u8);
+    }
+
+    let Some(size) = tiny_skia::IntSize::from_wh(w, h) else {
+        return;
+    };
+    let Some(src_pixmap) = Pixmap::from_vec(premul, size) else {
+        return;
+    };
+
+    let mut paint = PixmapPaint::default();
+    paint.opacity = alpha.clamp(0.0, 1.0);
+    paint.blend_mode = blend_mode;
+    pixmap
+        .as_mut()
+        .draw_pixmap(dx, dy, src_pixmap.as_ref(), &paint, Transform::identity(), None);
+}
+
+fn pixmap_to_rgba_image(pixmap: Pixmap) -> Result<RgbaImage, UiError> {
+    let w = pixmap.width();
+    let h = pixmap.height();
+    let mut out = Vec::with_capacity((w * h * 4) as usize);
+    for chunk in pixmap.data().chunks_exact(4) {
+        let a = chunk[3] as f32 / 255.0;
+        if a <= 0.0 {
+            out.extend_from_slice(&[0, 0, 0, 0]);
+            continue;
+        }
+        out.push(((chunk[0] as f32 / a).clamp(0.0, 255.0)) as u8);
+        out.push(((chunk[1] as f32 / a).clamp(0.0, 255.0)) as u8);
+        out.push(((chunk[2] as f32 / a).clamp(0.0, 255.0)) as u8);
+        out.push(chunk[3]);
+    }
+    RgbaImage::from_raw(w, h, out)
+        .ok_or_else(|| UiError::RenderError("failed to build image from pixmap".into()))
+}
+
+fn to_skia_color(rgba: [f32; 4], global_alpha: f32) -> Color {
+    let a = (rgba[3] * global_alpha).clamp(0.0, 1.0);
+    Color::from_rgba8(
+        (rgba[0].clamp(0.0, 1.0) * 255.0) as u8,
+        (rgba[1].clamp(0.0, 1.0) * 255.0) as u8,
+        (rgba[2].clamp(0.0, 1.0) * 255.0) as u8,
+        (a * 255.0) as u8,
+    )
+}
+
+fn style_primary_rgba(ctx: &ComposeContext<'_>) -> [f32; 4] {
+    let pt = &ctx.style.primary_tint;
+    [
+        pt.r as f32 / 255.0,
+        pt.g as f32 / 255.0,
+        pt.b as f32 / 255.0,
+        pt.a as f32 / 255.0,
+    ]
+}
+
+fn rgba_to_u8(rgba: [f32; 4]) -> [u8; 4] {
+    [
+        (rgba[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+        (rgba[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+        (rgba[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+        (rgba[3].clamp(0.0, 1.0) * 255.0).round() as u8,
+    ]
+}
+
+fn ir_rect_to_layout_rect(rect: UiIrRect) -> Rect {
+    Rect {
+        x: rect.x,
+        y: rect.y,
+        w: rect.w,
+        h: rect.h,
+    }
+}
+
+fn ir_value_to_px(value: &UiIrValue) -> f32 {
+    match value {
+        UiIrValue::Fixed { value } | UiIrValue::Percent { value } | UiIrValue::Other { value, .. } => *value,
+    }
+}
+

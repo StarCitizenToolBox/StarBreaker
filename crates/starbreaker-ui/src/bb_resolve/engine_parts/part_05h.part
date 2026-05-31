@@ -1,0 +1,356 @@
+#[cfg(test)]
+mod tests_h {
+    use super::*;
+    use crate::pipeline::extract_record_name;
+
+
+    fn load_fixture(name: &str) -> serde_json::Value {
+        let path = format!("{}/tests/fixtures/canvas/{name}", env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {name}: {e}"));
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("failed to parse {name}: {e}"))
+    }
+
+
+    fn one_node_canvas() -> serde_json::Value {
+        serde_json::json!({
+            "_RecordName_": "test_child",
+            "_RecordId_": "00000000-0000-0000-0000-000000000001",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "child_root"}
+                ]
+            }
+        })
+    }
+
+
+    fn three_node_canvas() -> serde_json::Value {
+        serde_json::json!({
+            "_RecordName_": "test_child3",
+            "_RecordId_": "00000000-0000-0000-0000-000000000002",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "child_root"},
+                    {"_Pointer_": "ptr:2", "_Type_": "BuildingBlocks_WidgetCanvas", "name": "c1", "parent": "_PointsTo_:ptr:1"},
+                    {"_Pointer_": "ptr:3", "_Type_": "BuildingBlocks_WidgetCanvas", "name": "c2", "parent": "_PointsTo_:ptr:1"}
+                ]
+            }
+        })
+    }
+
+
+    fn body_background_standard_fixture(texture_tag: &str) -> serde_json::Value {
+        serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.BodyBackgroundWidgetStandard",
+            "_RecordId_": "0b262f33-a075-42cb-907f-5e2fa3aa9df5",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_":"Vec3", "x": 1920.0, "y": 1080.0, "z": 0.0},
+                "defaultStyles": {
+                    "_Type_": "BuildingBlocks_DefaultStyles",
+                    "sharedStyles": null,
+                    "entries": [{
+                        "_Type_": "BuildingBlocks_StyleEntry",
+                        "name": "BackgroundTexture",
+                        "conditionsList": [{
+                            "_Type_": "BuildingBlocks_StyleConditionList",
+                            "conditions": [{
+                                "_Type_": "BuildingBlocks_StyleSelectorConditionTag",
+                                "tag": {"_RecordId_": texture_tag}
+                            }]
+                        }],
+                        "modifiers": [{
+                            "_Type_": "BuildingBlocks_FieldModifierString",
+                            "field": "ImagePath",
+                            "value": "UI/Textures/ModularKitStyles/_Default/SK_Default_BG.tif"
+                        }]
+                    }]
+                },
+                "brandStyles": [
+                    {
+                        "_Type_": "BuildingBlocks_BrandStyles",
+                        "brandIdentifier": "file://./../../../../../../../../libs/foundry/records/ui/buildingblocks/styles/s_drak.json",
+                        "entries": [{
+                            "_Type_": "BuildingBlocks_StyleEntry",
+                            "name": "Background Texture Style",
+                            "conditionsList": [{
+                                "_Type_": "BuildingBlocks_StyleConditionList",
+                                "conditions": [{
+                                    "_Type_": "BuildingBlocks_StyleSelectorConditionTag",
+                                    "tag": {"_RecordId_": texture_tag}
+                                }]
+                            }],
+                            "modifiers": [{
+                                "_Type_": "BuildingBlocks_FieldModifierString",
+                                "field": "ImagePath",
+                                "value": "UI/Textures/ModularKitStyles/DRAK/Drake_DoorPanel_Background-DarkTheme.tif"
+                            }]
+                        }]
+                    },
+                    {
+                        "_Type_": "BuildingBlocks_BrandStyles",
+                        "brandIdentifier": "file://./../../../../../../../../libs/foundry/records/ui/buildingblocks/styles/s_bioc.json",
+                        "entries": [{
+                            "_Type_": "BuildingBlocks_StyleEntry",
+                            "name": "Background Texture Style",
+                            "conditionsList": [{
+                                "_Type_": "BuildingBlocks_StyleConditionList",
+                                "conditions": [{
+                                    "_Type_": "BuildingBlocks_StyleSelectorConditionTag",
+                                    "tag": {"_RecordId_": texture_tag}
+                                }]
+                            }],
+                            "modifiers": [{
+                                "_Type_": "BuildingBlocks_FieldModifierString",
+                                "field": "ImagePath",
+                                "value": "UI/Textures/ModularKitStyles/BIOC/BIOC_bg.tif"
+                            }]
+                        }]
+                    }
+                ],
+                "scene": [],
+                "operations": [{
+                    "_Type_": "BuildingBlocks_BindingsTagFromIntegerSwitch",
+                    "values": [
+                        {"_Type_": "BuildingBlocks_IntegerTagPair", "first": 0, "second": null},
+                        {
+                            "_Type_": "BuildingBlocks_IntegerTagPair",
+                            "first": 1,
+                            "second": {"_RecordId_": texture_tag}
+                        }
+                    ]
+                }]
+            }
+        })
+    }
+
+
+    /// A host canvas (like M_MFD_Screen) with empty defaultStyles but a
+    /// WidgetCanvas node that carries a `canvas` URL to a content canvas.
+    fn host_canvas_with_widget_canvas_url(content_url: &str) -> serde_json::Value {
+        serde_json::json!({
+            "_RecordName_": "test_host",
+            "_RecordId_": "00000000-0000-0000-0000-000000000010",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 800.0, "y": 600.0, "z": 0.0},
+                "defaultStyles": {
+                    "_Type_": "BuildingBlocks_DefaultStyles",
+                    "sharedStyles": null,
+                    "entries": []
+                },
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "base_root"},
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetCanvas",
+                        "name": "canvas_content",
+                        "parent": "_PointsTo_:ptr:1",
+                        "canvas": content_url
+                    }
+                ]
+            }
+        })
+    }
+
+
+    /// Build a minimal canvas JSON that carries a single Pass 1 canvas-reference
+    /// modifier pointing to `child_url`.
+    fn canvas_with_style_ref(name: &str, child_url: &str) -> serde_json::Value {
+        serde_json::json!({
+            "_RecordName_": name,
+            "_RecordId_": "00000000-0000-0000-0000-0000000000aa",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "defaultStyles": {
+                    "_Type_": "BuildingBlocks_DefaultStyles",
+                    "sharedStyles": null,
+                    "entries": [{
+                        "matchTo": "",
+                        "modifiers": [{
+                            "field": {
+                                "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeCanvasReferenceRecord",
+                                "value": child_url
+                            }
+                        }]
+                    }]
+                },
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": format!("{name}_root")}
+                ]
+            }
+        })
+    }
+
+
+    /// Build a canvas with multiple conditional style entries, each pointing to
+    /// a different child canvas URL.
+    fn canvas_with_multi_conditional_refs(urls: &[(&str, &str)]) -> serde_json::Value {
+        let entries: Vec<serde_json::Value> = urls
+            .iter()
+            .map(|(name, url)| {
+                serde_json::json!({
+                    "name": name,
+                    "matchTo": "",
+                    "conditionsList": [{"_Type_": "BuildingBlocks_StyleConditionList", "conditions": [{"_Type_": "BuildingBlocks_StyleSelectorConditionType", "type": "Canvas"}]}],
+                    "modifiers": [{
+                        "field": {
+                            "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeCanvasReferenceRecord",
+                            "value": url
+                        }
+                    }]
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "_RecordName_": "multi_cond_root",
+            "_RecordId_": "00000000-0000-0000-0000-000000000030",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "defaultStyles": {
+                    "_Type_": "BuildingBlocks_DefaultStyles",
+                    "sharedStyles": null,
+                    "entries": entries
+                },
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "root"}
+                ]
+            }
+        })
+    }
+
+
+    #[test]
+    fn pick_default_entry_breaks_equal_tag_score_with_specificity() {
+        let child_simple = serde_json::json!({
+            "_RecordName_": "simple",
+            "_RecordId_": "00000000-0000-0000-0000-000000000110",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "simple_root"}
+                ]
+            }
+        });
+        let child_specific = serde_json::json!({
+            "_RecordName_": "specific",
+            "_RecordId_": "00000000-0000-0000-0000-000000000120",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "specific_root"}
+                ]
+            }
+        });
+
+        let root = serde_json::json!({
+            "_RecordName_": "specificity_master",
+            "_RecordId_": "00000000-0000-0000-0000-000000000101",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 1920.0, "y": 1080.0, "z": 0.0},
+                "defaultStyles": {
+                    "_Type_": "BuildingBlocks_DefaultStyles",
+                    "sharedStyles": null,
+                    "entries": [
+                        {
+                            "_Type_": "BuildingBlocks_StyleEntry",
+                            "name": "SimpleTagEntry",
+                            "conditionsList": [{
+                                "_Type_": "BuildingBlocks_StyleConditionList",
+                                "conditions": [{
+                                    "_Type_": "BuildingBlocks_StyleSelectorConditionTag",
+                                    "tag": {"_RecordId_": "tag_shared"}
+                                }]
+                            }],
+                            "matchTo": "",
+                            "modifiers": [{
+                                "_Type_": "BuildingBlocks_StyleModifier",
+                                "field": {
+                                    "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeCanvasReferenceRecord",
+                                    "value": "file://./simple.json"
+                                }
+                            }]
+                        },
+                        {
+                            "_Type_": "BuildingBlocks_StyleEntry",
+                            "name": "SpecificTagEntry",
+                            "conditionsList": [{
+                                "_Type_": "BuildingBlocks_StyleConditionList",
+                                "conditions": [
+                                    {
+                                        "_Type_": "BuildingBlocks_StyleSelectorConditionTag",
+                                        "tag": {"_RecordId_": "tag_shared"}
+                                    },
+                                    {
+                                        "_Type_": "BuildingBlocks_StyleSelectorConditionTag",
+                                        "tag": {"_RecordId_": "tag_extra"}
+                                    }
+                                ]
+                            }],
+                            "matchTo": "",
+                            "modifiers": [{
+                                "_Type_": "BuildingBlocks_StyleModifier",
+                                "field": {
+                                    "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeCanvasReferenceRecord",
+                                    "value": "file://./specific.json"
+                                }
+                            }]
+                        }
+                    ]
+                },
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "specificity_root"},
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetCanvas",
+                        "name": "canvas_Target",
+                        "parent": "_PointsTo_:ptr:1",
+                        "styleTags": [
+                            {"_RecordId_": "tag_shared"},
+                            {"_RecordId_": "tag_extra"}
+                        ]
+                    }
+                ]
+            }
+        });
+
+        let chosen = std::cell::Cell::new(None::<&'static str>);
+        let scene = resolve_canvas_graph(&root, None, &|url| {
+            let label: &'static str = if url.contains("specific") { "specific" } else { "simple" };
+            chosen.set(Some(label));
+            Ok(match url {
+                "file://./simple.json" => child_simple.clone(),
+                "file://./specific.json" => child_specific.clone(),
+                _ => return Err(format!("unexpected fetch: {url}")),
+            })
+        })
+        .expect("resolve failed");
+
+        assert_eq!(chosen.get(), Some("specific"));
+        let names: std::collections::HashSet<&str> = scene
+            .nodes
+            .values()
+            .filter_map(|n| if n.name.is_empty() { None } else { Some(n.name.as_str()) })
+            .collect();
+        assert!(names.contains("specific_root"));
+        assert!(!names.contains("simple_root"));
+    }
+}

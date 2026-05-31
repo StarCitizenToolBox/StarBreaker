@@ -1,0 +1,498 @@
+#[cfg(test)]
+mod tests_f {
+    use super::*;
+
+    struct TestCanvasFetcher {
+        by_guid: std::collections::HashMap<String, serde_json::Value>,
+        by_path: std::collections::HashMap<String, serde_json::Value>,
+    }
+
+    impl CanvasFetcher for TestCanvasFetcher {
+        fn fetch_canvas_json(&self, guid: &str) -> Result<serde_json::Value, crate::UiError> {
+            self.by_guid
+                .get(guid)
+                .cloned()
+                .ok_or_else(|| crate::UiError::RenderError(format!("missing guid: {guid}")))
+        }
+
+        fn fetch_canvas_by_name(
+            &self,
+            record_name: &str,
+        ) -> Result<serde_json::Value, crate::UiError> {
+            self.by_guid
+                .values()
+                .chain(self.by_path.values())
+                .find(|value| {
+                    value
+                        .get("_RecordName_")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|name| name == record_name)
+                })
+                .cloned()
+                .ok_or_else(|| crate::UiError::RenderError(format!("missing name: {record_name}")))
+        }
+
+        fn fetch_canvas_by_path(&self, path: &str) -> Result<serde_json::Value, crate::UiError> {
+            self.by_path
+                .get(path)
+                .cloned()
+                .ok_or_else(|| crate::UiError::RenderError(format!("missing path: {path}")))
+        }
+    }
+
+    fn defaults() -> crate::defaults::DefaultValueRegistry {
+        crate::defaults::DefaultValueRegistry::with_well_known_path_defaults()
+    }
+
+
+    #[test]
+    fn compile_ir_resolves_primary_state_tag_from_integer_switch_binding() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.PrimaryStateTagSwitch",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "label",
+                        "styleTags": [{"_RecordId_": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}],
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 30.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    }
+                ],
+                "operations": [
+                    {
+                        "_Type_": "BuildingBlocks_BindingsStringField",
+                        "widget": "_PointsTo_:ptr:1",
+                        "field": "PrimaryStateTag",
+                        "input": "_PointsTo_:ptr:2"
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_BindingsTagFromIntegerSwitch",
+                        "values": [
+                            {
+                                "first": 1,
+                                "second": {
+                                    "_RecordName_": "Tag.1477f18d-9b3e-4e5c-8047-dc60ba606ddb",
+                                    "_RecordId_": "1477f18d-9b3e-4e5c-8047-dc60ba606ddb"
+                                }
+                            }
+                        ],
+                        "defaultValue": null,
+                        "input": "_PointsTo_:ptr:3"
+                    },
+                    {
+                        "_Pointer_": "ptr:3",
+                        "_Type_": "BuildingBlocks_BindingsIntegerComponentParameter",
+                        "name": "primary state index",
+                        "parameter": "ParamInput0",
+                        "defaultValue": 1
+                    }
+                ]
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-primary-state-switch",
+            None,
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = &ir.nodes[0];
+        assert!(node
+            .style_tag_uuids
+            .iter()
+            .any(|uuid| uuid == "1477f18d-9b3e-4e5c-8047-dc60ba606ddb"));
+    }
+
+    #[test]
+    fn compile_ir_suppresses_placeholder_only_label_caption_pairs() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.PlaceholderLabelCaption",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_ComponentLabelCaptionPair",
+                        "name": "OperatorName",
+                        "isActive": true,
+                        "labelProperties": {
+                            "label": "@med_Header_OperatorName",
+                            "style": "Heading3",
+                            "caseModifier": "Upper",
+                            "anchorToParentX": 0.5,
+                            "anchorToParentY": 0.5
+                        },
+                        "captionProperties": {
+                            "caption": "@LOC_PLACEHOLDER",
+                            "style": "Heading6",
+                            "caseModifier": "None"
+                        },
+                        "size": {
+                            "width": {"behavior": "Auto", "value": 64.0},
+                            "height": {"behavior": "Auto", "value": 64.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let mut defaults = defaults();
+        defaults.insert_localization("med_header_operatorname", "OPERATOR NAME".to_string());
+        defaults.insert_localization("loc_placeholder", String::new());
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-placeholder",
+            None,
+            (100, 100),
+            &defaults,
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        assert_eq!(ir.nodes.len(), 1);
+        let node = &ir.nodes[0];
+        assert!(!node.is_active, "placeholder-only label-caption pair should compile inactive");
+        assert!(matches!(node.text_payload, Some(UiIrTextPayload::Resolved { .. })));
+        assert!(node.secondary_text_payload.is_none());
+    }
+
+    #[test]
+    fn compile_ir_secondary_param_input_loc_empty_uses_unified_empty_state() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.LabelCaptionLocEmpty",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_ComponentLabelCaptionPair",
+                        "name": "OperatorName",
+                        "isActive": true,
+                        "labelProperties": {
+                            "label": "OPERATOR",
+                            "style": "Heading3",
+                            "caseModifier": "Upper"
+                        },
+                        "captionProperties": {
+                            "caption": "@LOC_EMPTY",
+                            "style": "Heading6",
+                            "caseModifier": "None"
+                        },
+                        "size": {
+                            "width": {"behavior": "Auto", "value": 64.0},
+                            "height": {"behavior": "Auto", "value": 64.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let mut defaults = defaults();
+        defaults.insert_localization("loc_empty", String::new());
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-secondary-loc-empty",
+            None,
+            (100, 100),
+            &defaults,
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = &ir.nodes[0];
+        assert!(node.secondary_text_payload.is_none());
+        assert!(ir
+            .warnings
+            .iter()
+            .all(|warning| !warning.contains("unresolved text key")));
+    }
+
+    #[test]
+    fn compile_ir_resolves_localization_combine_binding_chain_for_text_field() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.LocalizationCombineBinding",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "text_TierValue",
+                        "labelProperties": {
+                            "style": "Heading3",
+                            "caseModifier": "Upper"
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 40.0},
+                            "height": {"behavior": "Fixed", "value": 12.0}
+                        }
+                    }
+                ],
+                "operations": [
+                    {
+                        "_Type_": "BuildingBlocks_BindingsLocalizedField",
+                        "widget": "_PointsTo_:ptr:1",
+                        "field": "ParamInput0",
+                        "input": "_PointsTo_:ptr:2"
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BindingsOperations_LocalizationCombine",
+                        "value": "@Med_T_Tier",
+                        "inputL": null,
+                        "inputR": "_PointsTo_:ptr:3"
+                    },
+                    {
+                        "_Pointer_": "ptr:3",
+                        "_Type_": "BuildingBlocks_BindingsIntegerComponentParameter",
+                        "name": "tier",
+                        "parameter": "ParamInput0",
+                        "defaultValue": 3
+                    }
+                ]
+            }
+        });
+
+        let mut defaults = defaults();
+        defaults.insert_localization("med_t_tier", "Tier %d".to_string());
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-localization-combine",
+            None,
+            (100, 100),
+            &defaults,
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = &ir.nodes[0];
+        assert_eq!(
+            node.text_payload,
+            Some(UiIrTextPayload::Resolved {
+                text: "TIER 3".to_string(),
+            })
+        );
+        assert!(ir
+            .warnings
+            .iter()
+            .all(|warning| !warning.contains("unresolved text key")));
+    }
+
+    #[test]
+    fn compile_ir_preserves_text_fidelity_signals_for_case_font_size_and_colour() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TextFidelitySignals",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "label",
+                        "labelProperties": {
+                            "label": "@Info_Kiosks_LogoScreen_001",
+                            "caseModifier": "Upper"
+                        },
+                        "FontStyleRecord": "record://fonts/title",
+                        "FontSize": 14.0,
+                        "FillColor": {"r": 0.25, "g": 0.5, "b": 0.75, "a": 1.0},
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 40.0},
+                            "height": {"behavior": "Fixed", "value": 12.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let mut defaults = defaults();
+        defaults.insert_localization("info_kiosks_logoscreen_001", "Touch to start".to_string());
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-text-fidelity",
+            Some("BuildingBlocks_Canvas.TextFidelitySignals"),
+            (100, 100),
+            &defaults,
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = &ir.nodes[0];
+        assert_eq!(
+            node.text_payload,
+            Some(UiIrTextPayload::Resolved {
+                text: "TOUCH TO START".to_string(),
+            })
+        );
+        let text_style = node.text_style.as_ref().expect("text style");
+        assert_eq!(text_style.font_record.as_deref(), Some("record://fonts/title"));
+        assert_eq!(text_style.font_size, UiIrValue::Fixed { value: 14.0 });
+        assert_eq!(text_style.colour, Some([0.25, 0.5, 0.75, 1.0]));
+    }
+
+    #[test]
+    fn compile_ir_prefers_raw_font_size_over_stale_parsed_text_size() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.RawFontSize",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "label",
+                        "text": "READY",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 30.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let mut scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let node = scene.nodes.get_mut(&1).expect("node 1");
+        node.raw["FontSize"] = serde_json::Value::from(42.0);
+
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-raw-font-size",
+            None,
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = &ir.nodes[0];
+        let style = node.text_style.as_ref().expect("text style");
+        assert_eq!(style.font_size, UiIrValue::Fixed { value: 42.0 });
+    }
+
+    #[test]
+    fn compile_ir_widget_text_preserves_loc_string_case_colour_and_auto_font_size() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.WidgetTextStatus",
+            "_RecordValue_": {
+                "size": {"x": 200, "y": 200},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetText",
+                        "name": "status",
+                        "locString": "@mykey",
+                        "color": {
+                            "_Type_": "BuildingBlocks_ColorStyle",
+                            "color": "Base",
+                            "alpha": 1.0
+                        },
+                        "fontStyle": "file://./../../../../../../../libs/foundry/records/ui/buildingblocks/fontstyles/audimatmono-regular.json",
+                        "autoFontSize": true,
+                        "fontSize": 16.0,
+                        "labelProperties": {
+                            "caseModifier": "Upper"
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 120.0},
+                            "height": {"behavior": "Fixed", "value": 80.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let mut defaults = defaults();
+        defaults.insert_localization("mykey", "Closed".to_string());
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-widget-text-status",
+            None,
+            (200, 200),
+            &defaults,
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = &ir.nodes[0];
+        assert_eq!(
+            node.text_payload,
+            Some(UiIrTextPayload::Resolved {
+                text: "CLOSED".to_string(),
+            })
+        );
+        let style = node.text_style.as_ref().expect("text style");
+        assert_eq!(
+            style.font_record.as_deref(),
+            Some("file://./../../../../../../../libs/foundry/records/ui/buildingblocks/fontstyles/audimatmono-regular.json")
+        );
+        assert_eq!(style.resolved_font_record, None);
+        assert_eq!(style.colour_token.as_deref(), Some("Base"));
+        assert!(
+            matches!(style.font_size, UiIrValue::Fixed { value } if value > 16.0),
+            "auto-sized text should exceed the stale authored font size: {:?}",
+            style.font_size
+        );
+    }
+}

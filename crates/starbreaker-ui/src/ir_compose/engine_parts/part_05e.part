@@ -1,0 +1,426 @@
+#[cfg(test)]
+mod tests_d {
+    use super::*;
+
+    use std::collections::HashMap;
+
+    use image::Rgba;
+
+    use crate::bb_atlas::AssetFetcher;
+    use crate::canvas::RgbaColor;
+    use crate::style::{CrtParams, ManufacturerStyle};
+    use crate::ui_ir::{UI_IR_SCHEMA_VERSION, UiRendererHint, UiIrAssetLayout, UiIrCustomShape, UiIrStyleTag, UiIrTextStyle};
+
+
+    fn text_style_with_font_record(record: serde_json::Value) -> UiIrTextStyle {
+        UiIrTextStyle {
+            font_record: Some("file://./fontstyles/blenderpro-medium.json".into()),
+            resolved_font_record: Some(record),
+            font_size: UiIrValue::Fixed { value: 18.0 },
+            line_spacing: None,
+            alignment: "Left".into(),
+            vertical_alignment: "Center".into(),
+            anchor_to_parent_x: None,
+            anchor_to_parent_y: None,
+            colour: None,
+            colour_token: None,
+            label_style: None,
+        }
+    }
+
+
+    fn assert_not_uniform(img: &RgbaImage, label: &str) {
+        let (w, h) = img.dimensions();
+        let mut first: Option<[u8; 4]> = None;
+        let mut differing = 0usize;
+        for y in (0..h).step_by(4) {
+            for x in (0..w).step_by(4) {
+                let px = img.get_pixel(x, y).0;
+                match first {
+                    None => first = Some(px),
+                    Some(f) if f != px => differing += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert!(
+            differing > 0,
+            "[{label}] image is entirely one colour ({:?})",
+            first.unwrap_or([0, 0, 0, 0])
+        );
+    }
+
+
+    fn assert_non_background_fraction(
+        img: &RgbaImage,
+        bg: [u8; 4],
+        min_frac: f32,
+        label: &str,
+    ) {
+        let (w, h) = img.dimensions();
+        let mut total = 0usize;
+        let mut non_bg = 0usize;
+        for y in (0..h).step_by(4) {
+            for x in (0..w).step_by(4) {
+                total += 1;
+                let p = img.get_pixel(x, y).0;
+                let differs = p
+                    .iter()
+                    .zip(bg.iter())
+                    .any(|(a, b)| (*a as i32 - *b as i32).abs() > 16);
+                if differs {
+                    non_bg += 1;
+                }
+            }
+        }
+        let frac = non_bg as f32 / total.max(1) as f32;
+        assert!(
+            frac >= min_frac,
+            "[{label}] only {:.1}% pixels differ from bg; expected >= {:.1}%",
+            frac * 100.0,
+            min_frac * 100.0,
+        );
+    }
+
+
+    struct StubFetcher {
+        images: HashMap<String, Vec<u8>>,
+    }
+
+
+    impl AssetFetcher for StubFetcher {
+        fn fetch_image_bytes(&self, p4k_path: &str) -> Option<Vec<u8>> {
+            self.images.get(&p4k_path.to_ascii_lowercase()).cloned()
+        }
+    }
+
+
+    fn stub_style() -> ManufacturerStyle {
+        ManufacturerStyle {
+            name: "drak".to_string(),
+            primary_tint: RgbaColor { r: 240, g: 168, b: 104, a: 255 },
+            secondary_tint: None,
+            colour_slots: vec![
+                RgbaColor { r: 240, g: 168, b: 104, a: 255 },
+                RgbaColor { r: 67, g: 221, b: 147, a: 255 },
+                RgbaColor { r: 228, g: 218, b: 77, a: 255 },
+                RgbaColor { r: 201, g: 51, b: 51, a: 255 },
+                RgbaColor { r: 0, g: 113, b: 188, a: 255 },
+            ],
+            background: RgbaColor { r: 48, g: 32, b: 16, a: 255 },
+            backlight: RgbaColor { r: 102, g: 214, b: 255, a: 255 },
+            font_family_hints: Vec::new(),
+            crt: CrtParams::default(),
+        }
+    }
+
+
+    fn minimal_swf_assets() -> crate::swf_assets::SwfAssetLibrary {
+        crate::swf_assets::SwfAssetLibrary::new(vec![
+            b'F', b'W', b'S', 6, 21, 0, 0, 0,
+            0x00, 0x18, 0x00, 0x01, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ])
+        .expect("minimal swf should parse")
+    }
+
+
+    fn blank_node(node_type: &str) -> UiIrNode {
+        UiIrNode {
+            id: 1,
+            parent_id: None,
+            children: Vec::new(),
+            node_type: node_type.to_string(),
+            name: "node".to_string(),
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            anchor: [0.0, 0.0],
+            pivot: [0.0, 0.0],
+            authored_position: [0.0, 0.0],
+            authored_size: [
+                UiIrValue::Fixed { value: 10.0 },
+                UiIrValue::Fixed { value: 10.0 },
+            ],
+            padding: [0.0, 0.0, 0.0, 0.0],
+            margin: [0.0, 0.0, 0.0, 0.0],
+            overflow_mode: None,
+            computed_rect: UiIrRect { x: 0.0, y: 0.0, w: 10.0, h: 10.0 },
+            background_fill_colour: None,
+            corner_radius: None,
+            background_fill_alpha: None,
+            background_fill_colour_token: None,
+            segmented_fill: None,
+            border: None,
+            stroke_colour: None,
+            stroke_colour_token: None,
+            stroke_extent: None,
+            colour_blend_mode: None,
+            icon_tint_colour: None,
+            icon_tint_colour_token: None,
+            icon_preset: None,
+            text_payload: None,
+            secondary_text_payload: None,
+            secondary_text_style: None,
+            meter_progress: None,
+            text_style: None,
+            asset_ref: None,
+            asset_layout: None,
+            custom_shape: None,
+            style_tag_uuids: Vec::new(),
+            resolved_style_tags: Vec::new(),
+        }
+    }
+
+
+    #[test]
+    fn render_ui_ir_document_is_deterministic_and_layout_sensitive() {
+        let document = UiIrDocument {
+            schema_version: UI_IR_SCHEMA_VERSION,
+            canvas_guid: "layout-guid".to_string(),
+            canvas_name: Some("BuildingBlocks_Canvas.LayoutDeterministic".to_string()),
+            target_width: 40,
+            target_height: 24,
+            selected_style_source: None,
+            selected_swf_source: None,
+            renderer_hint: UiRendererHint::Bb,
+            confidence: 100,
+            warnings: Vec::new(),
+            unresolved_references: Vec::new(),
+            resolved_asset_refs: Vec::new(),
+            missing_asset_refs: Vec::new(),
+            nodes: vec![UiIrNode {
+                id: 1,
+                parent_id: None,
+                children: Vec::new(),
+                node_type: "widget_canvas".to_string(),
+                name: "panel".to_string(),
+                is_active: true,
+                layer: 0,
+                alpha: 1.0,
+                anchor: [0.0, 0.0],
+                pivot: [0.0, 0.0],
+                authored_position: [5.0, 6.0],
+                authored_size: [
+                    UiIrValue::Fixed { value: 18.0 },
+                    UiIrValue::Fixed { value: 10.0 },
+                ],
+                padding: [0.0, 0.0, 0.0, 0.0],
+                margin: [0.0, 0.0, 0.0, 0.0],
+                overflow_mode: None,
+                computed_rect: UiIrRect { x: 5.0, y: 6.0, w: 18.0, h: 10.0 },
+                background_fill_colour: Some([0.0, 0.0, 1.0, 1.0]),
+                corner_radius: None,
+                background_fill_alpha: None,
+                background_fill_colour_token: None,
+                segmented_fill: None,
+                border: Some(UiIrBorder {
+                    top: crate::ui_ir::UiIrBorderSide { width: 1.0, colour: Some([1.0, 1.0, 0.0, 1.0]), colour_token: None },
+                    right: crate::ui_ir::UiIrBorderSide { width: 1.0, colour: Some([1.0, 1.0, 0.0, 1.0]), colour_token: None },
+                    bottom: crate::ui_ir::UiIrBorderSide { width: 1.0, colour: Some([1.0, 1.0, 0.0, 1.0]), colour_token: None },
+                    left: crate::ui_ir::UiIrBorderSide { width: 1.0, colour: Some([1.0, 1.0, 0.0, 1.0]), colour_token: None },
+                }),
+                stroke_colour: None,
+                stroke_colour_token: None,
+                stroke_extent: None,
+                colour_blend_mode: None,
+                icon_tint_colour: None,
+                icon_tint_colour_token: None,
+                icon_preset: None,
+                text_payload: None,
+                secondary_text_payload: None,
+                secondary_text_style: None,
+                meter_progress: None,
+                text_style: None::<UiIrTextStyle>,
+                asset_ref: None,
+                asset_layout: None,
+                custom_shape: None,
+                style_tag_uuids: Vec::new(),
+                resolved_style_tags: Vec::new(),
+            }],
+        };
+
+        let fetcher = StubFetcher { images: HashMap::new() };
+        let atlas = AtlasLibrary::new(&fetcher, Some("drak"));
+        let style = stub_style();
+        let defaults = crate::defaults::DefaultValueRegistry::with_well_known_path_defaults();
+        let assets = crate::swf_assets::SwfAssetLibrary::new(vec![
+            b'F', b'W', b'S', 6, 21, 0, 0, 0,
+            0x00, 0x18, 0x00, 0x01, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ])
+        .expect("minimal swf should parse");
+        let ctx = ComposeContext {
+            style: &style,
+            defaults: &defaults,
+            assets: &assets,
+        };
+
+        let img_a = render_ui_ir_document(&document, &ctx, &atlas).expect("first render should succeed");
+        let img_b = render_ui_ir_document(&document, &ctx, &atlas).expect("second render should succeed");
+
+        assert_eq!(img_a.as_raw(), img_b.as_raw(), "same IR should render bit-stably");
+        assert_eq!(img_a.get_pixel(1, 1).0, [48, 32, 16, 255], "background pixel should remain style background");
+        assert!(img_a.get_pixel(5, 6).0[0] > 200 && img_a.get_pixel(5, 6).0[1] > 200, "border origin should be yellow");
+        assert!(img_a.get_pixel(12, 10).0[2] > 200, "panel interior should render blue fill at the authored position");
+    }
+
+
+    #[test]
+    fn compose_source_does_not_reintroduce_forbidden_hardcoded_markers() {
+        let source = include_str!("../engine.inc");
+        // Hard rule: do not add heuristic marker names. If this trips, fix the
+        // structural root cause so composition remains generic across screens.
+        // Renaming around this assertion is not an acceptable workaround.
+        let forbidden = [
+            ["_", "candidate"].concat(),
+            ["is_", "med", "ical1_layout"].concat(),
+            ["is_", "medical", "_attract_banner_text"].concat(),
+            ["is_", "footer", "_brand_text_context"].concat(),
+            ["med", "ical_", "cyan_tint"].concat(),
+            ["Top_", "seperator"].concat(),
+            ["MedGel", "FillMeter"].concat(),
+            ["Function", "Title"].concat(),
+            ["node", ".name", ".eq_ignore_ascii_case(\"Med", "Gel\")"].concat(),
+            ["node", ".name", ".eq_ignore_ascii_case(\"Location", "Name\")"].concat(),
+            ["node", ".name", ".eq_ignore_ascii_case(\"Tier", "Level\")"].concat(),
+            ["s_", "bioc"].concat(),
+            ["s_", "rsi"].concat(),
+            ["s_", "aegs"].concat(),
+            ["s_", "drak"].concat(),
+            ["mockup", "image"].concat(),
+            ["i_med_bioc_", "bottom-bar"].concat(),
+            ["BG", "Dots"].concat(),
+            ["MainMenu", "Canvas"].concat(),
+        ];
+
+        for marker in forbidden {
+            assert!(
+                !source.contains(marker.as_str()),
+                "ir_compose hardcoding marker reintroduced: {marker}. This is a hard rule: do not work around this guard by renaming tokens. Keep composition generic for all screens and manageable in scope by fixing the structural root cause instead of reintroducing marker-based hardcoding."
+            );
+        }
+    }
+
+
+    #[test]
+    fn segmented_count_matches_medgel_source_geometry() {
+        assert_eq!(segmented_count_for_width(115.0, 3.0, 5.0), 14);
+    }
+
+
+    #[test]
+    fn label_caption_pair_stacks_secondary_immediately_below_primary_text_band() {
+        let rect = Rect { x: 100.0, y: 20.0, w: 128.0, h: 152.0 };
+        let (primary_rect, secondary_rect) = stacked_label_caption_pair_text_rects(
+            rect,
+            32.0,
+            27.0,
+            Some(0.5),
+            false,
+        );
+
+        assert_eq!(primary_rect.y, 47.0);
+        assert_eq!(primary_rect.h, 32.0);
+        assert_eq!(secondary_rect.y, 74.0);
+        assert_eq!(secondary_rect.h, 27.0);
+    }
+
+
+    #[test]
+    fn center_anchored_heading_textfield_uses_parent_anchor_text_band() {
+        let mut node = blank_node("widget_text_field");
+        node.computed_rect = UiIrRect { x: 20.0, y: 25.0, w: 320.0, h: 78.0 };
+        node.authored_size = [
+            UiIrValue::Fixed { value: 320.0 },
+            UiIrValue::Fixed { value: 78.0 },
+        ];
+        node.anchor = [0.0, -0.12];
+        node.pivot = [0.0, 0.0];
+        node.text_payload = Some(UiIrTextPayload::Resolved { text: "T3".to_string() });
+        node.text_style = Some(UiIrTextStyle {
+            font_record: None,
+            resolved_font_record: None,
+            font_size: UiIrValue::Fixed { value: 41.0 },
+            line_spacing: None,
+            alignment: "Left".to_string(),
+            vertical_alignment: "Center".to_string(),
+            anchor_to_parent_x: None,
+            anchor_to_parent_y: Some(0.5),
+            colour: None,
+            colour_token: None,
+            label_style: Some("Heading1".to_string()),
+        });
+
+        let rects = debug_text_rects(&node).expect("text rects");
+        assert_eq!(rects.primary.y, 64.0);
+        assert_eq!(rects.primary.h, 39.0);
+    }
+
+
+    #[test]
+    fn nested_right_pivot_heading_textfield_uses_inline_parent_text_advance() {
+        let mut parent = blank_node("widget_text_field");
+        parent.id = 1;
+        parent.children = vec![2];
+        parent.computed_rect = UiIrRect { x: 90.0, y: 25.0, w: 780.0, h: 78.0 };
+        parent.text_payload = Some(UiIrTextPayload::Resolved { text: "T3".to_string() });
+        parent.text_style = Some(UiIrTextStyle {
+            font_record: None,
+            resolved_font_record: None,
+            font_size: UiIrValue::Fixed { value: 41.0 },
+            line_spacing: None,
+            alignment: "Left".to_string(),
+            vertical_alignment: "Center".to_string(),
+            anchor_to_parent_x: Some(0.5),
+            anchor_to_parent_y: Some(0.5),
+            colour: None,
+            colour_token: None,
+            label_style: Some("Heading1".to_string()),
+        });
+
+        let mut child = blank_node("widget_text_field");
+        child.id = 2;
+        child.parent_id = Some(1);
+        child.anchor = [1.14, 0.0];
+        child.pivot = [1.0, 0.0];
+        child.computed_rect = UiIrRect { x: 200.0, y: 25.0, w: 780.0, h: 78.0 };
+        child.text_payload = Some(UiIrTextPayload::Resolved { text: "INLINE TITLE".to_string() });
+        child.text_style = parent.text_style.clone();
+
+        let document = UiIrDocument {
+            schema_version: UI_IR_SCHEMA_VERSION,
+            canvas_guid: "test-guid".to_string(),
+            canvas_name: None,
+            target_width: 400,
+            target_height: 160,
+            selected_style_source: None,
+            selected_swf_source: None,
+            renderer_hint: UiRendererHint::Bb,
+            confidence: 100,
+            warnings: Vec::new(),
+            unresolved_references: Vec::new(),
+            resolved_asset_refs: Vec::new(),
+            missing_asset_refs: Vec::new(),
+            nodes: vec![parent, child.clone()],
+        };
+        let style = stub_style();
+        let defaults = crate::defaults::DefaultValueRegistry::with_well_known_path_defaults();
+        let assets = minimal_swf_assets();
+        let ctx = ComposeContext { style: &style, defaults: &defaults, assets: &assets };
+        let rect = ir_rect_to_layout_rect(child.computed_rect);
+        let inline = inline_nested_textfield_text_rect(
+            &child,
+            rect,
+            &document,
+            &TextRenderer::new(),
+            &ctx,
+            41.0 * SWF_TEXT_RENDER_SIZE_CALIBRATION,
+        )
+        .expect("inline rect");
+
+        assert!(inline.x < rect.x, "expected nested title to move left from inflated Auto field");
+        assert!(inline.x > 90.0, "expected nested title to remain after parent text");
+        assert_eq!(inline.x + inline.w, rect.x + rect.w);
+    }
+}

@@ -1,0 +1,427 @@
+#[cfg(test)]
+mod tests_d {
+    use super::*;
+    use crate::bb_scene::parse_bb_canvas;
+
+    fn load_fixture(name: &str) -> serde_json::Value {
+        let path = format!(
+            "{}/tests/fixtures/canvas/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read fixture {name}: {e}"));
+        serde_json::from_str(&text)
+            .unwrap_or_else(|e| panic!("cannot parse fixture {name}: {e}"))
+    }
+
+    /// R5.I-A: `PercentOfX` height (and `PercentOfY` width) must be evaluated
+    /// against THIS NODE's OWN other-axis dimension, not the parent's other
+    /// dimension.
+
+    // ── A1.6 — fixture-based layout tests ────────────────────────────────────
+
+    /// MC_S_Target_Master: root DisplayWidget fills the canvas at Percent(1) sizing.
+    #[test]
+    fn mc_s_target_master_root_fills_canvas() {
+        let json = load_fixture("MC_S_Target_Master_b8d2d65c.json");
+        let scene = parse_bb_canvas(&json).expect("parse");
+        let result = layout(&scene, 1600, 900);
+
+        // Root rect should cover ≥99 % of target width (Percent(1.0) → 100 %).
+        let root_id = *scene.roots.first().expect("at least one root");
+        let root_rect = result.rects[&root_id];
+        let ratio_w = root_rect.w / 1600.0;
+        let ratio_h = root_rect.h / 900.0;
+        assert!(
+            (ratio_w - 1.0).abs() < 0.02,
+            "root width ratio {ratio_w} not within 2 % of 1.0"
+        );
+        assert!(
+            (ratio_h - 1.0).abs() < 0.02,
+            "root height ratio {ratio_h} not within 2 % of 1.0"
+        );
+    }
+
+    /// MC_S_Self_Master: 6 WidgetCanvas siblings all share the same parent
+    /// inner rect (i.e. their x/y origins all lie inside the root's inner
+    /// rect, modulo anchor offsets).
+    #[test]
+    fn mc_s_self_master_siblings_share_parent_inner() {
+        let json = load_fixture("MC_S_Self_Master_680a71df.json");
+        let scene = parse_bb_canvas(&json).expect("parse");
+        let result = layout(&scene, 1600, 900);
+
+        // Find the root node.
+        let root_id = *scene.roots.first().expect("root");
+        let root_rect = result.rects[&root_id];
+
+        // All WidgetCanvas siblings should have positive area.
+        let widget_canvas_nodes: Vec<BbNodeId> = scene
+            .nodes
+            .values()
+            .filter(|n| matches!(n.ty, BbNodeType::WidgetCanvas))
+            .map(|n| n.id)
+            .collect();
+
+        assert!(
+            widget_canvas_nodes.len() >= 6,
+            "expected ≥6 WidgetCanvas nodes, got {}",
+            widget_canvas_nodes.len()
+        );
+
+        for id in &widget_canvas_nodes {
+            let rect = result.rects[id];
+            assert!(rect.w > 0.0, "WidgetCanvas {id} has zero width");
+            assert!(rect.h > 0.0, "WidgetCanvas {id} has zero height");
+        }
+
+        // The root rect should have positive area too.
+        assert!(root_rect.w > 0.0 && root_rect.h > 0.0, "root has zero area");
+    }
+
+    /// BB_ScreenRadar: every WidgetCard's centre lies inside the canvas rect.
+    #[test]
+    fn bb_screen_radar_widget_cards_inside_canvas() {
+        let json = load_fixture("BB_ScreenRadar_C_App_Starmap_68ff6d17.json");
+        let scene = parse_bb_canvas(&json).expect("parse");
+        let result = layout(&scene, 1024, 1024);
+
+        let canvas = result.canvas;
+        // Expand the canvas slightly for floating-point tolerance.
+        let expanded = Rect {
+            x: canvas.x - 1.0,
+            y: canvas.y - 1.0,
+            w: canvas.w + 2.0,
+            h: canvas.h + 2.0,
+        };
+
+        for (id, node) in &scene.nodes {
+            if !matches!(node.ty, BbNodeType::WidgetCard) {
+                continue;
+            }
+            let rect = result.rects[id];
+            let (cx, cy) = rect.centre();
+            assert!(
+                expanded.contains_point(cx, cy),
+                "WidgetCard {:?} centre ({cx:.1},{cy:.1}) lies outside canvas bounds",
+                node.name,
+            );
+        }
+    }
+
+    /// EC_PowerManagement: 1 root node, rects has 1 entry, draw_order has
+    /// length 1.
+    #[test]
+    fn ec_power_management_single_node() {
+        let json = load_fixture("EC_PowerManagement_3228e5cc.json");
+        let scene = parse_bb_canvas(&json).expect("parse");
+        let result = layout(&scene, 1600, 900);
+
+        assert_eq!(scene.roots.len(), 1, "expected 1 root");
+        assert_eq!(result.rects.len(), 1, "expected 1 rect");
+        assert_eq!(result.draw_order.len(), 1, "expected 1 draw_order entry");
+    }
+
+    /// Edge case: a `BbValue::Other` with an unknown behavior does not panic
+    /// and produces a positive dimension.
+    #[test]
+    fn unknown_behavior_does_not_panic() {
+        use crate::bb_scene::{BbNode, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+        use crate::bb_scene::BbNodeType;
+
+        let node = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![],
+            ty: BbNodeType::WidgetCanvas,
+            name: "test".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing {
+                width: BbValue::Other { value: 0.5, behavior: "Auto".into() },
+                height: BbValue::Other { value: 0.5, behavior: "Auto".into() },
+            },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, node);
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (1920.0, 1080.0), roots: vec![1], nodes, operations: vec![] };
+
+        // Must not panic.
+        let result = layout(&scene, 1600, 900);
+        let rect = result.rects[&1];
+        // Fallback is fill → width = parent_inner.w
+        assert!(rect.w > 0.0, "fallback width must be positive");
+        assert!(rect.h > 0.0, "fallback height must be positive");
+    }
+
+    #[test]
+    fn authored_scale_expands_rect_around_pivot() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbScene, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let parent = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![2],
+            ty: BbNodeType::WidgetCanvas,
+            name: "parent".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(100.0), height: BbValue::Fixed(100.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+        let child = BbNode {
+            id: 2,
+            parent: Some(1),
+            children: vec![],
+            ty: BbNodeType::WidgetCustomShape,
+            name: "scaled_shape".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(50.0), height: BbValue::Fixed(50.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2 { x: 0.5, y: 0.5 },
+            anchor: Vec2 { x: 0.5, y: 0.5 },
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({
+                "scale": { "x": 1.2, "y": 1.4 }
+            }),
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, parent);
+        nodes.insert(2, child);
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (100.0, 100.0), roots: vec![1], nodes, operations: vec![] };
+
+        let result = layout(&scene, 100, 100);
+        let rect = result.rects[&2];
+
+        assert!((rect.w - 60.0).abs() < 0.01, "expected scaled width 60, got {}", rect.w);
+        assert!((rect.h - 70.0).abs() < 0.01, "expected scaled height 70, got {}", rect.h);
+        assert!((rect.x - 20.0).abs() < 0.01, "expected pivot-centred x 20, got {}", rect.x);
+        assert!((rect.y - 15.0).abs() < 0.01, "expected pivot-centred y 15, got {}", rect.y);
+    }
+
+    #[test]
+    fn text_field_child_canvas_scale_does_not_expand_layout_slot() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbScene, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let root = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![2],
+            ty: BbNodeType::WidgetCanvas,
+            name: "root".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(200.0), height: BbValue::Fixed(100.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+        let text = BbNode {
+            id: 2,
+            parent: Some(1),
+            children: vec![3],
+            ty: BbNodeType::WidgetTextField,
+            name: "prompt".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(200.0), height: BbValue::Fixed(60.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+        let backing_canvas = BbNode {
+            id: 3,
+            parent: Some(2),
+            children: vec![],
+            ty: BbNodeType::WidgetCanvas,
+            name: "text_backing_canvas".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Percent(1.0), height: BbValue::Percent(1.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2 { x: 0.5, y: 0.5 },
+            anchor: Vec2 { x: 0.5, y: 0.5 },
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({
+                "scale": { "x": 1.0, "y": 1.5 },
+                "sizingMethod": "Size"
+            }),
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, root);
+        nodes.insert(2, text);
+        nodes.insert(3, backing_canvas);
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (200.0, 100.0), roots: vec![1], nodes, operations: vec![] };
+
+        let result = layout(&scene, 200, 100);
+        let rect = result.rects[&3];
+
+        assert!((rect.w - 200.0).abs() < 0.01, "expected backing width to fill text slot, got {}", rect.w);
+        assert!((rect.h - 60.0).abs() < 0.01, "expected backing height to stay in text slot, got {}", rect.h);
+        assert!((rect.y - 0.0).abs() < 0.01, "expected backing to remain aligned to text slot, got {}", rect.y);
+    }
+
+    /// A3-PIVOT.3: when the canvas declares a 4:3 aspect (e.g. 800×600) and the
+    /// target is 16:9 (1600×900), a uniform-scale letterbox is applied.  A root
+    /// node with `Fixed(800)` sizing must NOT produce a rect of width 1600
+    /// (the old non-uniform-stretch result); instead it should be scaled to 1200
+    /// and horizontally centred with 200 px letterbox on each side.
+    #[test]
+    fn uniform_scale_letterboxes_mismatched_aspect() {
+        use crate::bb_scene::{BbNode, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+        use crate::bb_scene::BbNodeType;
+
+        // Canvas 800×600, Fixed(800)×Fixed(600) root.
+        let node = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![],
+            ty: BbNodeType::WidgetCard,
+            name: "root_card".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing {
+                width: BbValue::Fixed(800.0),
+                height: BbValue::Fixed(600.0),
+            },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, node);
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (800.0, 600.0), roots: vec![1], nodes, operations: vec![] };
+
+        let result = layout(&scene, 1600, 900);
+        let rect = result.rects[&1];
+
+        // Uniform scale = min(1600/800, 900/600) = min(2.0, 1.5) = 1.5.
+        // Fixed(800) → 800 × 1.5 = 1200.  NOT 1600 (old non-uniform stretch).
+        assert_ne!(
+            (rect.w, rect.h),
+            (1600.0, 900.0),
+            "Fixed(800×600) node must not be stretched to 1600×900"
+        );
+        assert!(
+            (rect.w - 1200.0).abs() < 1.0,
+            "expected width ≈ 1200 (uniform scale 1.5), got {:.1}",
+            rect.w
+        );
+        assert!(
+            (rect.h - 900.0).abs() < 1.0,
+            "expected height ≈ 900 (uniform scale 1.5), got {:.1}",
+            rect.h
+        );
+        // Letterbox: x offset = (1600 − 1200) / 2 = 200.
+        assert!(
+            (rect.x - 200.0).abs() < 1.0,
+            "expected x ≈ 200 (letterbox), got {:.1}",
+            rect.x
+        );
+    }
+
+    #[test]
+    fn layout_source_does_not_reintroduce_forbidden_hardcoded_or_heuristic_markers() {
+        let source = include_str!("../engine.inc");
+        // Hard rule: keep layout generic across assets and screens. If this
+        // trips, remove marker-based workarounds and fix structural causes.
+        let forbidden = [
+            ["med", "ical2"].concat(),
+            ["med", "gel"].concat(),
+            ["hard", "coded", "_offset"].concat(),
+            ["magic", "_multiplier"].concat(),
+            ["heu", "ristic", "_shift"].concat(),
+            ["blend", "_factor"].concat(),
+        ];
+
+        for marker in forbidden {
+            assert!(
+                !source.contains(marker.as_str()),
+                "bb_layout hardcoding/heuristic marker reintroduced: {marker}"
+            );
+        }
+    }
+}

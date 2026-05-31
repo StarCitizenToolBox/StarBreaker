@@ -1,0 +1,117 @@
+#[cfg(test)]
+mod tests_h {
+    use super::*;
+
+    struct TestCanvasFetcher {
+        by_guid: std::collections::HashMap<String, serde_json::Value>,
+        by_path: std::collections::HashMap<String, serde_json::Value>,
+    }
+
+    impl CanvasFetcher for TestCanvasFetcher {
+        fn fetch_canvas_json(&self, guid: &str) -> Result<serde_json::Value, crate::UiError> {
+            self.by_guid
+                .get(guid)
+                .cloned()
+                .ok_or_else(|| crate::UiError::RenderError(format!("missing guid: {guid}")))
+        }
+
+        fn fetch_canvas_by_name(
+            &self,
+            record_name: &str,
+        ) -> Result<serde_json::Value, crate::UiError> {
+            self.by_guid
+                .values()
+                .chain(self.by_path.values())
+                .find(|value| {
+                    value
+                        .get("_RecordName_")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|name| name == record_name)
+                })
+                .cloned()
+                .ok_or_else(|| crate::UiError::RenderError(format!("missing name: {record_name}")))
+        }
+
+        fn fetch_canvas_by_path(&self, path: &str) -> Result<serde_json::Value, crate::UiError> {
+            self.by_path
+                .get(path)
+                .cloned()
+                .ok_or_else(|| crate::UiError::RenderError(format!("missing path: {path}")))
+        }
+    }
+
+    fn defaults() -> crate::defaults::DefaultValueRegistry {
+        crate::defaults::DefaultValueRegistry::with_well_known_path_defaults()
+    }
+
+
+    #[test]
+    fn compile_ir_treats_loc_empty_as_intentionally_empty_not_unresolved() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.IntentionallyEmptyText",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "label",
+                        "text": "@LOC_EMPTY",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 30.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-intentionally-empty",
+            Some("BuildingBlocks_Canvas.IntentionallyEmptyText"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        assert_eq!(
+            ir.nodes[0].text_payload,
+            Some(UiIrTextPayload::IntentionallyEmpty {
+                key: Some("@LOC_EMPTY".to_string()),
+            })
+        );
+        assert!(ir
+            .warnings
+            .iter()
+            .all(|warning| !warning.contains("unresolved text key")));
+        assert_eq!(ir.confidence, 100);
+    }
+
+    #[test]
+    fn ui_ir_source_does_not_reintroduce_forbidden_hardcoded_markers() {
+        let source = include_str!("../engine.inc");
+        let forbidden = [
+            ["nominal_font_size_", "from_label_style"].concat(),
+            ["BG", "Dots"].concat(),
+            ["MainMenu", "Canvas"].concat(),
+            ["base_", "animatedelements"].concat(),
+            ["apply_medical", "attract_banner_layout"].concat(),
+        ];
+
+        for marker in forbidden {
+            assert!(
+                !source.contains(marker.as_str()),
+                "ui_ir hardcoding marker reintroduced: {marker}"
+            );
+        }
+    }
+}

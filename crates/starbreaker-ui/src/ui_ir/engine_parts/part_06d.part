@@ -1,0 +1,489 @@
+#[cfg(test)]
+mod tests_b {
+    use super::*;
+
+    struct TestCanvasFetcher {
+        by_guid: std::collections::HashMap<String, serde_json::Value>,
+        by_path: std::collections::HashMap<String, serde_json::Value>,
+    }
+
+    impl CanvasFetcher for TestCanvasFetcher {
+        fn fetch_canvas_json(&self, guid: &str) -> Result<serde_json::Value, crate::UiError> {
+            self.by_guid
+                .get(guid)
+                .cloned()
+                .ok_or_else(|| crate::UiError::RenderError(format!("missing guid: {guid}")))
+        }
+
+        fn fetch_canvas_by_name(
+            &self,
+            record_name: &str,
+        ) -> Result<serde_json::Value, crate::UiError> {
+            self.by_guid
+                .values()
+                .chain(self.by_path.values())
+                .find(|value| {
+                    value
+                        .get("_RecordName_")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|name| name == record_name)
+                })
+                .cloned()
+                .ok_or_else(|| crate::UiError::RenderError(format!("missing name: {record_name}")))
+        }
+
+        fn fetch_canvas_by_path(&self, path: &str) -> Result<serde_json::Value, crate::UiError> {
+            self.by_path
+                .get(path)
+                .cloned()
+                .ok_or_else(|| crate::UiError::RenderError(format!("missing path: {path}")))
+        }
+    }
+
+    fn defaults() -> crate::defaults::DefaultValueRegistry {
+        crate::defaults::DefaultValueRegistry::with_well_known_path_defaults()
+    }
+
+
+    #[test]
+    fn compile_ir_resolves_standard_textfield_line_spacing_for_label_style() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestStandardLineSpacing",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "title",
+                        "isActive": true,
+                        "text": "DIGITAL MEDICAL ASSISTANT",
+                        "FontSize": 100.0,
+                        "labelProperties": {
+                            "style": "Title3",
+                            "anchorToParentX": 0.5,
+                            "anchorToParentY": 0.5
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 40.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+        let standard = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TextFieldWidgetStandard",
+            "_RecordValue_": {
+                "defaultStyles": {
+                    "entries": [
+                        {
+                            "name": "T3",
+                            "modifiers": [
+                                    {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "FontSize", "value": 115.0},
+                                {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "LineSpacing", "value": -55.0}
+                            ]
+                        }
+                    ]
+                },
+                "brandStyles": [
+                    {
+                        "brandIdentifier": "file://./styles/s_bioc.json",
+                        "entries": [
+                            {
+                                "name": "T3",
+                                "modifiers": [
+                                    {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "FontSize", "value": 115.0},
+                                    {
+                                        "_Type_": "BuildingBlocks_FieldModifierRecordRef",
+                                        "field": {
+                                            "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeFontStyleRecord",
+                                            "value": "file://./fontstyles/blenderpro-thin.json"
+                                        }
+                                    },
+                                    {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "LineSpacing", "value": -35.0}
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+        let fetcher = TestCanvasFetcher {
+            by_guid: std::collections::HashMap::new(),
+            by_path: [(standard_text_field_widget_path().to_string(), standard)]
+                .into_iter()
+                .collect(),
+        };
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            Some(&fetcher),
+            "guid-standard-line-spacing",
+            Some("BuildingBlocks_Canvas.TestStandardLineSpacing"),
+            (100, 100),
+            &defaults(),
+            Some("canvas:s_bioc".to_string()),
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "title").expect("title node");
+        assert_eq!(
+            node.text_style.as_ref().and_then(|style| style.line_spacing),
+            Some(-35.0)
+        );
+        assert_eq!(
+            node.text_style.as_ref().and_then(|style| style.font_record.as_deref()),
+            Some("file://./fontstyles/blenderpro-thin.json")
+        );
+    }
+
+    #[test]
+    fn compile_ir_uses_standard_heading_font_size_for_unsized_textfield() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestStandardHeadingSize",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "location",
+                        "isActive": true,
+                        "text": "Drake Clipper",
+                        "labelProperties": {
+                            "style": "Heading3",
+                            "anchorToParentX": 0.5,
+                            "anchorToParentY": 0.5
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 40.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "machine_type",
+                        "isActive": true,
+                        "text": "MEDICAL ASSISTANT",
+                        "labelProperties": {
+                            "style": "Heading1",
+                            "anchorToParentX": 0.5,
+                            "anchorToParentY": 0.5
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 40.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+        let standard = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TextFieldWidgetStandard",
+            "_RecordValue_": {
+                "defaultStyles": {"entries": []},
+                "brandStyles": [
+                    {
+                        "brandIdentifier": "file://./styles/s_bioc.json",
+                        "entries": [
+                            {
+                                "name": "H3",
+                                "modifiers": [
+                                    {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "FontSize", "value": 30.0},
+                                    {
+                                        "_Type_": "BuildingBlocks_FieldModifierRecordRef",
+                                        "field": {
+                                            "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeFontStyleRecord",
+                                            "value": "file://./fontstyles/blenderpro-thin.json"
+                                        }
+                                    },
+                                    {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "LineSpacing", "value": 0.0}
+                                ]
+                            },
+                            {
+                                "name": "H1",
+                                "modifiers": [
+                                    {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "FontSize", "value": 57.0},
+                                    {
+                                        "_Type_": "BuildingBlocks_FieldModifierRecordRef",
+                                        "field": {
+                                            "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeFontStyleRecord",
+                                            "value": "file://./fontstyles/blenderpro-thin.json"
+                                        }
+                                    },
+                                    {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "LineSpacing", "value": 0.0}
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+        let fetcher = TestCanvasFetcher {
+            by_guid: std::collections::HashMap::new(),
+            by_path: [(standard_text_field_widget_path().to_string(), standard)]
+                .into_iter()
+                .collect(),
+        };
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            Some(&fetcher),
+            "guid-standard-heading-size",
+            Some("BuildingBlocks_Canvas.TestStandardHeadingSize"),
+            (100, 100),
+            &defaults(),
+            Some("canvas:s_bioc".to_string()),
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "location").expect("location node");
+        assert_eq!(
+            node.text_style.as_ref().map(|style| &style.font_size),
+            Some(&UiIrValue::Fixed { value: 21.6 })
+        );
+
+        let node = ir
+            .nodes
+            .iter()
+            .find(|node| node.name == "machine_type")
+            .expect("machine_type node");
+        assert_eq!(
+            node.text_style.as_ref().map(|style| &style.font_size),
+            Some(&UiIrValue::Fixed { value: 41.0 })
+        );
+    }
+
+    #[test]
+    fn compile_ir_uses_standard_title4_font_size_before_scene_style_borrow() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestStandardTitleSize",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "small_title_reference",
+                        "isActive": true,
+                        "text": "SMALL",
+                        "FontSize": 40.0,
+                        "labelProperties": {"style": "Title4"},
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 40.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "standard_title",
+                        "isActive": true,
+                        "text": "T3",
+                        "labelProperties": {"style": "Title4"},
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 40.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+        let standard = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TextFieldWidgetStandard",
+            "_RecordValue_": {
+                "defaultStyles": {"entries": [
+                    {
+                        "name": "Title4",
+                        "modifiers": [
+                            {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "FontSize", "value": 40.0},
+                            {
+                                "_Type_": "BuildingBlocks_FieldModifierRecordRef",
+                                "field": {
+                                    "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeFontStyleRecord",
+                                    "value": "file://./fontstyles/blenderpro-thin.json"
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "name": "T4",
+                        "modifiers": [
+                            {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "FontSize", "value": 75.0},
+                            {
+                                "_Type_": "BuildingBlocks_FieldModifierRecordRef",
+                                "field": {
+                                    "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeFontStyleRecord",
+                                    "value": "file://./fontstyles/blenderpro-medium.json"
+                                }
+                            }
+                        ]
+                    }
+                ]},
+                "brandStyles": []
+            }
+        });
+        let fetcher = TestCanvasFetcher {
+            by_guid: std::collections::HashMap::new(),
+            by_path: [(standard_text_field_widget_path().to_string(), standard)]
+                .into_iter()
+                .collect(),
+        };
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            Some(&fetcher),
+            "guid-standard-title-size",
+            Some("BuildingBlocks_Canvas.TestStandardTitleSize"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir
+            .nodes
+            .iter()
+            .find(|node| node.name == "standard_title")
+            .expect("standard title node");
+        assert_eq!(
+            node.text_style.as_ref().map(|style| &style.font_size),
+            Some(&UiIrValue::Fixed { value: 54.0 })
+        );
+    }
+
+    #[test]
+    fn short_heading1_uses_header_size_while_long_prompt_stays_shallow() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, Vec2, Vec3};
+
+        let textfield = |style: &str| BbNode {
+            id: 1,
+            parent: None,
+            children: vec![],
+            ty: BbNodeType::WidgetTextField,
+            name: "text".to_string(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing::default(),
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({"labelProperties": {"style": style}}),
+        };
+
+        let short_heading = textfield("Heading1");
+        assert_eq!(
+            textfield_fallback_font_size_from_signals(&short_heading, 78.0, Some("MEDICAL ASSISTANT")),
+            Some(40.0)
+        );
+
+        let long_prompt = textfield("Heading1");
+        assert_eq!(
+            textfield_fallback_font_size_from_signals(
+                &long_prompt,
+                105.0,
+                Some("PLEASE SELECT AN OPTION FROM THE AVAILABLE SERVICES"),
+            ),
+            Some(LONG_HEADING1_PROMPT_FONT_SIZE)
+        );
+    }
+
+    #[test]
+    fn compile_ir_limits_style_palette_text_default_to_label_caption() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestStylePaletteTextColour",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "palette_text",
+                        "isActive": true,
+                        "text": "PATIENT NAME",
+                        "__BrandIdentifier": "s_bioc",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_ComponentLabelCaptionPair",
+                        "name": "palette_pair",
+                        "isActive": true,
+                        "__BrandIdentifier": "s_bioc",
+                        "labelProperties": {
+                            "label": "PATIENT NAME",
+                            "style": "Heading3"
+                        },
+                        "alignment": "Left",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-style-palette-text-colour",
+            Some("BuildingBlocks_Canvas.TestStylePaletteTextColour"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "palette_text").expect("palette text node");
+        assert_eq!(
+            node.text_style.as_ref().and_then(|style| style.colour_token.as_deref()),
+            None
+        );
+
+        let pair = ir.nodes.iter().find(|node| node.name == "palette_pair").expect("palette pair node");
+        assert_eq!(
+            pair.text_style.as_ref().and_then(|style| style.colour_token.as_deref()),
+            Some("Base")
+        );
+    }
+}

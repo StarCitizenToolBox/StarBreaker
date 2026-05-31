@@ -14,7 +14,13 @@ This crate provides a data-driven pipeline that:
 Core constraints:
 - No production hard-coded ship/canvas/asset name heuristics.
 - Deterministic output for equivalent inputs.
-- Structural, modular organization with source-file line cap guardrails.
+- Structural, modular organization with a 500-line guardrail for `src/**/*.rs` and `src/**/*.part` files.
+
+Engine split-part directories (`engine.inc` include targets):
+- `src/bb_layout/engine_parts/`
+- `src/bb_resolve/engine_parts/`
+- `src/ir_compose/engine_parts/`
+- `src/ui_ir/engine_parts/`
 
 ## Key Entry Points
 
@@ -215,7 +221,7 @@ Regression path:
 
 ## Integration Tests (`tests/`)
 
-- `tests/line_count_guard.rs` - Guardrail for `src/**/*.rs` line cap.
+- `tests/line_count_guard.rs` - Guardrail for `src/**/*.rs` and `src/**/*.part` (max 500 lines).
 - `tests/manifest_live_ir_guard.rs` - Live manifest guard tests.
 - `tests/manifest_snapshot_regression.rs` - Snapshot drift regression tests.
 - `tests/manifest_visual_regression.rs` - Visual regression target tests.

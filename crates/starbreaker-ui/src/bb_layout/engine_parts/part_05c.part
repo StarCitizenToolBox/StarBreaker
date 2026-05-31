@@ -1,0 +1,437 @@
+#[cfg(test)]
+mod tests_b {
+    use super::*;
+    use crate::bb_scene::parse_bb_canvas;
+
+    fn load_fixture(name: &str) -> serde_json::Value {
+        let path = format!(
+            "{}/tests/fixtures/canvas/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read fixture {name}: {e}"));
+        serde_json::from_str(&text)
+            .unwrap_or_else(|e| panic!("cannot parse fixture {name}: {e}"))
+    }
+
+    /// R5.I-A: `PercentOfX` height (and `PercentOfY` width) must be evaluated
+    /// against THIS NODE's OWN other-axis dimension, not the parent's other
+    /// dimension.
+
+    #[test]
+    fn non_surface_child_canvas_root_preserves_authored_pivot() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let host = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![2],
+            ty: BbNodeType::WidgetCanvas,
+            name: "menu_host_canvas".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Percent(1.0), height: BbValue::Percent(0.77) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+        let child_root = BbNode {
+            id: 2,
+            parent: Some(1),
+            children: vec![],
+            ty: BbNodeType::DisplayWidget,
+            name: "menu_root".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Percent(1.0), height: BbValue::Percent(1.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2 { x: 0.0, y: 0.03 },
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, host);
+        nodes.insert(2, child_root);
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (200.0, 100.0), roots: vec![1], nodes, operations: vec![] };
+
+        let result = layout(&scene, 200, 100);
+        let host_rect = result.rects[&1];
+        let root_rect = result.rects[&2];
+        let expected_root_y = host_rect.y - root_rect.h * 0.03;
+        assert!((host_rect.h - 77.0).abs() < 0.5, "expected host height 77, got {}", host_rect.h);
+        assert!((root_rect.y - expected_root_y).abs() < 0.5, "expected child root y {}, got {}", expected_root_y, root_rect.y);
+    }
+
+    /// Mirror of above: `PercentOfY` for width must use own height.
+    #[test]
+    fn percent_of_y_uses_own_height_not_parent() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let parent = BbNode {
+            id: 1, parent: None, children: vec![2],
+            ty: BbNodeType::DisplayWidget, name: "parent".into(),
+            style_tag_uuids: vec![], is_active: true, layer: 0, alpha: 1.0,
+            position: Vec3::default(), position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(400.0), height: BbValue::Fixed(200.0) },
+            padding: BbTrbl::default(), margin: BbTrbl::default(),
+            pivot: Vec2::default(), anchor: Vec2::default(),
+            background: None, border: None, radial: None, text: None, icon: None,
+            raw: serde_json::Value::Null,
+        };
+        let child = BbNode {
+            id: 2, parent: Some(1), children: vec![],
+            ty: BbNodeType::WidgetIcon, name: "icon".into(),
+            style_tag_uuids: vec![], is_active: true, layer: 0, alpha: 1.0,
+            position: Vec3::default(), position_offset: Vec3::default(),
+            sizing: BbSizing {
+                width: BbValue::Other { value: 1.0, behavior: "PercentOfY".into() },
+                height: BbValue::Percent(0.6),
+            },
+            padding: BbTrbl::default(), margin: BbTrbl::default(),
+            pivot: Vec2::default(), anchor: Vec2::default(),
+            background: None, border: None, radial: None, text: None, icon: None,
+            raw: serde_json::Value::Null,
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, parent);
+        nodes.insert(2, child);
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (400.0, 200.0), roots: vec![1], nodes, operations: vec![] };
+
+        let result = layout(&scene, 400, 200);
+        let r = result.rects[&2];
+        // height = 0.6 × parent_h(200) = 120
+        // width  = 1.0 × own_h(120)    = 120  (NOT 1.0 × parent_h(200) or × parent_w(400))
+        assert!((r.h - 120.0).abs() < 0.5, "expected height ≈ 120, got {}", r.h);
+        assert!((r.w - 120.0).abs() < 0.5, "expected width ≈ 120 (square), got {}", r.w);
+    }
+
+    #[test]
+    fn flex_row_wrap_moves_full_width_child_to_next_line() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let root = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![2, 3],
+            ty: BbNodeType::DisplayWidget,
+            name: "root".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(300.0), height: BbValue::Fixed(200.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({
+                "layoutPolicy": {
+                    "_Type_": "BuildingBlocks_FlexContainer",
+                    "direction": "Row",
+                    "wrap": "Wrap",
+                    "axisJustification": "Start",
+                    "crossAxisJustification": "Start",
+                    "columnSpacing": 0,
+                    "rowSpacing": 0
+                }
+            }),
+        };
+        let child1 = BbNode {
+            id: 2,
+            parent: Some(1),
+            children: vec![],
+            ty: BbNodeType::DisplayWidget,
+            name: "c1".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(300.0), height: BbValue::Fixed(50.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+        let child2 = BbNode {
+            id: 3,
+            parent: Some(1),
+            children: vec![],
+            ty: BbNodeType::DisplayWidget,
+            name: "c2".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(300.0), height: BbValue::Fixed(50.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, root);
+        nodes.insert(2, child1);
+        nodes.insert(3, child2);
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (300.0, 200.0), roots: vec![1], nodes, operations: vec![] };
+        let result = layout(&scene, 300, 200);
+        let r1 = result.rects[&2];
+        let r2 = result.rects[&3];
+        assert!((r1.x - 0.0).abs() < 0.5 && (r1.y - 0.0).abs() < 0.5);
+        assert!(
+            (r2.x - 0.0).abs() < 0.5 && (r2.y - 50.0).abs() < 0.5,
+            "second wrapped child expected at y=50, got ({:.1},{:.1})",
+            r2.x,
+            r2.y
+        );
+    }
+
+    #[test]
+    fn flex_row_wrap_start_applies_child_main_axis_anchor() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let root = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![2],
+            ty: BbNodeType::DisplayWidget,
+            name: "root".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(300.0), height: BbValue::Fixed(100.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({
+                "layoutPolicy": {
+                    "_Type_": "BuildingBlocks_FlexContainer",
+                    "direction": "Row",
+                    "wrap": "Wrap",
+                    "axisJustification": "Start",
+                    "crossAxisJustification": "Start",
+                    "columnSpacing": 0,
+                    "rowSpacing": 0
+                }
+            }),
+        };
+        let child = BbNode {
+            id: 2,
+            parent: Some(1),
+            children: vec![],
+            ty: BbNodeType::WidgetTextField,
+            name: "anchored_prompt".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Percent(0.3), height: BbValue::Fixed(40.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2 { x: 0.01, y: 0.0 },
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+        let mut metric = child.clone();
+        metric.id = 3;
+        metric.name = "right_metric".into();
+        metric.sizing = BbSizing { width: BbValue::Fixed(50.0), height: BbValue::Fixed(40.0) };
+        metric.anchor = Vec2 { x: 1.0, y: 0.0 };
+        metric.pivot = Vec2 { x: 1.0, y: 0.0 };
+        assert_eq!(row_flex_start_anchor_offset(&metric, 300.0, 50.0, 1.0), None);
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, root);
+        nodes.insert(2, child);
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (300.0, 100.0), roots: vec![1], nodes, operations: vec![] };
+        let result = layout(&scene, 300, 100);
+        let rect = result.rects[&2];
+        assert!((rect.x - 3.0).abs() < 0.5, "expected x≈3 from 1% row anchor, got {}", rect.x);
+    }
+
+    #[test]
+    fn horizontal_filled_separator_uses_centerline_anchor() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let separator = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![],
+            ty: BbNodeType::Other("BuildingBlocks_WidgetSeparator".into()),
+            name: "separator".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Percent(0.5), height: BbValue::Fixed(16.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2 { x: 0.0, y: 0.18 },
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({
+                "direction": "Horizontal",
+                "svgFill": {
+                    "renderShape": true,
+                    "svgPath": ""
+                }
+            }),
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, separator);
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (100.0, 100.0), roots: vec![1], nodes, operations: vec![] };
+        let result = layout(&scene, 100, 100);
+        let rect = result.rects[&1];
+        assert!((rect.y - 10.0).abs() < 0.5, "expected centerline y=18 minus half height 8, got {}", rect.y);
+    }
+
+    #[test]
+    fn flex_row_auto_label_caption_pairs_share_available_width() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, BbValue, Vec2, Vec3};
+
+        let root = BbNode {
+            id: 1,
+            parent: None,
+            children: vec![2, 3],
+            ty: BbNodeType::DisplayWidget,
+            name: "text-layout".into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing { width: BbValue::Fixed(604.8), height: BbValue::Fixed(108.0) },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2 { x: 0.0, y: 0.5 },
+            anchor: Vec2 { x: 0.65, y: 0.5 },
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({
+                "layoutPolicy": {
+                    "_Type_": "BuildingBlocks_FlexContainer",
+                    "direction": "Row",
+                    "wrap": "NoWrap",
+                    "axisJustification": "Start",
+                    "crossAxisJustification": "Start",
+                    "itemAlignment": "Start",
+                    "columnSpacing": 30.0,
+                    "rowSpacing": 0.0
+                }
+            }),
+        };
+        let child = |id: u32, name: &str| BbNode {
+            id,
+            parent: Some(1),
+            children: vec![],
+            ty: BbNodeType::Other("BuildingBlocks_ComponentLabelCaptionPair".into()),
+            name: name.into(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing {
+                width: BbValue::Other { value: 64.0, behavior: "Auto".into() },
+                height: BbValue::Other { value: 64.0, behavior: "Auto".into() },
+            },
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::Value::Null,
+        };
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert(1, root);
+        nodes.insert(2, child(2, "operator"));
+        nodes.insert(3, child(3, "patient"));
+        let scene = BbScene { coordinate_method: crate::bb_scene::BbCoordinateMethod::UseRaw, canvas_size: (604.8, 108.0), roots: vec![1], nodes, operations: vec![] };
+
+        let result = layout(&scene, 605, 108);
+        let r1 = result.rects[&2];
+        let r2 = result.rects[&3];
+        assert!((r1.w - 287.4).abs() < 1.0, "expected first pair width ≈ 287.4, got {}", r1.w);
+        assert!((r2.w - 287.4).abs() < 1.0, "expected second pair width ≈ 287.4, got {}", r2.w);
+        assert!((r2.x - (r1.x + r1.w + 30.0)).abs() < 1.0, "expected second pair after 30px spacing, got x={}", r2.x);
+    }
+}

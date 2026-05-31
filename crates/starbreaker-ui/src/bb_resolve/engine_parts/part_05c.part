@@ -1,0 +1,475 @@
+#[cfg(test)]
+mod tests_c {
+    use super::*;
+    use crate::pipeline::extract_record_name;
+
+
+    fn load_fixture(name: &str) -> serde_json::Value {
+        let path = format!("{}/tests/fixtures/canvas/{name}", env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {name}: {e}"));
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("failed to parse {name}: {e}"))
+    }
+
+
+    fn one_node_canvas() -> serde_json::Value {
+        serde_json::json!({
+            "_RecordName_": "test_child",
+            "_RecordId_": "00000000-0000-0000-0000-000000000001",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "child_root"}
+                ]
+            }
+        })
+    }
+
+
+    fn three_node_canvas() -> serde_json::Value {
+        serde_json::json!({
+            "_RecordName_": "test_child3",
+            "_RecordId_": "00000000-0000-0000-0000-000000000002",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "child_root"},
+                    {"_Pointer_": "ptr:2", "_Type_": "BuildingBlocks_WidgetCanvas", "name": "c1", "parent": "_PointsTo_:ptr:1"},
+                    {"_Pointer_": "ptr:3", "_Type_": "BuildingBlocks_WidgetCanvas", "name": "c2", "parent": "_PointsTo_:ptr:1"}
+                ]
+            }
+        })
+    }
+
+
+    fn body_background_standard_fixture(texture_tag: &str) -> serde_json::Value {
+        serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.BodyBackgroundWidgetStandard",
+            "_RecordId_": "0b262f33-a075-42cb-907f-5e2fa3aa9df5",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_":"Vec3", "x": 1920.0, "y": 1080.0, "z": 0.0},
+                "defaultStyles": {
+                    "_Type_": "BuildingBlocks_DefaultStyles",
+                    "sharedStyles": null,
+                    "entries": [{
+                        "_Type_": "BuildingBlocks_StyleEntry",
+                        "name": "BackgroundTexture",
+                        "conditionsList": [{
+                            "_Type_": "BuildingBlocks_StyleConditionList",
+                            "conditions": [{
+                                "_Type_": "BuildingBlocks_StyleSelectorConditionTag",
+                                "tag": {"_RecordId_": texture_tag}
+                            }]
+                        }],
+                        "modifiers": [{
+                            "_Type_": "BuildingBlocks_FieldModifierString",
+                            "field": "ImagePath",
+                            "value": "UI/Textures/ModularKitStyles/_Default/SK_Default_BG.tif"
+                        }]
+                    }]
+                },
+                "brandStyles": [
+                    {
+                        "_Type_": "BuildingBlocks_BrandStyles",
+                        "brandIdentifier": "file://./../../../../../../../../libs/foundry/records/ui/buildingblocks/styles/s_drak.json",
+                        "entries": [{
+                            "_Type_": "BuildingBlocks_StyleEntry",
+                            "name": "Background Texture Style",
+                            "conditionsList": [{
+                                "_Type_": "BuildingBlocks_StyleConditionList",
+                                "conditions": [{
+                                    "_Type_": "BuildingBlocks_StyleSelectorConditionTag",
+                                    "tag": {"_RecordId_": texture_tag}
+                                }]
+                            }],
+                            "modifiers": [{
+                                "_Type_": "BuildingBlocks_FieldModifierString",
+                                "field": "ImagePath",
+                                "value": "UI/Textures/ModularKitStyles/DRAK/Drake_DoorPanel_Background-DarkTheme.tif"
+                            }]
+                        }]
+                    },
+                    {
+                        "_Type_": "BuildingBlocks_BrandStyles",
+                        "brandIdentifier": "file://./../../../../../../../../libs/foundry/records/ui/buildingblocks/styles/s_bioc.json",
+                        "entries": [{
+                            "_Type_": "BuildingBlocks_StyleEntry",
+                            "name": "Background Texture Style",
+                            "conditionsList": [{
+                                "_Type_": "BuildingBlocks_StyleConditionList",
+                                "conditions": [{
+                                    "_Type_": "BuildingBlocks_StyleSelectorConditionTag",
+                                    "tag": {"_RecordId_": texture_tag}
+                                }]
+                            }],
+                            "modifiers": [{
+                                "_Type_": "BuildingBlocks_FieldModifierString",
+                                "field": "ImagePath",
+                                "value": "UI/Textures/ModularKitStyles/BIOC/BIOC_bg.tif"
+                            }]
+                        }]
+                    }
+                ],
+                "scene": [],
+                "operations": [{
+                    "_Type_": "BuildingBlocks_BindingsTagFromIntegerSwitch",
+                    "values": [
+                        {"_Type_": "BuildingBlocks_IntegerTagPair", "first": 0, "second": null},
+                        {
+                            "_Type_": "BuildingBlocks_IntegerTagPair",
+                            "first": 1,
+                            "second": {"_RecordId_": texture_tag}
+                        }
+                    ]
+                }]
+            }
+        })
+    }
+
+
+    /// A host canvas (like M_MFD_Screen) with empty defaultStyles but a
+    /// WidgetCanvas node that carries a `canvas` URL to a content canvas.
+    fn host_canvas_with_widget_canvas_url(content_url: &str) -> serde_json::Value {
+        serde_json::json!({
+            "_RecordName_": "test_host",
+            "_RecordId_": "00000000-0000-0000-0000-000000000010",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 800.0, "y": 600.0, "z": 0.0},
+                "defaultStyles": {
+                    "_Type_": "BuildingBlocks_DefaultStyles",
+                    "sharedStyles": null,
+                    "entries": []
+                },
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "base_root"},
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetCanvas",
+                        "name": "canvas_content",
+                        "parent": "_PointsTo_:ptr:1",
+                        "canvas": content_url
+                    }
+                ]
+            }
+        })
+    }
+
+
+    /// Build a minimal canvas JSON that carries a single Pass 1 canvas-reference
+    /// modifier pointing to `child_url`.
+    fn canvas_with_style_ref(name: &str, child_url: &str) -> serde_json::Value {
+        serde_json::json!({
+            "_RecordName_": name,
+            "_RecordId_": "00000000-0000-0000-0000-0000000000aa",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "defaultStyles": {
+                    "_Type_": "BuildingBlocks_DefaultStyles",
+                    "sharedStyles": null,
+                    "entries": [{
+                        "matchTo": "",
+                        "modifiers": [{
+                            "field": {
+                                "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeCanvasReferenceRecord",
+                                "value": child_url
+                            }
+                        }]
+                    }]
+                },
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": format!("{name}_root")}
+                ]
+            }
+        })
+    }
+
+
+    /// Build a canvas with multiple conditional style entries, each pointing to
+    /// a different child canvas URL.
+    fn canvas_with_multi_conditional_refs(urls: &[(&str, &str)]) -> serde_json::Value {
+        let entries: Vec<serde_json::Value> = urls
+            .iter()
+            .map(|(name, url)| {
+                serde_json::json!({
+                    "name": name,
+                    "matchTo": "",
+                    "conditionsList": [{"_Type_": "BuildingBlocks_StyleConditionList", "conditions": [{"_Type_": "BuildingBlocks_StyleSelectorConditionType", "type": "Canvas"}]}],
+                    "modifiers": [{
+                        "field": {
+                            "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeCanvasReferenceRecord",
+                            "value": url
+                        }
+                    }]
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "_RecordName_": "multi_cond_root",
+            "_RecordId_": "00000000-0000-0000-0000-000000000030",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 100.0, "y": 100.0, "z": 0.0},
+                "defaultStyles": {
+                    "_Type_": "BuildingBlocks_DefaultStyles",
+                    "sharedStyles": null,
+                    "entries": entries
+                },
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "root"}
+                ]
+            }
+        })
+    }
+
+
+    #[test]
+    fn merge_scales_child_canvas_units_to_host_slot_size() {
+        // Parent canvas authored at 1920x1080 with a 400x400 WidgetCanvas slot.
+        let host = serde_json::json!({
+            "_RecordName_": "host_touch_slot",
+            "_RecordId_": "00000000-0000-0000-0000-000000000111",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_":"Vec3","x":1920.0,"y":1080.0,"z":0.0},
+                "defaultStyles": {
+                    "_Type_": "BuildingBlocks_DefaultStyles",
+                    "sharedStyles": null,
+                    "entries": [{
+                        "_Type_":"BuildingBlocks_StyleEntry",
+                        "name":"Default",
+                        "matchTo":"touch_slot",
+                        "conditionsList":[],
+                        "modifiers":[
+                            {"_Type_":"BuildingBlocks_FieldModifier",
+                             "field":{"_Type_":"BuildingBlocks_FieldModifierRecordRefTypeCanvasReferenceRecord","value":"file://./child_touch.json"}}
+                        ]
+                    }]
+                },
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_":"ptr:1","_Type_":"BuildingBlocks_DisplayWidget","name":"root"},
+                    {"_Pointer_":"ptr:2","_Type_":"BuildingBlocks_WidgetCanvas","name":"touch_slot","parent":"_PointsTo_:ptr:1",
+                     "sizing":{"_Type_":"BuildingBlocks_Size",
+                        "width":{"_Type_":"BuildingBlocks_FixedOrRelativeValue","value":400.0,"behavior":"Fixed"},
+                        "height":{"_Type_":"BuildingBlocks_FixedOrRelativeValue","value":400.0,"behavior":"Fixed"}}}
+                ]
+            }
+        });
+        // Child canvas authored at 1024x1024 with a 512px image.
+        let child = serde_json::json!({
+            "_RecordName_": "child_touch",
+            "_RecordId_": "00000000-0000-0000-0000-000000000112",
+            "_RecordValue_": {
+                "_Type_":"BuildingBlocks_Canvas",
+                "size":{"_Type_":"Vec3","x":1024.0,"y":1024.0,"z":0.0},
+                "scene":[
+                    {"_Pointer_":"ptr:10","_Type_":"BuildingBlocks_DisplayWidget","name":"child_root",
+                     "sizing":{"_Type_":"BuildingBlocks_Size",
+                        "width":{"_Type_":"BuildingBlocks_FixedOrRelativeValue","value":1024.0,"behavior":"Fixed"},
+                        "height":{"_Type_":"BuildingBlocks_FixedOrRelativeValue","value":1024.0,"behavior":"Fixed"}}},
+                    {"_Pointer_":"ptr:11","_Type_":"BuildingBlocks_WidgetImage","name":"child_image","parent":"_PointsTo_:ptr:10",
+                     "sizing":{"_Type_":"BuildingBlocks_Size",
+                        "width":{"_Type_":"BuildingBlocks_FixedOrRelativeValue","value":512.0,"behavior":"Fixed"},
+                        "height":{"_Type_":"BuildingBlocks_FixedOrRelativeValue","value":256.0,"behavior":"Fixed"}}}
+                ]
+            }
+        });
+
+        let scene = resolve_canvas_graph(&host, None, &|path| {
+            if path.to_ascii_lowercase().contains("child_touch.json") {
+                Ok(child.clone())
+            } else {
+                Err(format!("unexpected fetch path: {path}"))
+            }
+        })
+        .expect("resolve failed");
+
+        let image_node = scene
+            .nodes
+            .values()
+            .find(|n| n.name == "child_image")
+            .expect("child image node missing after merge");
+        let w = match image_node.sizing.width {
+            BbValue::Fixed(v) => v,
+            _ => panic!("child image width must stay fixed"),
+        };
+        let h = match image_node.sizing.height {
+            BbValue::Fixed(v) => v,
+            _ => panic!("child image height must stay fixed"),
+        };
+        assert!(
+            (w - 200.0).abs() < 0.01 && (h - 100.0).abs() < 0.01,
+            "expected 512x256 in 1024-child scaled into 400x400 slot => 200x100, got {w}x{h}"
+        );
+    }
+
+
+    #[test]
+    fn resolve_follows_widget_canvas_canvas_field() {
+        let content_url = "file://./content_canvas.json";
+        let host = host_canvas_with_widget_canvas_url(content_url);
+
+        // Content canvas has 5 nodes
+        let content = serde_json::json!({
+            "_RecordName_": "content_canvas",
+            "_RecordId_": "00000000-0000-0000-0000-000000000011",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 800.0, "y": 600.0, "z": 0.0},
+                "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "content_root"},
+                    {"_Pointer_": "ptr:2", "_Type_": "BuildingBlocks_WidgetIcon", "name": "icon1", "parent": "_PointsTo_:ptr:1"},
+                    {"_Pointer_": "ptr:3", "_Type_": "BuildingBlocks_WidgetIcon", "name": "icon2", "parent": "_PointsTo_:ptr:1"},
+                    {"_Pointer_": "ptr:4", "_Type_": "BuildingBlocks_WidgetTextField", "name": "text1", "parent": "_PointsTo_:ptr:1"},
+                    {"_Pointer_": "ptr:5", "_Type_": "BuildingBlocks_WidgetTextField", "name": "text2", "parent": "_PointsTo_:ptr:1"}
+                ]
+            }
+        });
+
+        let scene = resolve_canvas_graph(&host, None, &|url| {
+            assert_eq!(url, content_url, "fetcher called with unexpected url");
+            Ok(content.clone())
+        })
+        .expect("resolve failed");
+
+        // host (2) + content (5) = 7 nodes
+        assert_eq!(
+            scene.nodes.len(),
+            7,
+            "expected 7 merged nodes (2 host + 5 content), got {}",
+            scene.nodes.len()
+        );
+    }
+
+
+    #[test]
+    fn instantiated_false_widget_is_deactivated_and_not_merged() {
+        let host = serde_json::json!({
+            "_RecordName_": "test_host_instantiated_false",
+            "_RecordId_": "00000000-0000-0000-0000-000000000120",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 800.0, "y": 600.0, "z": 0.0},
+                "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "root"},
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetCanvas",
+                        "name": "attract_canvas",
+                        "parent": "_PointsTo_:ptr:1",
+                        "canvas": "file://./content_canvas.json"
+                    }
+                ],
+                "operations": [
+                    {"_Pointer_":"ptr:10","_Type_":"BuildingBlocks_BindingsBooleanVariable","value":"Bed/state.BaseScreens.Attract"},
+                    {"_Pointer_":"ptr:11","_Type_":"BuildingBlocks_BindingsBooleanVariable","value":"Bed/state.BaseScreens.MainMenu"},
+                    {"_Pointer_":"ptr:12","_Type_":"BuildingBlocks_BindingsBooleanField","widget":"_PointsTo_:ptr:2","field":"Instantiated","input":"_PointsTo_:ptr:10"}
+                ]
+            }
+        });
+        let content = serde_json::json!({
+            "_RecordName_": "content_canvas",
+            "_RecordId_": "00000000-0000-0000-0000-000000000121",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 800.0, "y": 600.0, "z": 0.0},
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "content_root"}
+                ]
+            }
+        });
+
+        let scene = resolve_canvas_graph(&host, None, &|url| {
+            assert_eq!(url, "file://./content_canvas.json");
+            Ok(content.clone())
+        })
+        .expect("resolve failed");
+
+        let widget = scene
+            .nodes
+            .get(&2)
+            .expect("host widget canvas ptr:2 must exist");
+        assert!(!widget.is_active, "Instantiated=false widget must be deactivated");
+        assert_eq!(
+            scene.nodes.len(),
+            2,
+            "inactive widget should not merge child canvas content"
+        );
+    }
+
+
+    #[test]
+    fn child_canvas_is_active_gate_uses_parent_selected_state() {
+        let host = serde_json::json!({
+            "_RecordName_": "test_host_selected_state",
+            "_RecordId_": "00000000-0000-0000-0000-000000000130",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 800.0, "y": 600.0, "z": 0.0},
+                "staticVariables": [
+                    {"name": "Standing/state.BaseScreens.Attract", "value": true}
+                ],
+                "defaultStyles": {"_Type_": "BuildingBlocks_DefaultStyles", "sharedStyles": null, "entries": []},
+                "brandStyles": [],
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "root"},
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetCanvas",
+                        "name": "footer_slot",
+                        "parent": "_PointsTo_:ptr:1",
+                        "canvas": "file://./footer_canvas.json"
+                    }
+                ],
+                "operations": [
+                    {"_Pointer_":"ptr:10","_Type_":"BuildingBlocks_BindingsBooleanVariable","binding":"Standing/state.BaseScreens.Attract"}
+                ]
+            }
+        });
+        let footer = serde_json::json!({
+            "_RecordName_": "footer_canvas",
+            "_RecordId_": "00000000-0000-0000-0000-000000000131",
+            "_RecordValue_": {
+                "_Type_": "BuildingBlocks_Canvas",
+                "size": {"_Type_": "Vec3", "x": 800.0, "y": 80.0, "z": 0.0},
+                "scene": [
+                    {"_Pointer_": "ptr:1", "_Type_": "BuildingBlocks_DisplayWidget", "name": "footer_root"},
+                    {"_Pointer_": "ptr:2", "_Type_": "BuildingBlocks_WidgetTextField", "name": "patient_name", "parent": "_PointsTo_:ptr:1"}
+                ],
+                "operations": [
+                    {"_Pointer_":"ptr:10","_Type_":"BuildingBlocks_BindingsBooleanVariable","binding":"Standing/state.BaseScreens.Attract"},
+                    {"_Pointer_":"ptr:11","_Type_":"BuildingBlocks_BindingsBooleanInvert","input":"_PointsTo_:ptr:10"},
+                    {"_Type_":"BuildingBlocks_BindingsBooleanField","widget":"_PointsTo_:ptr:2","field":"IsActive","input":"_PointsTo_:ptr:11"}
+                ]
+            }
+        });
+
+        let scene = resolve_canvas_graph(&host, None, &|url| {
+            assert_eq!(url, "file://./footer_canvas.json");
+            Ok(footer.clone())
+        })
+        .expect("resolve failed");
+
+        let patient = scene
+            .nodes
+            .values()
+            .find(|node| node.name == "patient_name")
+            .expect("merged footer patient node must exist");
+        assert!(
+            !patient.is_active,
+            "child IsActive gate must inherit the parent's selected Attract state"
+        );
+    }
+}

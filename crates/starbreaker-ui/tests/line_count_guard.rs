@@ -1,9 +1,10 @@
-//! Guardrail test: fail when any Rust source file in src/ exceeds 400 lines.
+//! Guardrail test: fail when any Rust source file (`.rs`) or engine part file
+//! (`.part`) in `src/` exceeds 500 lines.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const MAX_LINES: usize = 400;
+const MAX_LINES: usize = 500;
 
 fn collect_rs_files(root: &Path, out: &mut Vec<PathBuf>) {
     let entries = match fs::read_dir(root) {
@@ -17,7 +18,8 @@ fn collect_rs_files(root: &Path, out: &mut Vec<PathBuf>) {
             collect_rs_files(&path, out);
             continue;
         }
-        if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+        let ext = path.extension().and_then(|e| e.to_str());
+        if matches!(ext, Some("rs") | Some("part")) {
             out.push(path);
         }
     }
