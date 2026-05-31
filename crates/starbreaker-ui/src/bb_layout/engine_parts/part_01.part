@@ -1,0 +1,340 @@
+// BuildingBlocks layout engine — pixel-space rect resolver.
+//
+// Turns a merged [`BbScene`] (produced by [`crate::bb_resolve`]) into a
+// [`LayoutResult`] that maps every [`BbNodeId`] to a [`Rect`] in screen-pixel
+// coordinates, plus a deterministic DFS draw order.
+//
+// # Coordinate system
+// Screen-space, +x right, +y down, units = pixels.  The BB authoring system
+// also uses +x right, +y down (verified: in the Clipper reference screenshots
+// a node at `position.y = 100` canvas units appears below the top edge).
+//
+// # Percent sizing
+// `BbValue::Percent(p)` stores the raw `value` from the DataCore JSON.  In
+// every tested fixture `1.0` represents 100 % of the parent dimension (i.e.
+// the value is already a fraction, **not** a 0–100 percentage).  The task
+// specification stated "0–100" but fixture inspection (`MC_S_Target_Master`,
+// `BB_ScreenRadar`, etc.) shows `value: 1` for "fill parent" and `value: 0.08`
+// for an 8 % column.  We therefore compute `parent_inner.w * p` directly.
+//
+// # Margin simplification (Phase A1)
+// For Phase A1, `margin` is applied as a top-left offset only: positive
+// `margin.left` shifts the outer rect rightward, positive `margin.top` shifts
+// it downward.  Full TRBL margin layout (e.g. shrinking the available space
+// for siblings) is deferred to Phase A3.
+//
+// # Stacking
+// BB does not use flexbox by default.  All siblings are laid out using the
+// same parent inner rect as origin (z-order overlay).  If a parent node's
+// `_Type_` is `BuildingBlocks_FlexContainer` (or its raw JSON indicates a flex
+// layout policy), a warning is logged and the same overlay fallback is used.
+// Flex support is deferred to Phase A6.
+
+use std::collections::BTreeMap;
+
+use image::{Rgba, RgbaImage};
+use log::warn;
+
+use crate::bb_scene::{BbNode, BbNodeId, BbNodeType, BbScene, BbValue};
+
+const ADDITIVE_ALTERNATE_REVERSE_POSITION_PHASE_RATIO: f32 = 2.0 / 3.0;
+const SYNTHETIC_NODE_ID_BASE: BbNodeId = 0x8000_0000;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Public types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Axis-aligned rectangle in pixel space.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Rect {
+    /// Left edge (pixels from canvas left).
+    pub x: f32,
+    /// Top edge (pixels from canvas top).
+    pub y: f32,
+    /// Width in pixels.
+    pub w: f32,
+    /// Height in pixels.
+    pub h: f32,
+}
+
+impl Rect {
+    /// Return a new rect inset by `(top, right, bottom, left)` pixels.
+    ///
+    /// If the inset would make the dimension negative the result is clamped to
+    /// zero size at the centre of the corresponding axis.
+    pub fn inset(&self, t: f32, r: f32, b: f32, l: f32) -> Rect {
+        let x = self.x + l;
+        let y = self.y + t;
+        let w = (self.w - l - r).max(0.0);
+        let h = (self.h - t - b).max(0.0);
+        Rect { x, y, w, h }
+    }
+
+    /// Return `true` if `(px, py)` lies inside (or on the edge of) this rect.
+    pub fn contains_point(&self, px: f32, py: f32) -> bool {
+        px >= self.x && px <= self.x + self.w && py >= self.y && py <= self.y + self.h
+    }
+
+    /// Return the intersection of this rect with `other`, or `None` when they
+    /// do not overlap.
+    pub fn intersect(&self, other: &Rect) -> Option<Rect> {
+        let x0 = self.x.max(other.x);
+        let y0 = self.y.max(other.y);
+        let x1 = (self.x + self.w).min(other.x + other.w);
+        let y1 = (self.y + self.h).min(other.y + other.h);
+        if x1 > x0 && y1 > y0 {
+            Some(Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
+        } else {
+            None
+        }
+    }
+
+    /// Centre point of this rect.
+    pub fn centre(&self) -> (f32, f32) {
+        (self.x + self.w * 0.5, self.y + self.h * 0.5)
+    }
+}
+
+/// Output of [`layout`]: pixel-space rects for every node and a DFS draw order.
+pub struct LayoutResult {
+    /// Canvas rect: always `(0, 0, target_w, target_h)`.
+    pub canvas: Rect,
+    /// Pixel-space outer rect for every node keyed by [`BbNodeId`].
+    ///
+    /// Inactive nodes (`is_active == false`) are still present in `rects` —
+    /// their geometry may affect parent layout — but they are absent from
+    /// [`draw_order`].
+    pub rects: BTreeMap<BbNodeId, Rect>,
+    /// Uniform authoring-canvas-to-target scale applied to fixed measurements.
+    pub canvas_scale: f32,
+    /// Render order.
+    ///
+    /// DFS from each root, parent before children.  Siblings are sorted by
+    /// `(layer ascending, node-id ascending)`.  Node id order matches the
+    /// declaration order in the source JSON (ptr values increase monotonically
+    /// with array position).  Inactive nodes are excluded.
+    pub draw_order: Vec<BbNodeId>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Layout entry point
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Compute pixel-space rects for every node in `scene` at `(target_w, target_h)`.
+///
+/// # Scale and letterboxing
+/// The BB canvas declares an authoring coordinate size (`scene.canvas_size`).  A
+/// **uniform** scale factor `scale = min(target_w / canvas_w, target_h / canvas_h)`
+/// is applied so that `Fixed`-unit node positions / sizes are never stretched or
+/// squeezed disproportionately.  The scaled canvas is centred within the target:
+///
+/// ```text
+/// letterbox_x = (target_w − canvas_w × scale) / 2
+/// letterbox_y = (target_h − canvas_h × scale) / 2
+/// ```
+///
+/// Roots receive the centred canvas rect as their `parent_inner`; percent-based
+/// children fill that rect naturally.
+///
+/// # Panics
+/// Never panics on well-formed input.  Unknown `BbValue` behaviors produce
+/// warnings and fall back to filling the parent dimension.
+pub fn layout(scene: &BbScene, target_w: u32, target_h: u32) -> LayoutResult {
+    layout_with_animation_sample(scene, target_w, target_h, None)
+}
+
+/// Compute pixel-space rects while applying sampled animated SizeX/SizeY
+/// modifiers when `animation_sample_percent` is provided.
+pub fn layout_with_animation_sample(
+    scene: &BbScene,
+    target_w: u32,
+    target_h: u32,
+    animation_sample_percent: Option<f32>,
+) -> LayoutResult {
+    let canvas_scale = if scene.canvas_size.0 > 0.0 && scene.canvas_size.1 > 0.0 {
+        let sx = target_w as f32 / scene.canvas_size.0;
+        let sy = target_h as f32 / scene.canvas_size.1;
+        sx.min(sy)
+    } else {
+        1.0
+    };
+
+    // Centred canvas rect inside the target.
+    let scaled_w = scene.canvas_size.0 * canvas_scale;
+    let scaled_h = scene.canvas_size.1 * canvas_scale;
+    let offset_x = ((target_w as f32 - scaled_w) * 0.5).max(0.0);
+    let offset_y = ((target_h as f32 - scaled_h) * 0.5).max(0.0);
+    let canvas_rect = Rect { x: offset_x, y: offset_y, w: scaled_w, h: scaled_h };
+
+    // The LayoutResult.canvas always spans the full target.
+    let canvas = Rect { x: 0.0, y: 0.0, w: target_w as f32, h: target_h as f32 };
+
+    let mut rects: BTreeMap<BbNodeId, Rect> = BTreeMap::new();
+    let mut draw_order: Vec<BbNodeId> = Vec::new();
+
+    // Collect roots and sort deterministically while preserving authored order
+    // when synthetic ids are present (pointerless nodes get high synthetic ids).
+    let mut roots: Vec<BbNodeId> = scene.roots.clone();
+    let has_synthetic_roots = roots.iter().any(|id| *id >= SYNTHETIC_NODE_ID_BASE);
+    if has_synthetic_roots {
+        roots.sort_by_key(|&id| scene.nodes.get(&id).map(|n| n.layer).unwrap_or(0));
+    } else {
+        roots.sort_by_key(|&id| {
+            let layer = scene.nodes.get(&id).map(|n| n.layer).unwrap_or(0);
+            (layer, id)
+        });
+    }
+
+    for root_id in roots {
+        layout_node(
+            root_id,
+            canvas_rect,
+            scene,
+            canvas_scale,
+            canvas_scale,
+            animation_sample_percent,
+            &mut rects,
+            &mut draw_order,
+        );
+    }
+
+    LayoutResult { canvas, rects, draw_order, canvas_scale }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Recursive layout
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn layout_node(
+    node_id: BbNodeId,
+    parent_inner: Rect,
+    scene: &BbScene,
+    csx: f32,
+    csy: f32,
+    animation_sample_percent: Option<f32>,
+    rects: &mut BTreeMap<BbNodeId, Rect>,
+    draw_order: &mut Vec<BbNodeId>,
+) {
+    let Some(node) = scene.nodes.get(&node_id) else { return };
+
+    // ── 1. Resolve outer dimensions ─────────────────────────────────────────
+    //
+    // Two-pass resolve: a `PercentOfX` height or `PercentOfY` width is a
+    // percentage of THIS NODE's OTHER axis, not the parent's other axis.
+    // First compute each axis using parent's other-axis as cross_dim (naïve);
+    // then re-resolve any cross-axis behaviour using the node's own naïve
+    // opposite dimension. This handles the common "square icon" idiom
+    // (e.g. `width: Percent(0.8), height: PercentOfX(1.0)`) correctly while
+    // remaining a no-op for non-cross-axis sizing.
+    let fills_body_background_surface = fills_body_background_surface(node);
+    let width_value = sampled_sizing_value(&node.sizing.width, &node.raw, "SizeX", animation_sample_percent);
+    let height_value = sampled_sizing_value(&node.sizing.height, &node.raw, "SizeY", animation_sample_percent);
+    let naive_w = resolve_value_for_node(node, &width_value, parent_inner.w, parent_inner.h, csx, true);
+    let naive_h = resolve_value_for_node(node, &height_value, parent_inner.h, parent_inner.w, csy, false);
+    let base_outer_w = if fills_body_background_surface {
+        parent_inner.w
+    } else if matches!(width_value, BbValue::Other { ref behavior, .. } if behavior == "PercentOfY") {
+        resolve_value_for_node(node, &width_value, parent_inner.w, naive_h, csx, true)
+    } else {
+        naive_w
+    };
+    let base_outer_h = if fills_body_background_surface {
+        parent_inner.h
+    } else if matches!(height_value, BbValue::Other { ref behavior, .. } if behavior == "PercentOfX") {
+        resolve_value_for_node(node, &height_value, parent_inner.h, naive_w, csy, false)
+    } else {
+        naive_h
+    };
+    let (scale_x, scale_y) = authored_node_scale(node, scene);
+    let outer_w = base_outer_w * scale_x;
+    let outer_h = base_outer_h * scale_y;
+
+    // ── 2. Anchor / pivot / position ────────────────────────────────────────
+    //
+    // anchor: normalised point within the *parent inner rect* that the node
+    //         "attaches" to.
+    // pivot:  normalised point within the *node itself* that lands on the
+    //         anchored position.
+    // position / positionOffset: additional offset in canvas authoring units.
+    //
+    // Formula:
+    //   anchor_world_x = parent_inner.x + parent_inner.w * anchor.x
+    //                    + (position.x + positionOffset.x) * csx
+    //   outer.x        = anchor_world_x - outer_w * pivot.x
+
+    let offset_x = sampled_position_offset(
+        &node.raw,
+        "PosXOffset",
+        node.position_offset.x,
+        animation_sample_percent,
+    );
+    let offset_y = sampled_position_offset(
+        &node.raw,
+        "PosYOffset",
+        node.position_offset.y,
+        animation_sample_percent,
+    );
+    let pos_x = (node.position.x + offset_x) * csx;
+    let pos_y = (node.position.y + offset_y) * csy;
+
+    let is_root_fullscreen_canvas = matches!(node.ty, BbNodeType::WidgetCanvas)
+        && node.parent.is_none_or(|pid| scene.roots.contains(&pid))
+        && matches!(width_value, BbValue::Percent(p) if (p - 1.0).abs() < 0.0001)
+        && matches!(height_value, BbValue::Percent(p) if p > 0.90)
+        && (node.anchor.x - 0.5).abs() < 0.01
+        && (node.pivot.x - 0.5).abs() < 0.01;
+    let is_child_canvas_surface_root = matches!(node.ty, BbNodeType::DisplayWidget)
+        && parent_canvas_is_surface_host(node, scene)
+        && matches!(width_value, BbValue::Percent(p) if (p - 1.0).abs() < 0.0001)
+        && matches!(height_value, BbValue::Percent(p) if p > 0.90)
+        && node.position.x.abs() < 0.0001
+        && node.position.y.abs() < 0.0001
+        && offset_x.abs() < 0.0001
+        && offset_y.abs() < 0.0001;
+    let (outer_x, outer_y) = if is_root_fullscreen_canvas || is_child_canvas_surface_root || fills_body_background_surface {
+        // Full-bleed containers are parent-space overlays; authoring anchor/pivot
+        // offsets should not shift them out of the parent rect.
+        (parent_inner.x + pos_x, parent_inner.y + pos_y)
+    } else {
+        let mirrored_anchor_x = node.anchor.x >= 0.0
+            && node.anchor.x <= 1.0
+            && node.pivot.x >= 0.99
+            && matches!(
+                width_value,
+                BbValue::Other {
+                    value,
+                    ref behavior
+                } if behavior == "Auto" && value > 0.0 && value < 1.0
+            );
+        let anchor_x = if mirrored_anchor_x {
+            1.0 - node.anchor.x
+        } else {
+            node.anchor.x
+        };
+        let pivot_y = effective_pivot_y(node);
+        let anchor_world_x = parent_inner.x + parent_inner.w * anchor_x + pos_x;
+        let anchor_world_y = parent_inner.y + parent_inner.h * node.anchor.y + pos_y;
+        (
+            anchor_world_x - outer_w * node.pivot.x,
+            anchor_world_y - outer_h * pivot_y,
+        )
+    };
+
+    // ── 3. Margin (Phase A1: top-left offset only) ───────────────────────────
+    let outer_x = outer_x + node.margin.left * csx;
+    let outer_y = outer_y + node.margin.top * csy;
+
+    let outer_rect = Rect { x: outer_x, y: outer_y, w: outer_w, h: outer_h };
+
+    layout_node_with_rect(
+        node_id,
+        outer_rect,
+        scene,
+        csx,
+        csy,
+        animation_sample_percent,
+        rects,
+        draw_order,
+    );
+}
+

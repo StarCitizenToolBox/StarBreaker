@@ -122,6 +122,20 @@ impl SwfAssetLibrary {
         extract_stage_size(&self.raw)
     }
 
+    pub fn stage_visual_bounds(&self, frame_index: u32) -> Option<(f32, f32, f32, f32)> {
+        let stage_places = self.stage_frame(frame_index);
+        if stage_places.is_empty() {
+            return None;
+        }
+
+        let mut out: Option<(f32, f32, f32, f32)> = None;
+        for place in &stage_places {
+            let matrix = Matrix2d::from_swf(&place.matrix);
+            self.accumulate_visual_bounds(place.character_id, matrix, 6, &mut out);
+        }
+        out
+    }
+
     pub fn bitmap_count(&self) -> usize {
         self.bitmaps.len()
     }
@@ -143,5 +157,124 @@ impl SwfAssetLibrary {
             .iter()
             .filter(|(name, _)| !name.starts_with("__Packages."))
             .map(|(_, &id)| id)
+    }
+
+    fn accumulate_visual_bounds(
+        &self,
+        character_id: CharacterId,
+        matrix: Matrix2d,
+        max_depth: u8,
+        out: &mut Option<(f32, f32, f32, f32)>,
+    ) {
+        if let Some(shape) = self.get_shape(character_id) {
+            if !shape_contributes_visual_bounds(shape) {
+                return;
+            }
+
+            let b = &shape.shape_bounds;
+            let bx0 = b.x_min.to_pixels() as f32;
+            let by0 = b.y_min.to_pixels() as f32;
+            let bx1 = b.x_max.to_pixels() as f32;
+            let by1 = b.y_max.to_pixels() as f32;
+            let corners = [(bx0, by0), (bx1, by0), (bx0, by1), (bx1, by1)];
+
+            let mut min_x = f32::INFINITY;
+            let mut min_y = f32::INFINITY;
+            let mut max_x = f32::NEG_INFINITY;
+            let mut max_y = f32::NEG_INFINITY;
+
+            for (x, y) in corners {
+                let (tx, ty) = matrix.apply(x, y);
+                min_x = min_x.min(tx);
+                min_y = min_y.min(ty);
+                max_x = max_x.max(tx);
+                max_y = max_y.max(ty);
+            }
+
+            if min_x.is_finite() && min_y.is_finite() && max_x.is_finite() && max_y.is_finite() {
+                *out = Some(match *out {
+                    Some((ox0, oy0, ox1, oy1)) => {
+                        (ox0.min(min_x), oy0.min(min_y), ox1.max(max_x), oy1.max(max_y))
+                    }
+                    None => (min_x, min_y, max_x, max_y),
+                });
+            }
+            return;
+        }
+
+        if max_depth == 0 {
+            return;
+        }
+
+        let sprite_places = self.extract_sprite_first_frame(character_id);
+        if sprite_places.is_empty() {
+            return;
+        }
+
+        for place in &sprite_places {
+            let child_matrix = matrix.compose(Matrix2d::from_swf(&place.matrix));
+            self.accumulate_visual_bounds(
+                place.character_id,
+                child_matrix,
+                max_depth.saturating_sub(1),
+                out,
+            );
+        }
+    }
+}
+
+fn shape_contributes_visual_bounds(shape: &ShapeRecord) -> bool {
+    let has_opaque_fill = shape
+        .fill_styles
+        .iter()
+        .any(|fill| matches!(fill, swf::FillStyle::Color(c) if c.a > 0));
+    if has_opaque_fill {
+        return true;
+    }
+
+    shape.line_styles.iter().any(|line| {
+        line.width().to_pixels() > 0.0
+            && matches!(line.fill_style(), swf::FillStyle::Color(c) if c.a > 0)
+    })
+}
+
+#[derive(Clone, Copy)]
+struct Matrix2d {
+    a: f32,
+    b: f32,
+    c: f32,
+    d: f32,
+    tx: f32,
+    ty: f32,
+}
+
+impl Matrix2d {
+    fn from_swf(m: &swf::Matrix) -> Self {
+        Self {
+            a: m.a.to_f32(),
+            b: m.b.to_f32(),
+            c: m.c.to_f32(),
+            d: m.d.to_f32(),
+            tx: m.tx.to_pixels() as f32,
+            ty: m.ty.to_pixels() as f32,
+        }
+    }
+
+    fn compose(self, rhs: Self) -> Self {
+        Self {
+            a: self.a * rhs.a + self.c * rhs.b,
+            b: self.b * rhs.a + self.d * rhs.b,
+            c: self.a * rhs.c + self.c * rhs.d,
+            d: self.b * rhs.c + self.d * rhs.d,
+            tx: self.a * rhs.tx + self.c * rhs.ty + self.tx,
+            ty: self.b * rhs.tx + self.d * rhs.ty + self.ty,
+        }
+    }
+
+    fn apply(self, x: f32, y: f32) -> (f32, f32) {
+        (
+            self.a * x + self.c * y + self.tx,
+            self.b * x + self.d * y + self.ty,
+        )
     }
 }

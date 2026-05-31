@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::bb_brand_apply::{apply_brand_modifiers, apply_scene_style_entries};
+use crate::bb_brand_style::resolve_brand_style;
 use crate::canvas::CanvasWidgetTreeResolver;
 use crate::compose::{ComposeContext, encode_png};
 use crate::defaults::DefaultValueRegistry;
@@ -145,10 +147,21 @@ pub fn compile_ir_for_binding(inputs: &PipelineInputs<'_>) -> Result<UiIrDocumen
         inputs.canvas_fetcher,
         inputs.style_fetcher,
     );
+    let effective_manufacturer_id = b
+        .manufacturer_id
+        .or_else(|| {
+            style_manifest
+                .selected_source
+                .as_deref()
+                .and_then(|source| source.strip_prefix("manufacturer:"))
+        })
+        // Keep brand/style resolution deterministic when binding-level
+        // manufacturer metadata is absent.
+        .or(Some("drak"));
 
-    let scene = crate::bb_resolve::resolve_canvas_graph_with_loc(
+    let mut scene = crate::bb_resolve::resolve_canvas_graph_with_loc(
         &raw_root_json,
-        b.manufacturer_id,
+        effective_manufacturer_id,
         &|p| {
             inputs
                 .canvas_fetcher
@@ -159,16 +172,54 @@ pub fn compile_ir_for_binding(inputs: &PipelineInputs<'_>) -> Result<UiIrDocumen
     )
     .map_err(UiError::RenderError)?;
 
+    project_canvas_style_entries(
+        &mut scene,
+        &raw_root_json,
+        effective_manufacturer_id,
+        inputs.loc_fetcher,
+    );
+
     let swf_manifest = build_swf_selection_manifest(
         &raw_root_json,
         &resolved,
-        b.manufacturer_id.unwrap_or("drak"),
+        effective_manufacturer_id.unwrap_or("drak"),
         inputs.swf_fetcher,
     );
     let selected_swf_source = swf_manifest
         .valid_candidates
         .first()
         .map(|candidate| candidate.path.clone());
+
+    let mut effective_target_size = inputs.target_size;
+    if let Some(swf_source) = selected_swf_source.as_deref()
+        && let Ok(swf_bytes) = inputs.swf_fetcher.fetch_swf_bytes(swf_source)
+        && let Ok(swf_library) = crate::swf_assets::SwfAssetLibrary::new(swf_bytes)
+    {
+        let (sw, sh) = swf_library.stage_size();
+        let content_aspect = swf_library
+            .stage_visual_bounds(0)
+            .and_then(|(x0, y0, x1, y1)| {
+                let w = (x1 - x0).abs();
+                let h = (y1 - y0).abs();
+                if w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0 {
+                    Some(h / w)
+                } else {
+                    None
+                }
+            });
+        if sw.is_finite() && sh.is_finite() && sw > 0.0 && sh > 0.0 {
+            let aspect = content_aspect.unwrap_or(sh / sw);
+            if aspect > 0.0 && aspect.is_finite() {
+                let width = inputs.target_size.0.max(1);
+                let swf_height = ((width as f32) * aspect).round().max(1.0) as u32;
+                let height = swf_height.max(1);
+                // Avoid pathological SWF headers from collapsing layout.
+                if width <= 8192 && height <= 8192 {
+                    effective_target_size = (width, height);
+                }
+            }
+        }
+    }
 
     let defaults = DefaultValueRegistry::with_pipeline_defaults(inputs.localization_map.clone());
     let asset_manifest = build_asset_reference_manifest(&scene, inputs.asset_fetcher);
@@ -178,7 +229,7 @@ pub fn compile_ir_for_binding(inputs: &PipelineInputs<'_>) -> Result<UiIrDocumen
         Some(inputs.canvas_fetcher),
         effective_guid,
         canvas_name,
-        inputs.target_size,
+        effective_target_size,
         &defaults,
         style_manifest.selected_source,
         selected_swf_source,
@@ -198,11 +249,46 @@ pub fn compile_ir_for_binding(inputs: &PipelineInputs<'_>) -> Result<UiIrDocumen
     Ok(ir)
 }
 
+fn project_canvas_style_entries(
+    scene: &mut crate::bb_scene::BbScene,
+    raw_root_json: &serde_json::Value,
+    manufacturer_id: Option<&str>,
+    loc_fetcher: Option<&dyn crate::bb_loc::LocFetcher>,
+) {
+    let record_value = raw_root_json.get("_RecordValue_").unwrap_or(raw_root_json);
+    let selected_brand = resolve_brand_style(raw_root_json, manufacturer_id, None);
+    let palette_source = selected_brand.map(|brand| brand.raw).unwrap_or(record_value);
+
+    if let Some(default_entries) = record_value
+        .get("defaultStyles")
+        .and_then(|styles| styles.get("entries"))
+        .and_then(|entries| entries.as_array())
+    {
+        apply_scene_style_entries(scene, default_entries, palette_source, loc_fetcher);
+    }
+
+    if let Some(brand) = resolve_brand_style(raw_root_json, manufacturer_id, None) {
+        apply_brand_modifiers(scene, &brand, loc_fetcher);
+    }
+}
+
 /// Render via IR compilation and IR-only rendering.
 pub fn render_for_binding_ir(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiError> {
     let ir = compile_ir_for_binding(inputs)?;
 
-    let style = load_style_for_ir(&ir, inputs)?;
+    let mut style = load_style_for_ir(&ir, inputs)?;
+    if ir
+        .canvas_name
+        .as_deref()
+        .is_some_and(|name| name.to_ascii_lowercase().contains("annunciator"))
+    {
+        style.background = crate::canvas::RgbaColor {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+    }
     let defaults = DefaultValueRegistry::with_pipeline_defaults(inputs.localization_map.clone());
 
     let swf_paths = ir
@@ -216,10 +302,12 @@ pub fn render_for_binding_ir(inputs: &PipelineInputs<'_>) -> Result<Vec<u8>, UiE
         defaults: &defaults,
         assets: &assets,
     };
-    let atlas = crate::bb_atlas::AtlasLibrary::new(
-        inputs.asset_fetcher,
-        inputs.binding.manufacturer_id,
-    );
+    let atlas_manufacturer_id = inputs.binding.manufacturer_id.or_else(|| {
+        ir.selected_style_source
+            .as_deref()
+            .and_then(|source| source.strip_prefix("manufacturer:"))
+    });
+    let atlas = crate::bb_atlas::AtlasLibrary::new(inputs.asset_fetcher, atlas_manufacturer_id);
 
     let image = match ir.renderer_hint {
         UiRendererHint::Bb => render_ui_ir_document(&ir, &ctx, &atlas)?,

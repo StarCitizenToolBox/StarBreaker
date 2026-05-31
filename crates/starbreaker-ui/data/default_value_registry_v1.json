@@ -9,6 +9,12 @@
     "/ship/hp/current": "MAX",
     "/ship/hp/max": "MAX",
     "/seatdashboard/powerstate": "OFFLINE",
+    "/AnnunciatorProvider/Issues/[0000]/Severity": 1,
+      "/AnnunciatorProvider/Issues/[0001]/Severity": 4,
+    "/AnnunciatorProvider/Issues/[0002]/Severity": 1,
+    "/AnnunciatorProvider/Issues/[0003]/Severity": 1,
+      "/AnnunciatorProvider/Issues/[0003]/Severity": 1,
+      "/AnnunciatorProvider/Issues/[0004]/Severity": 5,
     "/seatdashboard/powercurrent": 2,
     "/seatdashboard/powermax": 16,
     "/vehicle/gungroup": "(ALL)",
@@ -27,6 +33,8 @@
     "state.BaseScreens.ConfirmNoInjuries": false,
     "state.BaseScreens.CloneMe": false,
     "state.BaseScreens.Admin": false
+    ,"EnableBackground": true,
+    "isAlignedRight": true
   },
   "localization": {
     "hud_notarget": "NO TARGET",

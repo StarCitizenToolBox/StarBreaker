@@ -149,7 +149,9 @@ impl BindingResolver {
 
         let mut widget_field_to_input_ptrs: HashMap<(BbNodeId, String), Vec<BbNodeId>> =
             HashMap::new();
+        let mut field_name_to_input_ptrs: HashMap<String, Vec<BbNodeId>> = HashMap::new();
         for (key, mut pairs) in widget_field_to_input_prio_ptrs {
+            let field_name = key.1.clone();
             pairs.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
             let mut ordered: Vec<BbNodeId> = Vec::new();
             for (_, ptr) in pairs {
@@ -157,7 +159,39 @@ impl BindingResolver {
                     ordered.push(ptr);
                 }
             }
+            for ptr in &ordered {
+                let entry = field_name_to_input_ptrs
+                    .entry(field_name.clone())
+                    .or_default();
+                if !entry.contains(ptr) {
+                    entry.push(*ptr);
+                }
+            }
             widget_field_to_input_ptrs.insert(key, ordered);
+        }
+
+        if std::env::var("BB_PRIMARY_TAG_PROBE").as_deref() == Ok("1") {
+            let mut count = 0usize;
+            for ((widget, field), ptrs) in &widget_field_to_input_ptrs {
+                if field == "PrimaryStateTag" || field == "IsActive" {
+                    count += 1;
+                    let typed_ptrs = ptrs
+                        .iter()
+                        .map(|ptr| {
+                            let ty = ptr_to_op
+                                .get(ptr)
+                                .and_then(|op| op.get("_Type_"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("<none>");
+                            format!("ptr:{ptr}:{ty}")
+                        })
+                        .collect::<Vec<_>>();
+                    log::info!(
+                        "primary-tag-probe: widget=ptr:{widget} field={field} inputs={typed_ptrs:?}"
+                    );
+                }
+            }
+            log::info!("primary-tag-probe: field mappings count={count}");
         }
 
         Self {
@@ -165,6 +199,7 @@ impl BindingResolver {
             widget_to_loc_key,
             widget_to_input_ptrs,
             widget_field_to_input_ptrs,
+            field_name_to_input_ptrs,
             ptr_to_op,
             ptr_to_path,
             widget_to_string,

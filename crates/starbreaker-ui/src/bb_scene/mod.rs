@@ -1,3 +1,4 @@
+mod clone_expand;
 mod fields;
 mod parse;
 #[cfg(test)]

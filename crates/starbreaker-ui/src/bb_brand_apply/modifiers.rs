@@ -211,25 +211,25 @@ fn apply_number_field(field_name: &str, value: f64, node: &mut BbNode) {
                 border.left.width = width;
             }
         }
-        "BorderWidthTop" => {
+        "BorderWidthTop" | "BorderTopWidth" => {
             ensure_border(node);
             if let Some(border) = &mut node.border {
                 border.top.width = value as f32;
             }
         }
-        "BorderWidthRight" => {
+        "BorderWidthRight" | "BorderRightWidth" => {
             ensure_border(node);
             if let Some(border) = &mut node.border {
                 border.right.width = value as f32;
             }
         }
-        "BorderWidthBottom" => {
+        "BorderWidthBottom" | "BorderBottomWidth" => {
             ensure_border(node);
             if let Some(border) = &mut node.border {
                 border.bottom.width = value as f32;
             }
         }
-        "BorderWidthLeft" => {
+        "BorderWidthLeft" | "BorderLeftWidth" => {
             ensure_border(node);
             if let Some(border) = &mut node.border {
                 border.left.width = value as f32;

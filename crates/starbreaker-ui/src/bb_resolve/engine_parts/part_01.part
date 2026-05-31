@@ -1,0 +1,360 @@
+// BuildingBlocks canvas graph resolver.
+//
+// Two-pass drill-down from a root `BuildingBlocks_Canvas` JSON record:
+//
+// **Pass 1** — `defaultStyles` / `brandStyles` canvas-reference modifiers.
+// Selects the *default-state* entry from `defaultStyles.entries[]` (or a
+// matching `brandStyles[]` entry) and fetches its
+// `CanvasReferenceRecord`-typed modifier value.  The default-state entry is:
+// 1. The first entry whose `conditionsList` is absent or empty
+//    (unconditional — always active regardless of game state).
+// 2. Failing that, the entry whose condition tag matches the scene node with
+//    the highest style-tag count ("most-tagged node" heuristic — the primary
+//    content slot carries more tags than sub-component slots).
+// 3. Last resort: the first entry overall (used when no scene-node heuristic
+//    applies, e.g. `MC_S_Target_Master` which has exactly one conditional
+//    entry that is effectively the default).
+//
+// Selecting a single entry prevents runtime mode-switching canvases (e.g.
+// `GunsMode`, `NavMode`, `TurretMode` on `MC_S_Self_Master`) from all being
+// merged into the static render at once.  Each fetched child canvas is
+// itself resolved recursively (up to `MAX_CANVAS_DEPTH` total levels), so
+// deep hierarchies like
+// `MC_S_Power_Master → GEN_MC_S_Power → gen_mc_s_powerlists → …` are fully
+// expanded in one call.
+//
+// **Pass 2** — `WidgetCanvas.canvas` field.
+// Some host canvases (e.g. `M_MFD_Screen`) have an empty `defaultStyles` and
+// carry all their content via a `BuildingBlocks_WidgetCanvas` node whose
+// `canvas` field is a `file://` URL pointing to the real content canvas.
+// Pass 2 follows those references recursively so the merged scene includes
+// the full content hierarchy.  Both passes share the same depth counter and
+// a global `visited` path set to guard against cycles.
+//
+// **Mode-switch guard** — `conditional_canvas_norms`.
+// All canvas URLs referenced by *any* conditional entry (regardless of which
+// entry Pass 1 selected) are collected into `conditional_canvas_norms`.
+// Pass 2 skips any URL in this set that was not visited by Pass 1, preventing
+// WidgetCanvas nodes that serve as mode-switchable slots (e.g. `canvas_NavMode`
+// pointing to `gen_mc_s_nav.json`) from being followed when a different mode
+// was selected in Pass 1.
+
+use std::collections::{HashMap, HashSet};
+
+use crate::bb_loc::LocFetcher;
+use crate::bb_scene::{BbNodeId, BbNodeType, BbScene, BbValue, parse_bb_canvas};
+use crate::bb_brand_style;
+use crate::pipeline::extract_record_name;
+
+fn is_linear_progress_meter(node: &crate::bb_scene::BbNode) -> bool {
+    matches!(
+        &node.ty,
+        BbNodeType::Other(kind)
+            if kind.eq_ignore_ascii_case("BuildingBlocks_WidgetLinearProgressMeter")
+    )
+}
+
+fn modular_linearprogress_style_path(style_identifier: &str) -> Option<String> {
+    let normalized = style_identifier.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let module_id = if let Some(rest) = normalized.strip_prefix("s_") {
+        format!("sk_{}", rest)
+    } else if normalized.starts_with("sk_") {
+        normalized
+    } else {
+        return None;
+    };
+
+    Some(format!(
+        "file://./../../../../../../../libs/foundry/records/ui/buildingblocks/styles/modularkitstyles/{0}/{0}_linearprogressmeterstyles.json",
+        module_id
+    ))
+}
+
+fn modular_buttonsecondary_style_path(style_identifier: &str) -> Option<String> {
+    let normalized = style_identifier.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let module_id = if let Some(rest) = normalized.strip_prefix("s_") {
+        format!("sk_{}", rest)
+    } else if normalized.starts_with("sk_") {
+        normalized
+    } else {
+        return None;
+    };
+
+    Some(format!(
+        "file://./../../../../../../../libs/foundry/records/ui/buildingblocks/styles/modularkitstyles/{0}/{0}_buttonsecondarystyles.json",
+        module_id
+    ))
+}
+
+fn standard_body_background_widget_path() -> String {
+    "file://./../../../../../../../libs/foundry/records/ui/buildingblocks/modularkit/standard/widgets/bodybackgroundwidgetstandard.json".to_string()
+}
+
+fn body_background_uses_texture(node: &crate::bb_scene::BbNode) -> bool {
+    if !matches!(node.ty, BbNodeType::WidgetBodyBackground) {
+        return false;
+    }
+
+    match node.raw.get("backgroundType") {
+        Some(serde_json::Value::String(value)) => value.eq_ignore_ascii_case("Texture"),
+        Some(serde_json::Value::Number(value)) => value.as_i64() == Some(1),
+        _ => false,
+    }
+}
+
+fn extract_body_background_texture_tag_id(standard_record: &serde_json::Value) -> Option<String> {
+    let record_value = standard_record
+        .get("_RecordValue_")
+        .unwrap_or(standard_record);
+    record_value
+        .get("operations")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .find_map(|operation| {
+            let ty = operation.get("_Type_").and_then(|v| v.as_str())?;
+            if !ty.eq_ignore_ascii_case("BuildingBlocks_BindingsTagFromIntegerSwitch") {
+                return None;
+            }
+            operation
+                .get("values")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+                .find_map(|pair| {
+                    if pair.get("first").and_then(|v| v.as_i64()) != Some(1) {
+                        return None;
+                    }
+                    pair.get("second")
+                        .and_then(|tag| tag.get("_RecordId_"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                })
+        })
+}
+
+fn seed_body_background_texture_tags(scene: &mut BbScene, tag_id: &str) {
+    for node in scene.nodes.values_mut() {
+        if body_background_uses_texture(node)
+            && !node.style_tag_uuids.iter().any(|id| id == tag_id)
+        {
+            node.style_tag_uuids.push(tag_id.to_string());
+        }
+    }
+}
+
+fn apply_body_background_standard_styles(
+    scene: &mut BbScene,
+    standard_record: &serde_json::Value,
+    manufacturer_id: Option<&str>,
+    preferred_brand: Option<&str>,
+    loc_fetcher: Option<&dyn LocFetcher>,
+) {
+    let Some(texture_tag_id) = extract_body_background_texture_tag_id(standard_record) else {
+        return;
+    };
+    seed_body_background_texture_tags(scene, &texture_tag_id);
+    if !scene
+        .nodes
+        .values()
+        .any(|node| body_background_uses_texture(node))
+    {
+        return;
+    }
+
+    let record_value = standard_record
+        .get("_RecordValue_")
+        .unwrap_or(standard_record);
+    if let Some(brand_style) =
+        bb_brand_style::resolve_brand_style(standard_record, None, preferred_brand)
+            .or_else(|| bb_brand_style::resolve_brand_style(standard_record, manufacturer_id, None))
+    {
+        crate::bb_brand_apply::apply_brand_modifiers(scene, &brand_style, loc_fetcher);
+    } else if let Some(entries) = record_value
+        .get("defaultStyles")
+        .and_then(|styles| styles.get("entries"))
+        .and_then(|entries| entries.as_array())
+        .filter(|entries| !entries.is_empty())
+    {
+        let brand = bb_brand_style::BrandStyle {
+            identifier: "BodyBackgroundWidgetStandard.defaultStyles".to_string(),
+            entries: entries.as_slice(),
+            raw: record_value,
+        };
+        crate::bb_brand_apply::apply_brand_modifiers(scene, &brand, loc_fetcher);
+    }
+}
+
+fn extract_rootghost_button_secondary_corner_radius(style_entries: &[serde_json::Value]) -> Option<f32> {
+    let root_ghost_entry = style_entries.iter().find(|entry| {
+        entry
+            .get("name")
+            .and_then(|v| v.as_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("RootGhost"))
+    })?;
+
+    let modifiers = root_ghost_entry.get("modifiers").and_then(|v| v.as_array())?;
+    let radius_fields = [
+        "BorderTopLeftRadius",
+        "BorderTopRightRadius",
+        "BorderBottomLeftRadius",
+        "BorderBottomRightRadius",
+    ];
+
+    let mut radii = Vec::with_capacity(radius_fields.len());
+    for field_name in radius_fields {
+        let value = modifiers
+            .iter()
+            .find(|modifier| {
+                modifier
+                    .get("field")
+                    .and_then(|field| field.as_str())
+                    .is_some_and(|field| field.eq_ignore_ascii_case(field_name))
+            })
+            .and_then(|modifier| modifier.get("value"))
+            .and_then(|value| value.as_f64())? as f32;
+        radii.push(value);
+    }
+
+    let first = *radii.first()?;
+    if first <= 0.0 || radii.iter().any(|radius| (*radius - first).abs() > f32::EPSILON) {
+        return None;
+    }
+
+    Some(first)
+}
+
+fn set_uniform_border_radius(node: &mut crate::bb_scene::BbNode, radius: f32) {
+    let Some(raw_obj) = node.raw.as_object_mut() else {
+        return;
+    };
+    let border = raw_obj
+        .entry("border".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let Some(border_obj) = border.as_object_mut() else {
+        return;
+    };
+
+    for corner in ["topLeftRadius", "topRightRadius", "bottomLeftRadius", "bottomRightRadius"] {
+        let corner_value = border_obj
+            .entry(corner.to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        let Some(corner_obj) = corner_value.as_object_mut() else {
+            continue;
+        };
+
+        let radius_value = corner_obj
+            .entry("radius".to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        let Some(radius_obj) = radius_value.as_object_mut() else {
+            continue;
+        };
+
+        radius_obj.insert(
+            "value".to_string(),
+            serde_json::Value::Number(serde_json::Number::from_f64(radius as f64).unwrap()),
+        );
+        radius_obj.insert(
+            "behavior".to_string(),
+            serde_json::Value::String("Fixed".to_string()),
+        );
+    }
+}
+
+fn apply_buttonsecondary_modular_styles(
+    scene: &mut BbScene,
+    style_entries: &[serde_json::Value],
+) {
+    let Some(radius) = extract_rootghost_button_secondary_corner_radius(style_entries) else {
+        return;
+    };
+
+    for node in scene.nodes.values_mut() {
+        if !matches!(node.ty, BbNodeType::ComponentGeneralButtonSecondary) {
+            continue;
+        }
+        let is_ghost = node
+            .raw
+            .get("fillStyle")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("Ghost"));
+        if !is_ghost {
+            continue;
+        }
+        set_uniform_border_radius(node, radius);
+    }
+}
+
+fn collect_style_condition_tags(
+    condition: &serde_json::Value,
+    out: &mut Vec<(String, Option<String>, Option<String>)>,
+) {
+    if let Some(tag) = condition.get("tag") {
+        let tag_id = tag
+            .get("_RecordId_")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .or_else(|| {
+                tag.as_str().and_then(|s| {
+                    s.strip_prefix("Tag.")
+                        .map(str::to_owned)
+                        .or_else(|| Some(s.to_owned()))
+                })
+            });
+
+        if let Some(tag_id) = tag_id {
+            let tag_record_name = tag
+                .get("_RecordName_")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+                .or_else(|| Some(format!("Tag.{tag_id}")));
+            let tag_record_path = tag
+                .get("_RecordPath_")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            out.push((tag_id, tag_record_name, tag_record_path));
+        }
+    }
+
+    if let Some(conditions) = condition.get("conditions").and_then(|v| v.as_array()) {
+        for nested in conditions {
+            collect_style_condition_tags(nested, out);
+        }
+    }
+    if let Some(break_conditions) = condition.get("breakConditions").and_then(|v| v.as_array()) {
+        for nested in break_conditions {
+            collect_style_condition_tags(nested, out);
+        }
+    }
+}
+
+fn find_tag_name_in_tree(tags: &[serde_json::Value], tag_id: &str) -> Option<String> {
+    for tag in tags {
+        if tag
+            .get("_RecordId_")
+            .and_then(|v| v.as_str())
+            .is_some_and(|id| id.eq_ignore_ascii_case(tag_id))
+        {
+            return tag
+                .get("tagName")
+                .and_then(|v| v.as_str())
+                .map(|name| name.to_ascii_lowercase());
+        }
+
+        if let Some(children) = tag.get("children").and_then(|v| v.as_array()) {
+            if let Some(name) = find_tag_name_in_tree(children, tag_id) {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+

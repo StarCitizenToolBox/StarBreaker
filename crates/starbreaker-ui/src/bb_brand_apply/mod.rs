@@ -27,6 +27,8 @@ mod tests_conditions;
 #[cfg(test)]
 mod tests_modifiers;
 #[cfg(test)]
+mod tests_scene_styles;
+#[cfg(test)]
 mod tests_support;
 
 use self::colors::{parse_color_value, ColorStyleRole};
@@ -49,6 +51,26 @@ pub fn apply_brand_modifiers(
     brand: &BrandStyle<'_>,
     loc_fetcher: Option<&dyn LocFetcher>,
 ) {
+    apply_style_entries(scene, brand.entries, brand.raw, Some(&brand.identifier), loc_fetcher);
+}
+
+/// Apply arbitrary canvas style entries (for example `defaultStyles.entries`) to a scene.
+pub fn apply_scene_style_entries(
+    scene: &mut BbScene,
+    entries: &[serde_json::Value],
+    palette_source: &serde_json::Value,
+    loc_fetcher: Option<&dyn LocFetcher>,
+) {
+    apply_style_entries(scene, entries, palette_source, None, loc_fetcher);
+}
+
+fn apply_style_entries(
+    scene: &mut BbScene,
+    entries: &[serde_json::Value],
+    palette_source: &serde_json::Value,
+    style_identifier: Option<&str>,
+    loc_fetcher: Option<&dyn LocFetcher>,
+) {
     let style_probe = std::env::var("BB_A3_STYLE_PROBE").as_deref() == Ok("1");
     let node_ids: Vec<_> = scene.nodes.keys().copied().collect();
     for node_id in node_ids {
@@ -56,8 +78,7 @@ pub fn apply_brand_modifiers(
             let Some(node) = scene.nodes.get(&node_id) else {
                 continue;
             };
-            let matches: Vec<&serde_json::Value> = brand
-                .entries
+            let matches: Vec<&serde_json::Value> = entries
                 .iter()
                 .filter(|entry| entry_matches_scene(entry, node_id, node, scene))
                 .collect();
@@ -80,18 +101,18 @@ pub fn apply_brand_modifiers(
         let Some(node) = scene.nodes.get_mut(&node_id) else {
             continue;
         };
-        if looks_like_style_brand_identifier(&brand.identifier) {
+        if style_identifier.is_some_and(looks_like_style_brand_identifier) {
             node.raw.as_object_mut().and_then(|obj| {
                 obj.insert(
                     "__BrandIdentifier".to_string(),
-                    serde_json::Value::String(brand.identifier.clone()),
+                    serde_json::Value::String(style_identifier.unwrap().to_string()),
                 )
             });
         }
-        apply_inline_color_overlay(node, brand.raw);
-        resolve_node_background_color(node, brand.raw);
+        apply_inline_color_overlay(node, palette_source);
+        resolve_node_background_color(node, palette_source);
         for entry in &matching_entries {
-            apply_entry_modifiers(entry, node, brand.raw, loc_fetcher);
+            apply_entry_modifiers(entry, node, palette_source, loc_fetcher);
             record_applied_style_entry(node, entry);
         }
     }

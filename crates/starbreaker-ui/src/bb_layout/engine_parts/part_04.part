@@ -1,0 +1,344 @@
+fn centered_intrinsic_text_column_spacing_applies(
+    children: &[BbNodeId],
+    flex: &serde_json::Value,
+    scene: &BbScene,
+    is_row: bool,
+) -> bool {
+    if is_row {
+        return false;
+    }
+    let direction = flex.get("direction").and_then(|v| v.as_str()).unwrap_or("Row");
+    let wrap = flex.get("wrap").and_then(|v| v.as_str()).unwrap_or("");
+    let axis = flex.get("axisJustification").and_then(|v| v.as_str()).unwrap_or("Start");
+    if !direction.eq_ignore_ascii_case("Column")
+        || !wrap.eq_ignore_ascii_case("NoWrapInfinite")
+        || !axis.eq_ignore_ascii_case("Center")
+    {
+        return false;
+    }
+
+    let intrinsic_textfields = children
+        .iter()
+        .filter_map(|id| scene.nodes.get(id))
+        .filter(|node| node.is_active && matches!(node.ty, BbNodeType::WidgetTextField))
+        .filter(|node| {
+            textfield_auto_intrinsic_override(node, &node.sizing.height, 1.0, 1.0, false)
+                .is_some()
+        })
+        .count();
+    intrinsic_textfields >= 2
+}
+
+fn is_placeholder_only_label_caption_pair(node: &BbNode) -> bool {
+    if !matches!(
+        &node.ty,
+        BbNodeType::Other(kind)
+            if kind.eq_ignore_ascii_case("BuildingBlocks_ComponentLabelCaptionPair")
+    ) {
+        return false;
+    }
+
+    let caption = node
+        .raw
+        .get("captionProperties")
+        .and_then(|cp| cp.get("caption"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .unwrap_or_default();
+    if !caption.eq_ignore_ascii_case("@LOC_PLACEHOLDER") {
+        return false;
+    }
+
+    let secondary_caption = node
+        .raw
+        .get("captionProperties")
+        .and_then(|cp| cp.get("caption2"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .unwrap_or_default();
+
+    secondary_caption.is_empty() || secondary_caption.eq_ignore_ascii_case("@LOC_PLACEHOLDER")
+}
+
+fn centered_intrinsic_text_column_adjustment(
+    base_item_spacing: f32,
+    sizes: &[(BbNodeId, f32, f32, bool)],
+    scene: &BbScene,
+    container_main: f32,
+    is_row: bool,
+) -> (f32, f32) {
+    if is_row || sizes.len() < 2 || base_item_spacing <= 0.0 {
+        return (base_item_spacing, 0.0);
+    }
+
+    let flow_count = sizes.len() as f32;
+    let mut intrinsic_textfields = 0.0f32;
+    let mut total_item_main = 0.0f32;
+    for (child_id, w, h, _auto_main) in sizes {
+        let node_main = if is_row { *w } else { *h };
+        total_item_main += node_main.max(0.0);
+        let Some(node) = scene.nodes.get(child_id) else {
+            continue;
+        };
+        if !node.is_active || !matches!(node.ty, BbNodeType::WidgetTextField) {
+            continue;
+        }
+        if textfield_auto_intrinsic_override(node, &node.sizing.height, 1.0, 1.0, false).is_some() {
+            intrinsic_textfields += 1.0;
+        }
+    }
+    if intrinsic_textfields < 2.0 {
+        return (base_item_spacing, 0.0);
+    }
+
+    // Derive spacing compression from how much of the column is occupied by
+    // intrinsic content and how text-dominant the flow is.
+    let coverage = if container_main > 0.0 {
+        (total_item_main / container_main).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let textfield_share = (intrinsic_textfields / flow_count).clamp(0.0, 1.0);
+    let spacing_scale = (1.0 - (coverage * textfield_share)).clamp(0.0, 1.0);
+    let adjusted_spacing = (base_item_spacing * spacing_scale).max(0.0);
+
+    // Keep centered columns from drifting downward as spacing shrinks by
+    // shifting upward in proportion to collapsed spacing across text blocks.
+    let collapsed_spacing = (base_item_spacing - adjusted_spacing).max(0.0);
+    let main_offset_shift = collapsed_spacing * (intrinsic_textfields - 1.0).max(0.0);
+
+    (adjusted_spacing, main_offset_shift)
+}
+
+fn row_flex_start_anchor_offset(
+    node: &crate::bb_scene::BbNode,
+    available_main: f32,
+    item_w: f32,
+    csx: f32,
+) -> Option<f32> {
+    let pos_x = (node.position.x + node.position_offset.x) * csx;
+    let is_start_anchored = node.anchor.x > 0.0 && node.anchor.x < 0.5 && node.pivot.x <= 0.01;
+    let has_position = pos_x.abs() > f32::EPSILON;
+    (is_start_anchored || has_position)
+        .then_some((node.anchor.x * available_main) + pos_x - (node.pivot.x * item_w))
+}
+
+
+///
+/// - `Fixed(v)` → `v * canvas_scale`  
+/// - `Percent(p)` → `primary_dim * p` (p is a fraction 0–1; value `1.0` = 100 %)
+/// - `Other` with a recognised cross-axis behavior (`PercentOfY` for a width
+///   dimension, `PercentOfX` for height) → `cross_dim * value`.  All other
+///   unknown behaviors log a warning and fall back to `primary_dim` (fill).
+fn resolve_value(v: &BbValue, primary_dim: f32, cross_dim: f32, canvas_scale: f32, is_width: bool) -> f32 {
+    match v {
+        BbValue::Fixed(px) => px * canvas_scale,
+        BbValue::Percent(p) => primary_dim * p,
+        BbValue::Other { value, behavior } => {
+            match behavior.as_str() {
+                // Cross-axis percent: width as % of parent height, or vice-versa.
+                "PercentOfY" if is_width => cross_dim * value,
+                "PercentOfX" if !is_width => cross_dim * value,
+                // "Auto" is overloaded in authored data:
+                // - values in (0, 1] often behave like normalized extents,
+                //   especially for flex/header containers.
+                // - larger values are content hints but we currently lack
+                //   robust measurement, so keep prior fill behavior there.
+                "Auto" if *value > 0.0 && *value <= 1.0 => primary_dim * *value,
+                "Auto" => primary_dim,
+                other => {
+                    warn!(
+                        "bb_layout: unknown sizing behavior {:?} (value={}) — \
+                         falling back to fill",
+                        other, value,
+                    );
+                    primary_dim
+                }
+            }
+        }
+    }
+}
+
+fn resolve_value_for_node(
+    node: &crate::bb_scene::BbNode,
+    v: &BbValue,
+    primary_dim: f32,
+    cross_dim: f32,
+    canvas_scale: f32,
+    is_width: bool,
+) -> f32 {
+    if let Some(override_value) = textfield_auto_intrinsic_override(node, v, primary_dim, canvas_scale, is_width) {
+        return override_value;
+    }
+
+    if let Some(override_value) = component_button_auto_intrinsic_override(node, v, canvas_scale) {
+        return override_value;
+    }
+
+    if matches!(node.ty, BbNodeType::WidgetText)
+        && let BbValue::Other { value, behavior } = v
+        && behavior == "Auto"
+    {
+        // Text widgets authored with Auto typically carry a small content-fit
+        // hint (for example 64). Treat that hint as size instead of filling
+        // the parent, which causes header/label overlap in medical canvases.
+        *value * canvas_scale
+    } else {
+        resolve_value(v, primary_dim, cross_dim, canvas_scale, is_width)
+    }
+}
+
+fn authored_node_scale(node: &crate::bb_scene::BbNode, scene: &BbScene) -> (f32, f32) {
+    if matches!(node.ty, BbNodeType::WidgetCanvas)
+        && node
+            .parent
+            .and_then(|parent_id| scene.nodes.get(&parent_id))
+            .is_some_and(|parent| matches!(parent.ty, BbNodeType::WidgetTextField))
+    {
+        return (1.0, 1.0);
+    }
+
+    let Some(scale) = node.raw.get("scale") else {
+        return (1.0, 1.0);
+    };
+    let x = scale
+        .get("x")
+        .and_then(|value| value.as_f64())
+        .map(|value| value as f32)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(1.0);
+    let y = scale
+        .get("y")
+        .and_then(|value| value.as_f64())
+        .map(|value| value as f32)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(1.0);
+    (x, y)
+}
+
+fn component_button_auto_intrinsic_override(
+    node: &crate::bb_scene::BbNode,
+    v: &BbValue,
+    canvas_scale: f32,
+) -> Option<f32> {
+    let is_supported_node = matches!(
+        node.ty,
+        BbNodeType::ComponentGeneralButton | BbNodeType::ComponentGeneralButtonSecondary
+    );
+
+    if !is_supported_node {
+        return None;
+    }
+
+    let (value, behavior) = match v {
+        BbValue::Other { value, behavior } => (*value, behavior.as_str()),
+        _ => return None,
+    };
+    if behavior != "Auto" || value <= 1.0 {
+        return None;
+    }
+
+    Some(value * canvas_scale)
+}
+
+fn textfield_auto_intrinsic_override(
+    node: &crate::bb_scene::BbNode,
+    v: &BbValue,
+    primary_dim: f32,
+    canvas_scale: f32,
+    is_width: bool,
+) -> Option<f32> {
+    if !matches!(node.ty, BbNodeType::WidgetTextField) {
+        return None;
+    }
+
+    if is_width
+        && node.pivot.x >= 0.99
+        && node.anchor.x > 1.0
+        && let BbValue::Other { value, behavior } = v
+        && behavior == "Auto"
+        && *value > 0.0
+        && *value <= 1.0
+    {
+        return Some(primary_dim);
+    }
+
+    let (value, behavior) = match v {
+        BbValue::Other { value, behavior } => (*value, behavior.as_str()),
+        _ => return None,
+    };
+    if behavior != "Auto" || value <= 0.0 || value > 1.0 {
+        return None;
+    }
+
+    let style = node
+        .raw
+        .get("labelProperties")
+        .and_then(|lp| lp.get("style"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("");
+
+    let has_tag = |needle: &str| node.style_tag_uuids.iter().any(|id| id.eq_ignore_ascii_case(needle));
+    let is_primary = has_tag("e6003a83-9795-4478-a61c-349f14016e5b");
+    let is_bright = has_tag("174b3e40-1b7b-4f01-a7dc-6420b7367d6b");
+    let is_prompt = has_tag("5e5c7c8f-847b-46c5-ad80-a57c941391ab");
+    let affects_layout = node
+        .raw
+        .get("affectsLayout")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    if is_width && is_bright && style == "Heading2" {
+        return Some(180.0 * canvas_scale);
+    }
+    if is_width && !affects_layout && is_bright && style == "Title3" {
+        return Some((180.0 * value * value) * canvas_scale);
+    }
+
+    if !is_width && style == "Title3" && is_primary {
+        return Some(270.0 * canvas_scale);
+    }
+    if !is_width && style == "Heading2" && is_bright {
+        return Some(270.0 * canvas_scale);
+    }
+    if !is_width && style == "Heading2" && is_prompt {
+        return Some(60.0 * canvas_scale);
+    }
+
+    None
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Wireframe renderer
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Render a debug wireframe overlay of `scene` at `(target_w × target_h)`.
+///
+/// Each laid-out node is drawn as:
+/// - A filled rect with a per-type colour at ~30 % alpha.
+/// - A 1-pixel white outline at ~80 % alpha.
+///
+/// The background is `#202020`.  Inactive nodes are not drawn.
+///
+/// The colour is derived by hashing the node's type-name string to an HSV hue,
+/// so no hard-coded type→colour table is needed.
+pub fn render_wireframe(scene: &BbScene, target_w: u32, target_h: u32) -> RgbaImage {
+    let result = layout(scene, target_w, target_h);
+
+    let mut img = RgbaImage::from_pixel(target_w, target_h, Rgba([0x20, 0x20, 0x20, 0xFF]));
+
+    for &node_id in &result.draw_order {
+        let Some(node) = scene.nodes.get(&node_id) else { continue };
+        let Some(&outer) = result.rects.get(&node_id) else { continue };
+
+        let type_name = type_name_str(&node.ty);
+        let fill_colour = type_colour_fill(type_name);
+        let outline_colour = Rgba([0xFF, 0xFF, 0xFF, (0.80 * 255.0) as u8]);
+
+        draw_rect_filled(&mut img, outer, fill_colour);
+        draw_rect_outline(&mut img, outer, outline_colour);
+    }
+
+    img
+}
+

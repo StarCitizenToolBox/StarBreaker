@@ -1,0 +1,305 @@
+// Canonical UI IR renderer for generic BuildingBlocks output.
+// GOLDEN RULE: No hard-coding, heuristic workarounds, no procedural fallbacks. Avoid targetted scoping. Find the root cause and fix issues instead. Find the source data even it means doing things the hard way. This is intended to be a pipeline that is completely generic that can work for any UI on any ship and must not have targetted hacks that won't fix the issue in other places. This will keep the code lean and generic. Think how the game-engine would implement it.
+//
+// This module is the first Phase 2 step toward deterministic renderer
+// consumption of [`crate::ui_ir::UiIrDocument`]. It renders the generic BB
+// path directly from IR fields that were materialized in Phase 1: layout,
+// fill colours, borders, asset references, and resolved text payload/style.
+//
+
+use image::RgbaImage;
+use image::imageops;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::OnceLock;
+use tiny_skia::{BlendMode, Color, FillRule, Paint, PathBuilder, Pixmap, PixmapPaint, Rect as TskRect, Stroke, Transform};
+
+use crate::bb_atlas::AtlasLibrary;
+use crate::bb_assets::UiAssetResolver;
+use crate::bb_layout::Rect;
+use crate::compose::ComposeContext;
+use crate::error::UiError;
+use crate::text::{FontKind, TextAlign, TextRenderer, VerticalAlign};
+use crate::swf_assets::FontGlyphSet;
+use crate::ui_ir::{
+    validate_ui_ir_document, UiIrBorder, UiIrColourBlendMode, UiIrDocument, UiIrNode, UiIrRect,
+    UiIrTextPayload, UiIrTextStyle, UiIrValue,
+};
+
+// BB/Flash nominal font sizes render visually smaller with the bundled DejaVu
+// fallback fonts. Calibrate at compose time to match measured output.
+const TEXT_RENDER_SIZE_CALIBRATION: f32 = 1.5;
+const SWF_TEXT_RENDER_SIZE_CALIBRATION: f32 = 0.84;
+const PAINT_FILE_SWF_SIZE_CALIBRATION: f32 = 0.84;
+const LOW_REG_SWF_SIZE_CALIBRATION: f32 = 3.45;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DebugTextRects {
+    pub primary: Rect,
+    pub secondary: Option<Rect>,
+    pub primary_text_origin: (f32, f32),
+    pub secondary_text_origin: Option<(f32, f32)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DebugTextDrawnBounds {
+    pub primary: Rect,
+    pub secondary: Option<Rect>,
+}
+
+/// Render a generic BuildingBlocks IR document without consulting raw BB data.
+///
+/// This renderer intentionally consumes only the canonical IR plus style/assets.
+/// SWF-specific and raw-source fallback behavior remains in the legacy renderer
+/// until the later Phase 2 split is complete.
+pub fn render_ui_ir_document(
+    document: &UiIrDocument,
+    ctx: &ComposeContext<'_>,
+    atlas: &AtlasLibrary<'_>,
+) -> Result<RgbaImage, UiError> {
+    validate_ui_ir_document(document)
+        .map_err(|errors| UiError::RenderError(format!("invalid UI IR: {}", errors.join("; "))))?;
+
+    if document.target_width == 0 || document.target_height == 0 {
+        return Err(UiError::RenderError(format!(
+            "invalid target size {}x{}",
+            document.target_width, document.target_height
+        )));
+    }
+
+    let mut pixmap = Pixmap::new(document.target_width, document.target_height)
+        .ok_or_else(|| UiError::RenderError("pixmap allocation failed".into()))?;
+
+    let bg = &ctx.style.background;
+    pixmap.fill(Color::from_rgba8(bg.r, bg.g, bg.b, bg.a));
+
+    let mut draw_order: Vec<&UiIrNode> = document.nodes.iter().filter(|node| node.is_active).collect();
+    // Keep authored IR order within each layer. Synthetic ids are an
+    // implementation detail and must not affect visual stacking.
+    draw_order.sort_by_key(|node| node.layer);
+
+    let text_renderer = TextRenderer::new();
+
+    for node in &draw_order {
+        draw_non_text_node(node, document, ctx, atlas, &mut pixmap);
+    }
+
+    // Keep progress meters on top of base chrome/background fills.
+    for node in &draw_order {
+        if node.meter_progress.is_none() {
+            continue;
+        }
+        let rect = resolved_linear_progress_meter_rect(node, document)
+            .unwrap_or_else(|| ir_rect_to_layout_rect(node.computed_rect));
+        let Some(tsk_rect) = TskRect::from_xywh(rect.x, rect.y, rect.w, rect.h) else {
+            continue;
+        };
+        draw_linear_progress_meter(node, ctx, &mut pixmap, tsk_rect);
+    }
+
+    let mut img = pixmap_to_rgba_image(pixmap)?;
+    let mut text_draw_order = draw_order.clone();
+    text_draw_order.sort_by(|left, right| {
+        let left_rect = ir_rect_to_layout_rect(left.computed_rect);
+        let right_rect = ir_rect_to_layout_rect(right.computed_rect);
+        let left_key = (
+            left_rect.x.round() as i32,
+            left_rect.y.round() as i32,
+            left_rect.w.round() as i32,
+            left_rect.h.round() as i32,
+        );
+        let right_key = (
+            right_rect.x.round() as i32,
+            right_rect.y.round() as i32,
+            right_rect.w.round() as i32,
+            right_rect.h.round() as i32,
+        );
+        let left_len = resolved_text_payload(left).map(|text| text.len()).unwrap_or(usize::MAX);
+        let right_len = resolved_text_payload(right)
+            .map(|text| text.len())
+            .unwrap_or(usize::MAX);
+
+        left_key
+            .cmp(&right_key)
+            .then(left_len.cmp(&right_len))
+            .then(left.id.cmp(&right.id))
+    });
+
+    let mut seen_text_rects: HashSet<(i32, i32, i32, i32)> = HashSet::new();
+    for node in &text_draw_order {
+        draw_text_node(
+            &mut img,
+            node,
+            document,
+            &text_renderer,
+            ctx,
+            &mut seen_text_rects,
+        );
+    }
+
+    Ok(img)
+}
+
+fn draw_non_text_node(
+    node: &UiIrNode,
+    document: &UiIrDocument,
+    ctx: &ComposeContext<'_>,
+    atlas: &AtlasLibrary<'_>,
+    pixmap: &mut Pixmap,
+) {
+    let rect = resolved_linear_progress_meter_rect(node, document)
+        .unwrap_or_else(|| ir_rect_to_layout_rect(node.computed_rect));
+    if rect.w < 0.5 || rect.h < 0.5 {
+        return;
+    }
+
+    let Some(tsk_rect) = TskRect::from_xywh(rect.x, rect.y, rect.w, rect.h) else {
+        return;
+    };
+
+    if node
+        .node_type
+        .eq_ignore_ascii_case("BuildingBlocks_WidgetCircle")
+        || node.node_type.eq_ignore_ascii_case("widget_circle")
+    {
+        draw_widget_circle(node, pixmap, tsk_rect);
+        return;
+    }
+
+    if node
+        .node_type
+        .eq_ignore_ascii_case("BuildingBlocks_WidgetSeparator")
+        || node.node_type.eq_ignore_ascii_case("widget_separator")
+    {
+        draw_widget_separator(ctx, pixmap, node, tsk_rect, node.alpha);
+        return;
+    }
+
+    if node.meter_progress.is_some() {
+        draw_linear_progress_meter(node, ctx, pixmap, tsk_rect);
+        return;
+    }
+
+    if node
+        .node_type
+        .eq_ignore_ascii_case("component_general_button_secondary")
+        && node
+            .icon_preset
+            .as_deref()
+            .is_some_and(|preset| preset.eq_ignore_ascii_case("GeneralX"))
+    {
+        draw_secondary_close_button(ctx, pixmap, node, tsk_rect, node.alpha);
+        return;
+    }
+
+    if node
+        .node_type
+        .eq_ignore_ascii_case("BuildingBlocks_WidgetManufacturerLogo")
+    {
+        draw_manufacturer_logo_ir(node, document, ctx, atlas, pixmap);
+    }
+
+    let skip_background_fill = node.custom_shape.is_some() && node.asset_ref.is_some();
+    if !skip_background_fill {
+        let resolved_background_fill = node.background_fill_colour.or_else(|| {
+            node.background_fill_colour_token
+                .as_deref()
+                .and_then(|token| resolve_surface_colour_token(ctx, token))
+                .map(|mut fill| {
+                    fill[3] *= node.background_fill_alpha.unwrap_or(1.0);
+                    fill
+                })
+        });
+        if let Some(fill) = resolved_background_fill
+            && fill[3] > 0.005
+        {
+            if node.name.eq_ignore_ascii_case("Root")
+                && node.node_type.eq_ignore_ascii_case("display_widget")
+                && rect.w >= document.target_width as f32 * 0.95
+                && rect.h <= document.target_height as f32 * 0.16
+            {
+                // Header root containers are layout scaffolding, not visible chrome.
+            } else {
+                fill_rect_ts_with_mode(pixmap, tsk_rect, fill, node.alpha, node_colour_blend_mode(node));
+            }
+        }
+    }
+
+    if let Some(asset_ref) = node.asset_ref.as_deref() {
+        let normalised_asset_ref = UiAssetResolver::normalise_path(asset_ref);
+        let iw = rect.w.round().max(1.0) as u32;
+        let ih = rect.h.round().max(1.0) as u32;
+        let fill_override = custom_shape_fill_override(node, ctx).or_else(|| {
+            if normalised_asset_ref.ends_with(".svg") {
+                node.icon_tint_colour.or_else(|| {
+                    node.icon_tint_colour_token
+                        .as_deref()
+                        .and_then(|token| resolve_colour_token(ctx, token))
+                })
+            } else {
+                None
+            }
+        });
+        let resolved_image = if UiAssetResolver::is_reference_overlay(asset_ref)
+            || UiAssetResolver::is_reference_overlay(&normalised_asset_ref)
+        {
+            None
+        } else if normalised_asset_ref.ends_with(".svg") {
+            atlas
+                .fetch_raw(asset_ref)
+                .or_else(|| {
+                    (normalised_asset_ref != asset_ref)
+                        .then(|| atlas.fetch_raw(&normalised_asset_ref))
+                        .flatten()
+                })
+                .and_then(|svg_bytes| rasterize_svg_for_node(node, &svg_bytes, iw, ih, fill_override))
+        } else {
+            atlas.resolve(asset_ref, iw, ih).or_else(|| {
+                (normalised_asset_ref != asset_ref)
+                    .then(|| atlas.resolve(&normalised_asset_ref, iw, ih))
+                    .flatten()
+            })
+        };
+        if let Some(mut img) = resolved_image {
+            let is_nine_slice_custom_shape = node
+                .custom_shape
+                .as_ref()
+                .is_some_and(|shape| shape.enable_nine_slice_rect.unwrap_or(false));
+            if normalised_asset_ref.ends_with(".svg")
+                && fill_override.is_some()
+                && !is_nine_slice_custom_shape
+            {
+                img = strip_custom_shape_uniform_matte(&img);
+            }
+            img = apply_asset_layout_flip(node, img);
+            let draw_x = rect.x as i32;
+            let draw_y = rect.y as i32;
+            let tint = image_tint_for_blit(node, asset_ref, fill_override, ctx);
+
+            let blend_mode = image_blend_mode_for_node(node, asset_ref);
+
+            blit_atlas_image_tinted_with_mode(pixmap, &img, draw_x, draw_y, tint, node.alpha, blend_mode);
+        }
+    }
+
+    if let Some(border) = &node.border {
+        draw_ir_border(pixmap, rect, border, node.alpha, ctx);
+    }
+
+    if let Some(stroke_colour) = node.stroke_colour
+        && node.stroke_extent.unwrap_or(0.0) > 0.0
+        && !node
+            .custom_shape
+            .as_ref()
+            .and_then(|shape| shape.render_shape)
+            .unwrap_or(false)
+    {
+        draw_rect_stroke_ts(
+            pixmap,
+            tsk_rect,
+            stroke_colour,
+            node.stroke_extent.unwrap_or(0.0),
+            node.alpha,
+        );
+    }
+}
+

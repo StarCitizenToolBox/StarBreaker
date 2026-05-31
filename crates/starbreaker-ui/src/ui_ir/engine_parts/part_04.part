@@ -1,0 +1,349 @@
+fn border_from_node(node: &BbNode) -> Option<UiIrBorder> {
+    let border = node.border.as_ref()?;
+    Some(UiIrBorder {
+        top: UiIrBorderSide {
+            width: border.top.width,
+            colour: border.top.colour,
+            colour_token: border_colour_token_from_raw(&node.raw, "Top"),
+        },
+        right: UiIrBorderSide {
+            width: border.right.width,
+            colour: border.right.colour,
+            colour_token: border_colour_token_from_raw(&node.raw, "Right"),
+        },
+        bottom: UiIrBorderSide {
+            width: border.bottom.width,
+            colour: border.bottom.colour,
+            colour_token: border_colour_token_from_raw(&node.raw, "Bottom"),
+        },
+        left: UiIrBorderSide {
+            width: border.left.width,
+            colour: border.left.colour,
+            colour_token: border_colour_token_from_raw(&node.raw, "Left"),
+        },
+    })
+}
+
+fn border_colour_token_from_raw(raw: &serde_json::Value, side: &str) -> Option<String> {
+    raw.get(format!("BorderColor{side}Token"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            raw.get("BorderColorToken")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|token| !token.is_empty())
+                .map(str::to_owned)
+        })
+        .or_else(|| {
+            raw.get("border")
+                .and_then(|border| border.get(side.to_ascii_lowercase()))
+                .and_then(|value| value.get("color"))
+                .and_then(colour_style_token)
+        })
+}
+
+fn stroke_colour_from_raw(raw: &serde_json::Value) -> Option<[f32; 4]> {
+    let obj = raw.get("StrokeColor")?.as_object()?;
+    let r = obj.get("r").and_then(|v| v.as_f64())? as f32;
+    let g = obj.get("g").and_then(|v| v.as_f64())? as f32;
+    let b = obj.get("b").and_then(|v| v.as_f64())? as f32;
+    let a = obj.get("a").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+    Some([r, g, b, a])
+}
+
+fn segmented_fill_from_raw(node: &crate::bb_scene::BbNode) -> Option<UiIrSegmentedFill> {
+    let raw = &node.raw;
+    let segmented_raw = raw.get("segmentedFill");
+
+    let enabled = raw
+        .get("EnableSegmentedFill")
+        .and_then(|v| v.as_bool())
+        .or_else(|| segmented_raw.and_then(|sf| sf.get("enable")).and_then(|v| v.as_bool()))
+        .unwrap_or(false);
+
+    if !enabled {
+        return None;
+    }
+
+    let angle = raw
+        .get("SegmentAngle")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32)
+        .or_else(|| {
+            segmented_raw
+                .and_then(|sf| sf.get("angle"))
+                .and_then(|v| v.as_f64())
+                .map(|v| v as f32)
+        })
+        .or_else(|| {
+            node.background
+                .as_ref()
+                .and_then(|bg| bg.segmented_fill.as_ref())
+                .map(|fill| fill.angle)
+        })
+        .unwrap_or(0.0);
+
+    let segment_size = raw
+        .get("SegmentSize")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32)
+        .or_else(|| {
+            segmented_raw
+                .and_then(|sf| sf.get("segmentSize"))
+                .and_then(|v| v.get("value"))
+                .and_then(|v| v.as_f64())
+                .map(|v| v as f32)
+        })
+        .unwrap_or(64.0);
+
+    let segment_spacing_size = raw
+        .get("SegmentSpacingSize")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32)
+        .or_else(|| {
+            segmented_raw
+                .and_then(|sf| sf.get("spaceSize"))
+                .and_then(|v| v.get("value"))
+                .and_then(|v| v.as_f64())
+                .map(|v| v as f32)
+        })
+        .unwrap_or(64.0);
+
+    let segment_x_offset = raw
+        .get("SegmentXOffset")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32)
+        .or_else(|| {
+            segmented_raw
+                .and_then(|sf| sf.get("xOffset"))
+                .and_then(|v| v.as_f64())
+                .map(|v| v as f32)
+        })
+        .unwrap_or(0.0);
+
+    let segmented_bar_fill = raw
+        .get("EnableSegmentedBarFill")
+        .and_then(|v| v.as_bool())
+        .or_else(|| {
+            segmented_raw
+                .and_then(|sf| sf.get("barFill"))
+                .and_then(|v| v.as_bool())
+        })
+        .unwrap_or(false);
+
+    let segment_colour = raw
+        .get("SegmentColor")
+        .and_then(parse_raw_colour)
+        .or_else(|| segmented_raw.and_then(|sf| sf.get("segmentColor")).and_then(parse_raw_colour));
+
+    let segment_colour_token = raw
+        .get("SegmentColor")
+        .and_then(|v| v.get("color"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .or_else(|| {
+            segmented_raw
+                .and_then(|sf| sf.get("segmentColor"))
+                .and_then(|v| v.get("color"))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        });
+
+    if segment_size <= 0.0 {
+        return None;
+    }
+
+    Some(UiIrSegmentedFill {
+        enabled,
+        angle,
+        segment_size,
+        segment_spacing_size,
+        segment_x_offset,
+        segmented_bar_fill,
+        segment_colour,
+        segment_colour_token,
+    })
+}
+
+fn parse_raw_colour(value: &serde_json::Value) -> Option<[f32; 4]> {
+    let r = value.get("r").and_then(|v| v.as_f64())? as f32;
+    let g = value.get("g").and_then(|v| v.as_f64())? as f32;
+    let b = value.get("b").and_then(|v| v.as_f64())? as f32;
+    let a = value.get("a").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+    if r > 1.0 || g > 1.0 || b > 1.0 || a > 1.0 {
+        Some([r / 255.0, g / 255.0, b / 255.0, a / 255.0])
+    } else {
+        Some([r, g, b, a])
+    }
+}
+
+fn parse_nine_slice_rect(value: &serde_json::Value) -> Option<[f32; 4]> {
+    let left = value.get("left")?.as_f64()? as f32;
+    let top = value.get("top")?.as_f64()? as f32;
+    let right = value.get("right")?.as_f64()? as f32;
+    let bottom = value.get("bottom")?.as_f64()? as f32;
+    Some([left, top, right, bottom])
+}
+
+fn separator_stroke_extent_from_raw(node: &crate::bb_scene::BbNode) -> Option<f32> {
+    let stroke_extent = node
+        .raw
+        .get("strokeExtent")
+        .or_else(|| node.raw.get("svgFill").and_then(|svg_fill| svg_fill.get("strokeExtent")))
+        .and_then(|value| value.as_f64())
+        .map(|value| value as f32);
+
+    if is_authored_procedural_separator_strip(node) {
+        return None;
+    }
+
+    stroke_extent
+}
+
+fn is_authored_procedural_separator_strip(node: &crate::bb_scene::BbNode) -> bool {
+    if !matches!(node.ty, BbNodeType::Other(ref ty) if ty.eq_ignore_ascii_case("BuildingBlocks_WidgetSeparator")) {
+        return false;
+    }
+
+    let Some(svg_fill) = node.raw.get("svgFill") else {
+        return false;
+    };
+    let svg_path_empty = svg_fill
+        .get("svgPath")
+        .and_then(|value| value.as_str())
+        .is_none_or(|path| path.trim().is_empty());
+    if !svg_path_empty {
+        return false;
+    }
+    if !svg_fill
+        .get("renderShape")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    if !svg_fill
+        .get("enableColorOverlay")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    if !svg_fill
+        .get("enableNineSliceRect")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+
+    let authored_fixed_height = node.raw.get("sizing").and_then(|sizing| sizing.get("height"));
+    let is_fixed_sixteen_px = authored_fixed_height
+        .and_then(|height| height.get("behavior"))
+        .and_then(|value| value.as_str())
+        .is_some_and(|behavior| behavior.eq_ignore_ascii_case("Fixed"))
+        && authored_fixed_height
+            .and_then(|height| height.get("value"))
+            .and_then(|value| value.as_f64())
+            .is_some_and(|value| (value - 16.0).abs() <= f64::EPSILON);
+
+    is_fixed_sixteen_px
+}
+
+fn separator_colour_blend_mode_from_raw(
+    node: &crate::bb_scene::BbNode,
+) -> Option<UiIrColourBlendMode> {
+    if !matches!(node.ty, BbNodeType::Other(ref ty) if ty.eq_ignore_ascii_case("BuildingBlocks_WidgetSeparator")) {
+        return None;
+    }
+
+    let svg_fill = node.raw.get("svgFill")?;
+    let svg_path_empty = svg_fill
+        .get("svgPath")
+        .and_then(|value| value.as_str())
+        .is_none_or(|path| path.trim().is_empty());
+    let render_shape = svg_fill
+        .get("renderShape")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let enable_color_overlay = svg_fill
+        .get("enableColorOverlay")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+
+    (svg_path_empty && render_shape && enable_color_overlay).then_some(UiIrColourBlendMode::Additive)
+}
+
+fn background_colour_blend_mode_from_raw(
+    node: &crate::bb_scene::BbNode,
+    colour_token: Option<&str>,
+    allow_background_fill: bool,
+) -> Option<UiIrColourBlendMode> {
+    if !allow_background_fill || !matches!(node.ty, BbNodeType::DisplayWidget) {
+        return None;
+    }
+    let token = colour_token?.trim();
+    if !token.to_ascii_lowercase().starts_with("accent") {
+        return None;
+    }
+
+    let has_authored_background_colour = node
+        .raw
+        .get("background")
+        .and_then(|background| background.get("color"))
+        .is_some_and(|value| !value.is_null())
+        || node.raw.get("BackgroundColor").is_some()
+        || node.raw.get("FillColor").is_some();
+
+    has_authored_background_colour.then_some(UiIrColourBlendMode::Additive)
+}
+
+#[derive(Debug, Clone, Default)]
+struct SeparatorStyleSource {
+    colour: Option<[f32; 4]>,
+    colour_token: Option<String>,
+    colour_alpha: Option<f32>,
+    alpha_override: Option<f32>,
+}
+
+fn separator_standard_style_from_source(
+    node: &crate::bb_scene::BbNode,
+    selected_style_source: Option<&str>,
+    canvas_fetcher: Option<&dyn CanvasFetcher>,
+) -> Option<SeparatorStyleSource> {
+    if !matches!(node.ty, BbNodeType::Other(ref ty) if ty.eq_ignore_ascii_case("BuildingBlocks_WidgetSeparator")) {
+        return None;
+    }
+
+    let direction = node
+        .raw
+        .get("direction")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let style = node
+        .raw
+        .get("style")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+
+    let record_name = match (
+        direction.to_ascii_lowercase().as_str(),
+        style.to_ascii_lowercase().as_str(),
+    ) {
+        ("horizontal", "primary") => "BuildingBlocks_Canvas.HorizontalSeparatorPrimaryWidgetStandard",
+        ("horizontal", "secondary") => "BuildingBlocks_Canvas.HorizontalSeparatorSecondaryWidgetStandard",
+        ("horizontal", "tertiary") => "BuildingBlocks_Canvas.HorizontalSeparatorTertiaryWidgetStandard",
+        ("vertical", "primary") => "BuildingBlocks_Canvas.VerticalSeparatorPrimaryWidgetStandard",
+        ("vertical", "secondary") => "BuildingBlocks_Canvas.VerticalSeparatorSecondaryWidgetStandard",
+        ("vertical", "tertiary") => "BuildingBlocks_Canvas.VerticalSeparatorTertiaryWidgetStandard",
+        _ => return None,
+    };
+
+    let selected_style_slug = style_source_slug(selected_style_source)?;
+    let standard = canvas_fetcher?.fetch_canvas_by_name(record_name).ok()?;
+    separator_style_from_standard_record(&standard, &selected_style_slug)
+}
+

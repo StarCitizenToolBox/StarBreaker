@@ -1,0 +1,445 @@
+fn overflow_mode_from_raw(raw: &serde_json::Value) -> Option<String> {
+    for key in [
+        "OverflowMode",
+        "overflowMode",
+        "overflow",
+        "Overflow",
+        "ClipMode",
+        "clipMode",
+        "clip",
+        "Clip",
+    ] {
+        if let Some(value) = raw.get(key) {
+            return Some(if let Some(string_value) = value.as_str() {
+                string_value.to_string()
+            } else {
+                value.to_string()
+            });
+        }
+    }
+
+    None
+}
+
+pub(crate) fn collect_node_asset_refs(node: &BbNode) -> Vec<String> {
+    let mut asset_refs = Vec::new();
+
+    push_asset_ref(
+        &mut asset_refs,
+        node.icon
+            .as_ref()
+            .and_then(|icon| icon.image_record.as_deref()),
+    );
+    push_asset_ref(
+        &mut asset_refs,
+        node.background
+            .as_ref()
+            .and_then(|background| background.svg_fill_path.as_deref()),
+    );
+    push_asset_ref(
+        &mut asset_refs,
+        node.raw
+            .get("ImagePath")
+            .and_then(|value| value.as_str()),
+    );
+    push_asset_ref(
+        &mut asset_refs,
+        node.raw
+            .get("imagePath")
+            .and_then(|value| value.as_str()),
+    );
+    push_asset_ref(
+        &mut asset_refs,
+        node.raw
+            .get("SvgPath")
+            .and_then(|value| value.as_str()),
+    );
+    push_asset_ref(
+        &mut asset_refs,
+        node.raw
+            .get("svgPath")
+            .and_then(|value| value.as_str()),
+    );
+    push_asset_ref(
+        &mut asset_refs,
+        node.raw
+            .get("svgFill")
+            .and_then(|value| value.get("svgPath"))
+            .and_then(|value| value.as_str()),
+    );
+
+    asset_refs
+}
+
+fn push_asset_ref(asset_refs: &mut Vec<String>, candidate: Option<&str>) {
+    let Some(candidate) = candidate.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    if asset_refs.iter().all(|existing| existing != candidate) {
+        asset_refs.push(candidate.to_string());
+    }
+}
+
+fn unresolved_text_key_from_raw(raw: &serde_json::Value) -> Option<String> {
+    let direct = raw.get("text").and_then(|v| v.as_str()).map(str::trim);
+    if let Some(key) = direct.filter(|s| s.starts_with('@') && !s.is_empty()) {
+        return Some(key.to_string());
+    }
+
+    let loc_string = raw
+        .get("locString")
+        .and_then(|v| v.as_str())
+        .map(str::trim);
+    if let Some(key) = loc_string.filter(|s| s.starts_with('@') && !s.is_empty()) {
+        return Some(key.to_string());
+    }
+
+    let label = raw
+        .get("labelProperties")
+        .and_then(|lp| lp.get("label"))
+        .and_then(|v| v.as_str())
+        .map(str::trim);
+    label
+        .filter(|s| s.starts_with('@') && !s.is_empty())
+        .map(ToString::to_string)
+}
+
+fn is_placeholder_or_empty_secondary_text_payload(payload: &UiIrTextPayload) -> bool {
+    match payload {
+        UiIrTextPayload::Empty => true,
+        UiIrTextPayload::IntentionallyEmpty { .. } => true,
+        UiIrTextPayload::Resolved { text } => text.trim().is_empty(),
+        UiIrTextPayload::UnresolvedKey { key } => key.trim().eq_ignore_ascii_case("@LOC_PLACEHOLDER"),
+    }
+}
+
+fn node_has_text_intent(node: &BbNode) -> bool {
+    node.text.is_some()
+        || node.raw.get("text").is_some()
+        || node.raw.get("locString").is_some()
+        || node.raw.get("labelProperties").is_some()
+}
+
+fn maybe_reanchor_active_label_caption_pair_rect(
+    scene: &BbScene,
+    layout: &LayoutResult,
+    node_id: BbNodeId,
+    node: &BbNode,
+    rect: Rect,
+) -> Rect {
+    if !node_type_name(&node.ty).eq_ignore_ascii_case("BuildingBlocks_ComponentLabelCaptionPair")
+        || node.anchor.x > 0.01
+        || node.pivot.x > 0.01
+    {
+        return rect;
+    }
+
+    let Some(parent_id) = node.parent else {
+        return rect;
+    };
+
+    if !is_footer_brand_label_context(scene, parent_id) {
+        return rect;
+    }
+
+    let Some(parent) = scene.nodes.get(&parent_id) else {
+        return rect;
+    };
+
+    let mut has_placeholder_sibling = false;
+    let mut leftmost_x = rect.x;
+    for sibling_id in &parent.children {
+        let Some(sibling) = scene.nodes.get(sibling_id) else {
+            continue;
+        };
+        if !node_type_name(&sibling.ty)
+            .eq_ignore_ascii_case("BuildingBlocks_ComponentLabelCaptionPair")
+        {
+            continue;
+        }
+
+        if *sibling_id != node_id
+            && sibling
+                .raw
+                .get("captionProperties")
+                .and_then(|cp| cp.get("caption"))
+                .and_then(|value| value.as_str())
+                .is_some_and(|caption| caption.trim().eq_ignore_ascii_case("@LOC_PLACEHOLDER"))
+        {
+            has_placeholder_sibling = true;
+        }
+
+        if let Some(sibling_rect) = layout.rects.get(sibling_id)
+            && sibling_rect.x < leftmost_x
+        {
+            leftmost_x = sibling_rect.x;
+        }
+    }
+
+    if has_placeholder_sibling && leftmost_x < rect.x {
+        Rect {
+            x: leftmost_x,
+            y: rect.y,
+            w: rect.w,
+            h: rect.h,
+        }
+    } else {
+        rect
+    }
+}
+
+fn node_corner_radius(node: &BbNode) -> Option<f32> {
+    explicit_uniform_corner_radius(node)
+}
+
+fn explicit_uniform_corner_radius(node: &BbNode) -> Option<f32> {
+    let border = node.raw.get("border")?;
+    let radii = ["topLeftRadius", "topRightRadius", "bottomLeftRadius", "bottomRightRadius"]
+        .into_iter()
+        .map(|corner| {
+            border
+                .get(corner)
+                .and_then(|value| value.get("radius"))
+                .and_then(|value| value.get("value"))
+                .and_then(|value| value.as_f64())
+                .map(|value| value as f32)
+        })
+        .collect::<Option<Vec<_>>>()?;
+
+    let first = *radii.first()?;
+    if first <= 0.0 || radii.iter().any(|radius| (*radius - first).abs() > f32::EPSILON) {
+        return None;
+    }
+
+    Some(first)
+}
+
+fn is_footer_brand_label_context(scene: &BbScene, mut parent_id: BbNodeId) -> bool {
+    loop {
+        let Some(parent) = scene.nodes.get(&parent_id) else {
+            return false;
+        };
+
+        let mut has_logo = false;
+        let mut has_bottom_bar = false;
+        for child_id in &parent.children {
+            let Some(child) = scene.nodes.get(child_id) else {
+                continue;
+            };
+            if node_type_name(&child.ty)
+                .eq_ignore_ascii_case("BuildingBlocks_WidgetManufacturerLogo")
+            {
+                has_logo = true;
+            }
+
+            let image_path = child
+                .raw
+                .get("ImagePath")
+                .or_else(|| child.raw.get("imagePath"))
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if image_path.contains("bottom-bar") {
+                has_bottom_bar = true;
+            }
+        }
+
+        if has_logo && has_bottom_bar {
+            return true;
+        }
+
+        if let Some(next_parent) = parent.parent {
+            parent_id = next_parent;
+        } else {
+            return false;
+        }
+    }
+}
+
+fn background_fill_colour_token_from_raw(raw: &serde_json::Value, allow_fill_colour: bool) -> Option<String> {
+    let background_enabled = raw_background_enabled(raw);
+
+    raw.get("BackgroundColorToken")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            if !allow_fill_colour {
+                return None;
+            }
+            raw.get("FillColorToken")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|token| !token.is_empty())
+                .map(str::to_owned)
+        })
+        .or_else(|| {
+            if background_enabled {
+                raw.get("background")
+                    .and_then(|background| background.get("color"))
+                    .and_then(colour_style_token)
+                    .or_else(|| raw.get("BackgroundColor").and_then(colour_style_token))
+            } else {
+                None
+            }
+            .or_else(|| {
+                if allow_fill_colour {
+                    raw.get("FillColor").and_then(colour_style_token)
+                } else {
+                    None
+                }
+            })
+        })
+}
+
+fn background_fill_colour_token_from_style_tags(
+    resolved_style_tags: &[UiIrStyleTag],
+    node_type: &BbNodeType,
+) -> Option<String> {
+    if !matches!(node_type, BbNodeType::DisplayWidget) {
+        return None;
+    }
+
+    let has_annunciator_screen = resolved_style_tags.iter().any(|tag| {
+        tag.tag_name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case("AnnunciatorScreen"))
+    });
+    let has_annunciator_item = resolved_style_tags.iter().any(|tag| {
+        tag.tag_name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case("AnnunciatorItem"))
+    });
+    if !has_annunciator_screen || has_annunciator_item {
+        return None;
+    }
+
+    resolved_style_tags.iter().find_map(|tag| {
+        let name = tag.tag_name.as_deref()?.trim().to_ascii_lowercase();
+        match name.as_str() {
+            "statecritical" | "flashing" => Some("Base".to_string()),
+            _ => None,
+        }
+    })
+}
+
+fn should_suppress_annunciator_border(
+    resolved_style_tags: &[UiIrStyleTag],
+    node_type: &BbNodeType,
+) -> bool {
+    if !matches!(node_type, BbNodeType::DisplayWidget) {
+        return false;
+    }
+
+    let has_annunciator_item = resolved_style_tags.iter().any(|tag| {
+        tag.tag_name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case("AnnunciatorItem"))
+    });
+    if !has_annunciator_item {
+        return false;
+    }
+
+    let has_state = resolved_style_tags.iter().any(|tag| {
+        tag.tag_name.as_deref().is_some_and(|name| {
+            name.eq_ignore_ascii_case("StateModerate")
+                || name.eq_ignore_ascii_case("StateCritical")
+                || name.eq_ignore_ascii_case("Flashing")
+        })
+    });
+
+    !has_state
+}
+
+fn is_annunciator_gradient_image(node: &crate::bb_scene::BbNode) -> bool {
+    if !matches!(node.ty, BbNodeType::WidgetImage) {
+        return false;
+    }
+
+    node.raw
+        .get("ImagePath")
+        .or_else(|| node.raw.get("imagePath"))
+        .and_then(|value| value.as_str())
+        .is_some_and(|path| {
+            path.replace('\\', "/")
+                .to_ascii_lowercase()
+                .ends_with("/annunciator_on.tif")
+        })
+}
+
+fn annunciator_gradient_tint_token(
+    node: &crate::bb_scene::BbNode,
+    resolved_style_tags: &[UiIrStyleTag],
+) -> Option<String> {
+    if !is_annunciator_gradient_image(node) {
+        return None;
+    }
+
+    let has_state = resolved_style_tags.iter().any(|tag| {
+        tag.tag_name.as_deref().is_some_and(|name| {
+            name.eq_ignore_ascii_case("StateModerate")
+                || name.eq_ignore_ascii_case("StateCritical")
+                || name.eq_ignore_ascii_case("Flashing")
+        })
+    });
+
+    has_state.then(|| "Background".to_string())
+}
+
+fn colour_style_alpha(value: &serde_json::Value) -> Option<f32> {
+    value
+        .get("_Type_")
+        .and_then(|v| v.as_str())
+        .filter(|ty| *ty == "BuildingBlocks_ColorStyle")?;
+
+    value
+        .get("alpha")
+        .and_then(|v| v.as_f64())
+        .map(|value| (value as f32).clamp(0.0, 1.0))
+}
+
+fn background_fill_alpha_from_raw(raw: &serde_json::Value, allow_fill_colour: bool) -> Option<f32> {
+    let background_enabled = raw_background_enabled(raw);
+
+    if background_enabled {
+        raw.get("background")
+            .and_then(|background| background.get("color"))
+            .and_then(colour_style_alpha)
+            .or_else(|| raw.get("BackgroundColor").and_then(colour_style_alpha))
+    } else {
+        None
+    }
+        .or_else(|| {
+            if allow_fill_colour {
+                raw.get("FillColor").and_then(colour_style_alpha)
+            } else {
+                None
+            }
+        })
+}
+
+fn raw_background_enabled(raw: &serde_json::Value) -> bool {
+    if raw.get("BackgroundColor").is_some()
+        || raw
+            .get("BackgroundColorToken")
+            .and_then(|token| token.as_str())
+            .is_some_and(|token| !token.trim().is_empty())
+    {
+        return true;
+    }
+
+    if raw
+        .get("EnableBackground")
+        .and_then(|enable| enable.as_bool())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    raw.get("background")
+        .and_then(|background| background.get("enable"))
+        .and_then(|enable| enable.as_bool())
+        .unwrap_or(false)
+}
+

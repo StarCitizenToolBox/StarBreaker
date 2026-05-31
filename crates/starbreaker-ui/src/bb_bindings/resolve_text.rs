@@ -33,9 +33,24 @@ impl BindingResolver {
         field: &str,
         defaults: &DefaultValueRegistry,
     ) -> Option<String> {
+        let probe = std::env::var("BB_PRIMARY_TAG_PROBE").as_deref() == Ok("1")
+            && field == "PrimaryStateTag";
         let input_ptrs = self
             .widget_field_to_input_ptrs
-            .get(&(node_id, field.to_string()))?;
+            .get(&(node_id, field.to_string()));
+        let Some(input_ptrs) = input_ptrs else {
+            if probe {
+                log::info!(
+                    "primary-tag-probe: resolve_field_text node=ptr:{node_id} field={field} missing-mapping"
+                );
+            }
+            return None;
+        };
+        if probe {
+            log::info!(
+                "primary-tag-probe: resolve_field_text node=ptr:{node_id} field={field} inputs={input_ptrs:?}"
+            );
+        }
 
         for &input_ptr in input_ptrs {
             let mut seen_str = std::collections::HashSet::new();
@@ -43,6 +58,11 @@ impl BindingResolver {
                 && !s.is_empty()
             {
                 let cleaned = s.replace("//", "/");
+                if probe {
+                    log::info!(
+                        "primary-tag-probe: resolve_field_text node=ptr:{node_id} string-result={cleaned:?}"
+                    );
+                }
                 return Some(cleaned);
             }
 
@@ -51,18 +71,39 @@ impl BindingResolver {
                 && !s.is_empty()
             {
                 let cleaned = s.replace("//", "/");
+                if probe {
+                    log::info!(
+                        "primary-tag-probe: resolve_field_text node=ptr:{node_id} localized-result={cleaned:?}"
+                    );
+                }
                 return Some(cleaned);
             }
 
             let mut seen_num = std::collections::HashSet::new();
             if let Some(n) = self.eval_number_ptr(input_ptr, defaults, &mut seen_num) {
+                if probe {
+                    log::info!(
+                        "primary-tag-probe: resolve_field_text node=ptr:{node_id} number-result={n}"
+                    );
+                }
                 return Some(number_to_compact_string(n));
             }
 
             let mut seen_int = std::collections::HashSet::new();
             if let Some(i) = self.eval_integer_ptr(input_ptr, defaults, &mut seen_int) {
+                if probe {
+                    log::info!(
+                        "primary-tag-probe: resolve_field_text node=ptr:{node_id} integer-result={i}"
+                    );
+                }
                 return Some(i.to_string());
             }
+        }
+
+        if probe {
+            log::info!(
+                "primary-tag-probe: resolve_field_text node=ptr:{node_id} field={field} no-result"
+            );
         }
 
         None

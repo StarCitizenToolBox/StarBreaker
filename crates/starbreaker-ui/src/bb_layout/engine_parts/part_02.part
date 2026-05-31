@@ -1,0 +1,295 @@
+fn layout_node_with_rect(
+    node_id: BbNodeId,
+    outer_rect: Rect,
+    scene: &BbScene,
+    csx: f32,
+    csy: f32,
+    animation_sample_percent: Option<f32>,
+    rects: &mut BTreeMap<BbNodeId, Rect>,
+    draw_order: &mut Vec<BbNodeId>,
+) {
+    let Some(node) = scene.nodes.get(&node_id) else { return };
+
+    // ── 4. Inner rect = outer rect inset by padding ──────────────────────────
+    let inner_rect = outer_rect.inset(
+        node.padding.top * csy,
+        node.padding.right * csx,
+        node.padding.bottom * csy,
+        node.padding.left * csx,
+    );
+
+    rects.insert(node_id, outer_rect);
+
+    // Add to draw order only when the node is active.
+    if !node.is_active {
+        return;
+    }
+    draw_order.push(node_id);
+
+    // ── 5. Recurse into children ─────────────────────────────────────────────
+    // If the sibling set includes synthetic node IDs (pointerless authored
+    // nodes), keep authored order for equal layers. Otherwise keep the prior
+    // deterministic (layer, id) order.
+    let mut children: Vec<BbNodeId> = node.children.clone();
+    let has_synthetic = children.iter().any(|id| *id >= SYNTHETIC_NODE_ID_BASE);
+    if has_synthetic {
+        children.sort_by_key(|&child_id| scene.nodes.get(&child_id).map(|n| n.layer).unwrap_or(0));
+    } else {
+        children.sort_by_key(|&child_id| {
+            let layer = scene.nodes.get(&child_id).map(|n| n.layer).unwrap_or(0);
+            (layer, child_id)
+        });
+    }
+
+    // Detect FlexContainer layout policy — if present, use flex layout instead
+    // of overlay for child positioning.
+    let flex_policy = node.raw.get("layoutPolicy").filter(|v| {
+        v.get("_Type_")
+            .and_then(|t| t.as_str())
+            .map(|t| t.contains("FlexContainer"))
+            .unwrap_or(false)
+    });
+
+    if let Some(flex) = flex_policy {
+        layout_flex_children(
+            &children,
+            inner_rect,
+            flex,
+            node.pivot.x,
+            scene,
+            csx,
+            csy,
+            animation_sample_percent,
+            rects,
+            draw_order,
+        );
+    } else {
+        for child_id in children {
+            layout_node(
+                child_id,
+                inner_rect,
+                scene,
+                csx,
+                csy,
+                animation_sample_percent,
+                rects,
+                draw_order,
+            );
+        }
+    }
+}
+
+fn fills_body_background_surface(node: &crate::bb_scene::BbNode) -> bool {
+    if !matches!(node.ty, BbNodeType::WidgetBodyBackground) {
+        return false;
+    }
+
+    let uses_texture_background = node
+        .raw
+        .get("backgroundType")
+        .and_then(|value| {
+            value
+                .as_str()
+                .map(|text| text.eq_ignore_ascii_case("Texture"))
+                .or_else(|| value.as_i64().map(|number| number == 1))
+        })
+        .unwrap_or(false);
+
+    uses_texture_background && node.raw.get("textureProperties").is_some()
+}
+
+fn parent_canvas_is_surface_host(node: &crate::bb_scene::BbNode, scene: &BbScene) -> bool {
+    node.parent
+        .and_then(|parent_id| scene.nodes.get(&parent_id))
+        .is_some_and(|parent| {
+            matches!(parent.ty, BbNodeType::WidgetCanvas)
+                && matches!(parent.sizing.width, BbValue::Percent(p) if (p - 1.0).abs() < 0.0001)
+                && matches!(parent.sizing.height, BbValue::Percent(p) if p > 0.90)
+        })
+}
+
+fn effective_pivot_y(node: &crate::bb_scene::BbNode) -> f32 {
+    if horizontal_filled_separator_uses_centerline_anchor(node) {
+        0.5
+    } else {
+        node.pivot.y
+    }
+}
+
+fn horizontal_filled_separator_uses_centerline_anchor(node: &crate::bb_scene::BbNode) -> bool {
+    let is_separator = matches!(
+        &node.ty,
+        BbNodeType::Other(kind) if kind.eq_ignore_ascii_case("BuildingBlocks_WidgetSeparator")
+    );
+    if !is_separator || node.pivot.y.abs() > f32::EPSILON {
+        return false;
+    }
+    let is_horizontal = node
+        .raw
+        .get("direction")
+        .and_then(|value| value.as_str())
+        .is_some_and(|direction| direction.eq_ignore_ascii_case("Horizontal"));
+    let is_filled_shape = node
+        .raw
+        .get("svgFill")
+        .is_some_and(|svg_fill| {
+            svg_fill
+                .get("renderShape")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+                && svg_fill
+                    .get("svgPath")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .is_empty()
+        });
+    let fixed_visual_height = matches!(node.sizing.height, BbValue::Fixed(height) if height > 1.0);
+    is_horizontal && is_filled_shape && fixed_visual_height
+}
+
+fn sampled_sizing_value(
+    authored: &BbValue,
+    raw: &serde_json::Value,
+    field_name: &str,
+    animation_sample_percent: Option<f32>,
+) -> BbValue {
+    let Some(sample_percent) = animation_sample_percent else {
+        return authored.clone();
+    };
+    let Some(sampled_value) = sampled_animation_number(raw, field_name, sample_percent) else {
+        return authored.clone();
+    };
+
+    match authored {
+        BbValue::Fixed(_) => BbValue::Fixed(sampled_value),
+        BbValue::Percent(_) => BbValue::Percent(sampled_value),
+        BbValue::Other { behavior, .. } => BbValue::Other {
+            value: sampled_value,
+            behavior: behavior.clone(),
+        },
+    }
+}
+
+fn sampled_position_offset(
+    raw: &serde_json::Value,
+    field_name: &str,
+    authored_offset: f32,
+    animation_sample_percent: Option<f32>,
+) -> f32 {
+    animation_sample_percent
+        .and_then(|sample_percent| {
+            sampled_animation_number(
+                raw,
+                field_name,
+                position_animation_sample_percent(raw, sample_percent),
+            )
+        })
+        .unwrap_or(authored_offset)
+}
+
+fn position_animation_sample_percent(raw: &serde_json::Value, sample_percent: f32) -> f32 {
+    let Some(animation) = raw.get("animation") else {
+        return sample_percent;
+    };
+    let direction = animation
+        .get("direction")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let loops = animation
+        .get("loopIndefinitely")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let additive = animation
+        .get("additive")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+
+    if direction.eq_ignore_ascii_case("AlternateReverse") && loops && additive {
+        sample_percent * ADDITIVE_ALTERNATE_REVERSE_POSITION_PHASE_RATIO
+    } else {
+        sample_percent
+    }
+}
+
+fn animation_number_keyframes(raw: &serde_json::Value, field_name: &str) -> Vec<(f64, f32)> {
+    let Some(keyframes) = raw
+        .get("animation")
+        .and_then(|animation| animation.get("animationTimeline"))
+        .and_then(|timeline| timeline.get("keyframes"))
+        .and_then(|keyframes| keyframes.as_array())
+    else {
+        return Vec::new();
+    };
+
+    keyframes
+        .iter()
+        .flat_map(|keyframe| {
+            let percent = keyframe
+                .get("percent")
+                .and_then(|value| value.as_f64())
+                .unwrap_or(0.0);
+            keyframe
+                .get("modifiers")
+                .and_then(|modifiers| modifiers.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(move |modifier_data| {
+                    let modifier = modifier_data.get("modifier").unwrap_or(modifier_data);
+                    let is_number = modifier
+                        .get("_Type_")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|ty| ty == "BuildingBlocks_FieldModifierNumber");
+                    if !is_number {
+                        return None;
+                    }
+                    let matches_field = modifier
+                        .get("field")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|field| field == field_name);
+                    if !matches_field {
+                        return None;
+                    }
+                    modifier
+                        .get("value")
+                        .and_then(|value| value.as_f64())
+                        .map(|value| (percent, value as f32))
+                })
+        })
+        .collect()
+}
+
+fn sampled_animation_number(raw: &serde_json::Value, field_name: &str, sample_percent: f32) -> Option<f32> {
+    let mut keyframes = animation_number_keyframes(raw, field_name);
+    if keyframes.is_empty() {
+        return None;
+    }
+    keyframes.sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let timeline_max = keyframes.last().map(|(percent, _)| *percent).unwrap_or(1.0);
+    let sample = if timeline_max <= 1.0 {
+        sample_percent as f64 / 100.0
+    } else {
+        sample_percent as f64
+    };
+
+    let first = keyframes[0];
+    if sample <= first.0 {
+        return Some(first.1);
+    }
+
+    for window in keyframes.windows(2) {
+        let (left_percent, left_value) = window[0];
+        let (right_percent, right_value) = window[1];
+        if sample <= right_percent {
+            let span = right_percent - left_percent;
+            if span <= f64::EPSILON {
+                return Some(right_value);
+            }
+            let t = ((sample - left_percent) / span) as f32;
+            return Some(left_value + (right_value - left_value) * t);
+        }
+    }
+
+    keyframes.last().map(|(_, value)| *value)
+}
+

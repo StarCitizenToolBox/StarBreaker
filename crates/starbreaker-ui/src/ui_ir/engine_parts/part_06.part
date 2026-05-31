@@ -1,0 +1,3983 @@
+fn fill_colour_from_raw_for_text(raw: &serde_json::Value) -> Option<[f32; 4]> {
+    let obj = raw.get("FillColor")?.as_object()?;
+    let r = obj.get("r").and_then(|v| v.as_f64())? as f32;
+    let g = obj.get("g").and_then(|v| v.as_f64())? as f32;
+    let b = obj.get("b").and_then(|v| v.as_f64())? as f32;
+    let a = obj.get("a").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+    Some([r, g, b, a])
+}
+
+fn resolve_effective_font_size(
+    node_id: BbNodeId,
+    node: &crate::bb_scene::BbNode,
+    text: &crate::bb_scene::BbText,
+    node_rect_h: f32,
+    resolved_text: Option<&str>,
+    scene: &BbScene,
+    binding_resolver: &BindingResolver,
+    defaults: &DefaultValueRegistry,
+    style_font_sizes: &HashMap<String, f32>,
+    standard_text_styles: &HashMap<String, StandardTextStyle>,
+) -> UiIrValue {
+    let label_style = label_style_name_from_node_or_ancestors(node_id, node, scene);
+
+    let standard_font_size =
+        standard_textfield_font_size_from_styles(node, label_style.as_deref(), standard_text_styles);
+
+    if matches!(label_style.as_deref(), Some("Title4")) {
+        if let Some(size) = standard_font_size {
+            return apply_label_style_font_scale(
+                UiIrValue::Fixed { value: size },
+                label_style.as_deref(),
+            );
+        }
+    }
+
+    if let Some(size) = auto_font_size_from_signals(node, node_rect_h, resolved_text) {
+        return apply_label_style_font_scale(
+            UiIrValue::Fixed { value: size },
+            label_style.as_deref(),
+        );
+    }
+
+    // Prefer the latest raw font size because direct style/brand modifiers are
+    // applied after parse_text and can update FontSize without mutating BbText.
+    if let Some(raw_font_size) = font_size_from_raw(node) {
+        return apply_label_style_font_scale(raw_font_size, label_style.as_deref());
+    }
+
+    // Numeric binding operations can drive FontSize without mutating node.raw.
+    if let Some(bound_font_size) = binding_resolver.resolve_field_number(node_id, "FontSize", defaults) {
+        if bound_font_size.is_finite() && bound_font_size > 0.0 {
+            return apply_label_style_font_scale(
+                UiIrValue::Fixed {
+                    value: bound_font_size as f32,
+                },
+                label_style.as_deref(),
+            );
+        }
+    }
+
+    // If this node has no explicit size, borrow the scene-derived size for its
+    // label style (when any sibling with the same style has an authored FontSize).
+    if let Some(style_name) = label_style.as_deref() {
+        if let Some(size) = style_font_sizes.get(style_name) {
+            return apply_label_style_font_scale(
+                UiIrValue::Fixed { value: *size },
+                Some(style_name),
+            );
+        }
+    }
+
+    if let Some(size) = textfield_long_prompt_font_size_from_signals(node, node_rect_h, resolved_text) {
+        return apply_label_style_font_scale(
+            UiIrValue::Fixed { value: size },
+            label_style.as_deref(),
+        );
+    }
+
+    if let Some(size) = standard_font_size {
+        return apply_label_style_font_scale(
+            UiIrValue::Fixed { value: size },
+            label_style.as_deref(),
+        );
+    }
+
+    if let Some(size) = textfield_fallback_font_size_from_signals(node, node_rect_h, resolved_text) {
+        return apply_label_style_font_scale(
+            UiIrValue::Fixed { value: size },
+            label_style.as_deref(),
+        );
+    }
+
+    // Fall through to whatever parse_text stored.
+    apply_label_style_font_scale(convert_bb_value(&text.font_size), label_style.as_deref())
+}
+
+fn apply_label_style_font_scale(value: UiIrValue, label_style: Option<&str>) -> UiIrValue {
+    let scale: f32 = match label_style {
+        Some("Title3") => 1.15,
+        Some("Heading2") => 0.77,
+        _ => 1.0,
+    };
+
+    if (scale - 1.0).abs() <= f32::EPSILON {
+        return value;
+    }
+
+    match value {
+        UiIrValue::Fixed { value } => UiIrValue::Fixed {
+            value: value * scale,
+        },
+        other => other,
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct StandardTextStyle {
+    line_spacing: Option<f32>,
+    font_size: Option<f32>,
+    font_record: Option<String>,
+}
+
+const STANDARD_TEXTFIELD_NOMINAL_FONT_SCALE: f32 = 0.72;
+const LONG_HEADING1_PROMPT_FONT_SIZE: f32 = 28.7;
+
+fn standard_text_field_widget_path() -> &'static str {
+    "file://./../../../../../../../libs/foundry/records/ui/buildingblocks/modularkit/standard/widgets/textfieldwidgetstandard.json"
+}
+
+fn collect_standard_text_styles(
+    canvas_fetcher: Option<&dyn CanvasFetcher>,
+    selected_style_source: Option<&str>,
+) -> HashMap<String, StandardTextStyle> {
+    let Some(fetcher) = canvas_fetcher else {
+        return HashMap::new();
+    };
+    let Ok(record) = fetcher.fetch_canvas_by_path(standard_text_field_widget_path()) else {
+        return HashMap::new();
+    };
+    let record_value = record.get("_RecordValue_").unwrap_or(&record);
+    let mut styles = HashMap::new();
+
+    for entry in record_value
+        .get("defaultStyles")
+        .and_then(|styles| styles.get("entries"))
+        .and_then(|entries| entries.as_array())
+        .into_iter()
+        .flatten()
+        .chain(
+            record_value
+                .get("brandStyles")
+                .and_then(|styles| styles.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|brand| brand.get("entries").and_then(|entries| entries.as_array()))
+                .flatten(),
+        )
+    {
+        let Some(name) = entry
+            .get("name")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        let style = standard_text_style_from_entry(entry);
+        styles
+            .entry(name.to_string())
+            .or_insert(style);
+    }
+
+    let selected_style_name = selected_style_source
+        .and_then(|source| source.strip_prefix("canvas:"))
+        .map(str::to_ascii_lowercase);
+    for entry in record_value
+        .get("brandStyles")
+        .and_then(|styles| styles.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|brand| {
+            let Some(selected_style_name) = selected_style_name.as_deref() else {
+                return false;
+            };
+            brand
+                .get("brandIdentifier")
+                .and_then(|identifier| identifier.as_str())
+                .map(crate::pipeline::extract_record_name)
+                .is_some_and(|identifier| identifier.eq_ignore_ascii_case(selected_style_name))
+        })
+        .filter_map(|brand| brand.get("entries").and_then(|entries| entries.as_array()))
+        .flatten()
+    {
+        let Some(name) = entry
+            .get("name")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        let style = standard_text_style_from_entry(entry);
+        if style.line_spacing.is_some() || style.font_size.is_some() {
+            styles.insert(name.to_string(), style);
+        }
+    }
+
+    styles
+}
+
+fn standard_text_style_from_entry(entry: &serde_json::Value) -> StandardTextStyle {
+    let mut style = StandardTextStyle::default();
+    for modifier in entry
+        .get("modifiers")
+        .and_then(|modifiers| modifiers.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let field = modifier.get("field");
+        if let Some(field_name) = field.and_then(|field| field.as_str()) {
+            let value = modifier
+                .get("value")
+                .and_then(|value| value.as_f64())
+                .map(|value| value as f32);
+            if field_name.eq_ignore_ascii_case("LineSpacing") {
+                style.line_spacing = value;
+            } else if field_name.eq_ignore_ascii_case("FontSize") {
+                style.font_size = value;
+            } else if field_name.eq_ignore_ascii_case("FontStyleRecord") {
+                style.font_record = modifier
+                    .get("value")
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned);
+            }
+        } else if let Some(field_obj) = field.and_then(|field| field.as_object()) {
+            let field_type = field_obj
+                .get("_Type_")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            if field_type.ends_with("FontStyleRecord") {
+                style.font_record = field_obj
+                    .get("value")
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned);
+            }
+        }
+    }
+    style
+}
+
+fn resolve_effective_line_spacing(
+    node: &crate::bb_scene::BbNode,
+    effective_font_size: &UiIrValue,
+    standard_text_styles: &HashMap<String, StandardTextStyle>,
+) -> Option<f32> {
+    line_spacing_from_raw(node).or_else(|| {
+        label_style_name_from_raw(node).and_then(|style| {
+            standard_text_style_keys(&style)
+                .into_iter()
+                .find_map(|key| standard_text_styles.get(&key).and_then(|standard| {
+                    standard.line_spacing.map(|line_spacing| {
+                        scale_standard_line_spacing(line_spacing, standard.font_size, effective_font_size)
+                    })
+                }))
+        })
+    })
+}
+
+fn scale_standard_line_spacing(
+    line_spacing: f32,
+    standard_font_size: Option<f32>,
+    effective_font_size: &UiIrValue,
+) -> f32 {
+    let Some(standard_font_size) = standard_font_size.filter(|value| value.is_finite() && *value > 0.0) else {
+        return line_spacing;
+    };
+    let UiIrValue::Fixed { value: effective_font_size } = effective_font_size else {
+        return line_spacing;
+    };
+    if !effective_font_size.is_finite() || *effective_font_size <= 0.0 {
+        return line_spacing;
+    }
+    line_spacing * (*effective_font_size / standard_font_size)
+}
+
+fn standard_text_style_keys(style: &str) -> Vec<String> {
+    let trimmed = style.trim();
+    let mut keys = Vec::new();
+    if let Some(index) = trimmed.strip_prefix("Title") {
+        keys.push(format!("T{index}"));
+    } else if let Some(index) = trimmed.strip_prefix("Heading") {
+        keys.push(format!("H{index}"));
+    }
+    keys.push(trimmed.to_string());
+    keys
+}
+
+fn line_spacing_from_raw(node: &crate::bb_scene::BbNode) -> Option<f32> {
+    node.raw
+        .get("lineSpacing")
+        .or_else(|| node.raw.get("LineSpacing"))
+        .or_else(|| {
+            node.raw
+                .get("modifiers")
+                .and_then(|mods| mods.get("lineSpacing").or_else(|| mods.get("LineSpacing")))
+        })
+        .and_then(|value| value.as_f64())
+        .map(|value| value as f32)
+        .filter(|value| value.is_finite())
+}
+
+fn font_size_from_raw(node: &crate::bb_scene::BbNode) -> Option<UiIrValue> {
+    let value = node
+        .raw
+        .get("fontSize")
+        .or_else(|| node.raw.get("FontSize"))
+        .or_else(|| {
+            node.raw
+                .get("modifiers")
+                .and_then(|mods| mods.get("fontSize").or_else(|| mods.get("FontSize")))
+        })?;
+
+    if let Some(number) = value.as_f64() {
+        return Some(UiIrValue::Fixed {
+            value: number as f32,
+        });
+    }
+
+    let obj = value.as_object()?;
+    let raw_value = obj.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let behavior = obj
+        .get("behavior")
+        .and_then(|b| b.as_str())
+        .unwrap_or("Fixed");
+    Some(match behavior {
+        "Fixed" => UiIrValue::Fixed { value: raw_value },
+        "Percent" => UiIrValue::Percent { value: raw_value },
+        other => UiIrValue::Other {
+            value: raw_value,
+            behavior: other.to_owned(),
+        },
+    })
+}
+
+fn font_size_fixed_value_from_raw(node: &crate::bb_scene::BbNode) -> Option<f32> {
+    match font_size_from_raw(node)? {
+        UiIrValue::Fixed { value } => Some(value),
+        _ => None,
+    }
+}
+
+fn label_style_name_from_raw(node: &crate::bb_scene::BbNode) -> Option<String> {
+    node.raw
+        .get("labelProperties")
+        .and_then(|v| v.get("style"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+fn resolved_text_from_payload(payload: &UiIrTextPayload) -> Option<&str> {
+    match payload {
+        UiIrTextPayload::Resolved { text } => Some(text.as_str()),
+        _ => None,
+    }
+}
+
+fn classify_text_payload(
+    resolved_text: Option<&str>,
+    raw: &serde_json::Value,
+    defaults: &DefaultValueRegistry,
+) -> UiIrTextPayload {
+    let Some(text) = resolved_text.map(str::trim) else {
+        return UiIrTextPayload::Empty;
+    };
+
+    if !text.is_empty() {
+        return classify_literal_or_localized_text(text, defaults);
+    }
+
+    if let Some(unresolved_key) = unresolved_text_key_from_raw(raw) {
+        if let Some(localized) = defaults.lookup_localization(&unresolved_key) {
+            if localized.trim().is_empty() {
+                UiIrTextPayload::IntentionallyEmpty {
+                    key: Some(unresolved_key),
+                }
+            } else {
+                UiIrTextPayload::Resolved {
+                    text: localized.trim().to_string(),
+                }
+            }
+        } else {
+            UiIrTextPayload::UnresolvedKey {
+                key: unresolved_key,
+            }
+        }
+    } else {
+        UiIrTextPayload::Empty
+    }
+}
+
+fn classify_literal_or_localized_text(
+    text: &str,
+    defaults: &DefaultValueRegistry,
+) -> UiIrTextPayload {
+    if text.starts_with('@') {
+        if let Some(localized) = defaults.lookup_localization(text) {
+            if localized.trim().is_empty() {
+                UiIrTextPayload::IntentionallyEmpty {
+                    key: Some(text.to_string()),
+                }
+            } else {
+                UiIrTextPayload::Resolved {
+                    text: localized.trim().to_string(),
+                }
+            }
+        } else {
+            UiIrTextPayload::UnresolvedKey {
+                key: text.to_string(),
+            }
+        }
+    } else {
+        UiIrTextPayload::Resolved {
+            text: text.to_string(),
+        }
+    }
+}
+
+fn textfield_long_prompt_font_size_from_signals(
+    node: &crate::bb_scene::BbNode,
+    node_rect_h: f32,
+    resolved_text: Option<&str>,
+) -> Option<f32> {
+    if !matches!(node.ty, BbNodeType::WidgetTextField) {
+        return None;
+    }
+
+    let style = label_style_name_from_raw(node)?;
+    let text_len = resolved_text
+        .map(|value| value.trim().chars().count())
+        .unwrap_or(0);
+
+    if style == "Heading1" && text_len >= 32 && node_rect_h <= 120.0 {
+        Some(LONG_HEADING1_PROMPT_FONT_SIZE)
+    } else {
+        None
+    }
+}
+
+fn standard_textfield_font_size_from_styles(
+    node: &crate::bb_scene::BbNode,
+    label_style: Option<&str>,
+    standard_text_styles: &HashMap<String, StandardTextStyle>,
+) -> Option<f32> {
+    if !matches!(node.ty, BbNodeType::WidgetTextField) {
+        return None;
+    }
+
+    let label_style = label_style?;
+    if !matches!(label_style, "Heading1" | "Heading3" | "Title4") {
+        return None;
+    }
+
+    standard_text_style_keys(label_style)
+        .into_iter()
+        .filter_map(|key| standard_text_styles.get(&key))
+        .find(|standard| {
+            if label_style == "Title4" {
+                return standard.font_size.is_some();
+            }
+            standard
+                .font_record
+                .as_deref()
+                .is_some_and(|record| {
+                    let font_style = crate::pipeline::extract_record_name(record);
+                    font_style.eq_ignore_ascii_case("blenderpro-thin")
+                })
+        })
+        .and_then(|standard| standard.font_size)
+        .filter(|font_size| font_size.is_finite() && *font_size > 0.0)
+        .map(|font_size| (font_size * STANDARD_TEXTFIELD_NOMINAL_FONT_SCALE * 10.0).round() / 10.0)
+}
+
+fn textfield_fallback_font_size_from_signals(
+    node: &crate::bb_scene::BbNode,
+    node_rect_h: f32,
+    resolved_text: Option<&str>,
+) -> Option<f32> {
+    if !matches!(node.ty, BbNodeType::WidgetTextField) {
+        return None;
+    }
+
+    let style = label_style_name_from_raw(node)?;
+    let text_len = resolved_text
+        .map(|value| value.trim().chars().count())
+        .unwrap_or(0);
+
+    match style.as_str() {
+        "Title4" => Some(56.0),
+        "Title3" => Some(90.0),
+        "Heading3" => Some(21.0),
+        "Heading2" if node_rect_h >= 220.0 && text_len > 0 && text_len <= 4 => Some(90.0),
+        "Heading2" if node_rect_h <= 80.0 => Some(28.0),
+        "Heading2" => Some(18.0),
+        "Heading6" if node_rect_h >= 48.0 => Some(18.0),
+        "Heading1" if text_len >= 32 && node_rect_h <= 120.0 => Some(LONG_HEADING1_PROMPT_FONT_SIZE),
+        "Heading1" => Some(40.0),
+        _ => None,
+    }
+}
+
+fn label_style_name_from_node_or_ancestors(
+    node_id: BbNodeId,
+    node: &crate::bb_scene::BbNode,
+    scene: &BbScene,
+) -> Option<String> {
+    if let Some(style) = label_style_name_from_raw(node) {
+        return Some(style);
+    }
+
+    let mut current = scene.nodes.get(&node_id).and_then(|n| n.parent);
+    while let Some(parent_id) = current {
+        let parent = scene.nodes.get(&parent_id)?;
+        if let Some(style) = label_style_name_from_raw(parent) {
+            return Some(style);
+        }
+        current = parent.parent;
+    }
+    None
+}
+
+fn collect_style_font_sizes(scene: &BbScene) -> HashMap<String, f32> {
+    let mut values_by_style: HashMap<String, Vec<f32>> = HashMap::new();
+
+    for node in scene.nodes.values() {
+        let Some(style_name) = label_style_name_from_raw(node) else {
+            continue;
+        };
+        let Some(value) = font_size_fixed_value_from_raw(node) else {
+            continue;
+        };
+        if value > 0.0 {
+            values_by_style.entry(style_name).or_default().push(value);
+        }
+    }
+
+    values_by_style
+        .into_iter()
+        .map(|(style, mut values)| {
+            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let median = values[values.len() / 2];
+            (style, median)
+        })
+        .collect()
+}
+
+fn resolve_record(
+    canvas_fetcher: Option<&dyn CanvasFetcher>,
+    candidates: &[&str],
+) -> Option<serde_json::Value> {
+    let fetcher = canvas_fetcher?;
+    for candidate in candidates {
+        let key = candidate.trim();
+        if key.is_empty() {
+            continue;
+        }
+        if let Ok(record) = fetcher.fetch_canvas_by_path(key) {
+            return Some(record);
+        }
+        if let Ok(record) = fetcher.fetch_canvas_by_name(key) {
+            return Some(record);
+        }
+        if let Ok(record) = fetcher.fetch_canvas_json(key) {
+            return Some(record);
+        }
+    }
+    None
+}
+
+/// Resolve a style-tag record for IR emission.
+///
+/// Resolution order:
+/// 1. Direct record fetch by `_RecordPath_`, `_RecordName_`, and UUID.
+/// 2. If those fail and `_RecordPath_` points to `tagdatabase`, fetch the
+///    tag-database record and resolve the UUID from its nested `tags[]` tree.
+///
+/// This keeps tag resolution in the core IR pipeline instead of requiring
+/// dump-specific flattening/indexing steps.
+fn resolve_style_tag_record(
+    canvas_fetcher: Option<&dyn CanvasFetcher>,
+    tag_reference: &serde_json::Value,
+    record_path: &str,
+    record_name: &str,
+    tag_uuid: &str,
+) -> Option<serde_json::Value> {
+    let tag_db_path = record_path.trim();
+    let is_tag_database_path = !tag_db_path.is_empty()
+        && tag_db_path.to_ascii_lowercase().contains("tagdatabase");
+
+    if !is_tag_database_path {
+        if let Some(record) = resolve_record(canvas_fetcher, &[record_path, record_name, tag_uuid]) {
+            return Some(record);
+        }
+    }
+
+    let fetcher = canvas_fetcher?;
+    if !is_tag_database_path {
+        if let Some(record) = resolve_record(Some(fetcher), &[tag_uuid]) {
+            return Some(record);
+        }
+    }
+
+    if !is_tag_database_path {
+        return None;
+    }
+
+    let tag_db = fetcher.fetch_canvas_by_path(tag_db_path).ok()?;
+    let tags = tag_db
+        .get("_RecordValue_")
+        .and_then(|rv| rv.get("tags"))
+        .and_then(|v| v.as_array())?;
+
+    let tag_value = tags.iter().find_map(|tag| find_tag_in_tree(tag, tag_uuid))?;
+    let resolved_record_name = tag_reference
+        .get("_RecordName_")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("Tag.{tag_uuid}"));
+
+    Some(serde_json::json!({
+        "_RecordId_": tag_uuid,
+        "_RecordName_": resolved_record_name,
+        "_RecordPath_": tag_db_path,
+        "_Type_": "Tag",
+        "_RecordValue_": trim_tag_tree_to_matched_tag(tag_value),
+    }))
+}
+
+fn find_tag_in_tree<'a>(value: &'a serde_json::Value, tag_uuid: &str) -> Option<&'a serde_json::Value> {
+    let object = value.as_object()?;
+    let matches = object
+        .get("_RecordId_")
+        .and_then(|v| v.as_str())
+        .is_some_and(|id| id == tag_uuid);
+    if matches {
+        return Some(value);
+    }
+
+    object
+        .get("children")
+        .and_then(|v| v.as_array())
+        .and_then(|children| children.iter().find_map(|child| find_tag_in_tree(child, tag_uuid)))
+}
+
+fn trim_tag_tree_to_matched_tag(tag_value: &serde_json::Value) -> serde_json::Value {
+    let Some(object) = tag_value.as_object() else {
+        return tag_value.clone();
+    };
+
+    let mut trimmed = serde_json::Map::with_capacity(object.len());
+    for (key, value) in object {
+        if key != "children" {
+            trimmed.insert(key.clone(), value.clone());
+        }
+    }
+    serde_json::Value::Object(trimmed)
+}
+
+fn convert_bb_value(value: &BbValue) -> UiIrValue {
+    match value {
+        BbValue::Fixed(v) => UiIrValue::Fixed { value: *v },
+        BbValue::Percent(v) => UiIrValue::Percent { value: *v },
+        BbValue::Other { value, behavior } => UiIrValue::Other {
+            value: *value,
+            behavior: behavior.clone(),
+        },
+    }
+}
+
+fn animation_number_keyframes(raw: &serde_json::Value, field_name: &str) -> Vec<(f64, f32)> {
+    let Some(keyframes) = raw.get("animation")
+        .and_then(|animation| animation.get("animationTimeline"))
+        .and_then(|timeline| timeline.get("keyframes"))
+        .and_then(|keyframes| keyframes.as_array())
+    else {
+        return Vec::new();
+    };
+
+    keyframes
+        .iter()
+        .flat_map(|keyframe| {
+            let percent = keyframe
+                .get("percent")
+                .and_then(|value| value.as_f64())
+                .unwrap_or(0.0);
+            keyframe
+                .get("modifiers")
+                .and_then(|modifiers| modifiers.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(move |modifier_data| {
+                    let modifier = modifier_data.get("modifier").unwrap_or(modifier_data);
+                    let is_number = modifier
+                        .get("_Type_")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|ty| ty == "BuildingBlocks_FieldModifierNumber");
+                    if !is_number {
+                        return None;
+                    }
+                    let matches_field = modifier
+                        .get("field")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|field| field == field_name);
+                    if !matches_field {
+                        return None;
+                    }
+                    modifier
+                        .get("value")
+                        .and_then(|value| value.as_f64())
+                        .map(|value| (percent, value as f32))
+                })
+        })
+        .collect()
+}
+
+fn representative_animation_alpha(raw: &serde_json::Value) -> Option<f32> {
+    animation_number_keyframes(raw, "Alpha")
+        .into_iter()
+        .map(|(_, value)| value.clamp(0.0, 1.0))
+        .max_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal))
+}
+
+fn local_alpha_for_node(
+    node: &crate::bb_scene::BbNode,
+    animation_sample_percent: Option<f32>,
+) -> f32 {
+    if is_transient_static_pulse_node(node) {
+        return 0.0;
+    }
+    if let Some(sample_percent) = animation_sample_percent {
+        sampled_animation_alpha(&node.raw, sample_percent)
+            .unwrap_or_else(|| representative_animation_alpha(&node.raw).unwrap_or(node.alpha))
+    } else {
+        representative_animation_alpha(&node.raw).unwrap_or(node.alpha)
+    }
+    .clamp(0.0, 1.0)
+}
+
+fn effective_alpha_for_node(
+    node_id: BbNodeId,
+    node: &crate::bb_scene::BbNode,
+    scene: &BbScene,
+    animation_sample_percent: Option<f32>,
+) -> f32 {
+    let mut alpha = local_alpha_for_node(node, animation_sample_percent);
+    let mut current_parent = node.parent;
+    let mut visited = HashSet::from([node_id]);
+
+    while let Some(parent_id) = current_parent {
+        if !visited.insert(parent_id) {
+            break;
+        }
+        let Some(parent) = scene.nodes.get(&parent_id) else {
+            break;
+        };
+        alpha *= local_alpha_for_node(parent, animation_sample_percent);
+        current_parent = parent.parent;
+    }
+
+    alpha.clamp(0.0, 1.0)
+}
+
+fn sampled_animation_alpha(raw: &serde_json::Value, sample_percent: f32) -> Option<f32> {
+    sampled_animation_number(raw, "Alpha", sample_percent).map(|value| value.clamp(0.0, 1.0))
+}
+
+fn sampled_animation_number(raw: &serde_json::Value, field_name: &str, sample_percent: f32) -> Option<f32> {
+    let mut keyframes = animation_number_keyframes(raw, field_name);
+    if keyframes.is_empty() {
+        return None;
+    }
+    keyframes.sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let timeline_max = keyframes.last().map(|(percent, _)| *percent).unwrap_or(1.0);
+    let sample = if timeline_max <= 1.0 {
+        sample_percent as f64 / 100.0
+    } else {
+        sample_percent as f64
+    };
+
+    let first = keyframes[0];
+    if sample <= first.0 {
+        return Some(first.1);
+    }
+
+    for window in keyframes.windows(2) {
+        let (left_percent, left_value) = window[0];
+        let (right_percent, right_value) = window[1];
+        if sample <= right_percent {
+            let span = right_percent - left_percent;
+            if span <= f64::EPSILON {
+                return Some(right_value);
+            }
+            let t = ((sample - left_percent) / span) as f32;
+            return Some(left_value + (right_value - left_value) * t);
+        }
+    }
+
+    keyframes.last().map(|(_, value)| *value)
+}
+
+fn is_transient_static_pulse_node(node: &BbNode) -> bool {
+    if !node_type_name(&node.ty).eq_ignore_ascii_case("BuildingBlocks_WidgetCircle") {
+        return false;
+    }
+
+    let looping = node
+        .raw
+        .get("animation")
+        .and_then(|animation| animation.get("loopIndefinitely"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if !looping {
+        return false;
+    }
+
+    let mut alpha_keyframes = animation_number_keyframes(&node.raw, "Alpha");
+    if alpha_keyframes.len() < 2 {
+        return false;
+    }
+    alpha_keyframes.sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let starts_hidden = alpha_keyframes.first().is_some_and(|(_, value)| *value <= 0.001);
+    let ends_hidden = alpha_keyframes.last().is_some_and(|(_, value)| *value <= 0.001);
+    let scales_over_time = !animation_number_keyframes(&node.raw, "SizeX").is_empty()
+        || !animation_number_keyframes(&node.raw, "SizeY").is_empty();
+
+    starts_hidden && ends_hidden && scales_over_time
+}
+
+fn node_type_name(node_type: &BbNodeType) -> &str {
+    match node_type {
+        BbNodeType::DisplayWidget => "display_widget",
+        BbNodeType::WidgetCanvas => "widget_canvas",
+        BbNodeType::WidgetIcon => "widget_icon",
+        BbNodeType::WidgetCard => "widget_card",
+        BbNodeType::WidgetTextField => "widget_text_field",
+        BbNodeType::ComponentGeneralButton => "component_general_button",
+        BbNodeType::ComponentGeneralButtonSecondary => "component_general_button_secondary",
+        BbNodeType::WidgetImage => "widget_image",
+        BbNodeType::WidgetText => "widget_text",
+        BbNodeType::WidgetCustomShape => "widget_custom_shape",
+        BbNodeType::WidgetBodyBackground => "widget_body_background",
+        BbNodeType::Other(s) => s,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestCanvasFetcher {
+        by_guid: std::collections::HashMap<String, serde_json::Value>,
+        by_path: std::collections::HashMap<String, serde_json::Value>,
+    }
+
+    impl CanvasFetcher for TestCanvasFetcher {
+        fn fetch_canvas_json(&self, guid: &str) -> Result<serde_json::Value, crate::UiError> {
+            self.by_guid
+                .get(guid)
+                .cloned()
+                .ok_or_else(|| crate::UiError::RenderError(format!("missing guid: {guid}")))
+        }
+
+        fn fetch_canvas_by_name(
+            &self,
+            record_name: &str,
+        ) -> Result<serde_json::Value, crate::UiError> {
+            self.by_guid
+                .values()
+                .chain(self.by_path.values())
+                .find(|value| {
+                    value
+                        .get("_RecordName_")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|name| name == record_name)
+                })
+                .cloned()
+                .ok_or_else(|| crate::UiError::RenderError(format!("missing name: {record_name}")))
+        }
+
+        fn fetch_canvas_by_path(&self, path: &str) -> Result<serde_json::Value, crate::UiError> {
+            self.by_path
+                .get(path)
+                .cloned()
+                .ok_or_else(|| crate::UiError::RenderError(format!("missing path: {path}")))
+        }
+    }
+
+    fn defaults() -> crate::defaults::DefaultValueRegistry {
+        crate::defaults::DefaultValueRegistry::with_well_known_path_defaults()
+    }
+
+    #[test]
+    fn resolve_style_tag_record_uses_matched_tag_instead_of_full_database() {
+        let tag_db_path = "libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json";
+        let fetcher = TestCanvasFetcher {
+            by_guid: std::collections::HashMap::new(),
+            by_path: std::collections::HashMap::from([(tag_db_path.to_string(), serde_json::json!({
+                "_RecordId_": "66ee5bfc-d90b-41bd-ad2e-e0a2b3efe359",
+                "_RecordName_": "TagDatabase.TagDatabase",
+                "_RecordValue_": {
+                    "_Type_": "TagDatabase",
+                    "tags": [
+                        {
+                            "_RecordId_": "parent-tag",
+                            "tagName": "Parent",
+                            "children": [
+                                {
+                                    "_RecordId_": "target-tag",
+                                    "tagName": "Target",
+                                    "children": [
+                                        {
+                                            "_RecordId_": "descendant-tag",
+                                            "tagName": "Descendant"
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }))]),
+        };
+
+        let tag_reference = serde_json::json!({
+            "_RecordId_": "target-tag",
+            "_RecordName_": "Tag.target-tag",
+            "_RecordPath_": tag_db_path,
+        });
+
+        let resolved = resolve_style_tag_record(
+            Some(&fetcher),
+            &tag_reference,
+            tag_db_path,
+            "Tag.target-tag",
+            "target-tag",
+        )
+        .expect("tag should resolve");
+
+        assert_eq!(resolved.get("_Type_").and_then(|v| v.as_str()), Some("Tag"));
+        assert_eq!(resolved.get("_RecordId_").and_then(|v| v.as_str()), Some("target-tag"));
+
+        let record_value = resolved.get("_RecordValue_").expect("record value");
+        assert_eq!(record_value.get("_RecordId_").and_then(|v| v.as_str()), Some("target-tag"));
+        assert_eq!(record_value.get("tagName").and_then(|v| v.as_str()), Some("Target"));
+        assert!(record_value.get("tags").is_none(), "full tag database leaked into record");
+        assert!(record_value.get("children").is_none(), "descendant tags leaked into record");
+    }
+
+    #[test]
+    fn compile_ir_style_tags_are_compact() {
+        let tag_db_path = "libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json";
+        let fetcher = TestCanvasFetcher {
+            by_guid: std::collections::HashMap::new(),
+            by_path: std::collections::HashMap::from([(tag_db_path.to_string(), serde_json::json!({
+                "_RecordId_": "66ee5bfc-d90b-41bd-ad2e-e0a2b3efe359",
+                "_RecordName_": "TagDatabase.TagDatabase",
+                "_RecordValue_": {
+                    "_Type_": "TagDatabase",
+                    "tags": [
+                        {
+                            "_RecordId_": "target-tag",
+                            "tagName": "Target"
+                        }
+                    ]
+                }
+            }))]),
+        };
+
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestTags",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetCanvas",
+                        "name": "root",
+                        "isActive": true,
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 100.0},
+                            "height": {"behavior": "Fixed", "value": 100.0}
+                        },
+                        "styleTags": [
+                            {
+                                "_RecordId_": "target-tag",
+                                "_RecordName_": "Tag.target-tag",
+                                "_RecordPath_": tag_db_path
+                            }
+                        ]
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let mut scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let target = scene.nodes.values_mut().next().expect("target node");
+        target.raw["FontSize"] = serde_json::Value::from(40.0);
+        target.raw["__AppliedStyleEntries"] = serde_json::json!([
+            {
+                "name": "ParentTitleSize",
+                "conditionsList": [
+                    {
+                        "conditions": [
+                            {
+                                "_Type_": "BuildingBlocks_StyleSelectorConditionParent",
+                                "conditions": [
+                                    {"_Type_": "BuildingBlocks_StyleSelectorConditionTag"}
+                                ]
+                            }
+                        ]
+                    }
+                ],
+                "modifiers": [
+                    {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "FontSize", "value": 40.0}
+                ]
+            }
+        ]);
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            Some(&fetcher),
+            "guid-tags",
+            Some("BuildingBlocks_Canvas.TestTags"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let actual = serde_json::to_value(ir).expect("serialize ir");
+        let style_tag = actual
+            .get("nodes")
+            .and_then(|v| v.as_array())
+            .and_then(|nodes| nodes.first())
+            .and_then(|node| node.get("resolved_style_tags"))
+            .and_then(|v| v.as_array())
+            .and_then(|tags| tags.first())
+            .and_then(|v| v.as_object())
+            .expect("resolved style tag object");
+
+        assert_eq!(style_tag.get("uuid").and_then(|v| v.as_str()), Some("target-tag"));
+        assert_eq!(style_tag.get("tag_name").and_then(|v| v.as_str()), Some("Target"));
+        assert_eq!(style_tag.len(), 2, "resolved style tags should serialize only essential fields");
+    }
+
+    #[test]
+    fn collect_node_asset_refs_includes_brand_applied_paths() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestAssets",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetImage",
+                        "name": "asset_node",
+                        "isActive": true,
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 100.0},
+                            "height": {"behavior": "Fixed", "value": 100.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let mut scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let node = scene.nodes.values_mut().next().expect("node");
+        node.raw
+            .as_object_mut()
+            .expect("raw object")
+            .insert(
+                "ImagePath".to_string(),
+                serde_json::Value::String(
+                    "UI/Textures/I_InteractiveScreens/Med/i_med_bioc_bottom-bar.tif".to_string(),
+                ),
+            );
+        node.raw
+            .as_object_mut()
+            .expect("raw object")
+            .insert(
+                "SvgPath".to_string(),
+                serde_json::Value::String(
+                    "UI/Textures/Vector/General/BrandLogos/logo_bioticorp_a.svg".to_string(),
+                ),
+            );
+
+        let asset_refs = collect_node_asset_refs(node);
+        assert_eq!(
+            asset_refs,
+            vec![
+                "UI/Textures/I_InteractiveScreens/Med/i_med_bioc_bottom-bar.tif".to_string(),
+                "UI/Textures/Vector/General/BrandLogos/logo_bioticorp_a.svg".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn compile_ir_emits_semantic_colour_tokens() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestColours",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "label",
+                        "isActive": true,
+                        "text": "HELLO",
+                        "textColor": {
+                            "_Type_": "BuildingBlocks_ColorStyle",
+                            "color": "Bright",
+                            "alpha": 1.0
+                        },
+                        "background": {
+                            "enable": true,
+                            "color": {
+                                "_Type_": "BuildingBlocks_ColorStyle",
+                                "color": "Accent2",
+                                "alpha": 1.0
+                            }
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetIcon",
+                        "name": "icon",
+                        "isActive": true,
+                        "iconProperties": {
+                            "customIcon": "UI/Textures/icon.svg",
+                            "color": {
+                                "_Type_": "BuildingBlocks_ColorStyle",
+                                "color": "Accent3",
+                                "alpha": 1.0
+                            }
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 20.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:3",
+                        "_Type_": "BuildingBlocks_WidgetCustomShape",
+                        "name": "shape",
+                        "isActive": true,
+                        "renderShape": true,
+                        "svgPath": "UI/Textures/Vector/General/FingerPrint.svg",
+                        "FillColor": {"r": 0.25, "g": 0.5, "b": 0.75, "a": 1.0},
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 20.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-colours",
+            Some("BuildingBlocks_Canvas.TestColours"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let label = ir.nodes.iter().find(|node| node.name == "label").expect("label node");
+        assert_eq!(label.background_fill_colour, None);
+        assert_eq!(label.background_fill_colour_token.as_deref(), Some("Accent2"));
+        assert_eq!(
+            label.text_style.as_ref().and_then(|style| style.colour_token.as_deref()),
+            Some("Bright")
+        );
+
+        let icon = ir.nodes.iter().find(|node| node.name == "icon").expect("icon node");
+        assert_eq!(icon.icon_tint_colour, None);
+        assert_eq!(icon.icon_tint_colour_token.as_deref(), Some("Accent3"));
+
+        let shape = ir.nodes.iter().find(|node| node.name == "shape").expect("shape node");
+        assert_eq!(shape.icon_tint_colour, Some([0.25, 0.5, 0.75, 1.0]));
+    }
+
+    #[test]
+    fn compile_ir_maps_primary_text_colour_tag_to_bright_token() {
+        let tag_db_path = "file://tagdatabase.tagdatabase.json";
+        let primary_tag_id = "primary-tag-id";
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestPrimaryTextColourTag",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "primary_title",
+                        "isActive": true,
+                        "text": "DIGITAL MEDICAL ASSISTANT",
+                        "labelProperties": {
+                            "style": "Title3"
+                        },
+                        "styleTags": [
+                            {
+                                "_RecordPath_": tag_db_path,
+                                "_RecordName_": "Tag.primary-tag-id",
+                                "_RecordId_": primary_tag_id
+                            }
+                        ],
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "primary_heading",
+                        "isActive": true,
+                        "text": "VIEW CURRENT STATUS",
+                        "labelProperties": {
+                            "style": "Heading6"
+                        },
+                        "styleTags": [
+                            {
+                                "_RecordPath_": tag_db_path,
+                                "_RecordName_": "Tag.primary-tag-id",
+                                "_RecordId_": primary_tag_id
+                            }
+                        ],
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+        let tag_db = serde_json::json!({
+            "_RecordName_": "TagDatabase",
+            "_RecordValue_": {
+                "tags": [
+                    {
+                        "_RecordId_": primary_tag_id,
+                        "_RecordName_": "Tag.primary-tag-id",
+                        "_Type_": "Tag",
+                        "tagName": "Primary",
+                        "children": []
+                    }
+                ]
+            }
+        });
+        let fetcher = TestCanvasFetcher {
+            by_guid: std::collections::HashMap::new(),
+            by_path: [(tag_db_path.to_string(), tag_db)].into_iter().collect(),
+        };
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            Some(&fetcher),
+            "guid-primary-text-colour-tag",
+            Some("BuildingBlocks_Canvas.TestPrimaryTextColourTag"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "primary_title").expect("primary title node");
+        assert_eq!(
+            node.text_style.as_ref().and_then(|style| style.colour_token.as_deref()),
+            Some("Bright")
+        );
+        assert_eq!(node.resolved_style_tags.first().and_then(|tag| tag.tag_name.as_deref()), Some("Primary"));
+
+        let heading = ir.nodes.iter().find(|node| node.name == "primary_heading").expect("primary heading node");
+        assert_eq!(
+            heading.text_style.as_ref().and_then(|style| style.colour_token.as_deref()),
+            None
+        );
+        assert_eq!(heading.resolved_style_tags.first().and_then(|tag| tag.tag_name.as_deref()), Some("Primary"));
+    }
+
+    #[test]
+    fn compile_ir_resolves_standard_textfield_line_spacing_for_label_style() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestStandardLineSpacing",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "title",
+                        "isActive": true,
+                        "text": "DIGITAL MEDICAL ASSISTANT",
+                        "FontSize": 100.0,
+                        "labelProperties": {
+                            "style": "Title3",
+                            "anchorToParentX": 0.5,
+                            "anchorToParentY": 0.5
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 40.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+        let standard = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TextFieldWidgetStandard",
+            "_RecordValue_": {
+                "defaultStyles": {
+                    "entries": [
+                        {
+                            "name": "T3",
+                            "modifiers": [
+                                    {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "FontSize", "value": 115.0},
+                                {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "LineSpacing", "value": -55.0}
+                            ]
+                        }
+                    ]
+                },
+                "brandStyles": [
+                    {
+                        "brandIdentifier": "file://./styles/s_bioc.json",
+                        "entries": [
+                            {
+                                "name": "T3",
+                                "modifiers": [
+                                    {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "FontSize", "value": 115.0},
+                                    {
+                                        "_Type_": "BuildingBlocks_FieldModifierRecordRef",
+                                        "field": {
+                                            "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeFontStyleRecord",
+                                            "value": "file://./fontstyles/blenderpro-thin.json"
+                                        }
+                                    },
+                                    {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "LineSpacing", "value": -35.0}
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+        let fetcher = TestCanvasFetcher {
+            by_guid: std::collections::HashMap::new(),
+            by_path: [(standard_text_field_widget_path().to_string(), standard)]
+                .into_iter()
+                .collect(),
+        };
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            Some(&fetcher),
+            "guid-standard-line-spacing",
+            Some("BuildingBlocks_Canvas.TestStandardLineSpacing"),
+            (100, 100),
+            &defaults(),
+            Some("canvas:s_bioc".to_string()),
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "title").expect("title node");
+        assert_eq!(
+            node.text_style.as_ref().and_then(|style| style.line_spacing),
+            Some(-35.0)
+        );
+        assert_eq!(
+            node.text_style.as_ref().and_then(|style| style.font_record.as_deref()),
+            Some("file://./fontstyles/blenderpro-thin.json")
+        );
+    }
+
+    #[test]
+    fn compile_ir_uses_standard_heading_font_size_for_unsized_textfield() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestStandardHeadingSize",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "location",
+                        "isActive": true,
+                        "text": "Drake Clipper",
+                        "labelProperties": {
+                            "style": "Heading3",
+                            "anchorToParentX": 0.5,
+                            "anchorToParentY": 0.5
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 40.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "machine_type",
+                        "isActive": true,
+                        "text": "MEDICAL ASSISTANT",
+                        "labelProperties": {
+                            "style": "Heading1",
+                            "anchorToParentX": 0.5,
+                            "anchorToParentY": 0.5
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 40.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+        let standard = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TextFieldWidgetStandard",
+            "_RecordValue_": {
+                "defaultStyles": {"entries": []},
+                "brandStyles": [
+                    {
+                        "brandIdentifier": "file://./styles/s_bioc.json",
+                        "entries": [
+                            {
+                                "name": "H3",
+                                "modifiers": [
+                                    {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "FontSize", "value": 30.0},
+                                    {
+                                        "_Type_": "BuildingBlocks_FieldModifierRecordRef",
+                                        "field": {
+                                            "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeFontStyleRecord",
+                                            "value": "file://./fontstyles/blenderpro-thin.json"
+                                        }
+                                    },
+                                    {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "LineSpacing", "value": 0.0}
+                                ]
+                            },
+                            {
+                                "name": "H1",
+                                "modifiers": [
+                                    {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "FontSize", "value": 57.0},
+                                    {
+                                        "_Type_": "BuildingBlocks_FieldModifierRecordRef",
+                                        "field": {
+                                            "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeFontStyleRecord",
+                                            "value": "file://./fontstyles/blenderpro-thin.json"
+                                        }
+                                    },
+                                    {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "LineSpacing", "value": 0.0}
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+        let fetcher = TestCanvasFetcher {
+            by_guid: std::collections::HashMap::new(),
+            by_path: [(standard_text_field_widget_path().to_string(), standard)]
+                .into_iter()
+                .collect(),
+        };
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            Some(&fetcher),
+            "guid-standard-heading-size",
+            Some("BuildingBlocks_Canvas.TestStandardHeadingSize"),
+            (100, 100),
+            &defaults(),
+            Some("canvas:s_bioc".to_string()),
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "location").expect("location node");
+        assert_eq!(
+            node.text_style.as_ref().map(|style| &style.font_size),
+            Some(&UiIrValue::Fixed { value: 21.6 })
+        );
+
+        let node = ir
+            .nodes
+            .iter()
+            .find(|node| node.name == "machine_type")
+            .expect("machine_type node");
+        assert_eq!(
+            node.text_style.as_ref().map(|style| &style.font_size),
+            Some(&UiIrValue::Fixed { value: 41.0 })
+        );
+    }
+
+    #[test]
+    fn compile_ir_uses_standard_title4_font_size_before_scene_style_borrow() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestStandardTitleSize",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "small_title_reference",
+                        "isActive": true,
+                        "text": "SMALL",
+                        "FontSize": 40.0,
+                        "labelProperties": {"style": "Title4"},
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 40.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "standard_title",
+                        "isActive": true,
+                        "text": "T3",
+                        "labelProperties": {"style": "Title4"},
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 40.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+        let standard = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TextFieldWidgetStandard",
+            "_RecordValue_": {
+                "defaultStyles": {"entries": [
+                    {
+                        "name": "Title4",
+                        "modifiers": [
+                            {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "FontSize", "value": 40.0},
+                            {
+                                "_Type_": "BuildingBlocks_FieldModifierRecordRef",
+                                "field": {
+                                    "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeFontStyleRecord",
+                                    "value": "file://./fontstyles/blenderpro-thin.json"
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "name": "T4",
+                        "modifiers": [
+                            {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "FontSize", "value": 75.0},
+                            {
+                                "_Type_": "BuildingBlocks_FieldModifierRecordRef",
+                                "field": {
+                                    "_Type_": "BuildingBlocks_FieldModifierRecordRefTypeFontStyleRecord",
+                                    "value": "file://./fontstyles/blenderpro-medium.json"
+                                }
+                            }
+                        ]
+                    }
+                ]},
+                "brandStyles": []
+            }
+        });
+        let fetcher = TestCanvasFetcher {
+            by_guid: std::collections::HashMap::new(),
+            by_path: [(standard_text_field_widget_path().to_string(), standard)]
+                .into_iter()
+                .collect(),
+        };
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            Some(&fetcher),
+            "guid-standard-title-size",
+            Some("BuildingBlocks_Canvas.TestStandardTitleSize"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir
+            .nodes
+            .iter()
+            .find(|node| node.name == "standard_title")
+            .expect("standard title node");
+        assert_eq!(
+            node.text_style.as_ref().map(|style| &style.font_size),
+            Some(&UiIrValue::Fixed { value: 54.0 })
+        );
+    }
+
+    #[test]
+    fn short_heading1_uses_header_size_while_long_prompt_stays_shallow() {
+        use crate::bb_scene::{BbNode, BbNodeType, BbSizing, BbTrbl, Vec2, Vec3};
+
+        let textfield = |style: &str| BbNode {
+            id: 1,
+            parent: None,
+            children: vec![],
+            ty: BbNodeType::WidgetTextField,
+            name: "text".to_string(),
+            style_tag_uuids: vec![],
+            is_active: true,
+            layer: 0,
+            alpha: 1.0,
+            position: Vec3::default(),
+            position_offset: Vec3::default(),
+            sizing: BbSizing::default(),
+            padding: BbTrbl::default(),
+            margin: BbTrbl::default(),
+            pivot: Vec2::default(),
+            anchor: Vec2::default(),
+            background: None,
+            border: None,
+            radial: None,
+            text: None,
+            icon: None,
+            raw: serde_json::json!({"labelProperties": {"style": style}}),
+        };
+
+        let short_heading = textfield("Heading1");
+        assert_eq!(
+            textfield_fallback_font_size_from_signals(&short_heading, 78.0, Some("MEDICAL ASSISTANT")),
+            Some(40.0)
+        );
+
+        let long_prompt = textfield("Heading1");
+        assert_eq!(
+            textfield_fallback_font_size_from_signals(
+                &long_prompt,
+                105.0,
+                Some("PLEASE SELECT AN OPTION FROM THE AVAILABLE SERVICES"),
+            ),
+            Some(LONG_HEADING1_PROMPT_FONT_SIZE)
+        );
+    }
+
+    #[test]
+    fn compile_ir_limits_style_palette_text_default_to_label_caption() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestStylePaletteTextColour",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "palette_text",
+                        "isActive": true,
+                        "text": "PATIENT NAME",
+                        "__BrandIdentifier": "s_bioc",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_ComponentLabelCaptionPair",
+                        "name": "palette_pair",
+                        "isActive": true,
+                        "__BrandIdentifier": "s_bioc",
+                        "labelProperties": {
+                            "label": "PATIENT NAME",
+                            "style": "Heading3"
+                        },
+                        "alignment": "Left",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-style-palette-text-colour",
+            Some("BuildingBlocks_Canvas.TestStylePaletteTextColour"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "palette_text").expect("palette text node");
+        assert_eq!(
+            node.text_style.as_ref().and_then(|style| style.colour_token.as_deref()),
+            None
+        );
+
+        let pair = ir.nodes.iter().find(|node| node.name == "palette_pair").expect("palette pair node");
+        assert_eq!(
+            pair.text_style.as_ref().and_then(|style| style.colour_token.as_deref()),
+            Some("Base")
+        );
+    }
+
+    #[test]
+    fn compile_ir_keeps_asset_fill_colour_as_tint_not_background() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestAssetFillTint",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetImage",
+                        "name": "bottom_bar",
+                        "isActive": true,
+                        "ImagePath": "UI/Textures/I_InteractiveScreens/Med/i_med_bioc_bottom-bar.tif",
+                        "FillColor": {
+                            "_Type_": "BuildingBlocks_ColorStyle",
+                            "color": "Base",
+                            "alpha": 1.0
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-asset-fill-tint",
+            Some("BuildingBlocks_Canvas.TestAssetFillTint"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "bottom_bar").expect("bottom bar node");
+        assert_eq!(node.background_fill_colour, None);
+        assert_eq!(node.background_fill_colour_token.as_deref(), None);
+        assert_eq!(node.icon_tint_colour_token.as_deref(), Some("Base"));
+    }
+
+    #[test]
+    fn compile_ir_does_not_draw_fill_colour_on_disabled_background_containers() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestDisabledContainerFillTint",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "card_root",
+                        "isActive": true,
+                        "background": {
+                            "enable": false,
+                            "color": null
+                        },
+                        "FillColor": {
+                            "_Type_": "BuildingBlocks_ColorStyle",
+                            "color": "Bright",
+                            "alpha": 1.0
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 80.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:3",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "disabled_border_strip",
+                        "isActive": true,
+                        "background": {
+                            "enable": false,
+                            "color": {
+                                "_Type_": "BuildingBlocks_ColorStyle",
+                                "color": "Base",
+                                "alpha": 0.2
+                            }
+                        },
+                        "svgFill": {
+                            "svgPath": "UI/Textures/Vector/Drake/Hazardlines_header1.svg",
+                            "renderShape": true,
+                            "enableColorOverlay": true,
+                            "color": {
+                                "_Type_": "BuildingBlocks_ColorStyle",
+                                "color": "Base",
+                                "alpha": 0.2
+                            }
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "enabled_panel",
+                        "isActive": true,
+                        "background": {
+                            "enable": true,
+                            "color": {
+                                "_Type_": "BuildingBlocks_ColorStyle",
+                                "color": "Bright",
+                                "alpha": 1.0
+                            }
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-disabled-container-fill-tint",
+            Some("BuildingBlocks_Canvas.TestDisabledContainerFillTint"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let card_root = ir.nodes.iter().find(|node| node.name == "card_root").expect("card root node");
+        assert_eq!(card_root.background_fill_colour, None);
+        assert_eq!(card_root.background_fill_colour_token, None);
+
+        let disabled_border_strip = ir
+            .nodes
+            .iter()
+            .find(|node| node.name == "disabled_border_strip")
+            .expect("disabled border strip node");
+        assert_eq!(disabled_border_strip.background_fill_colour, None);
+        assert_eq!(disabled_border_strip.background_fill_colour_token, None);
+        assert_eq!(disabled_border_strip.background_fill_alpha, None);
+
+        let enabled_panel = ir.nodes.iter().find(|node| node.name == "enabled_panel").expect("enabled panel node");
+        assert_eq!(enabled_panel.background_fill_colour, None);
+        assert_eq!(enabled_panel.background_fill_colour_token.as_deref(), Some("Bright"));
+    }
+
+    #[test]
+    fn compile_ir_draws_explicit_background_color_on_disabled_base_background() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestExplicitBackgroundColor",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "style_background_panel",
+                        "isActive": true,
+                        "background": {
+                            "enable": false,
+                            "color": null
+                        },
+                        "BackgroundColor": {"r": 0.015, "g": 0.031, "b": 0.09, "a": 0.5},
+                        "BackgroundColorToken": "Background",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-explicit-background-color",
+            Some("BuildingBlocks_Canvas.TestExplicitBackgroundColor"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let panel = ir.nodes.iter().find(|node| node.name == "style_background_panel").expect("panel node");
+        assert_eq!(panel.background_fill_colour, Some([0.015, 0.031, 0.09, 0.5]));
+        assert_eq!(panel.background_fill_colour_token.as_deref(), Some("Background"));
+    }
+
+    #[test]
+    fn compile_ir_marks_authored_accent_backgrounds_as_additive() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestAccentBackgroundBlend",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "accent_panel",
+                        "isActive": true,
+                        "background": {
+                            "enable": true,
+                            "color": {
+                                "_Type_": "BuildingBlocks_ColorStyle",
+                                "color": "Accent1",
+                                "alpha": 1.0
+                            }
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-accent-background-blend",
+            Some("BuildingBlocks_Canvas.TestAccentBackgroundBlend"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let panel = ir.nodes.iter().find(|node| node.name == "accent_panel").expect("panel node");
+        assert_eq!(panel.background_fill_colour_token.as_deref(), Some("Accent1"));
+        assert_eq!(panel.colour_blend_mode, Some(UiIrColourBlendMode::Additive));
+    }
+
+    #[test]
+    fn compile_ir_uses_representative_animation_alpha_for_static_render() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestAnimationStart",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetCircle",
+                        "name": "pulse",
+                        "isActive": true,
+                        "alpha": 1.0,
+                        "strokeExtent": 3.0,
+                        "animation": {
+                            "animationTimeline": {
+                                "keyframes": [
+                                    {
+                                        "percent": 0.0,
+                                        "modifiers": [
+                                            {
+                                                "modifier": {
+                                                    "_Type_": "BuildingBlocks_FieldModifierNumber",
+                                                    "field": "Alpha",
+                                                    "value": 0.0
+                                                }
+                                            },
+                                            {
+                                                "modifier": {
+                                                    "_Type_": "BuildingBlocks_FieldModifierNumber",
+                                                    "field": "SizeX",
+                                                    "value": 0.44
+                                                }
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "percent": 0.4,
+                                        "modifiers": [
+                                            {
+                                                "modifier": {
+                                                    "_Type_": "BuildingBlocks_FieldModifierNumber",
+                                                    "field": "Alpha",
+                                                    "value": 1.0
+                                                }
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "percent": 0.8,
+                                        "modifiers": [
+                                            {
+                                                "modifier": {
+                                                    "_Type_": "BuildingBlocks_FieldModifierNumber",
+                                                    "field": "Alpha",
+                                                    "value": 0.0
+                                                }
+                                            },
+                                            {
+                                                "modifier": {
+                                                    "_Type_": "BuildingBlocks_FieldModifierNumber",
+                                                    "field": "SizeX",
+                                                    "value": 1.33
+                                                }
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            "loopIndefinitely": true
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 20.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "label",
+                        "isActive": true,
+                        "alpha": 1.0,
+                        "text": "TOUCH TO START",
+                        "animation": {
+                            "animationTimeline": {
+                                "keyframes": [
+                                    {
+                                        "percent": 0.0,
+                                        "modifiers": [
+                                            {
+                                                "modifier": {
+                                                    "_Type_": "BuildingBlocks_FieldModifierNumber",
+                                                    "field": "Alpha",
+                                                    "value": 0.0
+                                                }
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "percent": 0.33,
+                                        "modifiers": [
+                                            {
+                                                "modifier": {
+                                                    "_Type_": "BuildingBlocks_FieldModifierNumber",
+                                                    "field": "Alpha",
+                                                    "value": 0.66
+                                                }
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "percent": 0.99,
+                                        "modifiers": [
+                                            {
+                                                "modifier": {
+                                                    "_Type_": "BuildingBlocks_FieldModifierNumber",
+                                                    "field": "Alpha",
+                                                    "value": 0.0
+                                                }
+                                            }
+                                        ]
+                                    }
+                                ]
+                            }
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 20.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-animation-start",
+            Some("BuildingBlocks_Canvas.TestAnimationStart"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let pulse = ir.nodes.iter().find(|node| node.name == "pulse").expect("pulse node");
+        assert_eq!(pulse.alpha, 0.0);
+        assert_eq!(pulse.stroke_extent, Some(3.0));
+
+        let label = ir.nodes.iter().find(|node| node.name == "label").expect("label node");
+        assert_eq!(label.alpha, 0.66);
+    }
+
+    #[test]
+    fn compile_ir_samples_animation_alpha_at_requested_percent() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestAnimationSample",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "fingerprint_like",
+                        "isActive": true,
+                        "alpha": 1.0,
+                        "text": "SCAN",
+                        "animation": {
+                            "animationTimeline": {
+                                "keyframes": [
+                                    {
+                                        "percent": 0.0,
+                                        "modifiers": [{"modifier": {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "Alpha", "value": 0.0}}]
+                                    },
+                                    {
+                                        "percent": 1.0,
+                                        "modifiers": [{"modifier": {"_Type_": "BuildingBlocks_FieldModifierNumber", "field": "Alpha", "value": 1.0}}]
+                                    }
+                                ]
+                            }
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 20.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene_with_animation_sample(
+            &scene,
+            None,
+            "guid-animation-sample",
+            Some("BuildingBlocks_Canvas.TestAnimationSample"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            Some(50.0),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "fingerprint_like").expect("sample node");
+        assert!((node.alpha - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn compile_ir_emits_border_and_stroke_metadata() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestBorderStroke",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetCanvas",
+                        "name": "bordered",
+                        "isActive": true,
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        },
+                        "border": {
+                            "top": {"width": 2.0, "color": {"r": 255.0, "g": 0.0, "b": 0.0, "a": 255.0}},
+                            "right": {"width": 3.0},
+                            "bottom": {"width": 4.0},
+                            "left": {"width": 5.0}
+                        },
+                        "StrokeColor": {"r": 0.25, "g": 0.5, "b": 0.75, "a": 1.0},
+                        "StrokeColorToken": "Accent4",
+                        "strokeExtent": 1.5,
+                        "BorderColorToken": "Accent1",
+                        "BorderColorRightToken": "Accent2"
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-border-stroke",
+            Some("BuildingBlocks_Canvas.TestBorderStroke"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "bordered").expect("bordered node");
+        let border = node.border.as_ref().expect("border metadata");
+        assert_eq!(border.top.width, 2.0);
+        assert_eq!(border.top.colour, Some([1.0, 0.0, 0.0, 1.0]));
+        assert_eq!(border.top.colour_token.as_deref(), Some("Accent1"));
+        assert_eq!(border.right.colour_token.as_deref(), Some("Accent2"));
+        assert_eq!(node.stroke_colour, Some([0.25, 0.5, 0.75, 1.0]));
+        assert_eq!(node.stroke_colour_token.as_deref(), Some("Accent4"));
+        assert_eq!(node.stroke_extent, Some(1.5));
+    }
+
+    #[test]
+    fn compile_ir_reads_svg_fill_stroke_extent() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestSvgFillStrokeExtent",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetSeparator",
+                        "name": "separator",
+                        "isActive": true,
+                        "sizing": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 8.0}
+                        },
+                        "svgFill": {
+                            "renderShape": true,
+                            "enableColorOverlay": true,
+                            "strokeExtent": 1.0
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-svg-fill-stroke-extent",
+            Some("BuildingBlocks_Canvas.TestSvgFillStrokeExtent"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "separator").expect("separator node");
+        assert_eq!(node.stroke_extent, Some(1.0));
+    }
+
+    #[test]
+    fn compile_ir_prefers_svg_fill_overlay_token_and_alpha() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestSvgFillOverlayTint",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "overlay",
+                        "isActive": true,
+                        "alpha": 1.0,
+                        "sizing": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 8.0}
+                        },
+                        "svgFill": {
+                            "svgPath": "UI/Textures/Vector/Drake/Drake_lowerline.svg",
+                            "renderShape": true,
+                            "enableColorOverlay": true,
+                            "color": {
+                                "_Type_": "BuildingBlocks_ColorStyle",
+                                "color": "Accent2",
+                                "alpha": 0.2
+                            }
+                        },
+                        "background": {
+                            "enable": false,
+                            "color": {
+                                "_Type_": "BuildingBlocks_ColorStyle",
+                                "color": "Base",
+                                "alpha": 1.0
+                            }
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-svg-fill-overlay-token",
+            Some("BuildingBlocks_Canvas.TestSvgFillOverlayTint"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "overlay").expect("overlay node");
+        assert_eq!(node.icon_tint_colour_token.as_deref(), Some("Accent2"));
+        assert!((node.alpha - 0.2).abs() < 0.001, "expected overlay alpha 0.2, got {}", node.alpha);
+    }
+
+    #[test]
+    fn compile_ir_emits_svg_flip_flags_in_asset_layout() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestSvgFlipFlags",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "arrow_right",
+                        "isActive": true,
+                        "sizing": {
+                            "width": {"behavior": "Fixed", "value": 20.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        },
+                        "svgFill": {
+                            "svgPath": "UI/Textures/Vector/H_HUDScreens/Ships/DRAK/drake_holo_hud_pixel_arrow.svg",
+                            "renderShape": true,
+                            "enableColorOverlay": true,
+                            "flipHorizontal": true,
+                            "flipVertical": false,
+                            "scalingBehavior": "Contain",
+                            "containPositionX": 0.5,
+                            "containPositionY": 0.5
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-svg-flip-flags",
+            Some("BuildingBlocks_Canvas.TestSvgFlipFlags"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "arrow_right").expect("arrow_right node");
+        let layout = node.asset_layout.as_ref().expect("asset layout");
+        assert_eq!(layout.flip_horizontal, Some(true));
+        assert_eq!(layout.flip_vertical, None);
+    }
+
+    #[test]
+    fn compile_ir_treats_authored_procedural_separator_strip_as_fill() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestAuthoredSeparatorStrip",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetSeparator",
+                        "name": "separator",
+                        "isActive": true,
+                        "sizing": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 16.0}
+                        },
+                        "svgFill": {
+                            "svgPath": "",
+                            "renderShape": true,
+                            "enableColorOverlay": true,
+                            "enableNineSliceRect": true,
+                            "strokeExtent": 1.0
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-authored-separator-strip",
+            Some("BuildingBlocks_Canvas.TestAuthoredSeparatorStrip"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "separator").expect("separator node");
+        assert_eq!(node.computed_rect.h, 16.0);
+        assert_eq!(node.stroke_extent, None);
+    }
+
+    #[test]
+    fn compile_ir_applies_horizontal_separator_source_style_colour() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestHorizontalSeparatorStyle",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetSeparator",
+                        "name": "secondary_separator",
+                        "isActive": true,
+                        "alpha": 0.5,
+                        "direction": "Horizontal",
+                        "style": "Secondary",
+                        "sizing": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 8.0}
+                        },
+                        "svgFill": {
+                            "svgPath": "",
+                            "renderShape": true,
+                            "enableColorOverlay": true,
+                            "enableNineSliceRect": true,
+                            "strokeExtent": 1.0
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+        let standard_separator = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.HorizontalSeparatorSecondaryWidgetStandard",
+            "_RecordValue_": {
+                "brandStyles": [
+                    {
+                        "brandIdentifier": "file://./../../../../../../../../libs/foundry/records/ui/buildingblocks/styles/s_bioc.json",
+                        "entries": [
+                            {
+                                "name": "Root",
+                                "modifiers": [
+                                    {
+                                        "_Type_": "BuildingBlocks_FieldModifierColor",
+                                        "field": "FillColor",
+                                        "color": {
+                                            "_Type_": "BuildingBlocks_ColorStyle",
+                                            "color": "Accent1",
+                                            "alpha": 0.3
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+        let fetcher = TestCanvasFetcher {
+            by_guid: std::collections::HashMap::new(),
+            by_path: std::collections::HashMap::from([(
+                "horizontal-secondary".to_string(),
+                standard_separator,
+            )]),
+        };
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            Some(&fetcher),
+            "guid-horizontal-separator-style",
+            Some("BuildingBlocks_Canvas.TestHorizontalSeparatorStyle"),
+            (100, 100),
+            &defaults(),
+            Some("canvas:s_bioc".to_owned()),
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir
+            .nodes
+            .iter()
+            .find(|node| node.name == "secondary_separator")
+            .expect("secondary separator node");
+        assert_eq!(node.stroke_colour_token.as_deref(), Some("Accent1"));
+        assert_eq!(node.colour_blend_mode, Some(UiIrColourBlendMode::Additive));
+        assert!((node.alpha - 0.15).abs() < 0.001, "expected styled alpha 0.15, got {}", node.alpha);
+    }
+
+    #[test]
+    fn compile_ir_emits_effective_inherited_alpha() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestInheritedAlpha",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "parent",
+                        "isActive": true,
+                        "alpha": 0.5,
+                        "sizing": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 80.0}
+                        },
+                        "children": ["ptr:2"]
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetSeparator",
+                        "name": "child",
+                        "isActive": true,
+                        "parent": "_PointsTo_:ptr:1",
+                        "alpha": 0.62,
+                        "sizing": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 8.0}
+                        },
+                        "svgFill": {
+                            "svgPath": "",
+                            "renderShape": true,
+                            "enableColorOverlay": true,
+                            "strokeExtent": 1.0
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-inherited-alpha",
+            Some("BuildingBlocks_Canvas.TestInheritedAlpha"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let child = ir.nodes.iter().find(|node| node.name == "child").expect("child node");
+        assert!((child.alpha - 0.31).abs() < 0.001, "expected inherited alpha 0.31, got {}", child.alpha);
+    }
+
+    #[test]
+    fn compile_ir_emits_segmented_fill_metadata() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestSegmentedFill",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetCanvas",
+                        "name": "segmented",
+                        "isActive": true,
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        },
+                        "background": {
+                            "enable": false,
+                            "color": null
+                        },
+                        "segmentedFill": {
+                            "enable": true,
+                            "angle": 22.5
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-segmented",
+            Some("BuildingBlocks_Canvas.TestSegmentedFill"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "segmented").expect("segmented node");
+        let segmented = node.segmented_fill.as_ref().expect("segmented fill metadata");
+        assert!(segmented.enabled);
+        assert_eq!(segmented.angle, 22.5);
+        assert_eq!(segmented.segment_size, 64.0);
+        assert_eq!(segmented.segment_spacing_size, 64.0);
+    }
+
+    #[test]
+    fn compile_ir_emits_schema_and_nodes() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.Test",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "label",
+                        "isActive": true,
+                        "position": {"x": 5.0, "y": 7.0},
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 40.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        },
+                        "text": "HELLO"
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-1",
+            Some("BuildingBlocks_Canvas.Test"),
+            (200, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            90,
+        );
+
+        assert_eq!(ir.schema_version, UI_IR_SCHEMA_VERSION);
+        assert_eq!(ir.canvas_guid, "guid-1");
+        assert_eq!(ir.target_width, 200);
+        assert_eq!(ir.nodes.len(), 1);
+        assert_eq!(ir.nodes[0].name, "label");
+        assert_eq!(ir.nodes[0].node_type, "widget_text_field");
+        assert_eq!(ir.nodes[0].text_payload, Some(UiIrTextPayload::Resolved { text: "HELLO".into() }));
+    }
+
+    #[test]
+    fn compile_ir_is_deterministic_for_same_input() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.Test2",
+            "_RecordValue_": {
+                "size": {"x": 50, "y": 50},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetCanvas",
+                        "name": "root",
+                        "isActive": true,
+                        "size": {
+                            "width": {"behavior": "Percent", "value": 1.0},
+                            "height": {"behavior": "Percent", "value": 1.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir1 = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-2",
+            None,
+            (128, 128),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+        let ir2 = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-2",
+            None,
+            (128, 128),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let s1 = serde_json::to_string(&ir1).expect("serialize ir1");
+        let s2 = serde_json::to_string(&ir2).expect("serialize ir2");
+        assert_eq!(s1, s2);
+
+        let h1 = stable_hash_ui_ir(&ir1).expect("hash ir1");
+        let h2 = stable_hash_ui_ir(&ir2).expect("hash ir2");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn validate_ir_rejects_invalid_document() {
+        let invalid = UiIrDocument {
+            schema_version: 999,
+            canvas_guid: String::new(),
+            canvas_name: None,
+            target_width: 0,
+            target_height: 0,
+            selected_style_source: None,
+            selected_swf_source: None,
+            renderer_hint: UiRendererHint::Bb,
+            confidence: 101,
+            warnings: Vec::new(),
+            unresolved_references: Vec::new(),
+            resolved_asset_refs: Vec::new(),
+            missing_asset_refs: Vec::new(),
+            nodes: vec![UiIrNode {
+                id: 1,
+                parent_id: None,
+                children: Vec::new(),
+                node_type: String::new(),
+                name: String::new(),
+                is_active: true,
+                layer: 0,
+                alpha: 1.0,
+                anchor: [0.0, 0.0],
+                pivot: [0.0, 0.0],
+                authored_position: [0.0, 0.0],
+                authored_size: [
+                    UiIrValue::Fixed { value: 1.0 },
+                    UiIrValue::Fixed { value: 1.0 },
+                ],
+                padding: [0.0, 0.0, 0.0, 0.0],
+                margin: [0.0, 0.0, 0.0, 0.0],
+                overflow_mode: None,
+                computed_rect: UiIrRect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: -1.0,
+                    h: -1.0,
+                },
+                background_fill_colour: None,
+                corner_radius: None,
+                background_fill_alpha: None,
+                background_fill_colour_token: None,
+                segmented_fill: None,
+                border: None,
+                stroke_colour: None,
+                stroke_colour_token: None,
+                stroke_extent: None,
+                colour_blend_mode: None,
+                icon_tint_colour: None,
+                icon_tint_colour_token: None,
+                icon_preset: None,
+                text_payload: None,
+                secondary_text_payload: None,
+                secondary_text_style: None,
+                meter_progress: None,
+                text_style: None,
+                asset_ref: None,
+                asset_layout: None,
+                custom_shape: None,
+                style_tag_uuids: Vec::new(),
+                resolved_style_tags: Vec::new(),
+            }],
+        };
+
+        let result = validate_ui_ir_document(&invalid);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn compile_ir_populates_anchor_pivot_alpha_and_style_tags() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.Test3",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "label",
+                        "alpha": 0.5,
+                        "anchor": {"x": 0.25, "y": 0.75},
+                        "pivot": {"x": 0.5, "y": 0.5},
+                        "styleTags": [{"_RecordId_": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}],
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 30.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-3",
+            None,
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+        let node = &ir.nodes[0];
+        assert_eq!(node.alpha, 0.5);
+        assert_eq!(node.anchor, [0.25, 0.75]);
+        assert_eq!(node.pivot, [0.5, 0.5]);
+        assert_eq!(node.style_tag_uuids.len(), 1);
+    }
+
+    #[test]
+    fn compile_ir_adds_primary_state_tag_alongside_authored_style_tags() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.PrimaryStateStyleTags",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "label",
+                        "styleTags": [{"_RecordId_": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}],
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 30.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    }
+                ],
+                "operations": [
+                    {
+                        "_Type_": "BuildingBlocks_BindingsStringField",
+                        "widget": "_PointsTo_:ptr:1",
+                        "field": "PrimaryStateTag",
+                        "input": "_PointsTo_:ptr:2"
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_BindingsStringComponentParameter",
+                        "name": "primary state",
+                        "parameter": "ParamInput0",
+                        "defaultValue": "Tag.1477f18d-9b3e-4e5c-8047-dc60ba606ddb"
+                    }
+                ]
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-primary-state-style-tags",
+            None,
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = &ir.nodes[0];
+        assert_eq!(node.style_tag_uuids.len(), 2);
+        assert!(node
+            .style_tag_uuids
+            .iter()
+            .any(|uuid| uuid == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"));
+        assert!(node
+            .style_tag_uuids
+            .iter()
+            .any(|uuid| uuid == "1477f18d-9b3e-4e5c-8047-dc60ba606ddb"));
+    }
+
+    #[test]
+    fn compile_ir_resolves_primary_state_tag_from_integer_switch_binding() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.PrimaryStateTagSwitch",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "label",
+                        "styleTags": [{"_RecordId_": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}],
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 30.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    }
+                ],
+                "operations": [
+                    {
+                        "_Type_": "BuildingBlocks_BindingsStringField",
+                        "widget": "_PointsTo_:ptr:1",
+                        "field": "PrimaryStateTag",
+                        "input": "_PointsTo_:ptr:2"
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_BindingsTagFromIntegerSwitch",
+                        "values": [
+                            {
+                                "first": 1,
+                                "second": {
+                                    "_RecordName_": "Tag.1477f18d-9b3e-4e5c-8047-dc60ba606ddb",
+                                    "_RecordId_": "1477f18d-9b3e-4e5c-8047-dc60ba606ddb"
+                                }
+                            }
+                        ],
+                        "defaultValue": null,
+                        "input": "_PointsTo_:ptr:3"
+                    },
+                    {
+                        "_Pointer_": "ptr:3",
+                        "_Type_": "BuildingBlocks_BindingsIntegerComponentParameter",
+                        "name": "primary state index",
+                        "parameter": "ParamInput0",
+                        "defaultValue": 1
+                    }
+                ]
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-primary-state-switch",
+            None,
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = &ir.nodes[0];
+        assert!(node
+            .style_tag_uuids
+            .iter()
+            .any(|uuid| uuid == "1477f18d-9b3e-4e5c-8047-dc60ba606ddb"));
+    }
+
+    #[test]
+    fn compile_ir_suppresses_placeholder_only_label_caption_pairs() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.PlaceholderLabelCaption",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_ComponentLabelCaptionPair",
+                        "name": "OperatorName",
+                        "isActive": true,
+                        "labelProperties": {
+                            "label": "@med_Header_OperatorName",
+                            "style": "Heading3",
+                            "caseModifier": "Upper",
+                            "anchorToParentX": 0.5,
+                            "anchorToParentY": 0.5
+                        },
+                        "captionProperties": {
+                            "caption": "@LOC_PLACEHOLDER",
+                            "style": "Heading6",
+                            "caseModifier": "None"
+                        },
+                        "size": {
+                            "width": {"behavior": "Auto", "value": 64.0},
+                            "height": {"behavior": "Auto", "value": 64.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let mut defaults = defaults();
+        defaults.insert_localization("med_header_operatorname", "OPERATOR NAME".to_string());
+        defaults.insert_localization("loc_placeholder", String::new());
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-placeholder",
+            None,
+            (100, 100),
+            &defaults,
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        assert_eq!(ir.nodes.len(), 1);
+        let node = &ir.nodes[0];
+        assert!(!node.is_active, "placeholder-only label-caption pair should compile inactive");
+        assert!(matches!(node.text_payload, Some(UiIrTextPayload::Resolved { .. })));
+        assert!(node.secondary_text_payload.is_none());
+    }
+
+    #[test]
+    fn compile_ir_secondary_param_input_loc_empty_uses_unified_empty_state() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.LabelCaptionLocEmpty",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_ComponentLabelCaptionPair",
+                        "name": "OperatorName",
+                        "isActive": true,
+                        "labelProperties": {
+                            "label": "OPERATOR",
+                            "style": "Heading3",
+                            "caseModifier": "Upper"
+                        },
+                        "captionProperties": {
+                            "caption": "@LOC_EMPTY",
+                            "style": "Heading6",
+                            "caseModifier": "None"
+                        },
+                        "size": {
+                            "width": {"behavior": "Auto", "value": 64.0},
+                            "height": {"behavior": "Auto", "value": 64.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let mut defaults = defaults();
+        defaults.insert_localization("loc_empty", String::new());
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-secondary-loc-empty",
+            None,
+            (100, 100),
+            &defaults,
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = &ir.nodes[0];
+        assert!(node.secondary_text_payload.is_none());
+        assert!(ir
+            .warnings
+            .iter()
+            .all(|warning| !warning.contains("unresolved text key")));
+    }
+
+    #[test]
+    fn compile_ir_resolves_localization_combine_binding_chain_for_text_field() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.LocalizationCombineBinding",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "text_TierValue",
+                        "labelProperties": {
+                            "style": "Heading3",
+                            "caseModifier": "Upper"
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 40.0},
+                            "height": {"behavior": "Fixed", "value": 12.0}
+                        }
+                    }
+                ],
+                "operations": [
+                    {
+                        "_Type_": "BuildingBlocks_BindingsLocalizedField",
+                        "widget": "_PointsTo_:ptr:1",
+                        "field": "ParamInput0",
+                        "input": "_PointsTo_:ptr:2"
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BindingsOperations_LocalizationCombine",
+                        "value": "@Med_T_Tier",
+                        "inputL": null,
+                        "inputR": "_PointsTo_:ptr:3"
+                    },
+                    {
+                        "_Pointer_": "ptr:3",
+                        "_Type_": "BuildingBlocks_BindingsIntegerComponentParameter",
+                        "name": "tier",
+                        "parameter": "ParamInput0",
+                        "defaultValue": 3
+                    }
+                ]
+            }
+        });
+
+        let mut defaults = defaults();
+        defaults.insert_localization("med_t_tier", "Tier %d".to_string());
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-localization-combine",
+            None,
+            (100, 100),
+            &defaults,
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = &ir.nodes[0];
+        assert_eq!(
+            node.text_payload,
+            Some(UiIrTextPayload::Resolved {
+                text: "TIER 3".to_string(),
+            })
+        );
+        assert!(ir
+            .warnings
+            .iter()
+            .all(|warning| !warning.contains("unresolved text key")));
+    }
+
+    #[test]
+    fn compile_ir_preserves_text_fidelity_signals_for_case_font_size_and_colour() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TextFidelitySignals",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "label",
+                        "labelProperties": {
+                            "label": "@Info_Kiosks_LogoScreen_001",
+                            "caseModifier": "Upper"
+                        },
+                        "FontStyleRecord": "record://fonts/title",
+                        "FontSize": 14.0,
+                        "FillColor": {"r": 0.25, "g": 0.5, "b": 0.75, "a": 1.0},
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 40.0},
+                            "height": {"behavior": "Fixed", "value": 12.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let mut defaults = defaults();
+        defaults.insert_localization("info_kiosks_logoscreen_001", "Touch to start".to_string());
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-text-fidelity",
+            Some("BuildingBlocks_Canvas.TextFidelitySignals"),
+            (100, 100),
+            &defaults,
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = &ir.nodes[0];
+        assert_eq!(
+            node.text_payload,
+            Some(UiIrTextPayload::Resolved {
+                text: "TOUCH TO START".to_string(),
+            })
+        );
+        let text_style = node.text_style.as_ref().expect("text style");
+        assert_eq!(text_style.font_record.as_deref(), Some("record://fonts/title"));
+        assert_eq!(text_style.font_size, UiIrValue::Fixed { value: 14.0 });
+        assert_eq!(text_style.colour, Some([0.25, 0.5, 0.75, 1.0]));
+    }
+
+    #[test]
+    fn compile_ir_prefers_raw_font_size_over_stale_parsed_text_size() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.RawFontSize",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "label",
+                        "text": "READY",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 30.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let mut scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let node = scene.nodes.get_mut(&1).expect("node 1");
+        node.raw["FontSize"] = serde_json::Value::from(42.0);
+
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-raw-font-size",
+            None,
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = &ir.nodes[0];
+        let style = node.text_style.as_ref().expect("text style");
+        assert_eq!(style.font_size, UiIrValue::Fixed { value: 42.0 });
+    }
+
+    #[test]
+    fn compile_ir_widget_text_preserves_loc_string_case_colour_and_auto_font_size() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.WidgetTextStatus",
+            "_RecordValue_": {
+                "size": {"x": 200, "y": 200},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetText",
+                        "name": "status",
+                        "locString": "@mykey",
+                        "color": {
+                            "_Type_": "BuildingBlocks_ColorStyle",
+                            "color": "Base",
+                            "alpha": 1.0
+                        },
+                        "fontStyle": "file://./../../../../../../../libs/foundry/records/ui/buildingblocks/fontstyles/audimatmono-regular.json",
+                        "autoFontSize": true,
+                        "fontSize": 16.0,
+                        "labelProperties": {
+                            "caseModifier": "Upper"
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 120.0},
+                            "height": {"behavior": "Fixed", "value": 80.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let mut defaults = defaults();
+        defaults.insert_localization("mykey", "Closed".to_string());
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-widget-text-status",
+            None,
+            (200, 200),
+            &defaults,
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = &ir.nodes[0];
+        assert_eq!(
+            node.text_payload,
+            Some(UiIrTextPayload::Resolved {
+                text: "CLOSED".to_string(),
+            })
+        );
+        let style = node.text_style.as_ref().expect("text style");
+        assert_eq!(
+            style.font_record.as_deref(),
+            Some("file://./../../../../../../../libs/foundry/records/ui/buildingblocks/fontstyles/audimatmono-regular.json")
+        );
+        assert_eq!(style.resolved_font_record, None);
+        assert_eq!(style.colour_token.as_deref(), Some("Base"));
+        assert!(
+            matches!(style.font_size, UiIrValue::Fixed { value } if value > 16.0),
+            "auto-sized text should exceed the stale authored font size: {:?}",
+            style.font_size
+        );
+    }
+
+    #[test]
+    fn compile_ir_widget_text_auto_font_size_caps_runaway_growth_on_large_slots() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.WidgetTextLargeSlot",
+            "_RecordValue_": {
+                "size": {"x": 1920, "y": 1080},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetText",
+                        "name": "status",
+                        "locString": "@mykey",
+                        "color": {
+                            "_Type_": "BuildingBlocks_ColorStyle",
+                            "color": "Base",
+                            "alpha": 1.0
+                        },
+                        "autoFontSize": true,
+                        "fontSize": 16.0,
+                        "textAlignment": "Center",
+                        "verticalAlignment": "Center",
+                        "wordWrap": false,
+                        "caseModifier": "Upper",
+                        "sizing": {
+                            "_Type_": "BuildingBlocks_Size",
+                            "width": {"_Type_": "BuildingBlocks_FixedOrRelativeValue", "behavior": "Percent", "value": 0.6},
+                            "height": {"_Type_": "BuildingBlocks_FixedOrRelativeValue", "behavior": "PercentOfX", "value": 0.3},
+                            "depth": {"_Type_": "BuildingBlocks_FixedOrRelativeValue", "behavior": "Fixed", "value": 0.0},
+                            "minWidth": {"_Type_": "BuildingBlocks_FixedOrRelativeValue", "behavior": "Fixed", "value": 0.0},
+                            "minHeight": {"_Type_": "BuildingBlocks_FixedOrRelativeValue", "behavior": "Fixed", "value": 0.0},
+                            "maxWidth": {"_Type_": "BuildingBlocks_FixedOrRelativeValue", "behavior": "Fixed", "value": 0.0},
+                            "maxHeight": {"_Type_": "BuildingBlocks_FixedOrRelativeValue", "behavior": "Fixed", "value": 0.0},
+                            "enableMinWidth": false,
+                            "enableMinHeight": false,
+                            "enableMaxWidth": false,
+                            "enableMaxHeight": false
+                        },
+                        "anchor": {"x": 0.5, "y": 0.6, "z": 0.0},
+                        "pivot": {"x": 0.5, "y": 0.5, "z": 0.0}
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let mut defaults = defaults();
+        defaults.insert_localization("mykey", "Closed".to_string());
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-widget-text-large-slot",
+            None,
+            (1920, 1080),
+            &defaults,
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = &ir.nodes[0];
+        let style = node.text_style.as_ref().expect("text style");
+        assert!(
+            matches!(style.font_size, UiIrValue::Fixed { value } if (63.9..=64.1).contains(&value)),
+            "auto-sized widget text should stay within the short-status authored-size band: {:?}",
+            style.font_size
+        );
+    }
+
+    #[test]
+    fn compile_ir_prefers_raw_font_record_over_stale_parsed_text_font_record() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.RawFontRecord",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "label",
+                        "text": "READY",
+                        "fontRecord": "file://./old-font.json",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 30.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let mut scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let node = scene.nodes.get_mut(&1).expect("node 1");
+        node.raw["FontStyleRecord"] =
+            serde_json::Value::from("file://./styled-font.json");
+
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-raw-font-record",
+            None,
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = &ir.nodes[0];
+        let style = node.text_style.as_ref().expect("text style");
+        assert_eq!(
+            style.font_record.as_deref(),
+            Some("file://./styled-font.json")
+        );
+    }
+
+    #[test]
+    fn compile_ir_uses_scene_style_font_size_when_node_font_size_is_missing() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.StyleFontSizeFallback",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "reference",
+                        "text": "REF",
+                        "FontSize": 40.0,
+                        "labelProperties": {"style": "Heading1"},
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 40.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "target",
+                        "text": "TARGET",
+                        "labelProperties": {"style": "Heading1"},
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 40.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-style-font-size-fallback",
+            None,
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let target = ir
+            .nodes
+            .iter()
+            .find(|node| node.name == "target")
+            .expect("target node");
+        let style = target.text_style.as_ref().expect("text style");
+        assert_eq!(style.font_size, UiIrValue::Fixed { value: 40.0 });
+    }
+
+    #[test]
+    fn compile_ir_reads_font_size_from_modifiers_projection() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.ModifierFontSize",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "label",
+                        "text": "READY",
+                        "modifiers": {"FontSize": 50.0},
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 30.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-modifier-font-size",
+            None,
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = &ir.nodes[0];
+        let style = node.text_style.as_ref().expect("text style");
+        assert_eq!(style.font_size, UiIrValue::Fixed { value: 50.0 });
+    }
+
+    #[test]
+    fn compile_ir_inherits_label_style_from_ancestor_for_font_size_fallback() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.AncestorStyleFallback",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "reference",
+                        "text": "REF",
+                        "FontSize": 40.0,
+                        "labelProperties": {"style": "Heading1"},
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 40.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_ComponentDisplayWidget",
+                        "name": "parent",
+                        "labelProperties": {"style": "Heading1"},
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 40.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:3",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "target",
+                        "text": "TARGET",
+                        "parent": "_PointsTo_:ptr:2",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 40.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-ancestor-style-fallback",
+            None,
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let target = ir
+            .nodes
+            .iter()
+            .find(|node| node.name == "target")
+            .expect("target node");
+        let style = target.text_style.as_ref().expect("text style");
+        assert_eq!(style.font_size, UiIrValue::Fixed { value: 40.0 });
+    }
+
+    #[test]
+    fn compile_ir_applies_hardcoded_textfield_font_size_exception() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.FontSizeException",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "label",
+                        "text": "READY",
+                        "labelProperties": {"style": "Heading3"},
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 30.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-font-size-exception",
+            None,
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = &ir.nodes[0];
+        let style = node.text_style.as_ref().expect("text style");
+        assert_eq!(style.font_size, UiIrValue::Fixed { value: 21.0 });
+    }
+
+    #[test]
+    fn compile_ir_without_selected_swf_source_uses_bb_renderer_hint() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.CustomShapeNoSwf",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "label",
+                        "text": "READY",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 30.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetCustomShape",
+                        "name": "shape",
+                        "shapeType": "line",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 20.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-custom-shape-no-swf",
+            Some("BuildingBlocks_Canvas.CustomShapeNoSwf"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        assert_eq!(ir.renderer_hint, UiRendererHint::Bb);
+        assert!(ir
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("no SWF source was resolved")));
+    }
+
+    #[test]
+    fn compile_ir_with_selected_swf_source_preserves_hybrid_renderer_hint() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.CustomShapeWithSwf",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "label",
+                        "text": "READY",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 30.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetCustomShape",
+                        "name": "shape",
+                        "shapeType": "line",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 20.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-custom-shape-with-swf",
+            Some("BuildingBlocks_Canvas.CustomShapeWithSwf"),
+            (100, 100),
+            &defaults(),
+            None,
+            Some("Data\\UI\\ShipInterface\\assets\\SWF\\test.swf".to_string()),
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        assert_eq!(ir.renderer_hint, UiRendererHint::Hybrid);
+    }
+
+    #[test]
+    fn compile_ir_treats_loc_empty_as_intentionally_empty_not_unresolved() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.IntentionallyEmptyText",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "label",
+                        "text": "@LOC_EMPTY",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 30.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-intentionally-empty",
+            Some("BuildingBlocks_Canvas.IntentionallyEmptyText"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        assert_eq!(
+            ir.nodes[0].text_payload,
+            Some(UiIrTextPayload::IntentionallyEmpty {
+                key: Some("@LOC_EMPTY".to_string()),
+            })
+        );
+        assert!(ir
+            .warnings
+            .iter()
+            .all(|warning| !warning.contains("unresolved text key")));
+        assert_eq!(ir.confidence, 100);
+    }
+
+    #[test]
+    fn ui_ir_source_does_not_reintroduce_forbidden_hardcoded_markers() {
+        let source = include_str!("../engine.inc");
+        let forbidden = [
+            ["nominal_font_size_", "from_label_style"].concat(),
+            ["BG", "Dots"].concat(),
+            ["MainMenu", "Canvas"].concat(),
+            ["base_", "animatedelements"].concat(),
+            ["apply_medical", "attract_banner_layout"].concat(),
+        ];
+
+        for marker in forbidden {
+            assert!(
+                !source.contains(marker.as_str()),
+                "ui_ir hardcoding marker reintroduced: {marker}"
+            );
+        }
+    }
+}

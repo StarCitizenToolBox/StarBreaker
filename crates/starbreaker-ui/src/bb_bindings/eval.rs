@@ -1,7 +1,6 @@
 use crate::bb_scene::BbNodeId;
 use crate::canvas::Value;
 use crate::defaults::DefaultValueRegistry;
-
 use super::util::{parse_points_to_or_ptr_str, value_to_string};
 use super::BindingResolver;
 
@@ -82,6 +81,9 @@ impl BindingResolver {
                 Some(value_to_string(val))
             }
             "BuildingBlocks_BindingsLocalizedComponentParameter" => {
+                if let Some(value) = self.eval_localized_component_parameter_override(op, ptr, defaults, seen) {
+                    return Some(value);
+                }
                 let key = op.get("defaultValue").and_then(|v| v.as_str()).unwrap_or("");
                 if key.is_empty() {
                     return None;
@@ -186,9 +188,7 @@ impl BindingResolver {
         defaults: &DefaultValueRegistry,
         seen: &mut std::collections::HashSet<BbNodeId>,
     ) -> Option<String> {
-        let ptr = field
-            .and_then(|v| v.as_str())
-            .and_then(parse_points_to_or_ptr_str)?;
+        let ptr = field.and_then(|v| v.as_str()).and_then(parse_points_to_or_ptr_str)?;
         self.eval_localized_ptr(ptr, defaults, seen)
     }
 
@@ -198,9 +198,7 @@ impl BindingResolver {
         defaults: &DefaultValueRegistry,
         seen: &mut std::collections::HashSet<BbNodeId>,
     ) -> Option<bool> {
-        let ptr = field
-            .and_then(|v| v.as_str())
-            .and_then(parse_points_to_or_ptr_str)?;
+        let ptr = field.and_then(|v| v.as_str()).and_then(parse_points_to_or_ptr_str)?;
         self.eval_bool_ptr(ptr, defaults, seen)
     }
 
@@ -218,11 +216,18 @@ impl BindingResolver {
         match ty {
             "_SynthBooleanParam_" => op.get("resolvedBool").and_then(|v| v.as_bool()),
             "BuildingBlocks_BindingsBooleanComponentParameter" => {
+                if let Some(value) = self.eval_bool_component_parameter_override(op, ptr, defaults, seen) {
+                    return Some(value);
+                }
                 op.get("defaultValue").and_then(|v| v.as_bool()).or(Some(false))
             }
             "BuildingBlocks_BindingsBooleanVariable" => {
-                let path = self.ptr_to_path.get(&ptr)?;
-                let val = defaults.lookup_path(path)?;
+                let Some(path) = self.ptr_to_path.get(&ptr) else {
+                    return None;
+                };
+                let Some(val) = defaults.lookup_path(path) else {
+                    return None;
+                };
                 match val {
                     Value::Bool(b) => Some(*b),
                     Value::Int(i) => Some(*i != 0),
@@ -283,11 +288,18 @@ impl BindingResolver {
         match ty {
             "_SynthIntegerParam_" => op.get("resolvedInt").and_then(|v| v.as_i64()),
             "BuildingBlocks_BindingsIntegerComponentParameter" => {
+                if let Some(value) = self.eval_integer_component_parameter_override(op, ptr, defaults, seen) {
+                    return Some(value);
+                }
                 op.get("defaultValue").and_then(|v| v.as_i64())
             }
             "BuildingBlocks_BindingsIntegerVariable" => {
-                let path = self.ptr_to_path.get(&ptr)?;
-                let val = defaults.lookup_path(path)?;
+                let Some(path) = self.ptr_to_path.get(&ptr) else {
+                    return None;
+                };
+                let Some(val) = defaults.lookup_path(path) else {
+                    return None;
+                };
                 match val {
                     Value::Int(i) => Some(*i as i64),
                     Value::Float(f) => Some(*f as i64),
@@ -298,16 +310,8 @@ impl BindingResolver {
             "BuildingBlocks_BindingsIntegerArithmatic" => {
                 let kind = op.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 let amount = op.get("amount").and_then(|v| v.as_i64()).unwrap_or(0);
-                let has_explicit_rhs = op
-                    .get("inputR")
-                    .and_then(|v| v.as_str())
-                    .and_then(parse_points_to_or_ptr_str)
-                    .is_some()
-                    || op
-                        .get("inputB")
-                        .and_then(|v| v.as_str())
-                        .and_then(parse_points_to_or_ptr_str)
-                        .is_some();
+                let has_explicit_rhs = op.get("inputR").and_then(|v| v.as_str()).and_then(parse_points_to_or_ptr_str).is_some()
+                    || op.get("inputB").and_then(|v| v.as_str()).and_then(parse_points_to_or_ptr_str).is_some();
                 let l = self
                     .eval_integer_ptr_from_field(op.get("inputL").and_then(|v| v.as_str()), defaults, seen)
                     .or_else(|| self.eval_integer_ptr_from_field(op.get("input").and_then(|v| v.as_str()), defaults, seen))
@@ -317,7 +321,6 @@ impl BindingResolver {
                     .or_else(|| self.eval_integer_ptr_from_field(op.get("inputB").and_then(|v| v.as_str()), defaults, seen))
                     .unwrap_or(amount);
                 Some(match kind {
-                    // BB Add uses RHS when present; `amount` is the fallback constant.
                     "Add" => {
                         if has_explicit_rhs {
                             l + r
@@ -378,23 +381,14 @@ impl BindingResolver {
                     .and_then(|p| self.eval_number_ptr(p, defaults, seen))
                     .unwrap_or(amount);
                 Some(match kind {
-                    "Add" => {
-                        if has_explicit_rhs {
-                            a + b
-                        } else {
-                            a + amount
-                        }
-                    }
+                    "Add" => if has_explicit_rhs { a + b } else { a + amount },
                     "Sub" => a - b,
                     "Mul" => a * b,
-                    "Div" => {
-                        if b.abs() > f64::EPSILON { a / b } else { 0.0 }
-                    }
+                    "Div" => if b.abs() > f64::EPSILON { a / b } else { 0.0 },
                     _ => a,
                 })
             }
             _ => self.eval_integer_ptr(ptr, defaults, seen).map(|v| v as f64),
         }
     }
-
 }

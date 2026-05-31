@@ -207,6 +207,48 @@ use serde_json::json;
     }
 
     #[test]
+    fn test_border_width_aliases_apply_to_typed_border() {
+        let mut scene = make_test_scene();
+        let brand = BrandStyle {
+            identifier: "test_brand".to_string(),
+            entries: &[json!({
+                "modifiers": [
+                    {
+                        "_Type_": "BuildingBlocks_FieldModifierNumber",
+                        "field": "BorderTopWidth",
+                        "value": 1.0
+                    },
+                    {
+                        "_Type_": "BuildingBlocks_FieldModifierNumber",
+                        "field": "BorderRightWidth",
+                        "value": 2.0
+                    },
+                    {
+                        "_Type_": "BuildingBlocks_FieldModifierNumber",
+                        "field": "BorderBottomWidth",
+                        "value": 3.0
+                    },
+                    {
+                        "_Type_": "BuildingBlocks_FieldModifierNumber",
+                        "field": "BorderLeftWidth",
+                        "value": 4.0
+                    }
+                ]
+            })],
+            raw: &json!({}),
+        };
+
+        apply_brand_modifiers(&mut scene, &brand, None);
+
+        let node = scene.nodes.get(&1).unwrap();
+        let border = node.border.as_ref().expect("border should be present");
+        assert_eq!(border.top.width, 1.0);
+        assert_eq!(border.right.width, 2.0);
+        assert_eq!(border.bottom.width, 3.0);
+        assert_eq!(border.left.width, 4.0);
+    }
+
+    #[test]
     fn test_embedded_parent_child_bright_fill_tints_svg_node() {
         let mut scene = make_test_scene();
         let parent = BbNode {

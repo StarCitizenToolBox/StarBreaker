@@ -1,0 +1,288 @@
+fn scale_line_spacing(line_spacing: Option<f32>, font_scale: f32) -> Option<f32> {
+    line_spacing.map(|spacing| spacing * font_scale)
+}
+
+fn draw_line_spacing_for_node(
+    node: &UiIrNode,
+    text: &str,
+    text_style: Option<&UiIrTextStyle>,
+) -> Option<f32> {
+    let spacing = text_style.and_then(|style| style.line_spacing);
+    let leading = font_style_leading_modifier_px(text_style);
+    let spacing = match (spacing, leading) {
+        (Some(spacing), 0.0) => Some(spacing),
+        (Some(spacing), leading) => Some(spacing + leading),
+        (None, 0.0) => None,
+        (None, leading) => Some(leading),
+    };
+    if is_large_wrapped_title3_heading(node, text, text_style) {
+        spacing.map(|value| value + 4.0)
+    } else {
+        spacing
+    }
+}
+
+fn apply_font_style_vertical_offset(rect: Rect, text_style: Option<&UiIrTextStyle>) -> Rect {
+    let offset = font_style_top_margin_offset_px(text_style);
+    if offset.abs() <= f32::EPSILON {
+        rect
+    } else {
+        Rect { y: rect.y + offset, ..rect }
+    }
+}
+
+fn is_large_wrapped_title3_heading(
+    node: &UiIrNode,
+    text: &str,
+    text_style: Option<&UiIrTextStyle>,
+) -> bool {
+    let Some(style) = text_style else {
+        return false;
+    };
+    if style.label_style.as_deref() != Some("Title3") {
+        return false;
+    }
+    if !matches!(VerticalAlign::from_bb_str(&style.vertical_alignment), VerticalAlign::Centre) {
+        return false;
+    }
+    let font_size = ir_value_to_px(&style.font_size);
+    font_size >= 90.0
+        && node.computed_rect.h >= font_size * 2.0
+        && text.split_whitespace().count() >= 3
+}
+
+fn resolved_text_colour(
+    node: &UiIrNode,
+    style: Option<&crate::ui_ir::UiIrTextStyle>,
+    ctx: &ComposeContext<'_>,
+) -> [u8; 4] {
+    explicit_text_colour_override(node)
+        .and_then(|token| resolve_colour_token(ctx, token))
+        .or_else(|| style.and_then(|style| style.colour))
+        .or_else(|| {
+            style
+                .and_then(|style| style.colour_token.as_deref())
+                .and_then(|token| text_colour_token_override(node, token).or(Some(token)))
+                .and_then(|token| resolve_colour_token(ctx, token))
+        })
+        .or_else(|| style_tag_colour_token(node).and_then(|token| resolve_colour_token(ctx, token)))
+        .or_else(|| label_style_colour_token(style, node).and_then(|token| resolve_colour_token(ctx, token)))
+        .map(rgba_to_u8)
+        .unwrap_or([255, 255, 255, 255])
+}
+
+fn explicit_text_colour_override(node: &UiIrNode) -> Option<&'static str> {
+    if node.resolved_style_tags.iter().any(|tag| {
+        tag.tag_name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case("UI_Generic_Flag_03"))
+    }) {
+        Some("Foreground")
+    } else {
+        None
+    }
+}
+
+fn text_colour_token_override<'a>(node: &UiIrNode, token: &'a str) -> Option<&'a str> {
+    let has_emphasis_flag = node.resolved_style_tags.iter().any(|tag| {
+        tag.tag_name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case("UI_Generic_Flag_03"))
+    });
+    if has_emphasis_flag && token.eq_ignore_ascii_case("Bright") {
+        Some("Foreground")
+    } else {
+        None
+    }
+}
+
+fn label_style_colour_token(
+    style: Option<&crate::ui_ir::UiIrTextStyle>,
+    node: &UiIrNode,
+) -> Option<&'static str> {
+    if !node.resolved_style_tags.is_empty() {
+        return None;
+    }
+    match style.and_then(|style| style.label_style.as_deref()) {
+        Some("Heading1" | "Heading3") => Some("Base"),
+        _ => None,
+    }
+}
+
+fn style_tag_colour_token(node: &UiIrNode) -> Option<&'static str> {
+    node.resolved_style_tags.iter().find_map(|tag| {
+        let name = tag.tag_name.as_deref()?.trim().to_ascii_lowercase();
+        match name.as_str() {
+            "primary" | "ui_generic_flag_03" => Some("Foreground"),
+            "statemoderate" => Some("Base"),
+            "statecritical" => Some("Background"),
+            "flashing" => Some("Background"),
+            "modify" => Some("Base"),
+            _ => None,
+        }
+    })
+}
+
+fn custom_shape_style_tag_colour_token(node: &UiIrNode) -> Option<&'static str> {
+    node.resolved_style_tags.iter().find_map(|tag| {
+        let name = tag.tag_name.as_deref()?.trim().to_ascii_lowercase();
+        match name.as_str() {
+            "primary" => Some("Accent1"),
+            "modify" => Some("Accent5"),
+            _ => None,
+        }
+    })
+}
+
+pub fn debug_text_rects(node: &UiIrNode) -> Option<DebugTextRects> {
+    let renderer = TextRenderer::new();
+    debug_text_rects_with_renderer(node, &renderer)
+}
+
+pub fn debug_text_drawn_bounds(node: &UiIrNode) -> Option<DebugTextDrawnBounds> {
+    let renderer = TextRenderer::new();
+    debug_text_drawn_bounds_with_renderer(node, &renderer)
+}
+
+fn debug_text_rects_with_renderer(node: &UiIrNode, renderer: &TextRenderer) -> Option<DebugTextRects> {
+    let text = resolved_text_payload(node)?;
+    let rect = ir_rect_to_layout_rect(node.computed_rect);
+    if rect.w < 0.5 || rect.h < 0.5 {
+        return None;
+    }
+
+    let nominal_font_size = node
+        .text_style
+        .as_ref()
+        .map(|style| ir_value_to_px(&style.font_size))
+        .unwrap_or(18.0)
+        .max(1.0);
+    let fallback_font_size = (nominal_font_size * TEXT_RENDER_SIZE_CALIBRATION).max(1.0);
+    let is_label_caption_pair = node
+        .node_type
+        .eq_ignore_ascii_case("BuildingBlocks_ComponentLabelCaptionPair");
+    if is_label_caption_pair && node.secondary_text_payload.is_some() {
+        let secondary_nominal_font_size = node
+            .secondary_text_style
+            .as_ref()
+            .map(|style| ir_value_to_px(&style.font_size))
+            .unwrap_or(nominal_font_size)
+            .max(1.0);
+        let secondary_fallback_font_size =
+            (secondary_nominal_font_size * TEXT_RENDER_SIZE_CALIBRATION).max(1.0);
+        let (mut primary, mut secondary) = stacked_label_caption_pair_text_rects(
+            rect,
+            renderer.measure(text, FontKind::Sans, fallback_font_size).1,
+            node.secondary_text_payload
+                .as_ref()
+                .and_then(|payload| match payload {
+                    UiIrTextPayload::Resolved { text } => Some(text.as_str()),
+                    UiIrTextPayload::UnresolvedKey { .. }
+                    | UiIrTextPayload::IntentionallyEmpty { .. }
+                    | UiIrTextPayload::Empty => None,
+                })
+                .map(|secondary| renderer.measure(secondary, FontKind::Sans, secondary_fallback_font_size).1)
+                .unwrap_or(secondary_fallback_font_size),
+            node.text_style.as_ref().and_then(|style| style.anchor_to_parent_y),
+            node.anchor[0] >= 0.99 && node.pivot[0] >= 0.99,
+        );
+        let (pair_offset_x, pair_offset_y) = right_anchored_label_caption_pair_offset(
+            node,
+            primary.h,
+            Some(secondary.h),
+        );
+        primary.x += pair_offset_x;
+        primary.y += pair_offset_y;
+        secondary.x += pair_offset_x;
+        secondary.y += pair_offset_y;
+        let primary_align = node
+            .text_style
+            .as_ref()
+            .map(|style| TextAlign::from_bb_str(&style.alignment))
+            .unwrap_or(TextAlign::Left);
+        let primary_vertical = node
+            .text_style
+            .as_ref()
+            .map(|style| VerticalAlign::from_bb_str(&style.vertical_alignment))
+            .unwrap_or(VerticalAlign::Centre);
+        let secondary_text = node.secondary_text_payload.as_ref().and_then(|payload| match payload {
+            UiIrTextPayload::Resolved { text } => Some(text.as_str()),
+            UiIrTextPayload::UnresolvedKey { .. }
+            | UiIrTextPayload::IntentionallyEmpty { .. }
+            | UiIrTextPayload::Empty => None,
+        });
+        let primary_text_origin = text_origin_in_rect(
+            renderer,
+            text,
+            primary,
+            FontKind::Sans,
+            fallback_font_size,
+            primary_align,
+            primary_vertical,
+        );
+        let secondary_text_origin = secondary_text.map(|secondary_text| {
+            text_origin_in_rect(
+                renderer,
+                secondary_text,
+                secondary,
+                FontKind::Sans,
+                secondary_fallback_font_size,
+                TextAlign::Left,
+                VerticalAlign::Centre,
+            )
+        });
+        Some(DebugTextRects {
+            primary,
+            secondary: Some(secondary),
+            primary_text_origin,
+            secondary_text_origin,
+        })
+    } else {
+        let align = node
+            .text_style
+            .as_ref()
+            .map(|style| TextAlign::from_bb_str(&style.alignment))
+            .unwrap_or(TextAlign::Left);
+        let vertical = node
+            .text_style
+            .as_ref()
+            .map(|style| VerticalAlign::from_bb_str(&style.vertical_alignment))
+            .unwrap_or(VerticalAlign::Centre);
+        let primary_rect = center_anchored_heading_textfield_text_rect(node, rect).unwrap_or(rect);
+        Some(DebugTextRects {
+            primary: primary_rect,
+            secondary: None,
+            primary_text_origin: text_origin_in_rect(renderer, text, primary_rect, FontKind::Sans, fallback_font_size, align, vertical),
+            secondary_text_origin: None,
+        })
+    }
+}
+
+fn center_anchored_heading_textfield_text_rect(node: &UiIrNode, rect: Rect) -> Option<Rect> {
+    let style = node.text_style.as_ref()?;
+    if !node.node_type.eq_ignore_ascii_case("widget_text_field") {
+        return None;
+    }
+    if !style
+        .label_style
+        .as_deref()
+        .is_some_and(|label| label.eq_ignore_ascii_case("Heading1"))
+    {
+        return None;
+    }
+    if !style.vertical_alignment.eq_ignore_ascii_case("Center") {
+        return None;
+    }
+    let anchor_to_parent_y = style.anchor_to_parent_y?;
+    if (anchor_to_parent_y - 0.5).abs() > f32::EPSILON || node.pivot[1].abs() > f32::EPSILON {
+        return None;
+    }
+    if node.anchor[1] > 0.0 && !(node.anchor[0] > 1.0 && node.pivot[0] >= 0.99) {
+        return None;
+    }
+
+    let top = rect.y + rect.h * anchor_to_parent_y;
+    let height = (rect.h * (1.0 - anchor_to_parent_y)).max(1.0);
+    Some(Rect { y: top, h: height, ..rect })
+}
+

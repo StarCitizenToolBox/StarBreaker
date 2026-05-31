@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use super::clone_expand::expand_widget_clones;
 use super::fields::*;
 use super::types::*;
 
@@ -23,7 +24,7 @@ pub fn parse_bb_canvas(json: &serde_json::Value) -> Result<BbScene, String> {
         .get("library")
         .and_then(|v| v.as_array())
         .unwrap_or(&empty_library);
-    let operations = record_value
+    let mut operations = record_value
         .get("operations")
         .and_then(|v| v.as_array())
         .cloned()
@@ -88,6 +89,8 @@ pub fn parse_bb_canvas(json: &serde_json::Value) -> Result<BbScene, String> {
             );
         }
     }
+
+    expand_widget_clones(&mut nodes, &mut operations, &mut synthetic_base);
 
     // ── Collect roots. ───────────────────────────────────────────────────────
     let roots: Vec<BbNodeId> = scene_order_ids

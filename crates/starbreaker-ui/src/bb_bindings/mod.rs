@@ -8,6 +8,7 @@ mod build;
 mod eval;
 mod eval_bool;
 mod eval_string;
+mod param_overrides;
 mod resolve_text;
 #[cfg(test)]
 mod tests;
@@ -19,6 +20,7 @@ pub struct BindingResolver {
     pub(super) widget_to_loc_key: HashMap<BbNodeId, String>,
     pub(super) widget_to_input_ptrs: HashMap<BbNodeId, Vec<BbNodeId>>,
     pub(super) widget_field_to_input_ptrs: HashMap<(BbNodeId, String), Vec<BbNodeId>>,
+    pub(super) field_name_to_input_ptrs: HashMap<String, Vec<BbNodeId>>,
     pub(super) ptr_to_op: HashMap<BbNodeId, serde_json::Value>,
     pub(super) ptr_to_path: HashMap<BbNodeId, String>,
     pub(super) widget_to_string: HashMap<BbNodeId, String>,

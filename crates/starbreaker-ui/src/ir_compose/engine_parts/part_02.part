@@ -1,0 +1,567 @@
+fn brand_slug_from_ir(document: &UiIrDocument, ctx: &ComposeContext<'_>) -> String {
+    let source = document.selected_style_source.as_deref().unwrap_or(&ctx.style.name);
+    let token = source
+        .split(':')
+        .next_back()
+        .unwrap_or(source)
+        .trim()
+        .trim_start_matches("s_")
+        .to_ascii_lowercase();
+
+    token
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+        .collect::<String>()
+}
+
+fn draw_manufacturer_logo_ir(
+    node: &UiIrNode,
+    document: &UiIrDocument,
+    ctx: &ComposeContext<'_>,
+    atlas: &AtlasLibrary<'_>,
+    pixmap: &mut Pixmap,
+) {
+    let draw_rect = ir_rect_to_layout_rect(node.computed_rect);
+    if draw_rect.w < 0.5 || draw_rect.h < 0.5 {
+        return;
+    }
+
+    let brand = brand_slug_from_ir(document, ctx);
+    let logo_brand = brand_logo_slug(&brand);
+    let brand_title = brand_title(logo_brand);
+    let candidates = [
+        format!("UI/Textures/Signs/Brands/{logo_brand}/{brand_title}_logo.svg"),
+        format!("UI/Textures/Vector/General/BrandLogos/logo_{logo_brand}_a.svg"),
+        format!("UI/Textures/Signs/Brands/{logo_brand}/{brand_title}_logo.dds"),
+    ];
+
+    let iw = draw_rect.w.round().max(1.0) as u32;
+    let ih = draw_rect.h.round().max(1.0) as u32;
+    let tint = manufacturer_logo_tint(node, ctx);
+    let fill_override = Some(tint);
+
+    for raw_path in candidates {
+        let norm = UiAssetResolver::normalise_path(&raw_path);
+        if UiAssetResolver::is_reference_overlay(&norm) {
+            continue;
+        }
+
+        if norm.ends_with(".svg") {
+            if let Some(svg_bytes) = atlas.fetch_raw(&norm)
+                && let Some(img) = crate::bb_svg::rasterize_svg(&svg_bytes, iw, ih, fill_override)
+            {
+                let draw_y = draw_rect.y as i32 - vertical_alpha_balance_offset(&img);
+                blit_atlas_image_tinted(
+                    pixmap,
+                    &img,
+                    draw_rect.x as i32,
+                    draw_y,
+                    [1.0, 1.0, 1.0, 1.0],
+                    node.alpha,
+                );
+                return;
+            }
+            continue;
+        }
+
+        if let Some(img) = atlas.resolve(&norm, iw, ih) {
+            blit_atlas_image_tinted(
+                pixmap,
+                &img,
+                draw_rect.x as i32,
+                draw_rect.y as i32,
+                tint,
+                node.alpha,
+            );
+            return;
+        }
+    }
+}
+
+fn manufacturer_logo_tint(node: &UiIrNode, ctx: &ComposeContext<'_>) -> [f32; 4] {
+    node.icon_tint_colour
+        .or_else(|| {
+            node.icon_tint_colour_token
+                .as_deref()
+                .and_then(|token| resolve_colour_token(ctx, token))
+        })
+        .or(node.background_fill_colour)
+        .or_else(|| {
+            node.background_fill_colour_token
+                .as_deref()
+                .and_then(|token| resolve_colour_token(ctx, token))
+        })
+        .or(node.stroke_colour)
+        .or_else(|| {
+            node.stroke_colour_token
+                .as_deref()
+                .and_then(|token| resolve_colour_token(ctx, token))
+        })
+        .unwrap_or_else(|| derived_accent_tint(ctx))
+}
+
+fn vertical_alpha_balance_offset(img: &RgbaImage) -> i32 {
+    let mut top = 0i32;
+    let mut bottom = 0i32;
+
+    for y in 0..img.height() {
+        let has_alpha = (0..img.width()).any(|x| img.get_pixel(x, y)[3] > 0);
+        if has_alpha {
+            break;
+        }
+        top += 1;
+    }
+
+    for y in (0..img.height()).rev() {
+        let has_alpha = (0..img.width()).any(|x| img.get_pixel(x, y)[3] > 0);
+        if has_alpha {
+            break;
+        }
+        bottom += 1;
+    }
+
+    (top - bottom) / 2
+}
+
+fn brand_logo_slug(slug: &str) -> &str {
+    match slug {
+        "bioc" => "bioticorp",
+        other => other,
+    }
+}
+
+fn brand_title(slug: &str) -> String {
+    let mut chars = slug.chars();
+    match chars.next() {
+        Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+fn resolve_colour_token(ctx: &ComposeContext<'_>, token: &str) -> Option<[f32; 4]> {
+    let key = token.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return None;
+    }
+
+    match key.as_str() {
+        "accent1" | "base" | "bright" => style_colour_slot_rgba(ctx, 0).or_else(|| Some(style_primary_rgba(ctx))),
+        "accent2" | "positive" | "success" => {
+            let primary = style_primary_rgba(ctx);
+            if let Some(slot_2) = style_colour_slot_rgba(ctx, 2)
+                && rgba4_near(slot_2, primary)
+            {
+                return Some(slot_2);
+            }
+            style_colour_slot_rgba(ctx, 1).or_else(|| Some(primary))
+        },
+        "accent3" | "warning" => style_colour_slot_rgba(ctx, 2),
+        "accent4" | "critical" | "negative" => style_colour_slot_rgba(ctx, 3).or(Some([1.0, 0.2, 0.2, 1.0])),
+        "accent5" | "contactunknown" => style_colour_slot_rgba(ctx, 4),
+        "mid" | "contactneutral" => style_colour_slot_rgba(ctx, 5),
+        "light" | "disabled" => style_colour_slot_rgba(ctx, 6),
+        "highlight" | "contactpositiverep" => style_colour_slot_rgba(ctx, 7),
+        "primarytext" | "text" | "foreground" | "fg" | "white" => Some([1.0, 1.0, 1.0, 1.0]),
+        "background" => Some([
+            ctx.style.background.r as f32 / 255.0,
+            ctx.style.background.g as f32 / 255.0,
+            ctx.style.background.b as f32 / 255.0,
+            ctx.style.background.a as f32 / 255.0,
+        ]),
+        "secondary" => ctx.style.secondary_tint.as_ref().map(|colour| {
+            [
+                colour.r as f32 / 255.0,
+                colour.g as f32 / 255.0,
+                colour.b as f32 / 255.0,
+                colour.a as f32 / 255.0,
+            ]
+        }),
+        "surface" => style_colour_slot_rgba(ctx, 8),
+        "bg" => style_colour_slot_rgba(ctx, 9),
+        "backlight" | "contactagressive" | "contactaggressive" => style_colour_slot_rgba(ctx, 11),
+        _ => None,
+    }
+}
+
+fn resolve_surface_colour_token(ctx: &ComposeContext<'_>, token: &str) -> Option<[f32; 4]> {
+    let key = token.trim().to_ascii_lowercase();
+    match key.as_str() {
+        "accent1" | "accent5" | "contactunknown" => style_colour_slot_rgba(ctx, 4),
+        _ => resolve_colour_token(ctx, token),
+    }
+}
+
+fn style_colour_slot_rgba(ctx: &ComposeContext<'_>, index: usize) -> Option<[f32; 4]> {
+    ctx.style.colour_slots.get(index).map(|colour| {
+        [
+            colour.r as f32 / 255.0,
+            colour.g as f32 / 255.0,
+            colour.b as f32 / 255.0,
+            colour.a as f32 / 255.0,
+        ]
+    })
+}
+
+fn rgba4_near(left: [f32; 4], right: [f32; 4]) -> bool {
+    (left[0] - right[0]).abs() < 0.0001
+        && (left[1] - right[1]).abs() < 0.0001
+        && (left[2] - right[2]).abs() < 0.0001
+        && (left[3] - right[3]).abs() < 0.0001
+}
+
+fn custom_shape_fill_override(node: &UiIrNode, ctx: &ComposeContext<'_>) -> Option<[f32; 4]> {
+    let render_shape = node
+        .custom_shape
+        .as_ref()
+        .and_then(|shape| shape.render_shape)
+        .unwrap_or(false);
+    if !render_shape {
+        return None;
+    }
+
+    custom_shape_style_tag_colour_token(node)
+        .and_then(|token| resolve_colour_token(ctx, token))
+        .or(node.icon_tint_colour)
+        .or_else(|| {
+            node.icon_tint_colour_token
+                .as_deref()
+                .and_then(|token| resolve_colour_token(ctx, token))
+        })
+        .or(node.background_fill_colour)
+        .or_else(|| {
+            node.background_fill_colour_token
+                .as_deref()
+                .and_then(|token| resolve_colour_token(ctx, token))
+        })
+        .or(node.stroke_colour)
+        .or_else(|| {
+            node.stroke_colour_token
+                .as_deref()
+                .and_then(|token| resolve_colour_token(ctx, token))
+        })
+}
+
+fn image_tint_for_blit(
+    node: &UiIrNode,
+    asset_ref: &str,
+    fill_override: Option<[f32; 4]>,
+    ctx: &ComposeContext<'_>,
+) -> [f32; 4] {
+    if fill_override.is_some()
+        && UiAssetResolver::normalise_path(asset_ref).ends_with(".svg")
+    {
+        [1.0, 1.0, 1.0, 1.0]
+    } else {
+        node.icon_tint_colour
+            .or_else(|| {
+                node.icon_tint_colour_token
+                    .as_deref()
+                    .and_then(|token| resolve_colour_token(ctx, token))
+            })
+            .unwrap_or([1.0, 1.0, 1.0, 1.0])
+    }
+}
+
+fn image_blend_mode_for_node(node: &UiIrNode, asset_ref: &str) -> BlendMode {
+    let normalised = UiAssetResolver::normalise_path(asset_ref);
+    let render_shape = node
+        .custom_shape
+        .as_ref()
+        .and_then(|shape| shape.render_shape)
+        .unwrap_or(false);
+    if !render_shape {
+        return BlendMode::SourceOver;
+    }
+
+    if normalised.ends_with(".svg") {
+        if custom_shape_has_modify_tag(node) {
+            BlendMode::Plus
+        } else {
+            BlendMode::SourceOver
+        }
+    } else {
+        BlendMode::Plus
+    }
+}
+
+fn custom_shape_has_modify_tag(node: &UiIrNode) -> bool {
+    node.resolved_style_tags.iter().any(|tag| {
+        tag.tag_name
+            .as_deref()
+            .is_some_and(|name| name.trim().eq_ignore_ascii_case("modify"))
+    })
+}
+
+fn rasterize_custom_shape_svg(
+    node: &UiIrNode,
+    svg_bytes: &[u8],
+    target_w: u32,
+    target_h: u32,
+    fill_override: Option<[f32; 4]>,
+) -> Option<RgbaImage> {
+    let Some(shape) = node.custom_shape.as_ref() else {
+        return crate::bb_svg::rasterize_svg(svg_bytes, target_w, target_h, fill_override);
+    };
+
+    let rendered = if shape.enable_nine_slice_rect.unwrap_or(false)
+        && let Some(nine_slice_rect) = shape.nine_slice_rect
+    {
+        crate::bb_svg::rasterize_svg_nine_slice(
+            svg_bytes,
+            target_w,
+            target_h,
+            fill_override,
+            nine_slice_rect,
+            shape.nine_slice_scale.unwrap_or(1.0),
+        )
+    } else {
+        crate::bb_svg::rasterize_svg(svg_bytes, target_w, target_h, fill_override)
+    }?;
+
+    if shape.render_shape.unwrap_or(false) {
+        // Preserve authored SVG geometry without post-raster crop/stretch.
+        Some(rendered)
+    } else {
+        Some(rendered)
+    }
+}
+
+fn rasterize_svg_for_node(
+    node: &UiIrNode,
+    svg_bytes: &[u8],
+    target_w: u32,
+    target_h: u32,
+    fill_override: Option<[f32; 4]>,
+) -> Option<RgbaImage> {
+    // Keep custom-shape SVGs on the custom-shape pipeline so nine-slice and
+    // authored shape behavior stay stable. Contain scaling is only used for
+    // regular asset-backed widgets.
+    if node.custom_shape.is_none()
+        && node
+            .asset_layout
+            .as_ref()
+            .and_then(|layout| layout.scaling_behavior.as_deref())
+            .is_some_and(|behavior| behavior.eq_ignore_ascii_case("Contain"))
+    {
+        let layout = node.asset_layout.as_ref().expect("contain layout");
+        return crate::bb_svg::rasterize_svg_contained(
+            svg_bytes,
+            target_w,
+            target_h,
+            fill_override,
+            layout.contain_position_x.unwrap_or(0.5),
+            layout.contain_position_y.unwrap_or(0.5),
+        );
+    }
+
+    rasterize_custom_shape_svg(node, svg_bytes, target_w, target_h, fill_override)
+}
+
+fn apply_asset_layout_flip(node: &UiIrNode, image: RgbaImage) -> RgbaImage {
+    let Some(layout) = node.asset_layout.as_ref() else {
+        return image;
+    };
+
+    let mut out = image;
+    if layout.flip_horizontal.unwrap_or(false) {
+        out = imageops::flip_horizontal(&out);
+    }
+    if layout.flip_vertical.unwrap_or(false) {
+        out = imageops::flip_vertical(&out);
+    }
+    out
+}
+
+fn strip_custom_shape_uniform_matte(img: &RgbaImage) -> RgbaImage {
+    let (width, height) = img.dimensions();
+    let total_pixels = (width as usize).saturating_mul(height as usize).max(1);
+
+    let mut opaque_counts: HashMap<[u8; 4], usize> = HashMap::new();
+    let mut transparent_count = 0usize;
+    for chunk in img.as_raw().chunks_exact(4) {
+        let px = [chunk[0], chunk[1], chunk[2], chunk[3]];
+        if px[3] == 0 {
+            transparent_count += 1;
+        }
+        if px[3] == 255 {
+            *opaque_counts.entry(px).or_insert(0) += 1;
+        }
+    }
+
+    if opaque_counts.is_empty() || transparent_count == 0 {
+        return img.clone();
+    }
+
+    let Some((matte_px, matte_count)) = opaque_counts
+        .iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(px, count)| (*px, *count))
+    else {
+        return img.clone();
+    };
+
+    let total_opaque: usize = opaque_counts.values().sum();
+    let matte_fraction = matte_count as f32 / total_opaque.max(1) as f32;
+    let full_image_fraction = matte_count as f32 / total_pixels as f32;
+    if matte_fraction < 0.85 || full_image_fraction < 0.9 {
+        return img.clone();
+    }
+
+    let is_matte = |px: image::Rgba<u8>| {
+        px[0] == matte_px[0] && px[1] == matte_px[1] && px[2] == matte_px[2] && px[3] == matte_px[3]
+    };
+
+    // Only strip matte that is actually connected to the asset border. This
+    // avoids deleting centered monochrome logos where the dominant opaque colour
+    // is the glyph itself, not an authored matte backdrop.
+    let mut queue: VecDeque<(u32, u32)> = VecDeque::new();
+    let mut visited = vec![false; total_pixels];
+    let push_seed = |x: u32, y: u32, queue: &mut VecDeque<(u32, u32)>, visited: &mut [bool]| {
+        let idx = (y as usize)
+            .saturating_mul(width as usize)
+            .saturating_add(x as usize);
+        if !visited[idx] && is_matte(*img.get_pixel(x, y)) {
+            visited[idx] = true;
+            queue.push_back((x, y));
+        }
+    };
+
+    for x in 0..width {
+        push_seed(x, 0, &mut queue, &mut visited);
+        if height > 1 {
+            push_seed(x, height - 1, &mut queue, &mut visited);
+        }
+    }
+    for y in 0..height {
+        push_seed(0, y, &mut queue, &mut visited);
+        if width > 1 {
+            push_seed(width - 1, y, &mut queue, &mut visited);
+        }
+    }
+
+    if queue.is_empty() {
+        return img.clone();
+    }
+
+    while let Some((x, y)) = queue.pop_front() {
+        if x > 0 {
+            let nx = x - 1;
+            let ny = y;
+            let idx = (ny as usize)
+                .saturating_mul(width as usize)
+                .saturating_add(nx as usize);
+            if !visited[idx] && is_matte(*img.get_pixel(nx, ny)) {
+                visited[idx] = true;
+                queue.push_back((nx, ny));
+            }
+        }
+        if x + 1 < width {
+            let nx = x + 1;
+            let ny = y;
+            let idx = (ny as usize)
+                .saturating_mul(width as usize)
+                .saturating_add(nx as usize);
+            if !visited[idx] && is_matte(*img.get_pixel(nx, ny)) {
+                visited[idx] = true;
+                queue.push_back((nx, ny));
+            }
+        }
+        if y > 0 {
+            let nx = x;
+            let ny = y - 1;
+            let idx = (ny as usize)
+                .saturating_mul(width as usize)
+                .saturating_add(nx as usize);
+            if !visited[idx] && is_matte(*img.get_pixel(nx, ny)) {
+                visited[idx] = true;
+                queue.push_back((nx, ny));
+            }
+        }
+        if y + 1 < height {
+            let nx = x;
+            let ny = y + 1;
+            let idx = (ny as usize)
+                .saturating_mul(width as usize)
+                .saturating_add(nx as usize);
+            if !visited[idx] && is_matte(*img.get_pixel(nx, ny)) {
+                visited[idx] = true;
+                queue.push_back((nx, ny));
+            }
+        }
+    }
+
+    let mut out = img.clone();
+    for y in 0..height {
+        for x in 0..width {
+            let idx = (y as usize)
+                .saturating_mul(width as usize)
+                .saturating_add(x as usize);
+            if visited[idx] {
+                let px = out.get_pixel_mut(x, y);
+                *px = image::Rgba([0, 0, 0, 0]);
+            }
+        }
+    }
+
+    out
+}
+
+fn draw_linear_progress_meter(
+    node: &UiIrNode,
+    ctx: &ComposeContext<'_>,
+    pixmap: &mut Pixmap,
+    rect: TskRect,
+) {
+    let glow = [
+        ctx.style.backlight.r as f32 / 255.0,
+        ctx.style.backlight.g as f32 / 255.0,
+        ctx.style.backlight.b as f32 / 255.0,
+        (ctx.style.backlight.a as f32 / 255.0).max(0.8),
+    ];
+
+    let progress = node.meter_progress.unwrap_or(1.0).clamp(0.0, 1.0);
+    if progress <= 0.0 {
+        return;
+    }
+
+    if let Some(segmented_fill) = node.segmented_fill.as_ref().filter(|fill| fill.enabled) {
+        let segment_width = if segmented_fill.segment_spacing_size > 0.0 {
+            segmented_fill.segment_spacing_size
+        } else {
+            segmented_fill.segment_size
+        }
+        .max(0.0);
+        let segment_gap = segmented_fill.segment_size.max(0.0);
+        let segment_stride = segment_width + segment_gap;
+        let segment_count = segmented_count_for_width(rect.width(), segment_width, segment_gap);
+        if segment_count > 0 && segment_stride > 0.0 {
+            let active_width = rect.width() * progress;
+            let segment_colour = segmented_fill.segment_colour.unwrap_or(glow);
+            for idx in 0..segment_count {
+                let x = rect.x() + segmented_fill.segment_x_offset + (idx as f32 * segment_stride);
+                if x >= rect.right() {
+                    break;
+                }
+                let right = (x + segment_width).min(rect.right());
+                if right <= x {
+                    continue;
+                }
+                let segment_end = right - rect.x();
+                if segment_end <= active_width {
+                    if let Some(segment_rect) =
+                        TskRect::from_xywh(x, rect.y(), right - x, rect.height())
+                    {
+                        fill_rect_ts(pixmap, segment_rect, segment_colour, node.alpha);
+                    }
+                }
+            }
+            return;
+        }
+    }
+
+    let filled_w = (rect.width() * progress).max(1.0);
+    if let Some(fill_rect) = TskRect::from_xywh(rect.x(), rect.y(), filled_w, rect.height()) {
+        fill_rect_ts(pixmap, fill_rect, glow, node.alpha);
+    }
+}
+

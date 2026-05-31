@@ -94,6 +94,83 @@ use super::types::{BbNodeType, BbScene};
         );
     }
 
+    #[test]
+    fn widget_clone_copies_field_operations_for_cloned_widgets() {
+        let canvas = serde_json::json!({
+            "_RecordValue_": {
+                "size": {"x": 100.0, "y": 100.0},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetCanvas",
+                        "name": "root",
+                        "isActive": true
+                    },
+                    {
+                        "_Pointer_": "ptr:3",
+                        "_Type_": "BuildingBlocks_WidgetClone",
+                        "name": "clone",
+                        "isActive": true,
+                        "parent": "_PointsTo_:ptr:1",
+                        "target": "_PointsTo_:ptr:4"
+                    }
+                ],
+                "library": [
+                    {
+                        "_Pointer_": "ptr:4",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "template",
+                        "isActive": true
+                    },
+                    {
+                        "_Pointer_": "ptr:5",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "template_child",
+                        "isActive": false,
+                        "parent": "_PointsTo_:ptr:4"
+                    }
+                ],
+                "operations": [
+                    {
+                        "_Pointer_": "ptr:10",
+                        "_Type_": "BuildingBlocks_BindingsBooleanVariable",
+                        "binding": "EnableBackground"
+                    },
+                    {
+                        "_Type_": "BuildingBlocks_BindingsBooleanField",
+                        "widget": "_PointsTo_:ptr:5",
+                        "field": "IsActive",
+                        "input": "_PointsTo_:ptr:10"
+                    }
+                ]
+            }
+        });
+
+        let scene = parse_bb_canvas(&canvas).expect("parse failed");
+        let cloned_child = scene
+            .nodes
+            .values()
+            .find(|node| node.name == "template_child" && node.parent == Some(3))
+            .expect("expected cloned child node");
+        let cloned_widget_ref = format!("_PointsTo_:ptr:{}", cloned_child.id);
+        let bool_field_count = scene
+            .operations
+            .iter()
+            .filter(|op| {
+                op.get("_Type_").and_then(|v| v.as_str())
+                    == Some("BuildingBlocks_BindingsBooleanField")
+            })
+            .count();
+        let cloned_field_exists = scene.operations.iter().any(|op| {
+            op.get("_Type_").and_then(|v| v.as_str())
+                == Some("BuildingBlocks_BindingsBooleanField")
+                && op.get("widget").and_then(|v| v.as_str()) == Some(cloned_widget_ref.as_str())
+        });
+
+        assert_eq!(bool_field_count, 2, "expected the clone to duplicate the field op");
+        assert!(cloned_field_exists, "expected a remapped field op for the cloned widget");
+    }
+
     // ── MC_S_Self_Master ─────────────────────────────────────────────────────
 
     #[test]

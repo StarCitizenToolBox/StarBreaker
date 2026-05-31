@@ -1,0 +1,299 @@
+// Canonical UI intermediate representation (IR) schema and compiler.
+//
+// This module defines a versioned, renderer-agnostic IR document that captures
+// fidelity-critical UI data from a resolved BuildingBlocks scene.
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
+
+use crate::bb_bindings::BindingResolver;
+use crate::bb_layout;
+use crate::bb_layout::{LayoutResult, Rect};
+use crate::bb_scene::{BbNode, BbNodeId, BbNodeType, BbScene, BbValue};
+use crate::defaults::DefaultValueRegistry;
+use crate::pipeline::CanvasFetcher;
+
+/// Current IR schema version.
+pub const UI_IR_SCHEMA_VERSION: u32 = 1;
+
+/// Renderer backend hint derived from scene content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiRendererHint {
+    Bb,
+    Swf,
+    Hybrid,
+}
+
+/// Canonical UI IR document.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UiIrDocument {
+    pub schema_version: u32,
+    pub canvas_guid: String,
+    pub canvas_name: Option<String>,
+    pub target_width: u32,
+    pub target_height: u32,
+    pub selected_style_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_swf_source: Option<String>,
+    pub renderer_hint: UiRendererHint,
+    pub confidence: u8,
+    pub warnings: Vec<String>,
+    pub unresolved_references: Vec<String>,
+    pub resolved_asset_refs: Vec<String>,
+    pub missing_asset_refs: Vec<String>,
+    pub nodes: Vec<UiIrNode>,
+}
+
+/// One scene node in the canonical IR.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UiIrNode {
+    pub id: u32,
+    pub parent_id: Option<u32>,
+    pub children: Vec<u32>,
+    pub node_type: String,
+    pub name: String,
+    pub is_active: bool,
+    pub layer: i32,
+    pub alpha: f32,
+    pub anchor: [f32; 2],
+    pub pivot: [f32; 2],
+    pub authored_position: [f32; 2],
+    pub authored_size: [UiIrValue; 2],
+    pub padding: [f32; 4],
+    pub margin: [f32; 4],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overflow_mode: Option<String>,
+    pub computed_rect: UiIrRect,
+    pub background_fill_colour: Option<[f32; 4]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub corner_radius: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background_fill_alpha: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background_fill_colour_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub segmented_fill: Option<UiIrSegmentedFill>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border: Option<UiIrBorder>,
+    pub stroke_colour: Option<[f32; 4]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stroke_colour_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stroke_extent: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub colour_blend_mode: Option<UiIrColourBlendMode>,
+    pub icon_tint_colour: Option<[f32; 4]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon_tint_colour_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon_preset: Option<String>,
+    pub text_payload: Option<UiIrTextPayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secondary_text_payload: Option<UiIrTextPayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secondary_text_style: Option<UiIrTextStyle>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meter_progress: Option<f32>,
+    pub text_style: Option<UiIrTextStyle>,
+    pub asset_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asset_layout: Option<UiIrAssetLayout>,
+    pub custom_shape: Option<UiIrCustomShape>,
+    pub style_tag_uuids: Vec<String>,
+    pub resolved_style_tags: Vec<UiIrStyleTag>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UiIrAssetLayout {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scaling_behavior: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contain_position_x: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contain_position_y: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flip_horizontal: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flip_vertical: Option<bool>,
+}
+
+/// Typed representation of authored fixed/relative values.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UiIrValue {
+    Fixed { value: f32 },
+    Percent { value: f32 },
+    Other { value: f32, behavior: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiIrColourBlendMode {
+    SourceOver,
+    Additive,
+}
+
+/// Pixel-space computed rectangle.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct UiIrRect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UiIrBorder {
+    pub top: UiIrBorderSide,
+    pub right: UiIrBorderSide,
+    pub bottom: UiIrBorderSide,
+    pub left: UiIrBorderSide,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UiIrBorderSide {
+    pub width: f32,
+    pub colour: Option<[f32; 4]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub colour_token: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UiIrSegmentedFill {
+    pub enabled: bool,
+    pub angle: f32,
+    pub segment_size: f32,
+    pub segment_spacing_size: f32,
+    pub segment_x_offset: f32,
+    pub segmented_bar_fill: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub segment_colour: Option<[f32; 4]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub segment_colour_token: Option<String>,
+}
+
+/// Text payload status carried by the IR.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum UiIrTextPayload {
+    Resolved { text: String },
+    UnresolvedKey { key: String },
+    IntentionallyEmpty { key: Option<String> },
+    Empty,
+}
+
+/// Typography/style attributes for text widgets.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UiIrTextStyle {
+    pub font_record: Option<String>,
+    pub resolved_font_record: Option<serde_json::Value>,
+    pub font_size: UiIrValue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_spacing: Option<f32>,
+    pub alignment: String,
+    #[serde(default = "default_vertical_alignment")]
+    pub vertical_alignment: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_to_parent_x: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_to_parent_y: Option<f32>,
+    pub colour: Option<[f32; 4]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub colour_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label_style: Option<String>,
+}
+
+fn default_vertical_alignment() -> String {
+    "Center".to_string()
+}
+
+fn asset_layout_from_raw(raw: &serde_json::Value) -> Option<UiIrAssetLayout> {
+    let svg_fill = raw.get("svgFill")?;
+    let scaling_behavior = svg_fill
+        .get("scalingBehavior")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let contain_position_x = svg_fill
+        .get("containPositionX")
+        .and_then(|value| value.as_f64())
+        .map(|value| value as f32);
+    let contain_position_y = svg_fill
+        .get("containPositionY")
+        .and_then(|value| value.as_f64())
+        .map(|value| value as f32);
+    let flip_horizontal = svg_fill
+        .get("flipHorizontal")
+        .and_then(|value| value.as_bool())
+        .filter(|value| *value);
+    let flip_vertical = svg_fill
+        .get("flipVertical")
+        .and_then(|value| value.as_bool())
+        .filter(|value| *value);
+
+    if scaling_behavior.is_none()
+        && contain_position_x.is_none()
+        && contain_position_y.is_none()
+        && flip_horizontal.is_none()
+        && flip_vertical.is_none()
+    {
+        return None;
+    }
+
+    Some(UiIrAssetLayout {
+        scaling_behavior,
+        contain_position_x,
+        contain_position_y,
+        flip_horizontal,
+        flip_vertical,
+    })
+}
+
+fn effective_font_record(
+    node: &BbNode,
+    standard_text_styles: &HashMap<String, StandardTextStyle>,
+) -> Option<String> {
+    node.raw
+        .get("FontStyleRecord")
+        .or_else(|| node.raw.get("fontStyle"))
+        .or_else(|| node.raw.get("fontRecord"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| node.text.as_ref().and_then(|text| text.font_record.clone()))
+        .or_else(|| {
+            label_style_name_from_raw(node).and_then(|style| {
+                standard_text_style_keys(&style)
+                    .into_iter()
+                    .find_map(|key| {
+                        standard_text_styles
+                            .get(&key)
+                            .and_then(|standard| standard.font_record.clone())
+                    })
+            })
+        })
+}
+
+/// Shape metadata for custom-shape widgets.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UiIrCustomShape {
+    pub shape_type: Option<String>,
+    pub shape: Option<String>,
+    pub svg_path: Option<String>,
+    pub render_shape: Option<bool>,
+    pub enable_nine_slice_rect: Option<bool>,
+    pub nine_slice_rect: Option<[f32; 4]>,
+    pub nine_slice_scale: Option<f32>,
+}
+
+/// Resolved style-tag metadata from source `styleTags[]` entries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UiIrStyleTag {
+    pub uuid: String,
+    pub tag_name: Option<String>,
+}
+
