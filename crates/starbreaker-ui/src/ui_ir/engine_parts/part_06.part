@@ -7,6 +7,29 @@ fn fill_colour_from_raw_for_text(raw: &serde_json::Value) -> Option<[f32; 4]> {
     Some([r, g, b, a])
 }
 
+fn adjust_ui_ir_font_value_for_font_record_image_percent(
+    value: UiIrValue,
+    resolved_font_record: Option<&serde_json::Value>,
+) -> UiIrValue {
+    let image_size_percent = resolved_font_record
+        .and_then(|record| record.get("_RecordValue_"))
+        .and_then(|record_value| record_value.get("imageSizePercent"))
+        .and_then(|value| value.as_f64())
+        .map(|value| value as f32)
+        .filter(|value| value.is_finite() && *value > 0.0 && (*value - 1.0).abs() > f32::EPSILON);
+
+    let Some(percent) = image_size_percent else {
+        return value;
+    };
+
+    match value {
+        UiIrValue::Fixed { value } => UiIrValue::Fixed {
+            value: value / percent,
+        },
+        other => other,
+    }
+}
+
 fn resolve_effective_font_size(
     node_id: BbNodeId,
     node: &crate::bb_scene::BbNode,

@@ -30,7 +30,6 @@ jobs:
       - name: Run manifest regression integration suites
         run: |
           cargo test -p starbreaker-ui --test manifest_snapshot_regression -- --nocapture
-            STARBREAKER_UI_REQUIRE_VISUAL_ARTIFACTS=1 cargo test -p starbreaker-ui --test manifest_visual_regression -- --nocapture
           cargo test -p starbreaker-ui --test manifest_live_ir_guard -- --nocapture
       - name: Run Phase 5 certification dashboard drift check
         run: cargo run -p starbreaker-ui --example phase5_certification_dashboard

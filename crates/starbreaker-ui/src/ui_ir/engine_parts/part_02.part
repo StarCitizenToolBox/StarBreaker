@@ -245,6 +245,9 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
             }
         }
         let font_record = effective_font_record(node, &standard_text_styles);
+        let resolved_font_record = font_record
+            .as_deref()
+            .and_then(|record_ref| resolve_record(canvas_fetcher, &[record_ref]));
         let label_style = label_style_name_from_raw(node);
         let text_style = if let Some(text) = node.text.as_ref() {
             let font_size = resolve_effective_font_size(
@@ -259,11 +262,13 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
                 &style_font_sizes,
                 &standard_text_styles,
             );
+            let font_size = adjust_ui_ir_font_value_for_font_record_image_percent(
+                font_size,
+                resolved_font_record.as_ref(),
+            );
             Some(UiIrTextStyle {
                 font_record: font_record.clone(),
-                resolved_font_record: font_record
-                    .as_deref()
-                    .and_then(|record_ref| resolve_record(canvas_fetcher, &[record_ref])),
+                resolved_font_record: resolved_font_record.clone(),
                 line_spacing: resolve_effective_line_spacing(node, &font_size, &standard_text_styles),
                 font_size,
                 alignment: text.alignment.clone(),
@@ -328,16 +333,18 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
                         18.0
                     }
                 });
+            let font_size_value = adjust_ui_ir_font_value_for_font_record_image_percent(
+                UiIrValue::Fixed { value: font_size },
+                resolved_font_record.as_ref(),
+            );
 
             Some(UiIrTextStyle {
                 font_record: font_record.clone(),
-                resolved_font_record: font_record
-                    .as_deref()
-                    .and_then(|record_ref| resolve_record(canvas_fetcher, &[record_ref])),
-                font_size: UiIrValue::Fixed { value: font_size },
+                resolved_font_record: resolved_font_record.clone(),
+                font_size: font_size_value.clone(),
                 line_spacing: resolve_effective_line_spacing(
                     node,
-                    &UiIrValue::Fixed { value: font_size },
+                    &font_size_value,
                     &standard_text_styles,
                 ),
                 alignment,
