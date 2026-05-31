@@ -97,7 +97,7 @@ fn manufacturer_logo_tint(node: &UiIrNode, ctx: &ComposeContext<'_>) -> [f32; 4]
                 .as_deref()
                 .and_then(|token| resolve_colour_token(ctx, token))
         })
-        .unwrap_or_else(|| derived_accent_tint(ctx))
+        .unwrap_or([1.0, 1.0, 1.0, 1.0])
 }
 
 fn vertical_alpha_balance_offset(img: &RgbaImage) -> i32 {
@@ -145,9 +145,11 @@ fn resolve_colour_token(ctx: &ComposeContext<'_>, token: &str) -> Option<[f32; 4
     }
 
     match key.as_str() {
-        "accent1" | "base" | "bright" => style_colour_slot_rgba(ctx, 0).or_else(|| Some(style_primary_rgba(ctx))),
+        "accent1" | "base" | "bright" => {
+            style_colour_slot_rgba(ctx, 0).or_else(|| Some(style_primary_rgba_local(ctx)))
+        },
         "accent2" | "positive" | "success" => {
-            let primary = style_primary_rgba(ctx);
+            let primary = style_primary_rgba_local(ctx);
             if let Some(slot_2) = style_colour_slot_rgba(ctx, 2)
                 && rgba4_near(slot_2, primary)
             {
@@ -156,7 +158,7 @@ fn resolve_colour_token(ctx: &ComposeContext<'_>, token: &str) -> Option<[f32; 4
             style_colour_slot_rgba(ctx, 1).or_else(|| Some(primary))
         },
         "accent3" | "warning" => style_colour_slot_rgba(ctx, 2),
-        "accent4" | "critical" | "negative" => style_colour_slot_rgba(ctx, 3).or(Some([1.0, 0.2, 0.2, 1.0])),
+        "accent4" | "critical" | "negative" => style_colour_slot_rgba(ctx, 3),
         "accent5" | "contactunknown" => style_colour_slot_rgba(ctx, 4),
         "mid" | "contactneutral" => style_colour_slot_rgba(ctx, 5),
         "light" | "disabled" => style_colour_slot_rgba(ctx, 6),
@@ -202,6 +204,16 @@ fn style_colour_slot_rgba(ctx: &ComposeContext<'_>, index: usize) -> Option<[f32
     })
 }
 
+fn style_primary_rgba_local(ctx: &ComposeContext<'_>) -> [f32; 4] {
+    let pt = &ctx.style.primary_tint;
+    [
+        pt.r as f32 / 255.0,
+        pt.g as f32 / 255.0,
+        pt.b as f32 / 255.0,
+        pt.a as f32 / 255.0,
+    ]
+}
+
 fn rgba4_near(left: [f32; 4], right: [f32; 4]) -> bool {
     (left[0] - right[0]).abs() < 0.0001
         && (left[1] - right[1]).abs() < 0.0001
@@ -219,9 +231,7 @@ fn custom_shape_fill_override(node: &UiIrNode, ctx: &ComposeContext<'_>) -> Opti
         return None;
     }
 
-    custom_shape_style_tag_colour_token(node)
-        .and_then(|token| resolve_colour_token(ctx, token))
-        .or(node.icon_tint_colour)
+    node.icon_tint_colour
         .or_else(|| {
             node.icon_tint_colour_token
                 .as_deref()
@@ -274,7 +284,7 @@ fn image_blend_mode_for_node(node: &UiIrNode, asset_ref: &str) -> BlendMode {
     }
 
     if normalised.ends_with(".svg") {
-        if custom_shape_has_modify_tag(node) {
+        if matches!(node.colour_blend_mode, Some(UiIrColourBlendMode::Additive)) {
             BlendMode::Plus
         } else {
             BlendMode::SourceOver
@@ -282,14 +292,6 @@ fn image_blend_mode_for_node(node: &UiIrNode, asset_ref: &str) -> BlendMode {
     } else {
         BlendMode::Plus
     }
-}
-
-fn custom_shape_has_modify_tag(node: &UiIrNode) -> bool {
-    node.resolved_style_tags.iter().any(|tag| {
-        tag.tag_name
-            .as_deref()
-            .is_some_and(|name| name.trim().eq_ignore_ascii_case("modify"))
-    })
 }
 
 fn rasterize_custom_shape_svg(

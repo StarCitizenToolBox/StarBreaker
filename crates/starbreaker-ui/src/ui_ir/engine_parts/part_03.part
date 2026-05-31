@@ -116,6 +116,19 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
             unresolved_count
         ));
     }
+
+    let missing_style_semantics: Vec<String> = nodes
+        .iter()
+        .flat_map(missing_strict_renderer_style_semantics)
+        .collect();
+    if !missing_style_semantics.is_empty() {
+        warnings.push(format!(
+            "{} strict-renderer style semantic gap(s) detected",
+            missing_style_semantics.len()
+        ));
+        warnings.extend(missing_style_semantics.into_iter().take(8));
+    }
+
     let computed_confidence = confidence
         .saturating_sub(unresolved_count.saturating_mul(10))
         .min(100);
@@ -136,5 +149,60 @@ pub fn compile_ui_ir_from_scene_with_animation_sample(
         missing_asset_refs,
         nodes,
     }
+}
+
+fn missing_strict_renderer_style_semantics(node: &UiIrNode) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let node_type = node.node_type.trim();
+
+    if node_type.eq_ignore_ascii_case("BuildingBlocks_WidgetSeparator")
+        || node_type.eq_ignore_ascii_case("widget_separator")
+    {
+        let has_separator_colour = node.stroke_colour.is_some()
+            || node.stroke_colour_token.is_some()
+            || node.background_fill_colour.is_some()
+            || node.background_fill_colour_token.is_some();
+        if !has_separator_colour {
+            warnings.push(format!(
+                "node {} ({}) separator missing stroke/background colour semantics",
+                node.id, node.name
+            ));
+        }
+    }
+
+    if let Some(border) = node.border.as_ref() {
+        if border.top.width > 0.0 && border.top.colour.is_none() && border.top.colour_token.is_none() {
+            warnings.push(format!(
+                "node {} ({}) border.top width {} missing colour semantics",
+                node.id, node.name, border.top.width
+            ));
+        }
+        if border.right.width > 0.0
+            && border.right.colour.is_none()
+            && border.right.colour_token.is_none()
+        {
+            warnings.push(format!(
+                "node {} ({}) border.right width {} missing colour semantics",
+                node.id, node.name, border.right.width
+            ));
+        }
+        if border.bottom.width > 0.0
+            && border.bottom.colour.is_none()
+            && border.bottom.colour_token.is_none()
+        {
+            warnings.push(format!(
+                "node {} ({}) border.bottom width {} missing colour semantics",
+                node.id, node.name, border.bottom.width
+            ));
+        }
+        if border.left.width > 0.0 && border.left.colour.is_none() && border.left.colour_token.is_none() {
+            warnings.push(format!(
+                "node {} ({}) border.left width {} missing colour semantics",
+                node.id, node.name, border.left.width
+            ));
+        }
+    }
+
+    warnings
 }
 

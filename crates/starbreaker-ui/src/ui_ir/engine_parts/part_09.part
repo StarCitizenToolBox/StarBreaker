@@ -11,8 +11,18 @@ fn adjust_ui_ir_font_value_for_font_record_image_percent(
     value: UiIrValue,
     resolved_font_record: Option<&serde_json::Value>,
 ) -> UiIrValue {
-    let image_size_percent = resolved_font_record
-        .and_then(|record| record.get("_RecordValue_"))
+    let record_value = resolved_font_record
+        .and_then(|record| record.get("_RecordValue_").or(Some(record)));
+    let should_adjust = record_value
+        .and_then(|value| value.get("font"))
+        .and_then(|value| value.as_str())
+        .is_some_and(|font| font.eq_ignore_ascii_case("$Med-Heavy"));
+
+    if !should_adjust {
+        return value;
+    }
+
+    let image_size_percent = record_value
         .and_then(|record_value| record_value.get("imageSizePercent"))
         .and_then(|value| value.as_f64())
         .map(|value| value as f32)

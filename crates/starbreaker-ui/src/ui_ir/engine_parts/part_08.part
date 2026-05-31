@@ -243,6 +243,30 @@ fn semantic_text_colour_token_from_style_tags(
     let is_title_style = !style_name.is_empty() && style_name.starts_with("Title");
     let is_heading_style = !style_name.is_empty() && style_name.starts_with("Heading");
 
+    if tags.iter().any(|tag| {
+        tag.tag_name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case("UI_Generic_Flag_03"))
+    }) {
+        return Some("Foreground".to_string());
+    }
+
+    if tags.iter().any(|tag| {
+        tag.tag_name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case("StateModerate") || name.eq_ignore_ascii_case("Modify"))
+    }) {
+        return Some("Base".to_string());
+    }
+
+    if tags.iter().any(|tag| {
+        tag.tag_name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case("StateCritical") || name.eq_ignore_ascii_case("Flashing"))
+    }) {
+        return Some("Background".to_string());
+    }
+
     if is_heading_style
         && tags.iter().any(|tag| {
             matches!(
@@ -251,6 +275,10 @@ fn semantic_text_colour_token_from_style_tags(
             )
         })
     {
+        return Some("Base".to_string());
+    }
+
+    if tags.is_empty() && matches!(style_name, "Heading1" | "Heading3") {
         return Some("Base".to_string());
     }
 

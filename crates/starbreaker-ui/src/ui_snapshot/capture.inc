@@ -35,9 +35,16 @@ pub fn snapshot_from_ui_ir(document: &UiIrDocument) -> UiScreenSnapshot {
                 .map(|style| style.vertical_alignment.clone()),
             overflow_mode: node.overflow_mode.clone(),
             background_rgba: node.background_fill_colour,
+            background_tint_token: node.background_fill_colour_token.clone(),
             stroke_rgba: node.stroke_colour,
+            stroke_tint_token: node.stroke_colour_token.clone(),
             text_rgba: node.text_style.as_ref().and_then(|style| style.colour),
+            text_tint_token: node
+                .text_style
+                .as_ref()
+                .and_then(|style| style.colour_token.clone()),
             icon_tint_rgba: node.icon_tint_colour,
+            icon_tint_token: node.icon_tint_colour_token.clone(),
             stroke_extent: node.stroke_extent,
             text_payload: node.text_payload.as_ref().and_then(|payload| match payload {
                 crate::ui_ir::UiIrTextPayload::Resolved { text } => Some(text.clone()),

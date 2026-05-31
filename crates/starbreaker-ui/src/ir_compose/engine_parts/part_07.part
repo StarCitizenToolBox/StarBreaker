@@ -82,15 +82,6 @@ fn title3_font_weight_rank(symbol: &str, font: &FontGlyphSet) -> i32 {
     name_rank + if font.is_bold { 10 } else { 0 }
 }
 
-fn derived_accent_tint(ctx: &ComposeContext<'_>) -> [f32; 4] {
-    [
-        ctx.style.backlight.r as f32 / 255.0,
-        ctx.style.backlight.g as f32 / 255.0,
-        ctx.style.backlight.b as f32 / 255.0,
-        1.0,
-    ]
-}
-
 fn resolved_text_payload(node: &UiIrNode) -> Option<&str> {
     let payload = node.text_payload.as_ref()?;
     match payload {
@@ -108,12 +99,15 @@ fn draw_ir_border(
     alpha: f32,
     ctx: &ComposeContext<'_>,
 ) {
+    let top_colour = border_side_colour(&border.top, ctx);
     draw_border_side(
         pixmap,
         Rect { x: rect.x, y: rect.y, w: rect.w, h: border.top.width },
-        border.top.colour.unwrap_or_else(|| style_primary_rgba(ctx)),
+        top_colour,
         alpha,
     );
+
+    let right_colour = border_side_colour(&border.right, ctx);
     draw_border_side(
         pixmap,
         Rect {
@@ -122,9 +116,11 @@ fn draw_ir_border(
             w: border.right.width,
             h: rect.h,
         },
-        border.right.colour.unwrap_or_else(|| style_primary_rgba(ctx)),
+        right_colour,
         alpha,
     );
+
+    let bottom_colour = border_side_colour(&border.bottom, ctx);
     draw_border_side(
         pixmap,
         Rect {
@@ -133,18 +129,31 @@ fn draw_ir_border(
             w: rect.w,
             h: border.bottom.width,
         },
-        border.bottom.colour.unwrap_or_else(|| style_primary_rgba(ctx)),
+        bottom_colour,
         alpha,
     );
+
+    let left_colour = border_side_colour(&border.left, ctx);
     draw_border_side(
         pixmap,
         Rect { x: rect.x, y: rect.y, w: border.left.width, h: rect.h },
-        border.left.colour.unwrap_or_else(|| style_primary_rgba(ctx)),
+        left_colour,
         alpha,
     );
 }
 
-fn draw_border_side(pixmap: &mut Pixmap, rect: Rect, colour: [f32; 4], alpha: f32) {
+fn border_side_colour(side: &crate::ui_ir::UiIrBorderSide, ctx: &ComposeContext<'_>) -> Option<[f32; 4]> {
+    side.colour.or_else(|| {
+        side.colour_token
+            .as_deref()
+            .and_then(|token| resolve_surface_colour_token(ctx, token))
+    })
+}
+
+fn draw_border_side(pixmap: &mut Pixmap, rect: Rect, colour: Option<[f32; 4]>, alpha: f32) {
+    let Some(colour) = colour else {
+        return;
+    };
     if rect.w <= 0.0 || rect.h <= 0.0 {
         return;
     }
@@ -204,9 +213,10 @@ fn draw_widget_separator(
             node.background_fill_colour_token
                 .as_deref()
                 .and_then(|token| resolve_surface_colour_token(ctx, token))
-        })
-        .or_else(|| resolve_surface_colour_token(ctx, "Accent5"))
-        .unwrap_or_else(|| style_primary_rgba(ctx));
+        });
+    let Some(colour) = colour else {
+        return;
+    };
     fill_rect_ts_with_mode(pixmap, draw_rect, colour, alpha, node_colour_blend_mode(node));
 }
 
@@ -362,6 +372,7 @@ fn to_skia_color(rgba: [f32; 4], global_alpha: f32) -> Color {
     )
 }
 
+#[cfg(test)]
 fn style_primary_rgba(ctx: &ComposeContext<'_>) -> [f32; 4] {
     let pt = &ctx.style.primary_tint;
     [

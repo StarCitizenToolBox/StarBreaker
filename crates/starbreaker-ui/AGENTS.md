@@ -4,6 +4,19 @@ Scope: everything under `StarBreaker/crates/starbreaker-ui/`.
 
 Read this after the repo-level `StarBreaker/AGENTS.md` and before planning or editing work in this crate.
 
+## Required first reads
+
+Before planning or editing in this crate, read these in order:
+
+1. `StarBreaker/AGENTS.md`
+2. `StarBreaker/.github/copilot-instructions.md`
+3. `StarBreaker/crates/starbreaker-ui/AGENTS.md` (this file)
+4. `StarBreaker/crates/starbreaker-ui/docs/ui-matching-workflow.md` for any UI parity/matching task
+
+Do not rely on stale chat context for UI matching behavior. Re-read
+`ui-matching-workflow.md` when switching screens, after long detours, or when
+visual fixes stop converging.
+
 ## Core rules
 
 - No hard-coding, no name-matching, no ship-specific branches, and no screen-specific branches in production code.

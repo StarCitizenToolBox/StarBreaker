@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "frozen_at": "2026-05-28T15:57:21Z",
-  "approver": "Star Destroyer",
-  "reason": "Normalize channel tokens in freeze metadata",
+  "frozen_at": "2026-05-31T22:01:47Z",
+  "approver": "tom",
+  "reason": "User-approved refresh: clipper_small_door gold; ui_target_a/ui_target_b platinum",
   "signature": null,
   "manifest_path": "crates/starbreaker-ui/tests/fixtures/ui_ir/ui_snapshot_manifest.json",
   "artifacts": [
@@ -11,7 +11,7 @@
       "tier": "platinum",
       "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_i_med_medicalbed_a.png",
       "artifact_path": "test-artifacts/ui/ui_target_a.png",
-      "sha256": "cc16cf760781c2c2ecce80499593a52707670b50601fa849dea29c87f1af1d6e",
+      "sha256": "e42071e0ba2cb8c74e0b98a5311682c79dfba25753e7286f001a59e36e426609",
       "width": 1920,
       "height": 1080,
       "channels": "srgba"
@@ -21,7 +21,7 @@
       "tier": "platinum",
       "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_i_med_medicalendofbed_a.png",
       "artifact_path": "test-artifacts/ui/ui_target_b.png",
-      "sha256": "2dab2a273eee10bb0b6fc961b8a1ee2fd0a508ba5e2a69a43e1aeaa9a58f1a84",
+      "sha256": "971593f01fab14c826cb3412aba970242d6b871e751d869ca015ad5c5d5ba8a8",
       "width": 1920,
       "height": 1080,
       "channels": "srgba"
@@ -31,7 +31,7 @@
       "tier": "gold",
       "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_i_door_small_drak.png",
       "artifact_path": "test-artifacts/ui/clipper_small_door.png",
-      "sha256": "ccd70a713eaa075a2dfedf8a6d527bcba6fb058c3637fb50044365716f71173d",
+      "sha256": "e2d5c793328d543c5a68c0a76e9921274932d816c91c5ffefb32bb0293f6f80e",
       "width": 1920,
       "height": 1080,
       "channels": "srgba"

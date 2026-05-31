@@ -83,6 +83,23 @@ pub fn render_ui_ir_document(
         draw_non_text_node(node, document, ctx, atlas, &mut pixmap);
     }
 
+    // Token-driven borders are semantic overlays and should render after base
+    // fills/assets so child card fills do not obscure parent outlines.
+    for node in &draw_order {
+        let Some(border) = &node.border else {
+            continue;
+        };
+        if !border_uses_colour_tokens(border) {
+            continue;
+        }
+        let rect = resolved_linear_progress_meter_rect(node, document)
+            .unwrap_or_else(|| ir_rect_to_layout_rect(node.computed_rect));
+        if rect.w < 0.5 || rect.h < 0.5 {
+            continue;
+        }
+        draw_ir_border(&mut pixmap, rect, border, node.alpha, ctx);
+    }
+
     // Keep progress meters on top of base chrome/background fills.
     for node in &draw_order {
         if node.meter_progress.is_none() {
@@ -212,6 +229,7 @@ fn draw_non_text_node(
         if let Some(fill) = resolved_background_fill
             && fill[3] > 0.005
         {
+            let fill_rect = inset_fill_rect_for_token_border(node, rect, tsk_rect);
             if node.name.eq_ignore_ascii_case("Root")
                 && node.node_type.eq_ignore_ascii_case("display_widget")
                 && rect.w >= document.target_width as f32 * 0.95
@@ -219,7 +237,7 @@ fn draw_non_text_node(
             {
                 // Header root containers are layout scaffolding, not visible chrome.
             } else {
-                fill_rect_ts_with_mode(pixmap, tsk_rect, fill, node.alpha, node_colour_blend_mode(node));
+                fill_rect_ts_with_mode(pixmap, fill_rect, fill, node.alpha, node_colour_blend_mode(node));
             }
         }
     }
@@ -281,7 +299,9 @@ fn draw_non_text_node(
         }
     }
 
-    if let Some(border) = &node.border {
+    if let Some(border) = &node.border
+        && !border_uses_colour_tokens(border)
+    {
         draw_ir_border(pixmap, rect, border, node.alpha, ctx);
     }
 
@@ -301,5 +321,40 @@ fn draw_non_text_node(
             node.alpha,
         );
     }
+}
+
+fn border_uses_colour_tokens(border: &UiIrBorder) -> bool {
+    border.top.colour_token.is_some()
+        || border.right.colour_token.is_some()
+        || border.bottom.colour_token.is_some()
+        || border.left.colour_token.is_some()
+}
+
+fn inset_fill_rect_for_token_border(node: &UiIrNode, rect: Rect, fallback: TskRect) -> TskRect {
+    let Some(border) = &node.border else {
+        return fallback;
+    };
+    if !border_uses_colour_tokens(border) {
+        return fallback;
+    }
+
+    let inset = border
+        .top
+        .width
+        .max(border.right.width)
+        .max(border.bottom.width)
+        .max(border.left.width)
+        .max(0.0);
+    if inset <= 0.0 {
+        return fallback;
+    }
+
+    let inset_w = rect.w - inset * 2.0;
+    let inset_h = rect.h - inset * 2.0;
+    if inset_w <= 0.5 || inset_h <= 0.5 {
+        return fallback;
+    }
+
+    TskRect::from_xywh(rect.x + inset, rect.y + inset, inset_w, inset_h).unwrap_or(fallback)
 }
 

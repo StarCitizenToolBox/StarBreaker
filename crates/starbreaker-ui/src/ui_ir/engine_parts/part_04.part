@@ -285,12 +285,11 @@ fn build_ui_ir_nodes(
                 .as_ref()
                 .is_some_and(|payload| matches!(payload, UiIrTextPayload::Resolved { text } if !text.trim().is_empty()));
 
-        let rect = if suppress_placeholder_only_label_caption_pair {
+        let mut rect = if suppress_placeholder_only_label_caption_pair {
             layout_rect
         } else {
             maybe_reanchor_active_label_caption_pair_rect(scene, &layout, id, node, layout_rect)
         };
-
         let meter_progress = if node_type_name(&node.ty)
             .eq_ignore_ascii_case("BuildingBlocks_WidgetLinearProgressMeter")
         {
@@ -327,7 +326,7 @@ fn build_ui_ir_nodes(
 
         let custom_shape = build_custom_shape(node);
 
-        let stroke_extent = separator_stroke_extent_from_raw(node);
+        let mut stroke_extent = separator_stroke_extent_from_raw(node);
         let separator_style = separator_standard_style_from_source(
             node,
             selected_style_source.as_deref(),
@@ -338,6 +337,13 @@ fn build_ui_ir_nodes(
             .and_then(|style| style.alpha_override)
             .unwrap_or_else(|| effective_alpha_for_node(id, node, scene, animation_sample_percent));
         let svg_fill_overlay_alpha = svg_fill_overlay_alpha_from_raw(&node.raw);
+        let annunciator_gradient_tint = annunciator_gradient_tint_token(
+            scene,
+            node,
+            &binding_resolver,
+            defaults,
+            &resolved_style_tags,
+        );
         let mut alpha = alpha_base
             * separator_style
                 .as_ref()
@@ -346,7 +352,7 @@ fn build_ui_ir_nodes(
             * svg_fill_overlay_alpha.unwrap_or(1.0);
         let stroke_colour = stroke_colour_from_raw(&node.raw)
             .or_else(|| separator_style.as_ref().and_then(|style| style.colour));
-        let stroke_colour_token = stroke_colour_token_from_raw(&node.raw).or_else(|| {
+        let mut stroke_colour_token = stroke_colour_token_from_raw(&node.raw).or_else(|| {
             separator_style
                 .as_ref()
                 .and_then(|style| style.colour_token.clone())
@@ -354,7 +360,10 @@ fn build_ui_ir_nodes(
 
         let allow_background_fill = raw_background_enabled(&node.raw);
         let background_fill_colour_token = background_fill_colour_token_from_raw(&node.raw, allow_background_fill)
-            .or_else(|| background_fill_colour_token_from_style_tags(&resolved_style_tags, &node.ty));
+            .or_else(|| {
+                background_fill_colour_token_from_style_tags(&resolved_style_tags, &node.ty)
+            });
+        let background_fill_alpha = background_fill_alpha_from_raw(&node.raw, allow_background_fill);
         let mut background_fill_colour = allow_background_fill
             .then(|| {
                 node.background
@@ -368,14 +377,50 @@ fn build_ui_ir_nodes(
         {
             background_fill_colour = None;
         }
+        if stroke_colour.is_none()
+            && stroke_colour_token.is_none()
+            && let Some((outline_token, outline_extent)) = annunciator_outline_stroke_from_background_token(
+                &resolved_style_tags,
+                &node.ty,
+                background_fill_colour_token.as_deref(),
+            )
+        {
+            stroke_colour_token = Some(outline_token);
+            if stroke_extent.unwrap_or(0.0) <= 0.0 {
+                stroke_extent = Some(outline_extent);
+            }
+        }
         let colour_blend_mode = separator_colour_blend_mode_from_raw(node).or_else(|| {
             background_colour_blend_mode_from_raw(node, background_fill_colour_token.as_deref(), allow_background_fill)
-        });
-        let border = if should_suppress_annunciator_border(&resolved_style_tags, &node.ty) {
+        })
+        .or_else(|| custom_shape_colour_blend_mode_from_style_tags(&resolved_style_tags, &node.ty));
+        let mut border = if should_suppress_annunciator_border(&resolved_style_tags, &node.ty) {
             None
         } else {
-            border_from_node(node)
+            let base_border = border_from_node(node);
+            if base_border
+                .as_ref()
+                .is_some_and(border_has_visible_semantics)
+            {
+                base_border
+            } else {
+                border_from_style_tags(&resolved_style_tags, &node.ty)
+                    .or_else(|| {
+                        border_from_annunciator_background_token(
+                            &resolved_style_tags,
+                            &node.ty,
+                            background_fill_colour_token.as_deref(),
+                        )
+                    })
+                    .or_else(|| border_from_annunciator_layout_pattern(scene, node, &node.ty))
+                    .or(base_border)
+            }
         };
+        if border.is_some()
+            && annunciator_slot_label_matches(node, scene, &binding_resolver, defaults, "COOL")
+        {
+            border = None;
+        }
         let overflow_mode = overflow_mode_from_raw(&node.raw);
 
         let mut icon_tint_colour = node
@@ -387,9 +432,22 @@ fn build_ui_ir_nodes(
         let icon_tint_colour_token = icon_tint_colour_token_from_raw(
             &node.raw,
             true,
-        ).or_else(|| annunciator_gradient_tint_token(node, &resolved_style_tags));
+        )
+        .or_else(|| icon_tint_colour_token_from_style_tags(&resolved_style_tags, &node.ty))
+        .or_else(|| annunciator_gradient_tint.clone());
         if is_annunciator_gradient_image(node) && icon_tint_colour_token.is_some() {
             icon_tint_colour = None;
+            if icon_tint_colour_token
+                .as_deref()
+                .is_some_and(|token| token.eq_ignore_ascii_case("Accent2"))
+            {
+                alpha = 0.0;
+            } else {
+                alpha = alpha.max(1.0);
+            }
+        } else if is_annunciator_gradient_image(node)
+            && (node.is_active || state_driven_image_activation)
+        {
             alpha = alpha.max(1.0);
         }
 
@@ -433,7 +491,7 @@ fn build_ui_ir_nodes(
             },
             background_fill_colour,
             corner_radius: node_corner_radius(node),
-            background_fill_alpha: background_fill_alpha_from_raw(&node.raw, allow_background_fill),
+            background_fill_alpha,
             background_fill_colour_token,
             segmented_fill: segmented_fill_from_raw(node),
             border,

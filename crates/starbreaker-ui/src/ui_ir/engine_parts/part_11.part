@@ -460,4 +460,374 @@ mod tests {
         );
         assert_eq!(heading.resolved_style_tags.first().and_then(|tag| tag.tag_name.as_deref()), Some("Primary"));
     }
+
+    #[test]
+    fn compile_ir_maps_untagged_heading1_text_to_base_token() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestHeadingBase",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "untagged_heading",
+                        "isActive": true,
+                        "text": "VIEW CURRENT STATUS",
+                        "labelProperties": {
+                            "style": "Heading1"
+                        },
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-heading-base",
+            Some("BuildingBlocks_Canvas.TestHeadingBase"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let heading = ir.nodes.iter().find(|node| node.name == "untagged_heading").expect("heading node");
+        assert_eq!(
+            heading.text_style.as_ref().and_then(|style| style.colour_token.as_deref()),
+            Some("Base")
+        );
+    }
+
+    #[test]
+    fn compile_ir_maps_ui_generic_flag_03_to_foreground_token() {
+        let tag_db_path = "file://tagdatabase.tagdatabase.json";
+        let emphasis_tag_id = "emphasis-tag-id";
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestEmphasisTextColourTag",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "emphasis_heading",
+                        "isActive": true,
+                        "text": "MODE",
+                        "labelProperties": {
+                            "style": "Heading6"
+                        },
+                        "styleTags": [
+                            {
+                                "_RecordPath_": tag_db_path,
+                                "_RecordName_": "Tag.emphasis-tag-id",
+                                "_RecordId_": emphasis_tag_id
+                            }
+                        ],
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+        let tag_db = serde_json::json!({
+            "_RecordName_": "TagDatabase",
+            "_RecordValue_": {
+                "tags": [
+                    {
+                        "_RecordId_": emphasis_tag_id,
+                        "_RecordName_": "Tag.emphasis-tag-id",
+                        "_Type_": "Tag",
+                        "tagName": "UI_Generic_Flag_03",
+                        "children": []
+                    }
+                ]
+            }
+        });
+        let fetcher = TestCanvasFetcher {
+            by_guid: std::collections::HashMap::new(),
+            by_path: [(tag_db_path.to_string(), tag_db)].into_iter().collect(),
+        };
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            Some(&fetcher),
+            "guid-emphasis-text-colour-tag",
+            Some("BuildingBlocks_Canvas.TestEmphasisTextColourTag"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "emphasis_heading").expect("emphasis node");
+        assert_eq!(
+            node.text_style.as_ref().and_then(|style| style.colour_token.as_deref()),
+            Some("Foreground")
+        );
+    }
+
+    #[test]
+    fn compile_ir_maps_custom_shape_modify_tag_to_accent5_icon_tint_token() {
+        let tag_db_path = "file://tagdatabase.tagdatabase.json";
+        let modify_tag_id = "modify-tag-id";
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestCustomShapeModifyTag",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetCustomShape",
+                        "name": "modify_shape",
+                        "isActive": true,
+                        "svgFill": {
+                            "svgPath": "UI/Textures/Vector/General/FingerPrint.svg",
+                            "renderShape": true,
+                            "enableColorOverlay": true
+                        },
+                        "styleTags": [
+                            {
+                                "_RecordPath_": tag_db_path,
+                                "_RecordName_": "Tag.modify-tag-id",
+                                "_RecordId_": modify_tag_id
+                            }
+                        ],
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 40.0},
+                            "height": {"behavior": "Fixed", "value": 40.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+        let tag_db = serde_json::json!({
+            "_RecordName_": "TagDatabase",
+            "_RecordValue_": {
+                "tags": [
+                    {
+                        "_RecordId_": modify_tag_id,
+                        "_RecordName_": "Tag.modify-tag-id",
+                        "_Type_": "Tag",
+                        "tagName": "Modify",
+                        "children": []
+                    }
+                ]
+            }
+        });
+        let fetcher = TestCanvasFetcher {
+            by_guid: std::collections::HashMap::new(),
+            by_path: [(tag_db_path.to_string(), tag_db)].into_iter().collect(),
+        };
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            Some(&fetcher),
+            "guid-custom-shape-modify-tag",
+            Some("BuildingBlocks_Canvas.TestCustomShapeModifyTag"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "modify_shape").expect("modify shape node");
+        assert_eq!(node.icon_tint_colour_token.as_deref(), Some("Accent5"));
+        assert_eq!(node.colour_blend_mode, Some(crate::ui_ir::UiIrColourBlendMode::Additive));
+    }
+
+    #[test]
+    fn compile_ir_maps_footer_logo_and_bar_style_tags_to_accent1_icon_tint_token() {
+        let tag_db_path = "file://tagdatabase.tagdatabase.json";
+        let logo_tag_id = "logo-tag-id";
+        let animate_tag_id = "animate8-tag-id";
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestFooterTintTags",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetManufacturerLogo",
+                        "name": "Logo",
+                        "styleTags": [{
+                            "_RecordPath_": tag_db_path,
+                            "_RecordName_": "Tag.logo-tag-id",
+                            "_RecordId_": logo_tag_id
+                        }],
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 20.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetImage",
+                        "name": "Image_bottom_bar",
+                        "styleTags": [{
+                            "_RecordPath_": tag_db_path,
+                            "_RecordName_": "Tag.animate8-tag-id",
+                            "_RecordId_": animate_tag_id
+                        }],
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 20.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+        let tag_db = serde_json::json!({
+            "_RecordName_": "TagDatabase",
+            "_RecordValue_": {
+                "tags": [
+                    {
+                        "_RecordId_": logo_tag_id,
+                        "_RecordName_": "Tag.logo-tag-id",
+                        "_Type_": "Tag",
+                        "tagName": "UI_Generic_Flag_01",
+                        "children": []
+                    },
+                    {
+                        "_RecordId_": animate_tag_id,
+                        "_RecordName_": "Tag.animate8-tag-id",
+                        "_Type_": "Tag",
+                        "tagName": "Animate_8",
+                        "children": []
+                    }
+                ]
+            }
+        });
+        let fetcher = TestCanvasFetcher {
+            by_guid: std::collections::HashMap::new(),
+            by_path: [(tag_db_path.to_string(), tag_db)].into_iter().collect(),
+        };
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            Some(&fetcher),
+            "guid-footer-tint-tags",
+            Some("BuildingBlocks_Canvas.TestFooterTintTags"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let logo = ir.nodes.iter().find(|node| node.name == "Logo").expect("logo node");
+        assert_eq!(logo.icon_tint_colour_token.as_deref(), Some("Accent1"));
+
+        let footer = ir
+            .nodes
+            .iter()
+            .find(|node| node.name == "Image_bottom_bar")
+            .expect("bottom bar node");
+        assert_eq!(footer.icon_tint_colour_token.as_deref(), Some("Accent1"));
+    }
+
+    #[test]
+    fn compile_ir_maps_annunciator_item_state_tag_to_background_token() {
+        let tag_db_path = "file://tagdatabase.tagdatabase.json";
+        let screen_tag_id = "ann-screen";
+        let item_tag_id = "ann-item";
+        let moderate_tag_id = "ann-moderate";
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestAnnunciatorItemState",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "ann_item",
+                        "styleTags": [
+                            {"_RecordPath_": tag_db_path, "_RecordName_": "Tag.ann-screen", "_RecordId_": screen_tag_id},
+                            {"_RecordPath_": tag_db_path, "_RecordName_": "Tag.ann-item", "_RecordId_": item_tag_id},
+                            {"_RecordPath_": tag_db_path, "_RecordName_": "Tag.ann-moderate", "_RecordId_": moderate_tag_id}
+                        ],
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 50.0},
+                            "height": {"behavior": "Fixed", "value": 50.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+        let tag_db = serde_json::json!({
+            "_RecordName_": "TagDatabase",
+            "_RecordValue_": {
+                "tags": [
+                    {"_RecordId_": screen_tag_id, "_RecordName_": "Tag.ann-screen", "_Type_": "Tag", "tagName": "AnnunciatorScreen", "children": []},
+                    {"_RecordId_": item_tag_id, "_RecordName_": "Tag.ann-item", "_Type_": "Tag", "tagName": "AnnunciatorItem", "children": []},
+                    {"_RecordId_": moderate_tag_id, "_RecordName_": "Tag.ann-moderate", "_Type_": "Tag", "tagName": "StateModerate", "children": []}
+                ]
+            }
+        });
+        let fetcher = TestCanvasFetcher {
+            by_guid: std::collections::HashMap::new(),
+            by_path: [(tag_db_path.to_string(), tag_db)].into_iter().collect(),
+        };
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            Some(&fetcher),
+            "guid-ann-item-state",
+            Some("BuildingBlocks_Canvas.TestAnnunciatorItemState"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir.nodes.iter().find(|node| node.name == "ann_item").expect("annunciator item node");
+        assert_eq!(node.background_fill_colour_token.as_deref(), None);
+        assert_eq!(node.stroke_colour_token.as_deref(), None);
+        assert_eq!(node.stroke_extent, None);
+        let border = node.border.as_ref().expect("annunciator moderate border");
+        assert_eq!(border.top.width, 2.0);
+        assert_eq!(border.right.width, 2.0);
+        assert_eq!(border.bottom.width, 2.0);
+        assert_eq!(border.left.width, 2.0);
+        assert_eq!(border.top.colour_token.as_deref(), Some("Accent3"));
+        assert_eq!(border.right.colour_token.as_deref(), Some("Accent3"));
+        assert_eq!(border.bottom.colour_token.as_deref(), Some("Accent3"));
+        assert_eq!(border.left.colour_token.as_deref(), Some("Accent3"));
+    }
 }

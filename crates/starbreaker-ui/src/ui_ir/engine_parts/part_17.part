@@ -46,6 +46,35 @@ mod tests_g {
         crate::defaults::DefaultValueRegistry::with_well_known_path_defaults()
     }
 
+    fn font_record_with_percent(font: &str, image_size_percent: f32) -> serde_json::Value {
+        serde_json::json!({
+            "_RecordValue_": {
+                "font": font,
+                "imageSizePercent": image_size_percent
+            }
+        })
+    }
+
+    #[test]
+    fn image_size_percent_compensation_applies_for_med_heavy() {
+        let record = font_record_with_percent("$Med-Heavy", 0.75);
+        let adjusted = adjust_ui_ir_font_value_for_font_record_image_percent(
+            UiIrValue::Fixed { value: 64.0 },
+            Some(&record),
+        );
+        assert!(matches!(adjusted, UiIrValue::Fixed { value } if (value - 85.333336).abs() < 0.001));
+    }
+
+    #[test]
+    fn image_size_percent_compensation_does_not_apply_for_other_fonts() {
+        let record = font_record_with_percent("$Text1Thin", 0.75);
+        let adjusted = adjust_ui_ir_font_value_for_font_record_image_percent(
+            UiIrValue::Fixed { value: 64.0 },
+            Some(&record),
+        );
+        assert_eq!(adjusted, UiIrValue::Fixed { value: 64.0 });
+    }
+
 
     #[test]
     fn compile_ir_widget_text_auto_font_size_caps_runaway_growth_on_large_slots() {

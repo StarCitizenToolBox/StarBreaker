@@ -345,6 +345,60 @@ mod tests_e {
     }
 
     #[test]
+    fn compile_ir_warns_when_separator_lacks_strict_style_semantics() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.SeparatorStyleGap",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetSeparator",
+                        "name": "separator_gap",
+                        "isActive": true,
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 8.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-separator-gap",
+            Some("BuildingBlocks_Canvas.SeparatorStyleGap"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        assert!(
+            ir.warnings
+                .iter()
+                .any(|warning| warning.contains("strict-renderer style semantic gap")),
+            "expected strict-renderer semantic warning, got: {:?}",
+            ir.warnings
+        );
+        assert!(
+            ir.warnings
+                .iter()
+                .any(|warning| warning.contains("separator missing stroke/background colour semantics")),
+            "expected separator semantic detail warning, got: {:?}",
+            ir.warnings
+        );
+    }
+
+    #[test]
     fn compile_ir_populates_anchor_pivot_alpha_and_style_tags() {
         let canvas = serde_json::json!({
             "_RecordName_": "BuildingBlocks_Canvas.Test3",

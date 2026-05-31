@@ -107,3 +107,11 @@ fn canonicalises_common_path_variants() {
         "data/ui/foo.svg"
     );
 }
+
+#[test]
+fn canonicalises_tif_to_dds() {
+    assert_eq!(
+        canonicalise_path("UI/Textures/H_HUDscreens/Ships/General/Annunciator_On.tif"),
+        "ui/textures/h_hudscreens/ships/general/annunciator_on.dds"
+    );
+}

@@ -85,7 +85,20 @@ Snapshot element fields should include at minimum:
 - text font size (new explicit field to add in code)
 - line spacing
 - text/background/stroke/icon tint RGBA
+- text/background/stroke/icon tint token semantics
 - alignment/overflow/blend mode/asset identity
+
+Schema-addition policy:
+
+- When adding new snapshot semantics (for example `stroke_tint_token`, `text_tint_token`), add the fields to:
+  - `UiSnapshotElement` schema
+  - snapshot capture path
+  - comparator checks
+  - live-guard focused semantic views (only clear fields intentionally)
+- Comparator policy for optional string fields remains migration-friendly:
+  - baseline `Some` -> current `None` or different must fail
+  - baseline `None` -> current `Some` is allowed during additive rollout
+- For newly added fields that must become strict immediately on specific targets, add explicit required checks in `manifest_live_ir_guard` instead of forcing one-shot baseline churn.
 
 ## Validation Rules
 

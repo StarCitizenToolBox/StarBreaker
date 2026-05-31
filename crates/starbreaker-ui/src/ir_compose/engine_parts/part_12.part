@@ -17,5 +17,5 @@ fn secondary_close_button_tint(node: &UiIrNode, ctx: &ComposeContext<'_>) -> [f3
                 .as_deref()
                 .and_then(|token| resolve_colour_token(ctx, token))
         })
-        .unwrap_or_else(|| derived_accent_tint(ctx))
+        .unwrap_or([1.0, 1.0, 1.0, 1.0])
 }

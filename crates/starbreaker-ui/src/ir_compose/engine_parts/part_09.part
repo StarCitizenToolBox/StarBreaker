@@ -258,20 +258,30 @@ mod tests_c {
         assert_eq!(resolve_colour_token(&drake_ctx, "Accent2"), Some(style_primary_rgba(&drake_ctx)));
 
         let mut node = blank_node("widget_text_field");
-        node.resolved_style_tags = vec![UiIrStyleTag {
-            uuid: "tag-primary".to_string(),
-            tag_name: Some("Primary".to_string()),
-        }];
-
         assert_eq!(resolved_text_colour(&node, None, &ctx), [255, 255, 255, 255]);
 
-        node.resolved_style_tags[0].tag_name = Some("Modify".to_string());
-        assert_eq!(resolved_text_colour(&node, None, &ctx), rgba_to_u8(style_primary_rgba(&ctx)));
+        node.text_style = Some(crate::ui_ir::UiIrTextStyle {
+            font_record: None,
+            resolved_font_record: None,
+            font_size: crate::ui_ir::UiIrValue::Fixed { value: 28.0 },
+            line_spacing: None,
+            alignment: "Left".to_string(),
+            vertical_alignment: "Center".to_string(),
+            anchor_to_parent_x: None,
+            anchor_to_parent_y: None,
+            colour: None,
+            colour_token: Some("Base".to_string()),
+            label_style: None,
+        });
+        assert_eq!(
+            resolved_text_colour(&node, node.text_style.as_ref(), &ctx),
+            rgba_to_u8(style_primary_rgba(&ctx))
+        );
     }
 
 
     #[test]
-    fn untagged_heading_text_resolves_to_accent() {
+    fn untagged_heading_text_defaults_to_white_without_ir_token() {
         let style = stub_style();
         let defaults = crate::defaults::DefaultValueRegistry::with_well_known_path_defaults();
         let assets = minimal_swf_assets();
@@ -297,13 +307,13 @@ mod tests_c {
 
         assert_eq!(
             resolved_text_colour(&node, node.text_style.as_ref(), &ctx),
-            rgba_to_u8(style_primary_rgba(&ctx))
+            [255, 255, 255, 255]
         );
     }
 
 
     #[test]
-    fn custom_shape_modify_tag_uses_deep_blue_palette_slot() {
+    fn custom_shape_icon_tint_token_uses_deep_blue_palette_slot() {
         let style = stub_style();
         let defaults = crate::defaults::DefaultValueRegistry::with_well_known_path_defaults();
         let assets = minimal_swf_assets();
@@ -322,18 +332,64 @@ mod tests_c {
             nine_slice_rect: None,
             nine_slice_scale: None,
         });
-        node.icon_tint_colour_token = Some("Accent1".to_string());
-        node.resolved_style_tags = vec![UiIrStyleTag {
-            uuid: "tag-modify".to_string(),
-            tag_name: Some("Modify".to_string()),
-        }];
+        node.icon_tint_colour_token = Some("Accent5".to_string());
 
         assert_eq!(custom_shape_fill_override(&node, &ctx), Some([0.0, 113.0 / 255.0, 188.0 / 255.0, 1.0]));
     }
 
 
     #[test]
+    fn custom_shape_without_explicit_ir_tint_does_not_infer_from_style_tags() {
+        let style = stub_style();
+        let defaults = crate::defaults::DefaultValueRegistry::with_well_known_path_defaults();
+        let assets = minimal_swf_assets();
+        let ctx = ComposeContext {
+            style: &style,
+            defaults: &defaults,
+            assets: &assets,
+        };
+        let mut node = blank_node("widget_custom_shape");
+        node.custom_shape = Some(UiIrCustomShape {
+            shape_type: None,
+            shape: None,
+            svg_path: Some("UI/Textures/Vector/General/FingerPrint.svg".to_string()),
+            render_shape: Some(true),
+            enable_nine_slice_rect: None,
+            nine_slice_rect: None,
+            nine_slice_scale: None,
+        });
+        node.resolved_style_tags = vec![UiIrStyleTag {
+            uuid: "tag-modify".to_string(),
+            tag_name: Some("Modify".to_string()),
+        }];
+
+        assert_eq!(custom_shape_fill_override(&node, &ctx), None);
+    }
+
+
+    #[test]
     fn custom_shape_modify_svg_uses_additive_blend() {
+        let mut node = blank_node("widget_custom_shape");
+        node.custom_shape = Some(UiIrCustomShape {
+            shape_type: None,
+            shape: None,
+            svg_path: Some("UI/Textures/Vector/General/FingerPrint.svg".to_string()),
+            render_shape: Some(true),
+            enable_nine_slice_rect: None,
+            nine_slice_rect: None,
+            nine_slice_scale: None,
+        });
+        node.colour_blend_mode = Some(UiIrColourBlendMode::Additive);
+
+        assert_eq!(
+            image_blend_mode_for_node(&node, "UI/Textures/Vector/General/FingerPrint.svg"),
+            BlendMode::Plus
+        );
+    }
+
+
+    #[test]
+    fn custom_shape_svg_style_tags_do_not_imply_additive_without_ir_blend_mode() {
         let mut node = blank_node("widget_custom_shape");
         node.custom_shape = Some(UiIrCustomShape {
             shape_type: None,
@@ -351,7 +407,7 @@ mod tests_c {
 
         assert_eq!(
             image_blend_mode_for_node(&node, "UI/Textures/Vector/General/FingerPrint.svg"),
-            BlendMode::Plus
+            BlendMode::SourceOver
         );
     }
 

@@ -175,6 +175,13 @@ pub fn compare_snapshots(
             current_element.background_rgba,
             tolerance.rgba_channel_abs,
         );
+        compare_optional_string(
+            &mut failures,
+            identity,
+            "background_tint_token",
+            baseline_element.background_tint_token.as_deref(),
+            current_element.background_tint_token.as_deref(),
+        );
         compare_optional_rgba(
             &mut failures,
             identity,
@@ -182,6 +189,13 @@ pub fn compare_snapshots(
             baseline_element.stroke_rgba,
             current_element.stroke_rgba,
             tolerance.rgba_channel_abs,
+        );
+        compare_optional_string(
+            &mut failures,
+            identity,
+            "stroke_tint_token",
+            baseline_element.stroke_tint_token.as_deref(),
+            current_element.stroke_tint_token.as_deref(),
         );
         compare_optional_rgba(
             &mut failures,
@@ -191,6 +205,13 @@ pub fn compare_snapshots(
             current_element.text_rgba,
             tolerance.rgba_channel_abs,
         );
+        compare_optional_string(
+            &mut failures,
+            identity,
+            "text_tint_token",
+            baseline_element.text_tint_token.as_deref(),
+            current_element.text_tint_token.as_deref(),
+        );
         compare_optional_rgba(
             &mut failures,
             identity,
@@ -198,6 +219,13 @@ pub fn compare_snapshots(
             baseline_element.icon_tint_rgba,
             current_element.icon_tint_rgba,
             tolerance.rgba_channel_abs,
+        );
+        compare_optional_string(
+            &mut failures,
+            identity,
+            "icon_tint_token",
+            baseline_element.icon_tint_token.as_deref(),
+            current_element.icon_tint_token.as_deref(),
         );
     }
 
@@ -341,6 +369,24 @@ fn compare_optional_rgba(
         _ => failures.push(format!(
             "{identity}: {field} presence drift baseline={baseline:?} current={current:?}"
         )),
+    }
+}
+
+fn compare_optional_string(
+    failures: &mut Vec<String>,
+    identity: &str,
+    field: &str,
+    baseline: Option<&str>,
+    current: Option<&str>,
+) {
+    match (baseline, current) {
+        (Some(base), Some(cur)) if base != cur => failures.push(format!(
+            "{identity}: {field} drift baseline={base:?} current={cur:?}"
+        )),
+        (Some(base), None) => failures.push(format!(
+            "{identity}: {field} drift baseline={base:?} current={current:?}"
+        )),
+        _ => {}
     }
 }
 

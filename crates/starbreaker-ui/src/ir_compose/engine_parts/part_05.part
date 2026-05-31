@@ -56,82 +56,16 @@ fn resolved_text_colour(
     style: Option<&crate::ui_ir::UiIrTextStyle>,
     ctx: &ComposeContext<'_>,
 ) -> [u8; 4] {
-    explicit_text_colour_override(node)
-        .and_then(|token| resolve_colour_token(ctx, token))
-        .or_else(|| style.and_then(|style| style.colour))
+    let _ = node;
+    style
+        .and_then(|style| style.colour)
         .or_else(|| {
             style
                 .and_then(|style| style.colour_token.as_deref())
-                .and_then(|token| text_colour_token_override(node, token).or(Some(token)))
                 .and_then(|token| resolve_colour_token(ctx, token))
         })
-        .or_else(|| style_tag_colour_token(node).and_then(|token| resolve_colour_token(ctx, token)))
-        .or_else(|| label_style_colour_token(style, node).and_then(|token| resolve_colour_token(ctx, token)))
         .map(rgba_to_u8)
         .unwrap_or([255, 255, 255, 255])
-}
-
-fn explicit_text_colour_override(node: &UiIrNode) -> Option<&'static str> {
-    if node.resolved_style_tags.iter().any(|tag| {
-        tag.tag_name
-            .as_deref()
-            .is_some_and(|name| name.eq_ignore_ascii_case("UI_Generic_Flag_03"))
-    }) {
-        Some("Foreground")
-    } else {
-        None
-    }
-}
-
-fn text_colour_token_override<'a>(node: &UiIrNode, token: &'a str) -> Option<&'a str> {
-    let has_emphasis_flag = node.resolved_style_tags.iter().any(|tag| {
-        tag.tag_name
-            .as_deref()
-            .is_some_and(|name| name.eq_ignore_ascii_case("UI_Generic_Flag_03"))
-    });
-    if has_emphasis_flag && token.eq_ignore_ascii_case("Bright") {
-        Some("Foreground")
-    } else {
-        None
-    }
-}
-
-fn label_style_colour_token(
-    style: Option<&crate::ui_ir::UiIrTextStyle>,
-    node: &UiIrNode,
-) -> Option<&'static str> {
-    if !node.resolved_style_tags.is_empty() {
-        return None;
-    }
-    match style.and_then(|style| style.label_style.as_deref()) {
-        Some("Heading1" | "Heading3") => Some("Base"),
-        _ => None,
-    }
-}
-
-fn style_tag_colour_token(node: &UiIrNode) -> Option<&'static str> {
-    node.resolved_style_tags.iter().find_map(|tag| {
-        let name = tag.tag_name.as_deref()?.trim().to_ascii_lowercase();
-        match name.as_str() {
-            "primary" | "ui_generic_flag_03" => Some("Foreground"),
-            "statemoderate" => Some("Base"),
-            "statecritical" => Some("Background"),
-            "flashing" => Some("Background"),
-            "modify" => Some("Base"),
-            _ => None,
-        }
-    })
-}
-
-fn custom_shape_style_tag_colour_token(node: &UiIrNode) -> Option<&'static str> {
-    node.resolved_style_tags.iter().find_map(|tag| {
-        let name = tag.tag_name.as_deref()?.trim().to_ascii_lowercase();
-        match name.as_str() {
-            "primary" => Some("Accent1"),
-            "modify" => Some("Accent5"),
-            _ => None,
-        }
-    })
 }
 
 pub fn debug_text_rects(node: &UiIrNode) -> Option<DebugTextRects> {

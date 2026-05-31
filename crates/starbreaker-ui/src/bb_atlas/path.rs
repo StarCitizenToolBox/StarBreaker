@@ -12,7 +12,11 @@ pub fn canonicalise_path(raw: &str) -> String {
     } else {
         s
     };
-    s.to_string()
+    if s.ends_with(".tif") {
+        format!("{}.dds", &s[..s.len() - 4])
+    } else {
+        s.to_string()
+    }
 }
 
 pub(super) fn extension_of(path: &str) -> &str {
