@@ -42,20 +42,6 @@
         "w": 1.0,
         "h": 1.0
       }
-    },
-    {
-      "id": "eng_annunciator_master_left",
-      "category": "image",
-      "baseline_path": "eng_annunciator_master_left.baseline",
-      "current_path": "eng_annunciator_master_left.current",
-      "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_h_eng_annunciator_master_left.png",
-      "tier": "gold",
-      "roi": {
-        "x": 0,
-        "y": 0,
-        "w": 1,
-        "h": 1
-      }
     }
   ]
 }

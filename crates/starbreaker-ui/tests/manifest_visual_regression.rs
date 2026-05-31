@@ -125,15 +125,15 @@ fn assert_manifest_runner_preflight() {
 }
 
 #[test]
-fn manifest_contains_expected_four_visual_targets() {
+fn manifest_contains_expected_three_visual_targets() {
     let manifest = snapshot_manifest();
-    assert_eq!(manifest.targets.len(), 4, "expected four manifest targets");
+    assert_eq!(manifest.targets.len(), 3, "expected three manifest targets");
     assert!(
         manifest
             .targets
             .iter()
-            .any(|target| target.id == "eng_annunciator_master_left"),
-        "new gold target must exist in manifest"
+            .all(|target| target.id != "eng_annunciator_master_left"),
+        "annunciator target should not be in gold/platinum manifest set"
     );
 }
 
