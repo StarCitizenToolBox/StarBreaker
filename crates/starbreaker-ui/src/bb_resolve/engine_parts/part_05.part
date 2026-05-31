@@ -1,418 +1,399 @@
-/// Synthesize `_SynthLocalizedParam_` operations from a parent `WidgetCanvas`
-/// node's `paramInputValues` array into the child scene's operations.
-///
-/// When a `WidgetCanvas` node declares `paramInputValues` entries of type
-/// `BuildingBlocks_ComponentParameterInputLocalization`, those entries override
-/// the `defaultValue` of the matching `BuildingBlocks_BindingsLocalizedComponentParameter`
-/// operations inside the child canvas.  This function injects a synthetic
-/// `_SynthLocalizedParam_` operation for each such override so that
-/// `BindingResolver` can map widget pointers to localization keys without
-/// requiring ActionScript execution.
-///
-/// Synthetic ops have the same `_Pointer_` value as the matching
-/// `BuildingBlocks_BindingsLocalizedComponentParameter` op; they are remapped
-/// by `merge_child_scene` together with the rest of the child's operations.
-fn inject_param_overrides(
-    param_inputs: &[serde_json::Value],
-    child_scene: &mut crate::bb_scene::BbScene,
+fn merge_child_scene(
+    parent_scene: &mut BbScene,
+    child_scene: BbScene,
+    match_to: &str,
+    host_parent_override: Option<BbNodeId>,
 ) {
-    if param_inputs.is_empty() {
+    let BbScene {
+        coordinate_method: child_coordinate_method,
+        canvas_size: child_canvas_size,
+        roots: child_roots,
+        nodes: child_nodes,
+        operations: child_ops,
+        ..
+    } = child_scene;
+
+    // Build a collision-free mapping from child original IDs to new IDs.
+    // We use a monotonic counter that wraps and skips any ID already present
+    // in the parent, so the merge is always safe regardless of the depth to
+    // which children have been recursively merged.
+    let mut next: BbNodeId = parent_scene
+        .nodes
+        .keys()
+        .next_back()
+        .copied()
+        .unwrap_or(0)
+        .wrapping_add(1);
+    let mut id_map: HashMap<BbNodeId, BbNodeId> = HashMap::with_capacity(child_nodes.len());
+    for &orig_id in child_nodes.keys() {
+        // Advance past any ID already occupied in the parent or already
+        // assigned to another child node in this batch.
+        while parent_scene.nodes.contains_key(&next) || id_map.values().any(|&v| v == next) {
+            next = next.wrapping_add(1);
+        }
+        id_map.insert(orig_id, next);
+        next = next.wrapping_add(1);
+    }
+
+    let child_roots_reided: Vec<BbNodeId> = child_roots
+        .iter()
+        .filter_map(|id| id_map.get(id).copied())
+        .collect();
+
+    let host_parent_id = if let Some(id) = host_parent_override {
+        if parent_scene.nodes.contains_key(&id) {
+            Some(id)
+        } else {
+            None
+        }
+    } else {
+        find_host_parent(parent_scene, match_to)
+    };
+    let Some(host_parent_id) = host_parent_id else {
+        log::warn!("bb_resolve: no host parent available for child canvas merge");
         return;
+    };
+    if should_adopt_child_coordinate_method(parent_scene, host_parent_id, child_coordinate_method) {
+        parent_scene.coordinate_method = child_coordinate_method;
     }
+    let canvas_scale = child_canvas_scale_for_host(parent_scene, host_parent_id, child_canvas_size);
 
-    // Build param_name → override maps from parent paramInputValues.
-    let mut param_to_loc: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    let mut param_to_string: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-    let mut param_to_bool: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
-    let mut param_to_int: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-    for entry in param_inputs {
-        let ty = entry
-            .get("_Type_")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let Some(param) = entry.get("parameter").and_then(|v| v.as_str()) else {
-            continue;
+    let mut inserted_child_roots = Vec::new();
+    for (orig_id, mut node) in child_nodes {
+        let new_id = match id_map.get(&orig_id).copied() {
+            Some(id) => id,
+            None => {
+                log::warn!("bb_resolve: no id mapping for child node {orig_id}; skipping");
+                continue;
+            }
         };
-        if param.is_empty() {
-            continue;
+        node.id = new_id;
+        node.parent = node.parent.and_then(|p| id_map.get(&p).copied());
+        node.children = node
+            .children
+            .into_iter()
+            .filter_map(|c| id_map.get(&c).copied())
+            .collect();
+
+        if child_roots.contains(&orig_id) {
+            node.parent = Some(host_parent_id);
+            inserted_child_roots.push(new_id);
         }
-        let key = param.to_ascii_lowercase();
-        if ty.eq_ignore_ascii_case("BuildingBlocks_ComponentParameterInputLocalization") {
-            let Some(value) = entry.get("value").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            if value.is_empty() {
-                continue;
-            }
-            param_to_loc.insert(key, value.to_owned());
-        } else if ty.eq_ignore_ascii_case("BuildingBlocks_ComponentParameterInputString") {
-            let Some(value) = entry.get("value").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            if value.is_empty() {
-                continue;
-            }
-            param_to_string.insert(key, value.to_owned());
-        } else if ty.eq_ignore_ascii_case("BuildingBlocks_ComponentParameterInputBoolean") {
-            if let Some(v) = entry.get("value").and_then(|v| v.as_bool()) {
-                param_to_bool.insert(param.to_ascii_lowercase(), v);
-            }
-        } else if ty.eq_ignore_ascii_case("BuildingBlocks_ComponentParameterInputInteger") {
-            if let Some(v) = entry.get("value").and_then(|v| v.as_i64()) {
-                param_to_int.insert(param.to_ascii_lowercase(), v);
-            }
-        } else if ty.eq_ignore_ascii_case("BuildingBlocks_ComponentParameterInputNumber") {
-            if let Some(v) = entry
-                .get("value")
-                .and_then(|v| v.as_f64())
-                .map(|v| v.round() as i64)
-            {
-                param_to_int.insert(param.to_ascii_lowercase(), v);
-            }
+        if let Some((sx, sy)) = canvas_scale {
+            scale_node_from_child_canvas(&mut node, sx, sy);
         }
-    }
-    if param_to_loc.is_empty()
-        && param_to_string.is_empty()
-        && param_to_bool.is_empty()
-        && param_to_int.is_empty()
-    {
-        return;
+
+        parent_scene.nodes.insert(new_id, node);
     }
 
-    // Scan existing ops for BuildingBlocks_BindingsLocalizedComponentParameter
-    // entries and inject a synthetic _SynthLocalizedParam_ op for each match.
-    let mut synthetics: Vec<serde_json::Value> = Vec::new();
-    let mut param_ptr_to_loc: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    let mut param_ptr_to_string: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-    for op in &child_scene.operations {
-        let ty = op.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
-        let param_name_lc = op
-            .get("parameter")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_ascii_lowercase())
-            .unwrap_or_default();
-        let Some(ptr_str) = op.get("_Pointer_").and_then(|v| v.as_str()) else {
-            continue;
+    // Remap operation-pointer namespace to avoid collisions across merged child
+    // canvases. Node IDs and operation IDs are distinct domains in source
+    // records, but both use ptr:N string encoding and can collide numerically.
+    let op_id_map = remap_child_operation_ids(parent_scene, &child_ops);
+
+    // Remap ptr: / _PointsTo_:ptr: references in operations using both node-id
+    // and operation-id maps.
+    let mut remapped_ops = child_ops;
+    for op in &mut remapped_ops {
+        remap_ptrs_in_json_map(op, &id_map, &op_id_map);
+    }
+    parent_scene.operations.extend(remapped_ops);
+
+    if let Some(host) = parent_scene.nodes.get_mut(&host_parent_id) {
+        let roots_to_add = if inserted_child_roots.is_empty() {
+            child_roots_reided
+        } else {
+            inserted_child_roots
         };
-        if ty.eq_ignore_ascii_case("BuildingBlocks_BindingsLocalizedComponentParameter") {
-            let Some(loc_key) = param_to_loc.get(&param_name_lc) else {
-                continue;
-            };
-            synthetics.push(serde_json::json!({
-                "_Type_": "_SynthLocalizedParam_",
-                "_Pointer_": ptr_str,
-                "resolvedLocKey": loc_key,
-            }));
-            param_ptr_to_loc.insert(ptr_str.to_owned(), loc_key.to_owned());
-        } else if ty.eq_ignore_ascii_case("BuildingBlocks_BindingsStringComponentParameter") {
-            let Some(value) = param_to_string.get(&param_name_lc) else {
-                continue;
-            };
-            synthetics.push(serde_json::json!({
-                "_Type_": "_SynthStringParam_",
-                "_Pointer_": ptr_str,
-                "resolvedString": value,
-            }));
-            param_ptr_to_string.insert(ptr_str.to_owned(), value.to_owned());
-        } else if ty.eq_ignore_ascii_case("BuildingBlocks_BindingsBooleanComponentParameter") {
-            let Some(value) = param_to_bool.get(&param_name_lc) else {
-                continue;
-            };
-            synthetics.push(serde_json::json!({
-                "_Type_": "_SynthBooleanParam_",
-                "_Pointer_": ptr_str,
-                "resolvedBool": value,
-            }));
-        } else if ty.eq_ignore_ascii_case("BuildingBlocks_BindingsIntegerComponentParameter") {
-            let Some(value) = param_to_int.get(&param_name_lc) else {
-                continue;
-            };
-            synthetics.push(serde_json::json!({
-                "_Type_": "_SynthIntegerParam_",
-                "_Pointer_": ptr_str,
-                "resolvedInt": value,
-            }));
-        }
-    }
-
-    // Also synthesize direct widget→loc mappings for LocalizedField ops that
-    // consume those component-parameter pointers. This avoids losing the
-    // mapping when intermediate pointer graphs are ambiguous after deep merges.
-    if !param_ptr_to_loc.is_empty() || !param_ptr_to_string.is_empty() {
-        for op in &child_scene.operations {
-            let ty = op.get("_Type_").and_then(|v| v.as_str()).unwrap_or("");
-            if !ty.eq_ignore_ascii_case("BuildingBlocks_BindingsLocalizedField")
-                && !ty.eq_ignore_ascii_case("BuildingBlocks_BindingsStringField")
-            {
-                continue;
-            }
-            let Some(widget_ptr) = ptr_ref_str(op.get("widget")) else {
-                continue;
-            };
-            let Some(input_ptr_raw) = ptr_ref_str(op.get("input")) else {
-                continue;
-            };
-            if ty.eq_ignore_ascii_case("BuildingBlocks_BindingsLocalizedField") {
-                let Some(loc_key) = param_ptr_to_loc.get(input_ptr_raw) else {
-                    continue;
-                };
-                synthetics.push(serde_json::json!({
-                    "_Type_": "_SynthLocalizedWidget_",
-                    "widget": widget_ptr,
-                    "resolvedLocKey": loc_key,
-                }));
-            } else if ty.eq_ignore_ascii_case("BuildingBlocks_BindingsStringField") {
-                let Some(value) = param_ptr_to_string.get(input_ptr_raw) else {
-                    continue;
-                };
-                synthetics.push(serde_json::json!({
-                    "_Type_": "_SynthStringWidget_",
-                    "widget": widget_ptr,
-                    "resolvedString": value,
-                }));
-            }
-        }
-    }
-
-    if !synthetics.is_empty() {
-        child_scene.operations.extend(synthetics);
+        host.children.extend(roots_to_add);
+        let mut seen = std::collections::BTreeSet::new();
+        host.children.retain(|id| seen.insert(*id));
     }
 }
 
-fn inject_dynamic_param_field_bindings(
-    host_widget_id: BbNodeId,
-    parent_operations: &[serde_json::Value],
-    child_scene: &mut crate::bb_scene::BbScene,
-) {
-    let parent_ptr_to_op: std::collections::HashMap<BbNodeId, &serde_json::Value> =
-        parent_operations
-            .iter()
-            .filter_map(|op| Some((ptr_ref_to_id(op.get("_Pointer_"))?, op)))
-            .collect();
-    if parent_ptr_to_op.is_empty() {
-        return;
+fn should_adopt_child_coordinate_method(
+    parent_scene: &BbScene,
+    host_parent_id: BbNodeId,
+    child_coordinate_method: crate::bb_scene::BbCoordinateMethod,
+) -> bool {
+    if matches!(child_coordinate_method, crate::bb_scene::BbCoordinateMethod::UseRaw) {
+        return false;
     }
 
-    let child_param_targets = child_component_parameter_targets(&child_scene.operations);
-    if child_param_targets.is_empty() {
-        return;
+    let Some(host) = parent_scene.nodes.get(&host_parent_id) else {
+        return false;
+    };
+
+    matches!(host.ty, crate::bb_scene::BbNodeType::WidgetCanvas)
+        && host.parent.is_none()
+        && matches!(host.sizing.width, BbValue::Percent(value) if (value - 1.0).abs() < f32::EPSILON)
+        && matches!(host.sizing.height, BbValue::Percent(value) if (value - 1.0).abs() < f32::EPSILON)
+        && host.position.x.abs() < f32::EPSILON
+        && host.position.y.abs() < f32::EPSILON
+}
+
+fn child_canvas_scale_for_host(
+    parent_scene: &BbScene,
+    host_parent_id: BbNodeId,
+    child_canvas_size: (f32, f32),
+) -> Option<(f32, f32)> {
+    let host = parent_scene.nodes.get(&host_parent_id)?;
+    let child_w = child_canvas_size.0;
+    let child_h = child_canvas_size.1;
+    if child_w <= 0.0 || child_h <= 0.0 {
+        return None;
     }
+    let host_w = match host.sizing.width {
+        BbValue::Fixed(v) if v > 0.0 => v,
+        _ => return None,
+    };
+    let host_h = match host.sizing.height {
+        BbValue::Fixed(v) if v > 0.0 => v,
+        _ => return None,
+    };
+    let sx = host_w / child_w;
+    let sy = host_h / child_h;
+    if !sx.is_finite() || !sy.is_finite() || sx <= 0.0 || sy <= 0.0 {
+        return None;
+    }
+    if sx > 4.0 || sy > 4.0 || sx < 0.25 || sy < 0.25 {
+        log::debug!(
+            "bb_resolve: skipping child-canvas scaling for host ptr:{} (child {:.0}x{:.0} -> host {:.0}x{:.0}, scale {:.3}x{:.3})",
+            host_parent_id,
+            child_w,
+            child_h,
+            host_w,
+            host_h,
+            sx,
+            sy,
+        );
+        return None;
+    }
+    if (sx - 1.0).abs() < 0.0001 && (sy - 1.0).abs() < 0.0001 {
+        return None;
+    }
+    Some((sx, sy))
+}
 
-    let mut occupied_ptrs: std::collections::BTreeSet<BbNodeId> = child_scene
-        .operations
-        .iter()
-        .filter_map(|op| ptr_ref_to_id(op.get("_Pointer_")))
-        .collect();
-    let mut injected_ops = Vec::new();
+fn scale_node_from_child_canvas(node: &mut crate::bb_scene::BbNode, sx: f32, sy: f32) {
+    node.position.x *= sx;
+    node.position.y *= sy;
+    node.position_offset.x *= sx;
+    node.position_offset.y *= sy;
+    scale_bb_value(&mut node.sizing.width, sx);
+    scale_bb_value(&mut node.sizing.height, sy);
+    node.padding.left *= sx;
+    node.padding.right *= sx;
+    node.padding.top *= sy;
+    node.padding.bottom *= sy;
+    node.margin.left *= sx;
+    node.margin.right *= sx;
+    node.margin.top *= sy;
+    node.margin.bottom *= sy;
+    if let Some(text) = node.text.as_mut() {
+        scale_bb_value(&mut text.font_size, sy);
+    }
+    if let Some(border) = node.border.as_mut() {
+        let sw = sx.min(sy);
+        border.top.width *= sw;
+        border.right.width *= sw;
+        border.bottom.width *= sw;
+        border.left.width *= sw;
+    }
+}
 
-    for parent_op in parent_operations {
-        let Some(widget_id) = ptr_ref_to_id(parent_op.get("widget")) else {
-            continue;
-        };
-        if widget_id != host_widget_id {
-            continue;
+fn scale_bb_value(value: &mut BbValue, scale: f32) {
+    if let BbValue::Fixed(v) = value {
+        *v *= scale;
+    }
+}
+
+fn remap_child_operation_ids(
+    parent_scene: &BbScene,
+    child_ops: &[serde_json::Value],
+) -> HashMap<BbNodeId, BbNodeId> {
+    let mut occupied: std::collections::BTreeSet<BbNodeId> = std::collections::BTreeSet::new();
+    for id in parent_scene.nodes.keys().copied() {
+        occupied.insert(id);
+    }
+    for op in &parent_scene.operations {
+        if let Some(id) = op
+            .get("_Pointer_")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.strip_prefix("ptr:"))
+            .and_then(|n| n.parse::<BbNodeId>().ok())
+        {
+            occupied.insert(id);
         }
+    }
 
-        let Some(binding_kind) = component_parameter_kind_for_field_op(parent_op) else {
-            continue;
-        };
-        let Some(field_name) = parent_op.get("field").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let Some(target_ptr) = child_param_targets
-            .get(&(field_name.to_ascii_lowercase(), binding_kind))
-            .copied()
+    let mut next: BbNodeId = occupied.iter().next_back().copied().unwrap_or(0).wrapping_add(1);
+    let mut out = HashMap::new();
+    for op in child_ops {
+        let Some(old_id) = op
+            .get("_Pointer_")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.strip_prefix("ptr:"))
+            .and_then(|n| n.parse::<BbNodeId>().ok())
         else {
             continue;
         };
-        let Some(input_ptr) = ptr_ref_to_id(parent_op.get("input")) else {
+        if out.contains_key(&old_id) {
             continue;
-        };
-
-        let mut ptr_remap = std::collections::HashMap::new();
-        let _ = clone_binding_subgraph_into_child(
-            input_ptr,
-            target_ptr,
-            &parent_ptr_to_op,
-            &mut occupied_ptrs,
-            &mut ptr_remap,
-            &mut injected_ops,
-        );
-    }
-
-    if !injected_ops.is_empty() {
-        child_scene.operations.extend(injected_ops);
-    }
-}
-
-fn child_component_parameter_targets(
-    child_operations: &[serde_json::Value],
-) -> std::collections::HashMap<(String, &'static str), BbNodeId> {
-    let mut targets = std::collections::HashMap::new();
-    for op in child_operations {
-        let Some(kind) = component_parameter_kind_for_component_op(op) else {
-            continue;
-        };
-        let Some(parameter) = op.get("parameter").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let Some(ptr) = ptr_ref_to_id(op.get("_Pointer_")) else {
-            continue;
-        };
-        targets.insert((parameter.to_ascii_lowercase(), kind), ptr);
-    }
-    targets
-}
-
-fn component_parameter_kind_for_field_op(op: &serde_json::Value) -> Option<&'static str> {
-    match op.get("_Type_").and_then(|v| v.as_str()).unwrap_or("") {
-        ty if ty.eq_ignore_ascii_case("BuildingBlocks_BindingsBooleanField") => Some("bool"),
-        ty if ty.eq_ignore_ascii_case("BuildingBlocks_BindingsIntegerField") => Some("int"),
-        ty if ty.eq_ignore_ascii_case("BuildingBlocks_BindingsLocalizedField") => Some("loc"),
-        ty if ty.eq_ignore_ascii_case("BuildingBlocks_BindingsStringField") => Some("string"),
-        _ => None,
-    }
-}
-
-fn component_parameter_kind_for_component_op(op: &serde_json::Value) -> Option<&'static str> {
-    match op.get("_Type_").and_then(|v| v.as_str()).unwrap_or("") {
-        ty if ty.eq_ignore_ascii_case("BuildingBlocks_BindingsBooleanComponentParameter") => {
-            Some("bool")
         }
-        ty if ty.eq_ignore_ascii_case("BuildingBlocks_BindingsIntegerComponentParameter") => {
-            Some("int")
+        while occupied.contains(&next) || out.values().any(|&v| v == next) {
+            next = next.wrapping_add(1);
         }
-        ty if ty.eq_ignore_ascii_case("BuildingBlocks_BindingsLocalizedComponentParameter") => {
-            Some("loc")
-        }
-        ty if ty.eq_ignore_ascii_case("BuildingBlocks_BindingsStringComponentParameter") => {
-            Some("string")
-        }
-        _ => None,
-    }
-}
-
-fn clone_binding_subgraph_into_child(
-    source_ptr: BbNodeId,
-    target_ptr: BbNodeId,
-    parent_ptr_to_op: &std::collections::HashMap<BbNodeId, &serde_json::Value>,
-    occupied_ptrs: &mut std::collections::BTreeSet<BbNodeId>,
-    ptr_remap: &mut std::collections::HashMap<BbNodeId, BbNodeId>,
-    cloned_ops: &mut Vec<serde_json::Value>,
-) -> Option<BbNodeId> {
-    if let Some(&mapped) = ptr_remap.get(&source_ptr) {
-        return Some(mapped);
-    }
-
-    let source_op = *parent_ptr_to_op.get(&source_ptr)?;
-    let new_ptr = if ptr_remap.is_empty() {
-        target_ptr
-    } else {
-        next_free_operation_ptr(occupied_ptrs)
-    };
-    ptr_remap.insert(source_ptr, new_ptr);
-
-    for dependency_ptr in binding_input_ptrs(source_op) {
-        let _ = clone_binding_subgraph_into_child(
-            dependency_ptr,
-            target_ptr,
-            parent_ptr_to_op,
-            occupied_ptrs,
-            ptr_remap,
-            cloned_ops,
-        );
-    }
-
-    let mut cloned = source_op.clone();
-    cloned["_Pointer_"] = serde_json::Value::String(format!("ptr:{new_ptr}"));
-    remap_binding_input_fields(&mut cloned, ptr_remap);
-    cloned_ops.push(cloned);
-    Some(new_ptr)
-}
-
-fn binding_input_ptrs(op: &serde_json::Value) -> Vec<BbNodeId> {
-    let mut refs = Vec::new();
-    for key in [
-        "input",
-        "inputA",
-        "inputB",
-        "inputL",
-        "inputR",
-        "inputTrue",
-        "inputFalse",
-        "nZeros",
-    ] {
-        if let Some(ptr) = ptr_ref_to_id(op.get(key)) {
-            refs.push(ptr);
-        }
-    }
-    if let Some(inputs) = op.get("inputs").and_then(|v| v.as_array()) {
-        refs.extend(inputs.iter().filter_map(|value| ptr_ref_to_id(Some(value))));
-    }
-    refs
-}
-
-fn remap_binding_input_fields(
-    op: &mut serde_json::Value,
-    ptr_remap: &std::collections::HashMap<BbNodeId, BbNodeId>,
-) {
-    for key in [
-        "input",
-        "inputA",
-        "inputB",
-        "inputL",
-        "inputR",
-        "inputTrue",
-        "inputFalse",
-        "nZeros",
-    ] {
-        remap_binding_ptr_value(op.get_mut(key), ptr_remap);
-    }
-    if let Some(inputs) = op.get_mut("inputs").and_then(|v| v.as_array_mut()) {
-        for value in inputs {
-            remap_binding_ptr_value(Some(value), ptr_remap);
-        }
-    }
-}
-
-fn remap_binding_ptr_value(
-    value: Option<&mut serde_json::Value>,
-    ptr_remap: &std::collections::HashMap<BbNodeId, BbNodeId>,
-) {
-    let Some(value) = value else {
-        return;
-    };
-    let Some(old_ptr) = ptr_ref_to_id(Some(value)) else {
-        return;
-    };
-    let Some(&new_ptr) = ptr_remap.get(&old_ptr) else {
-        return;
-    };
-    *value = serde_json::Value::String(format!("_PointsTo_:ptr:{new_ptr}"));
-}
-
-fn next_free_operation_ptr(occupied_ptrs: &mut std::collections::BTreeSet<BbNodeId>) -> BbNodeId {
-    let mut next = occupied_ptrs.iter().next_back().copied().unwrap_or(0).wrapping_add(1);
-    while occupied_ptrs.contains(&next) {
+        out.insert(old_id, next);
         next = next.wrapping_add(1);
     }
-    occupied_ptrs.insert(next);
-    next
+    out
 }
 
-fn ptr_ref_to_id(value: Option<&serde_json::Value>) -> Option<BbNodeId> {
-    let raw = ptr_ref_str(value)?;
-    raw.strip_prefix("ptr:")?.parse::<BbNodeId>().ok()
+fn remap_ptrs_in_json_map(
+    v: &mut serde_json::Value,
+    id_map: &HashMap<BbNodeId, BbNodeId>,
+    op_id_map: &HashMap<BbNodeId, BbNodeId>,
+) {
+    remap_ptrs_in_json_map_keyed(v, None, id_map, op_id_map);
 }
 
-fn ptr_ref_str(value: Option<&serde_json::Value>) -> Option<&str> {
-    match value {
-        Some(serde_json::Value::String(s)) => s.strip_prefix("_PointsTo_:").or(Some(s.as_str())),
-        Some(serde_json::Value::Object(obj)) => obj.get("_Pointer_").and_then(|v| v.as_str()),
-        _ => None,
+fn remap_ptrs_in_json_map_keyed(
+    v: &mut serde_json::Value,
+    key: Option<&str>,
+    id_map: &HashMap<BbNodeId, BbNodeId>,
+    op_id_map: &HashMap<BbNodeId, BbNodeId>,
+) {
+    match v {
+        serde_json::Value::String(s) => {
+            if let Some(n) = s.strip_prefix("ptr:").and_then(|n| n.parse::<BbNodeId>().ok()) {
+                let remapped = remap_ptr_with_key(n, key, id_map, op_id_map);
+                if let Some(new_id) = remapped {
+                    *s = format!("ptr:{new_id}");
+                }
+            } else if let Some(n) = s
+                .strip_prefix("_PointsTo_:ptr:")
+                .and_then(|n| n.parse::<BbNodeId>().ok())
+            {
+                let remapped = remap_ptr_with_key(n, key, id_map, op_id_map);
+                if let Some(new_id) = remapped {
+                    *s = format!("_PointsTo_:ptr:{new_id}");
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                remap_ptrs_in_json_map_keyed(item, key, id_map, op_id_map);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (k, value) in map {
+                remap_ptrs_in_json_map_keyed(value, Some(k.as_str()), id_map, op_id_map);
+            }
+        }
+        _ => {}
     }
 }
 
+fn remap_ptr_with_key(
+    old: BbNodeId,
+    key: Option<&str>,
+    id_map: &HashMap<BbNodeId, BbNodeId>,
+    op_id_map: &HashMap<BbNodeId, BbNodeId>,
+) -> Option<BbNodeId> {
+    let k = key.unwrap_or("");
+    let prefer_node = matches!(k, "widget" | "parent" | "target");
+    let prefer_op = k == "_Pointer_" || k.starts_with("input") || k == "nZeros";
+
+    if prefer_node {
+        if let Some(&n) = id_map.get(&old) {
+            return Some(n);
+        }
+        if let Some(&n) = op_id_map.get(&old) {
+            return Some(n);
+        }
+        return None;
+    }
+    if prefer_op {
+        if let Some(&n) = op_id_map.get(&old) {
+            return Some(n);
+        }
+        if let Some(&n) = id_map.get(&old) {
+            return Some(n);
+        }
+        return None;
+    }
+    op_id_map.get(&old).copied().or_else(|| id_map.get(&old).copied())
+}
+
+fn find_host_parent(parent_scene: &BbScene, match_to: &str) -> Option<BbNodeId> {
+    if !match_to.is_empty() {
+        for root_id in &parent_scene.roots {
+            let Some(root) = parent_scene.nodes.get(root_id) else {
+                continue;
+            };
+            for child_id in &root.children {
+                let Some(child) = parent_scene.nodes.get(child_id) else {
+                    continue;
+                };
+                if child.name.eq_ignore_ascii_case(match_to) {
+                    return Some(*child_id);
+                }
+            }
+        }
+    }
+
+    parent_scene.roots.first().copied()
+}
+
+fn param_inputs_for_match_to(
+    scene: &BbScene,
+    match_to: &str,
+) -> Option<Vec<serde_json::Value>> {
+    for root_id in &scene.roots {
+        let Some(root) = scene.nodes.get(root_id) else {
+            continue;
+        };
+        for child_id in &root.children {
+            let Some(child) = scene.nodes.get(child_id) else {
+                continue;
+            };
+            if !child.name.eq_ignore_ascii_case(match_to) {
+                continue;
+            }
+            let inputs = child
+                .raw
+                .get("paramInputValues")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if !inputs.is_empty() {
+                return Some(inputs);
+            }
+        }
+    }
+    None
+}
+
+fn host_node_for_match_to(scene: &BbScene, match_to: &str) -> Option<BbNodeId> {
+    if match_to.is_empty() {
+        return None;
+    }
+
+    for root_id in &scene.roots {
+        let Some(root) = scene.nodes.get(root_id) else {
+            continue;
+        };
+        for child_id in &root.children {
+            let Some(child) = scene.nodes.get(child_id) else {
+                continue;
+            };
+            if child.name.eq_ignore_ascii_case(match_to) {
+                return Some(*child_id);
+            }
+        }
+    }
+
+    None
+}
 

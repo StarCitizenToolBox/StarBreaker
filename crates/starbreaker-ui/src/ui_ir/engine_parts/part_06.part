@@ -1,454 +1,460 @@
-fn fill_colour_from_raw_for_text(raw: &serde_json::Value) -> Option<[f32; 4]> {
-    let obj = raw.get("FillColor")?.as_object()?;
-    let r = obj.get("r").and_then(|v| v.as_f64())? as f32;
-    let g = obj.get("g").and_then(|v| v.as_f64())? as f32;
-    let b = obj.get("b").and_then(|v| v.as_f64())? as f32;
-    let a = obj.get("a").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
-    Some([r, g, b, a])
-}
-
-fn adjust_ui_ir_font_value_for_font_record_image_percent(
-    value: UiIrValue,
-    resolved_font_record: Option<&serde_json::Value>,
-) -> UiIrValue {
-    let image_size_percent = resolved_font_record
-        .and_then(|record| record.get("_RecordValue_"))
-        .and_then(|record_value| record_value.get("imageSizePercent"))
-        .and_then(|value| value.as_f64())
-        .map(|value| value as f32)
-        .filter(|value| value.is_finite() && *value > 0.0 && (*value - 1.0).abs() > f32::EPSILON);
-
-    let Some(percent) = image_size_percent else {
-        return value;
-    };
-
-    match value {
-        UiIrValue::Fixed { value } => UiIrValue::Fixed {
-            value: value / percent,
-        },
-        other => other,
-    }
-}
-
-fn resolve_effective_font_size(
-    node_id: BbNodeId,
-    node: &crate::bb_scene::BbNode,
-    text: &crate::bb_scene::BbText,
-    node_rect_h: f32,
-    resolved_text: Option<&str>,
-    scene: &BbScene,
-    binding_resolver: &BindingResolver,
-    defaults: &DefaultValueRegistry,
-    style_font_sizes: &HashMap<String, f32>,
-    standard_text_styles: &HashMap<String, StandardTextStyle>,
-) -> UiIrValue {
-    let label_style = label_style_name_from_node_or_ancestors(node_id, node, scene);
-
-    let standard_font_size =
-        standard_textfield_font_size_from_styles(node, label_style.as_deref(), standard_text_styles);
-
-    if matches!(label_style.as_deref(), Some("Title4")) {
-        if let Some(size) = standard_font_size {
-            return apply_label_style_font_scale(
-                UiIrValue::Fixed { value: size },
-                label_style.as_deref(),
-            );
+fn overflow_mode_from_raw(raw: &serde_json::Value) -> Option<String> {
+    for key in [
+        "OverflowMode",
+        "overflowMode",
+        "overflow",
+        "Overflow",
+        "ClipMode",
+        "clipMode",
+        "clip",
+        "Clip",
+    ] {
+        if let Some(value) = raw.get(key) {
+            return Some(if let Some(string_value) = value.as_str() {
+                string_value.to_string()
+            } else {
+                value.to_string()
+            });
         }
     }
 
-    if let Some(size) = auto_font_size_from_signals(node, node_rect_h, resolved_text) {
-        return apply_label_style_font_scale(
-            UiIrValue::Fixed { value: size },
-            label_style.as_deref(),
-        );
-    }
-
-    // Prefer the latest raw font size because direct style/brand modifiers are
-    // applied after parse_text and can update FontSize without mutating BbText.
-    if let Some(raw_font_size) = font_size_from_raw(node) {
-        return apply_label_style_font_scale(raw_font_size, label_style.as_deref());
-    }
-
-    // Numeric binding operations can drive FontSize without mutating node.raw.
-    if let Some(bound_font_size) = binding_resolver.resolve_field_number(node_id, "FontSize", defaults) {
-        if bound_font_size.is_finite() && bound_font_size > 0.0 {
-            return apply_label_style_font_scale(
-                UiIrValue::Fixed {
-                    value: bound_font_size as f32,
-                },
-                label_style.as_deref(),
-            );
-        }
-    }
-
-    // If this node has no explicit size, borrow the scene-derived size for its
-    // label style (when any sibling with the same style has an authored FontSize).
-    if let Some(style_name) = label_style.as_deref() {
-        if let Some(size) = style_font_sizes.get(style_name) {
-            return apply_label_style_font_scale(
-                UiIrValue::Fixed { value: *size },
-                Some(style_name),
-            );
-        }
-    }
-
-    if let Some(size) = textfield_long_prompt_font_size_from_signals(node, node_rect_h, resolved_text) {
-        return apply_label_style_font_scale(
-            UiIrValue::Fixed { value: size },
-            label_style.as_deref(),
-        );
-    }
-
-    if let Some(size) = standard_font_size {
-        return apply_label_style_font_scale(
-            UiIrValue::Fixed { value: size },
-            label_style.as_deref(),
-        );
-    }
-
-    if let Some(size) = textfield_fallback_font_size_from_signals(node, node_rect_h, resolved_text) {
-        return apply_label_style_font_scale(
-            UiIrValue::Fixed { value: size },
-            label_style.as_deref(),
-        );
-    }
-
-    // Fall through to whatever parse_text stored.
-    apply_label_style_font_scale(convert_bb_value(&text.font_size), label_style.as_deref())
+    None
 }
 
-fn apply_label_style_font_scale(value: UiIrValue, label_style: Option<&str>) -> UiIrValue {
-    let scale: f32 = match label_style {
-        Some("Title3") => 1.15,
-        Some("Heading2") => 0.77,
-        _ => 1.0,
+pub(crate) fn collect_node_asset_refs(node: &BbNode) -> Vec<String> {
+    let mut asset_refs = Vec::new();
+
+    push_asset_ref(
+        &mut asset_refs,
+        node.icon
+            .as_ref()
+            .and_then(|icon| icon.image_record.as_deref()),
+    );
+    push_asset_ref(
+        &mut asset_refs,
+        node.background
+            .as_ref()
+            .and_then(|background| background.svg_fill_path.as_deref()),
+    );
+    push_asset_ref(
+        &mut asset_refs,
+        node.raw
+            .get("ImagePath")
+            .and_then(|value| value.as_str()),
+    );
+    push_asset_ref(
+        &mut asset_refs,
+        node.raw
+            .get("imagePath")
+            .and_then(|value| value.as_str()),
+    );
+    push_asset_ref(
+        &mut asset_refs,
+        node.raw
+            .get("SvgPath")
+            .and_then(|value| value.as_str()),
+    );
+    push_asset_ref(
+        &mut asset_refs,
+        node.raw
+            .get("svgPath")
+            .and_then(|value| value.as_str()),
+    );
+    push_asset_ref(
+        &mut asset_refs,
+        node.raw
+            .get("svgFill")
+            .and_then(|value| value.get("svgPath"))
+            .and_then(|value| value.as_str()),
+    );
+
+    asset_refs
+}
+
+fn push_asset_ref(asset_refs: &mut Vec<String>, candidate: Option<&str>) {
+    let Some(candidate) = candidate.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
     };
-
-    if (scale - 1.0).abs() <= f32::EPSILON {
-        return value;
-    }
-
-    match value {
-        UiIrValue::Fixed { value } => UiIrValue::Fixed {
-            value: value * scale,
-        },
-        other => other,
+    if asset_refs.iter().all(|existing| existing != candidate) {
+        asset_refs.push(candidate.to_string());
     }
 }
 
-#[derive(Debug, Clone, Default)]
-struct StandardTextStyle {
-    line_spacing: Option<f32>,
-    font_size: Option<f32>,
-    font_record: Option<String>,
-}
-
-const STANDARD_TEXTFIELD_NOMINAL_FONT_SCALE: f32 = 0.72;
-const LONG_HEADING1_PROMPT_FONT_SIZE: f32 = 28.7;
-
-fn standard_text_field_widget_path() -> &'static str {
-    "file://./../../../../../../../libs/foundry/records/ui/buildingblocks/modularkit/standard/widgets/textfieldwidgetstandard.json"
-}
-
-fn collect_standard_text_styles(
-    canvas_fetcher: Option<&dyn CanvasFetcher>,
-    selected_style_source: Option<&str>,
-) -> HashMap<String, StandardTextStyle> {
-    let Some(fetcher) = canvas_fetcher else {
-        return HashMap::new();
-    };
-    let Ok(record) = fetcher.fetch_canvas_by_path(standard_text_field_widget_path()) else {
-        return HashMap::new();
-    };
-    let record_value = record.get("_RecordValue_").unwrap_or(&record);
-    let mut styles = HashMap::new();
-
-    for entry in record_value
-        .get("defaultStyles")
-        .and_then(|styles| styles.get("entries"))
-        .and_then(|entries| entries.as_array())
-        .into_iter()
-        .flatten()
-        .chain(
-            record_value
-                .get("brandStyles")
-                .and_then(|styles| styles.as_array())
-                .into_iter()
-                .flatten()
-                .filter_map(|brand| brand.get("entries").and_then(|entries| entries.as_array()))
-                .flatten(),
-        )
-    {
-        let Some(name) = entry
-            .get("name")
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-        else {
-            continue;
-        };
-        let style = standard_text_style_from_entry(entry);
-        styles
-            .entry(name.to_string())
-            .or_insert(style);
+fn unresolved_text_key_from_raw(raw: &serde_json::Value) -> Option<String> {
+    let direct = raw.get("text").and_then(|v| v.as_str()).map(str::trim);
+    if let Some(key) = direct.filter(|s| s.starts_with('@') && !s.is_empty()) {
+        return Some(key.to_string());
     }
 
-    let selected_style_name = selected_style_source
-        .and_then(|source| source.strip_prefix("canvas:"))
-        .map(str::to_ascii_lowercase);
-    for entry in record_value
-        .get("brandStyles")
-        .and_then(|styles| styles.as_array())
-        .into_iter()
-        .flatten()
-        .filter(|brand| {
-            let Some(selected_style_name) = selected_style_name.as_deref() else {
-                return false;
-            };
-            brand
-                .get("brandIdentifier")
-                .and_then(|identifier| identifier.as_str())
-                .map(crate::pipeline::extract_record_name)
-                .is_some_and(|identifier| identifier.eq_ignore_ascii_case(selected_style_name))
-        })
-        .filter_map(|brand| brand.get("entries").and_then(|entries| entries.as_array()))
-        .flatten()
-    {
-        let Some(name) = entry
-            .get("name")
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-        else {
-            continue;
-        };
-        let style = standard_text_style_from_entry(entry);
-        if style.line_spacing.is_some() || style.font_size.is_some() {
-            styles.insert(name.to_string(), style);
-        }
-    }
-
-    styles
-}
-
-fn standard_text_style_from_entry(entry: &serde_json::Value) -> StandardTextStyle {
-    let mut style = StandardTextStyle::default();
-    for modifier in entry
-        .get("modifiers")
-        .and_then(|modifiers| modifiers.as_array())
-        .into_iter()
-        .flatten()
-    {
-        let field = modifier.get("field");
-        if let Some(field_name) = field.and_then(|field| field.as_str()) {
-            let value = modifier
-                .get("value")
-                .and_then(|value| value.as_f64())
-                .map(|value| value as f32);
-            if field_name.eq_ignore_ascii_case("LineSpacing") {
-                style.line_spacing = value;
-            } else if field_name.eq_ignore_ascii_case("FontSize") {
-                style.font_size = value;
-            } else if field_name.eq_ignore_ascii_case("FontStyleRecord") {
-                style.font_record = modifier
-                    .get("value")
-                    .and_then(|value| value.as_str())
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_owned);
-            }
-        } else if let Some(field_obj) = field.and_then(|field| field.as_object()) {
-            let field_type = field_obj
-                .get("_Type_")
-                .and_then(|value| value.as_str())
-                .unwrap_or_default();
-            if field_type.ends_with("FontStyleRecord") {
-                style.font_record = field_obj
-                    .get("value")
-                    .and_then(|value| value.as_str())
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_owned);
-            }
-        }
-    }
-    style
-}
-
-fn resolve_effective_line_spacing(
-    node: &crate::bb_scene::BbNode,
-    effective_font_size: &UiIrValue,
-    standard_text_styles: &HashMap<String, StandardTextStyle>,
-) -> Option<f32> {
-    line_spacing_from_raw(node).or_else(|| {
-        label_style_name_from_raw(node).and_then(|style| {
-            standard_text_style_keys(&style)
-                .into_iter()
-                .find_map(|key| standard_text_styles.get(&key).and_then(|standard| {
-                    standard.line_spacing.map(|line_spacing| {
-                        scale_standard_line_spacing(line_spacing, standard.font_size, effective_font_size)
-                    })
-                }))
-        })
-    })
-}
-
-fn scale_standard_line_spacing(
-    line_spacing: f32,
-    standard_font_size: Option<f32>,
-    effective_font_size: &UiIrValue,
-) -> f32 {
-    let Some(standard_font_size) = standard_font_size.filter(|value| value.is_finite() && *value > 0.0) else {
-        return line_spacing;
-    };
-    let UiIrValue::Fixed { value: effective_font_size } = effective_font_size else {
-        return line_spacing;
-    };
-    if !effective_font_size.is_finite() || *effective_font_size <= 0.0 {
-        return line_spacing;
-    }
-    line_spacing * (*effective_font_size / standard_font_size)
-}
-
-fn standard_text_style_keys(style: &str) -> Vec<String> {
-    let trimmed = style.trim();
-    let mut keys = Vec::new();
-    if let Some(index) = trimmed.strip_prefix("Title") {
-        keys.push(format!("T{index}"));
-    } else if let Some(index) = trimmed.strip_prefix("Heading") {
-        keys.push(format!("H{index}"));
-    }
-    keys.push(trimmed.to_string());
-    keys
-}
-
-fn line_spacing_from_raw(node: &crate::bb_scene::BbNode) -> Option<f32> {
-    node.raw
-        .get("lineSpacing")
-        .or_else(|| node.raw.get("LineSpacing"))
-        .or_else(|| {
-            node.raw
-                .get("modifiers")
-                .and_then(|mods| mods.get("lineSpacing").or_else(|| mods.get("LineSpacing")))
-        })
-        .and_then(|value| value.as_f64())
-        .map(|value| value as f32)
-        .filter(|value| value.is_finite())
-}
-
-fn font_size_from_raw(node: &crate::bb_scene::BbNode) -> Option<UiIrValue> {
-    let value = node
-        .raw
-        .get("fontSize")
-        .or_else(|| node.raw.get("FontSize"))
-        .or_else(|| {
-            node.raw
-                .get("modifiers")
-                .and_then(|mods| mods.get("fontSize").or_else(|| mods.get("FontSize")))
-        })?;
-
-    if let Some(number) = value.as_f64() {
-        return Some(UiIrValue::Fixed {
-            value: number as f32,
-        });
-    }
-
-    let obj = value.as_object()?;
-    let raw_value = obj.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-    let behavior = obj
-        .get("behavior")
-        .and_then(|b| b.as_str())
-        .unwrap_or("Fixed");
-    Some(match behavior {
-        "Fixed" => UiIrValue::Fixed { value: raw_value },
-        "Percent" => UiIrValue::Percent { value: raw_value },
-        other => UiIrValue::Other {
-            value: raw_value,
-            behavior: other.to_owned(),
-        },
-    })
-}
-
-fn font_size_fixed_value_from_raw(node: &crate::bb_scene::BbNode) -> Option<f32> {
-    match font_size_from_raw(node)? {
-        UiIrValue::Fixed { value } => Some(value),
-        _ => None,
-    }
-}
-
-fn label_style_name_from_raw(node: &crate::bb_scene::BbNode) -> Option<String> {
-    node.raw
-        .get("labelProperties")
-        .and_then(|v| v.get("style"))
+    let loc_string = raw
+        .get("locString")
         .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
+        .map(str::trim);
+    if let Some(key) = loc_string.filter(|s| s.starts_with('@') && !s.is_empty()) {
+        return Some(key.to_string());
+    }
+
+    let label = raw
+        .get("labelProperties")
+        .and_then(|lp| lp.get("label"))
+        .and_then(|v| v.as_str())
+        .map(str::trim);
+    label
+        .filter(|s| s.starts_with('@') && !s.is_empty())
+        .map(ToString::to_string)
 }
 
-fn resolved_text_from_payload(payload: &UiIrTextPayload) -> Option<&str> {
+fn is_placeholder_or_empty_secondary_text_payload(payload: &UiIrTextPayload) -> bool {
     match payload {
-        UiIrTextPayload::Resolved { text } => Some(text.as_str()),
-        _ => None,
+        UiIrTextPayload::Empty => true,
+        UiIrTextPayload::IntentionallyEmpty { .. } => true,
+        UiIrTextPayload::Resolved { text } => text.trim().is_empty(),
+        UiIrTextPayload::UnresolvedKey { key } => key.trim().eq_ignore_ascii_case("@LOC_PLACEHOLDER"),
     }
 }
 
-fn classify_text_payload(
-    resolved_text: Option<&str>,
-    raw: &serde_json::Value,
-    defaults: &DefaultValueRegistry,
-) -> UiIrTextPayload {
-    let Some(text) = resolved_text.map(str::trim) else {
-        return UiIrTextPayload::Empty;
+fn node_has_text_intent(node: &BbNode) -> bool {
+    node.text.is_some()
+        || node.raw.get("text").is_some()
+        || node.raw.get("locString").is_some()
+        || node.raw.get("labelProperties").is_some()
+}
+
+fn maybe_reanchor_active_label_caption_pair_rect(
+    scene: &BbScene,
+    layout: &LayoutResult,
+    node_id: BbNodeId,
+    node: &BbNode,
+    rect: Rect,
+) -> Rect {
+    if !node_type_name(&node.ty).eq_ignore_ascii_case("BuildingBlocks_ComponentLabelCaptionPair")
+        || node.anchor.x > 0.01
+        || node.pivot.x > 0.01
+    {
+        return rect;
+    }
+
+    let Some(parent_id) = node.parent else {
+        return rect;
     };
 
-    if !text.is_empty() {
-        return classify_literal_or_localized_text(text, defaults);
+    if !is_footer_brand_label_context(scene, parent_id) {
+        return rect;
     }
 
-    if let Some(unresolved_key) = unresolved_text_key_from_raw(raw) {
-        if let Some(localized) = defaults.lookup_localization(&unresolved_key) {
-            if localized.trim().is_empty() {
-                UiIrTextPayload::IntentionallyEmpty {
-                    key: Some(unresolved_key),
-                }
-            } else {
-                UiIrTextPayload::Resolved {
-                    text: localized.trim().to_string(),
-                }
-            }
-        } else {
-            UiIrTextPayload::UnresolvedKey {
-                key: unresolved_key,
-            }
+    let Some(parent) = scene.nodes.get(&parent_id) else {
+        return rect;
+    };
+
+    let mut has_placeholder_sibling = false;
+    let mut leftmost_x = rect.x;
+    for sibling_id in &parent.children {
+        let Some(sibling) = scene.nodes.get(sibling_id) else {
+            continue;
+        };
+        if !node_type_name(&sibling.ty)
+            .eq_ignore_ascii_case("BuildingBlocks_ComponentLabelCaptionPair")
+        {
+            continue;
+        }
+
+        if *sibling_id != node_id
+            && sibling
+                .raw
+                .get("captionProperties")
+                .and_then(|cp| cp.get("caption"))
+                .and_then(|value| value.as_str())
+                .is_some_and(|caption| caption.trim().eq_ignore_ascii_case("@LOC_PLACEHOLDER"))
+        {
+            has_placeholder_sibling = true;
+        }
+
+        if let Some(sibling_rect) = layout.rects.get(sibling_id)
+            && sibling_rect.x < leftmost_x
+        {
+            leftmost_x = sibling_rect.x;
+        }
+    }
+
+    if has_placeholder_sibling && leftmost_x < rect.x {
+        Rect {
+            x: leftmost_x,
+            y: rect.y,
+            w: rect.w,
+            h: rect.h,
         }
     } else {
-        UiIrTextPayload::Empty
+        rect
     }
 }
 
-fn classify_literal_or_localized_text(
-    text: &str,
-    defaults: &DefaultValueRegistry,
-) -> UiIrTextPayload {
-    if text.starts_with('@') {
-        if let Some(localized) = defaults.lookup_localization(text) {
-            if localized.trim().is_empty() {
-                UiIrTextPayload::IntentionallyEmpty {
-                    key: Some(text.to_string()),
-                }
-            } else {
-                UiIrTextPayload::Resolved {
-                    text: localized.trim().to_string(),
-                }
+fn node_corner_radius(node: &BbNode) -> Option<f32> {
+    explicit_uniform_corner_radius(node)
+}
+
+fn explicit_uniform_corner_radius(node: &BbNode) -> Option<f32> {
+    let border = node.raw.get("border")?;
+    let radii = ["topLeftRadius", "topRightRadius", "bottomLeftRadius", "bottomRightRadius"]
+        .into_iter()
+        .map(|corner| {
+            border
+                .get(corner)
+                .and_then(|value| value.get("radius"))
+                .and_then(|value| value.get("value"))
+                .and_then(|value| value.as_f64())
+                .map(|value| value as f32)
+        })
+        .collect::<Option<Vec<_>>>()?;
+
+    let first = *radii.first()?;
+    if first <= 0.0 || radii.iter().any(|radius| (*radius - first).abs() > f32::EPSILON) {
+        return None;
+    }
+
+    Some(first)
+}
+
+fn is_footer_brand_label_context(scene: &BbScene, mut parent_id: BbNodeId) -> bool {
+    loop {
+        let Some(parent) = scene.nodes.get(&parent_id) else {
+            return false;
+        };
+
+        let mut has_logo = false;
+        let mut has_bottom_bar = false;
+        for child_id in &parent.children {
+            let Some(child) = scene.nodes.get(child_id) else {
+                continue;
+            };
+            if node_type_name(&child.ty)
+                .eq_ignore_ascii_case("BuildingBlocks_WidgetManufacturerLogo")
+            {
+                has_logo = true;
             }
-        } else {
-            UiIrTextPayload::UnresolvedKey {
-                key: text.to_string(),
+
+            let image_path = child
+                .raw
+                .get("ImagePath")
+                .or_else(|| child.raw.get("imagePath"))
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if image_path.contains("bottom-bar") {
+                has_bottom_bar = true;
             }
         }
-    } else {
-        UiIrTextPayload::Resolved {
-            text: text.to_string(),
+
+        if has_logo && has_bottom_bar {
+            return true;
+        }
+
+        if let Some(next_parent) = parent.parent {
+            parent_id = next_parent;
+        } else {
+            return false;
         }
     }
+}
+
+fn background_fill_colour_token_from_raw(raw: &serde_json::Value, allow_fill_colour: bool) -> Option<String> {
+    let background_enabled = raw_background_enabled(raw);
+
+    raw.get("BackgroundColorToken")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            if !allow_fill_colour {
+                return None;
+            }
+            raw.get("FillColorToken")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|token| !token.is_empty())
+                .map(str::to_owned)
+        })
+        .or_else(|| {
+            if background_enabled {
+                raw.get("background")
+                    .and_then(|background| background.get("color"))
+                    .and_then(colour_style_token)
+                    .or_else(|| raw.get("BackgroundColor").and_then(colour_style_token))
+            } else {
+                None
+            }
+            .or_else(|| {
+                if allow_fill_colour {
+                    raw.get("FillColor").and_then(colour_style_token)
+                } else {
+                    None
+                }
+            })
+        })
+}
+
+fn background_fill_colour_token_from_style_tags(
+    resolved_style_tags: &[UiIrStyleTag],
+    node_type: &BbNodeType,
+) -> Option<String> {
+    if !matches!(node_type, BbNodeType::DisplayWidget) {
+        return None;
+    }
+
+    let has_annunciator_screen = resolved_style_tags.iter().any(|tag| {
+        tag.tag_name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case("AnnunciatorScreen"))
+    });
+    let has_annunciator_item = resolved_style_tags.iter().any(|tag| {
+        tag.tag_name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case("AnnunciatorItem"))
+    });
+    if !has_annunciator_screen || has_annunciator_item {
+        return None;
+    }
+
+    resolved_style_tags.iter().find_map(|tag| {
+        let name = tag.tag_name.as_deref()?.trim().to_ascii_lowercase();
+        match name.as_str() {
+            "flashing" => Some("Base".to_string()),
+            _ => None,
+        }
+    })
+}
+
+fn should_suppress_annunciator_border(
+    resolved_style_tags: &[UiIrStyleTag],
+    node_type: &BbNodeType,
+) -> bool {
+    if !matches!(node_type, BbNodeType::DisplayWidget) {
+        return false;
+    }
+
+    let has_annunciator_item = resolved_style_tags.iter().any(|tag| {
+        tag.tag_name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case("AnnunciatorItem"))
+    });
+    if !has_annunciator_item {
+        return false;
+    }
+
+    let has_state = resolved_style_tags.iter().any(|tag| {
+        tag.tag_name.as_deref().is_some_and(|name| {
+            name.eq_ignore_ascii_case("StateModerate")
+                || name.eq_ignore_ascii_case("StateCritical")
+                || name.eq_ignore_ascii_case("Flashing")
+        })
+    });
+
+    !has_state
+}
+
+fn is_annunciator_gradient_image(node: &crate::bb_scene::BbNode) -> bool {
+    if !matches!(node.ty, BbNodeType::WidgetImage) {
+        return false;
+    }
+
+    node.raw
+        .get("ImagePath")
+        .or_else(|| node.raw.get("imagePath"))
+        .and_then(|value| value.as_str())
+        .is_some_and(|path| {
+            path.replace('\\', "/")
+                .to_ascii_lowercase()
+                .ends_with("/annunciator_on.tif")
+        })
+}
+
+fn annunciator_gradient_tint_token(
+    node: &crate::bb_scene::BbNode,
+    resolved_style_tags: &[UiIrStyleTag],
+) -> Option<String> {
+    if !is_annunciator_gradient_image(node) {
+        return None;
+    }
+
+    let has_state = resolved_style_tags.iter().any(|tag| {
+        tag.tag_name.as_deref().is_some_and(|name| {
+            name.eq_ignore_ascii_case("StateModerate")
+                || name.eq_ignore_ascii_case("StateCritical")
+        })
+    });
+
+    has_state.then(|| "Base".to_string())
+}
+
+fn should_activate_annunciator_gradient(
+    node: &crate::bb_scene::BbNode,
+    resolved_style_tags: &[UiIrStyleTag],
+) -> bool {
+    if !is_annunciator_gradient_image(node) {
+        return false;
+    }
+
+    resolved_style_tags.iter().any(|tag| {
+        tag.tag_name.as_deref().is_some_and(|name| {
+            name.eq_ignore_ascii_case("StateModerate")
+                || name.eq_ignore_ascii_case("StateCritical")
+        })
+    })
+}
+
+fn colour_style_alpha(value: &serde_json::Value) -> Option<f32> {
+    value
+        .get("_Type_")
+        .and_then(|v| v.as_str())
+        .filter(|ty| *ty == "BuildingBlocks_ColorStyle")?;
+
+    value
+        .get("alpha")
+        .and_then(|v| v.as_f64())
+        .map(|value| (value as f32).clamp(0.0, 1.0))
+}
+
+fn background_fill_alpha_from_raw(raw: &serde_json::Value, allow_fill_colour: bool) -> Option<f32> {
+    let background_enabled = raw_background_enabled(raw);
+
+    if background_enabled {
+        raw.get("background")
+            .and_then(|background| background.get("color"))
+            .and_then(colour_style_alpha)
+            .or_else(|| raw.get("BackgroundColor").and_then(colour_style_alpha))
+    } else {
+        None
+    }
+        .or_else(|| {
+            if allow_fill_colour {
+                raw.get("FillColor").and_then(colour_style_alpha)
+            } else {
+                None
+            }
+        })
+}
+
+fn raw_background_enabled(raw: &serde_json::Value) -> bool {
+    if raw.get("BackgroundColor").is_some()
+        || raw
+            .get("BackgroundColorToken")
+            .and_then(|token| token.as_str())
+            .is_some_and(|token| !token.trim().is_empty())
+    {
+        return true;
+    }
+
+    if raw
+        .get("EnableBackground")
+        .and_then(|enable| enable.as_bool())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    raw.get("background")
+        .and_then(|background| background.get("enable"))
+        .and_then(|enable| enable.as_bool())
+        .unwrap_or(false)
 }
 

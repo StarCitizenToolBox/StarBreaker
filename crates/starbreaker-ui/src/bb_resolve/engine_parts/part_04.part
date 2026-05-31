@@ -1,399 +1,290 @@
-fn merge_child_scene(
-    parent_scene: &mut BbScene,
-    child_scene: BbScene,
-    match_to: &str,
-    host_parent_override: Option<BbNodeId>,
+fn inline_animation_timeline_references(
+    scene: &mut BbScene,
+    fetch_by_path: &dyn Fn(&str) -> Result<serde_json::Value, String>,
 ) {
-    let BbScene {
-        coordinate_method: child_coordinate_method,
-        canvas_size: child_canvas_size,
-        roots: child_roots,
-        nodes: child_nodes,
-        operations: child_ops,
-        ..
-    } = child_scene;
-
-    // Build a collision-free mapping from child original IDs to new IDs.
-    // We use a monotonic counter that wraps and skips any ID already present
-    // in the parent, so the merge is always safe regardless of the depth to
-    // which children have been recursively merged.
-    let mut next: BbNodeId = parent_scene
-        .nodes
-        .keys()
-        .next_back()
-        .copied()
-        .unwrap_or(0)
-        .wrapping_add(1);
-    let mut id_map: HashMap<BbNodeId, BbNodeId> = HashMap::with_capacity(child_nodes.len());
-    for &orig_id in child_nodes.keys() {
-        // Advance past any ID already occupied in the parent or already
-        // assigned to another child node in this batch.
-        while parent_scene.nodes.contains_key(&next) || id_map.values().any(|&v| v == next) {
-            next = next.wrapping_add(1);
-        }
-        id_map.insert(orig_id, next);
-        next = next.wrapping_add(1);
-    }
-
-    let child_roots_reided: Vec<BbNodeId> = child_roots
-        .iter()
-        .filter_map(|id| id_map.get(id).copied())
-        .collect();
-
-    let host_parent_id = if let Some(id) = host_parent_override {
-        if parent_scene.nodes.contains_key(&id) {
-            Some(id)
-        } else {
-            None
-        }
-    } else {
-        find_host_parent(parent_scene, match_to)
-    };
-    let Some(host_parent_id) = host_parent_id else {
-        log::warn!("bb_resolve: no host parent available for child canvas merge");
-        return;
-    };
-    if should_adopt_child_coordinate_method(parent_scene, host_parent_id, child_coordinate_method) {
-        parent_scene.coordinate_method = child_coordinate_method;
-    }
-    let canvas_scale = child_canvas_scale_for_host(parent_scene, host_parent_id, child_canvas_size);
-
-    let mut inserted_child_roots = Vec::new();
-    for (orig_id, mut node) in child_nodes {
-        let new_id = match id_map.get(&orig_id).copied() {
-            Some(id) => id,
-            None => {
-                log::warn!("bb_resolve: no id mapping for child node {orig_id}; skipping");
-                continue;
-            }
-        };
-        node.id = new_id;
-        node.parent = node.parent.and_then(|p| id_map.get(&p).copied());
-        node.children = node
-            .children
-            .into_iter()
-            .filter_map(|c| id_map.get(&c).copied())
-            .collect();
-
-        if child_roots.contains(&orig_id) {
-            node.parent = Some(host_parent_id);
-            inserted_child_roots.push(new_id);
-        }
-        if let Some((sx, sy)) = canvas_scale {
-            scale_node_from_child_canvas(&mut node, sx, sy);
-        }
-
-        parent_scene.nodes.insert(new_id, node);
-    }
-
-    // Remap operation-pointer namespace to avoid collisions across merged child
-    // canvases. Node IDs and operation IDs are distinct domains in source
-    // records, but both use ptr:N string encoding and can collide numerically.
-    let op_id_map = remap_child_operation_ids(parent_scene, &child_ops);
-
-    // Remap ptr: / _PointsTo_:ptr: references in operations using both node-id
-    // and operation-id maps.
-    let mut remapped_ops = child_ops;
-    for op in &mut remapped_ops {
-        remap_ptrs_in_json_map(op, &id_map, &op_id_map);
-    }
-    parent_scene.operations.extend(remapped_ops);
-
-    if let Some(host) = parent_scene.nodes.get_mut(&host_parent_id) {
-        let roots_to_add = if inserted_child_roots.is_empty() {
-            child_roots_reided
-        } else {
-            inserted_child_roots
-        };
-        host.children.extend(roots_to_add);
-        let mut seen = std::collections::BTreeSet::new();
-        host.children.retain(|id| seen.insert(*id));
-    }
-}
-
-fn should_adopt_child_coordinate_method(
-    parent_scene: &BbScene,
-    host_parent_id: BbNodeId,
-    child_coordinate_method: crate::bb_scene::BbCoordinateMethod,
-) -> bool {
-    if matches!(child_coordinate_method, crate::bb_scene::BbCoordinateMethod::UseRaw) {
-        return false;
-    }
-
-    let Some(host) = parent_scene.nodes.get(&host_parent_id) else {
-        return false;
-    };
-
-    matches!(host.ty, crate::bb_scene::BbNodeType::WidgetCanvas)
-        && host.parent.is_none()
-        && matches!(host.sizing.width, BbValue::Percent(value) if (value - 1.0).abs() < f32::EPSILON)
-        && matches!(host.sizing.height, BbValue::Percent(value) if (value - 1.0).abs() < f32::EPSILON)
-        && host.position.x.abs() < f32::EPSILON
-        && host.position.y.abs() < f32::EPSILON
-}
-
-fn child_canvas_scale_for_host(
-    parent_scene: &BbScene,
-    host_parent_id: BbNodeId,
-    child_canvas_size: (f32, f32),
-) -> Option<(f32, f32)> {
-    let host = parent_scene.nodes.get(&host_parent_id)?;
-    let child_w = child_canvas_size.0;
-    let child_h = child_canvas_size.1;
-    if child_w <= 0.0 || child_h <= 0.0 {
-        return None;
-    }
-    let host_w = match host.sizing.width {
-        BbValue::Fixed(v) if v > 0.0 => v,
-        _ => return None,
-    };
-    let host_h = match host.sizing.height {
-        BbValue::Fixed(v) if v > 0.0 => v,
-        _ => return None,
-    };
-    let sx = host_w / child_w;
-    let sy = host_h / child_h;
-    if !sx.is_finite() || !sy.is_finite() || sx <= 0.0 || sy <= 0.0 {
-        return None;
-    }
-    if sx > 4.0 || sy > 4.0 || sx < 0.25 || sy < 0.25 {
-        log::debug!(
-            "bb_resolve: skipping child-canvas scaling for host ptr:{} (child {:.0}x{:.0} -> host {:.0}x{:.0}, scale {:.3}x{:.3})",
-            host_parent_id,
-            child_w,
-            child_h,
-            host_w,
-            host_h,
-            sx,
-            sy,
-        );
-        return None;
-    }
-    if (sx - 1.0).abs() < 0.0001 && (sy - 1.0).abs() < 0.0001 {
-        return None;
-    }
-    Some((sx, sy))
-}
-
-fn scale_node_from_child_canvas(node: &mut crate::bb_scene::BbNode, sx: f32, sy: f32) {
-    node.position.x *= sx;
-    node.position.y *= sy;
-    node.position_offset.x *= sx;
-    node.position_offset.y *= sy;
-    scale_bb_value(&mut node.sizing.width, sx);
-    scale_bb_value(&mut node.sizing.height, sy);
-    node.padding.left *= sx;
-    node.padding.right *= sx;
-    node.padding.top *= sy;
-    node.padding.bottom *= sy;
-    node.margin.left *= sx;
-    node.margin.right *= sx;
-    node.margin.top *= sy;
-    node.margin.bottom *= sy;
-    if let Some(text) = node.text.as_mut() {
-        scale_bb_value(&mut text.font_size, sy);
-    }
-    if let Some(border) = node.border.as_mut() {
-        let sw = sx.min(sy);
-        border.top.width *= sw;
-        border.right.width *= sw;
-        border.bottom.width *= sw;
-        border.left.width *= sw;
-    }
-}
-
-fn scale_bb_value(value: &mut BbValue, scale: f32) {
-    if let BbValue::Fixed(v) = value {
-        *v *= scale;
-    }
-}
-
-fn remap_child_operation_ids(
-    parent_scene: &BbScene,
-    child_ops: &[serde_json::Value],
-) -> HashMap<BbNodeId, BbNodeId> {
-    let mut occupied: std::collections::BTreeSet<BbNodeId> = std::collections::BTreeSet::new();
-    for id in parent_scene.nodes.keys().copied() {
-        occupied.insert(id);
-    }
-    for op in &parent_scene.operations {
-        if let Some(id) = op
-            .get("_Pointer_")
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.strip_prefix("ptr:"))
-            .and_then(|n| n.parse::<BbNodeId>().ok())
-        {
-            occupied.insert(id);
-        }
-    }
-
-    let mut next: BbNodeId = occupied.iter().next_back().copied().unwrap_or(0).wrapping_add(1);
-    let mut out = HashMap::new();
-    for op in child_ops {
-        let Some(old_id) = op
-            .get("_Pointer_")
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.strip_prefix("ptr:"))
-            .and_then(|n| n.parse::<BbNodeId>().ok())
+    for node in scene.nodes.values_mut() {
+        let Some(timeline_slot) = node
+            .raw
+            .get_mut("animation")
+            .and_then(|animation| animation.get_mut("animationTimeline"))
         else {
             continue;
         };
-        if out.contains_key(&old_id) {
-            continue;
-        }
-        while occupied.contains(&next) || out.values().any(|&v| v == next) {
-            next = next.wrapping_add(1);
-        }
-        out.insert(old_id, next);
-        next = next.wrapping_add(1);
-    }
-    out
-}
-
-fn remap_ptrs_in_json_map(
-    v: &mut serde_json::Value,
-    id_map: &HashMap<BbNodeId, BbNodeId>,
-    op_id_map: &HashMap<BbNodeId, BbNodeId>,
-) {
-    remap_ptrs_in_json_map_keyed(v, None, id_map, op_id_map);
-}
-
-fn remap_ptrs_in_json_map_keyed(
-    v: &mut serde_json::Value,
-    key: Option<&str>,
-    id_map: &HashMap<BbNodeId, BbNodeId>,
-    op_id_map: &HashMap<BbNodeId, BbNodeId>,
-) {
-    match v {
-        serde_json::Value::String(s) => {
-            if let Some(n) = s.strip_prefix("ptr:").and_then(|n| n.parse::<BbNodeId>().ok()) {
-                let remapped = remap_ptr_with_key(n, key, id_map, op_id_map);
-                if let Some(new_id) = remapped {
-                    *s = format!("ptr:{new_id}");
-                }
-            } else if let Some(n) = s
-                .strip_prefix("_PointsTo_:ptr:")
-                .and_then(|n| n.parse::<BbNodeId>().ok())
-            {
-                let remapped = remap_ptr_with_key(n, key, id_map, op_id_map);
-                if let Some(new_id) = remapped {
-                    *s = format!("_PointsTo_:ptr:{new_id}");
-                }
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            for item in arr {
-                remap_ptrs_in_json_map_keyed(item, key, id_map, op_id_map);
-            }
-        }
-        serde_json::Value::Object(map) => {
-            for (k, value) in map {
-                remap_ptrs_in_json_map_keyed(value, Some(k.as_str()), id_map, op_id_map);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn remap_ptr_with_key(
-    old: BbNodeId,
-    key: Option<&str>,
-    id_map: &HashMap<BbNodeId, BbNodeId>,
-    op_id_map: &HashMap<BbNodeId, BbNodeId>,
-) -> Option<BbNodeId> {
-    let k = key.unwrap_or("");
-    let prefer_node = matches!(k, "widget" | "parent" | "target");
-    let prefer_op = k == "_Pointer_" || k.starts_with("input") || k == "nZeros";
-
-    if prefer_node {
-        if let Some(&n) = id_map.get(&old) {
-            return Some(n);
-        }
-        if let Some(&n) = op_id_map.get(&old) {
-            return Some(n);
-        }
-        return None;
-    }
-    if prefer_op {
-        if let Some(&n) = op_id_map.get(&old) {
-            return Some(n);
-        }
-        if let Some(&n) = id_map.get(&old) {
-            return Some(n);
-        }
-        return None;
-    }
-    op_id_map.get(&old).copied().or_else(|| id_map.get(&old).copied())
-}
-
-fn find_host_parent(parent_scene: &BbScene, match_to: &str) -> Option<BbNodeId> {
-    if !match_to.is_empty() {
-        for root_id in &parent_scene.roots {
-            let Some(root) = parent_scene.nodes.get(root_id) else {
-                continue;
-            };
-            for child_id in &root.children {
-                let Some(child) = parent_scene.nodes.get(child_id) else {
-                    continue;
-                };
-                if child.name.eq_ignore_ascii_case(match_to) {
-                    return Some(*child_id);
-                }
-            }
-        }
-    }
-
-    parent_scene.roots.first().copied()
-}
-
-fn param_inputs_for_match_to(
-    scene: &BbScene,
-    match_to: &str,
-) -> Option<Vec<serde_json::Value>> {
-    for root_id in &scene.roots {
-        let Some(root) = scene.nodes.get(root_id) else {
+        let Some(timeline_path) = timeline_slot
+            .get("timelineRecord")
+            .and_then(|value| value.as_str())
+            .filter(|path| !path.is_empty())
+        else {
             continue;
         };
-        for child_id in &root.children {
-            let Some(child) = scene.nodes.get(child_id) else {
-                continue;
-            };
-            if !child.name.eq_ignore_ascii_case(match_to) {
-                continue;
-            }
-            let inputs = child
-                .raw
-                .get("paramInputValues")
+        let Ok(timeline_record) = fetch_by_path(timeline_path) else {
+            continue;
+        };
+        let record_value = timeline_record
+            .get("_RecordValue_")
+            .unwrap_or(&timeline_record);
+        let Some(timeline) = record_value
+            .get("timeline")
+            .or_else(|| record_value.get("animationTimeline"))
+            .or_else(|| record_value.get("keyframes").map(|_| record_value))
+        else {
+            continue;
+        };
+        if timeline.get("keyframes").is_some() {
+            *timeline_slot = timeline.clone();
+        }
+    }
+}
+
+fn deactivate_subtrees(scene: &mut BbScene, roots: &std::collections::HashSet<BbNodeId>) {
+    let mut stack: Vec<BbNodeId> = roots.iter().copied().collect();
+    let mut seen: std::collections::HashSet<BbNodeId> = std::collections::HashSet::new();
+    while let Some(node_id) = stack.pop() {
+        if !seen.insert(node_id) {
+            continue;
+        }
+        let Some(node) = scene.nodes.get_mut(&node_id) else {
+            continue;
+        };
+        node.is_active = false;
+        stack.extend(node.children.iter().copied());
+    }
+}
+
+fn pick_active_entries<'a>(
+    record_value: &'a serde_json::Value,
+    record_root: &'a serde_json::Value,
+    manufacturer_id: Option<&str>,
+) -> Vec<&'a serde_json::Value> {
+    let preferred_brand = record_value
+        .get("style")
+        .and_then(|v| v.as_str())
+        .map(extract_record_name);
+    // Use new brand-style resolver (R1 phase) which handles IC_* per-canvas override + generic fallback
+    if let Some(brand_style) = bb_brand_style::resolve_brand_style(
+        record_root,
+        manufacturer_id,
+        preferred_brand.as_deref(),
+    ) {
+        return brand_style.entries.iter().collect();
+    }
+
+    // Fall back to defaultStyles when no brand match
+    record_value
+        .get("defaultStyles")
+        .map(entries_from)
+        .unwrap_or_default()
+}
+
+/// Return the single default-state entry to follow in Pass 1.
+///
+/// Prefers the first entry whose `conditionsList` is absent or empty
+/// (unconditional — always active).  Falls back to the entry that targets
+/// the scene node with the highest style-tag count when all entries are
+/// conditional (the "most-tagged" node heuristic selects the primary content
+/// slot over sub-component slots — e.g. `canvas_GunsMode` with 2 tags wins
+/// over `canvas_AmmoNumbers` with 1 tag on `MC_S_Self_Master`).  Falls back
+/// to the first entry overall as a last resort.
+struct DefaultEntryDecision<'a> {
+    entry: &'a serde_json::Value,
+    reason: DefaultEntryReason,
+    score: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+enum DefaultEntryReason {
+    FirstUnconditional,
+    HighestTagScore,
+    HighestTagScoreThenSpecificity,
+    FirstEntryFallback,
+}
+
+impl DefaultEntryReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::FirstUnconditional => "first_unconditional",
+            Self::HighestTagScore => "highest_tag_score",
+            Self::HighestTagScoreThenSpecificity => "highest_tag_score_then_specificity",
+            Self::FirstEntryFallback => "first_entry_fallback",
+        }
+    }
+}
+
+fn pick_default_entry_decision<'a>(
+    record_value: &'a serde_json::Value,
+    record_root: &'a serde_json::Value,
+    manufacturer_id: Option<&str>,
+) -> Option<DefaultEntryDecision<'a>> {
+    let entries = pick_active_entries(record_value, record_root, manufacturer_id);
+    // Prefer first unconditional (empty/absent conditionsList).
+    if let Some(entry) = entries.iter().copied().find(|e| {
+        e.get("conditionsList")
+            .and_then(|v| v.as_array())
+            .map(|a| a.is_empty())
+            .unwrap_or(true)
+    }) {
+        return Some(DefaultEntryDecision {
+            entry,
+            reason: DefaultEntryReason::FirstUnconditional,
+            score: None,
+        });
+    }
+
+    // When all entries are conditional, use style-tag count on the matched
+    // scene node as a tiebreaker.  Entries that target scene nodes with MORE
+    // tags are more specifically annotated (e.g. the primary weapon-info slot
+    // carries both a system tag and a content-type tag), so they are preferred.
+    if entries.len() > 1 {
+        let scene = record_value
+            .get("scene")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]);
+
+        // Build a map from tag RecordId → number of style tags on the scene
+        // node that carries that tag.
+        let mut tag_to_node_tag_count: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
+        for node in scene {
+            let style_tags = node
+                .get("styleTags")
                 .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            if !inputs.is_empty() {
-                return Some(inputs);
+                .map(|a| a.as_slice())
+                .unwrap_or(&[]);
+            let count = style_tags.len();
+            for tag in style_tags {
+                if let Some(rid) = tag.get("_RecordId_").and_then(|v| v.as_str()) {
+                    // Prefer the higher count if a tag appears on multiple nodes.
+                    let e = tag_to_node_tag_count.entry(rid).or_insert(0);
+                    if count > *e {
+                        *e = count;
+                    }
+                }
             }
         }
+
+        // Score each entry by the max style-tag count of its condition's tag.
+        let mut best_entry = entries[0];
+        let mut best_score = 0usize;
+        let mut best_specificity = 0usize;
+        let mut used_specificity_tiebreak = false;
+        for entry in &entries {
+            let score = condition_tag_score(entry, &tag_to_node_tag_count);
+            let specificity = condition_tag_specificity(entry, tag_to_node_tag_count.keys().copied());
+            if score > best_score {
+                best_score = score;
+                best_specificity = specificity;
+                best_entry = entry;
+                used_specificity_tiebreak = false;
+            } else if score == best_score && score > 0 && specificity > best_specificity {
+                best_specificity = specificity;
+                best_entry = entry;
+                used_specificity_tiebreak = true;
+            }
+        }
+        if best_score > 0 {
+            return Some(DefaultEntryDecision {
+                entry: best_entry,
+                reason: if used_specificity_tiebreak {
+                    DefaultEntryReason::HighestTagScoreThenSpecificity
+                } else {
+                    DefaultEntryReason::HighestTagScore
+                },
+                score: Some(best_score),
+            });
+        }
     }
-    None
+
+    // Last resort: first entry (structural default when all entries are
+    // conditional and no scene-node heuristic applies, e.g. MC_S_Target_Master
+    // which has exactly one entry used at runtime despite being tagged
+    // conditional in the data).
+    entries.into_iter().next().map(|entry| DefaultEntryDecision {
+        entry,
+        reason: DefaultEntryReason::FirstEntryFallback,
+        score: None,
+    })
 }
 
-fn host_node_for_match_to(scene: &BbScene, match_to: &str) -> Option<BbNodeId> {
-    if match_to.is_empty() {
-        return None;
-    }
-
-    for root_id in &scene.roots {
-        let Some(root) = scene.nodes.get(root_id) else {
-            continue;
-        };
-        for child_id in &root.children {
-            let Some(child) = scene.nodes.get(child_id) else {
-                continue;
-            };
-            if child.name.eq_ignore_ascii_case(match_to) {
-                return Some(*child_id);
-            }
+/// Extract the maximum style-tag count of any scene node matched by an
+/// entry's `conditionsList` tag conditions.
+///
+/// Returns 0 when the entry has no recognisable tag conditions or none of its
+/// tags appear in `tag_to_count`.
+fn condition_tag_score(
+    entry: &serde_json::Value,
+    tag_to_count: &std::collections::HashMap<&str, usize>,
+) -> usize {
+    let cond_lists = match entry.get("conditionsList").and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => return 0,
+    };
+    let mut max = 0usize;
+    for cond_list in cond_lists {
+        let conditions = cond_list
+            .get("conditions")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]);
+        for cond in conditions {
+            max = max.max(score_condition_node(cond, tag_to_count));
         }
     }
+    max
+}
 
-    None
+fn condition_tag_specificity<'a>(
+    entry: &serde_json::Value,
+    known_tags: impl IntoIterator<Item = &'a str>,
+) -> usize {
+    let known_tags: std::collections::HashSet<&str> = known_tags.into_iter().collect();
+    let cond_lists = match entry.get("conditionsList").and_then(|v| v.as_array()) {
+        Some(v) => v,
+        None => return 0,
+    };
+    cond_lists
+        .iter()
+        .filter_map(|cond_list| cond_list.get("conditions").and_then(|v| v.as_array()))
+        .flatten()
+        .filter_map(|condition| {
+            condition
+                .get("tag")
+                .and_then(|tag| tag.get("_RecordId_"))
+                .and_then(|value| value.as_str())
+        })
+        .filter(|tag| known_tags.contains(tag))
+        .count()
+}
+
+/// Recursively walk a condition node to find tag RecordIds and return the
+/// maximum style-tag count found in `tag_to_count`.
+fn score_condition_node(
+    cond: &serde_json::Value,
+    tag_to_count: &std::collections::HashMap<&str, usize>,
+) -> usize {
+    // Direct tag condition: {"_Type_": "…ConditionTag", "tag": {"_RecordId_": "…"}}
+    if let Some(tag_id) = cond
+        .get("tag")
+        .and_then(|t| t.get("_RecordId_"))
+        .and_then(|v| v.as_str())
+    {
+        return tag_to_count.get(tag_id).copied().unwrap_or(0);
+    }
+    // Compound (AllOf/AnyOf): recurse into "conditions" children.
+    let mut max = 0usize;
+    if let Some(children) = cond.get("conditions").and_then(|v| v.as_array()) {
+        for child in children {
+            max = max.max(score_condition_node(child, tag_to_count));
+        }
+    }
+    max
+}
+
+fn entries_from(value: &serde_json::Value) -> Vec<&serde_json::Value> {
+    value
+        .get("entries")
+        .and_then(|v| v.as_array())
+        .map(|entries| entries.iter().collect())
+        .unwrap_or_default()
 }
 

@@ -4,11 +4,11 @@
 include!("engine_parts/part_01.part");
 include!("engine_parts/part_02.part");
 include!("engine_parts/part_03.part");
-include!("engine_parts/part_03b.part");
-include!("engine_parts/part_03c.part");
 include!("engine_parts/part_04.part");
 include!("engine_parts/part_05.part");
-include!("engine_parts/part_05b.part");
-include!("engine_parts/part_05c.part");
-include!("engine_parts/part_05d.part");
-include!("engine_parts/part_05e.part");
+include!("engine_parts/part_06.part");
+include!("engine_parts/part_07.part");
+include!("engine_parts/part_08.part");
+include!("engine_parts/part_09.part");
+include!("engine_parts/part_10.part");
+include!("engine_parts/part_11.part");

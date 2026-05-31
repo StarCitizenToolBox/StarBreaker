@@ -1,21 +1,385 @@
-fn secondary_close_button_tint(node: &UiIrNode, ctx: &ComposeContext<'_>) -> [f32; 4] {
-    node.stroke_colour
-        .or_else(|| {
-            node.stroke_colour_token
-                .as_deref()
-                .and_then(|token| resolve_colour_token(ctx, token))
+fn inline_nested_textfield_text_rect(
+    node: &UiIrNode,
+    rect: Rect,
+    document: &UiIrDocument,
+    renderer: &TextRenderer,
+    ctx: &ComposeContext<'_>,
+    child_render_size_px: f32,
+) -> Option<Rect> {
+    let style = node.text_style.as_ref()?;
+    if !node.node_type.eq_ignore_ascii_case("widget_text_field")
+        || node.pivot[0] < 0.99
+        || node.anchor[0] <= 1.0
+        || !style.vertical_alignment.eq_ignore_ascii_case("Center")
+    {
+        return None;
+    }
+
+    let parent_id = node.parent_id?;
+    let parent = document.nodes.iter().find(|candidate| candidate.id == parent_id)?;
+    let parent_style = parent.text_style.as_ref()?;
+    if !parent.node_type.eq_ignore_ascii_case("widget_text_field")
+        || !same_label_style(style, parent_style)
+        || !parent_style.vertical_alignment.eq_ignore_ascii_case(&style.vertical_alignment)
+    {
+        return None;
+    }
+
+    let parent_text = resolved_text_payload(parent)?;
+    let parent_rect = center_anchored_heading_textfield_text_rect(
+        parent,
+        ir_rect_to_layout_rect(parent.computed_rect),
+    )
+    .unwrap_or_else(|| ir_rect_to_layout_rect(parent.computed_rect));
+    let parent_nominal_size = parent_style_font_size(parent_style);
+    let parent_font_style_scale = font_style_scale_modifier(Some(parent_style));
+    let parent_swf_size = (parent_nominal_size * parent_font_style_scale * SWF_TEXT_RENDER_SIZE_CALIBRATION).max(1.0);
+    let parent_width = select_imported_ui_font(ctx, Some(parent_style))
+        .and_then(|selection| {
+            renderer.measure_swf_advance_width(parent_text, selection.font, parent_swf_size)
         })
-        .or(node.icon_tint_colour)
-        .or_else(|| {
-            node.icon_tint_colour_token
-                .as_deref()
-                .and_then(|token| resolve_colour_token(ctx, token))
-        })
-        .or(node.background_fill_colour)
-        .or_else(|| {
-            node.background_fill_colour_token
-                .as_deref()
-                .and_then(|token| resolve_colour_token(ctx, token))
-        })
-        .unwrap_or_else(|| derived_accent_tint(ctx))
+        .unwrap_or_else(|| {
+            renderer.measure(
+                parent_text,
+                FontKind::Sans,
+                (parent_nominal_size * parent_font_style_scale * TEXT_RENDER_SIZE_CALIBRATION).max(1.0),
+            ).0
+        });
+    let inline_gap = style.anchor_to_parent_x.unwrap_or(0.0).max(0.0) * child_render_size_px;
+    let inline_x = parent_rect.x + parent_width + inline_gap;
+    if !inline_x.is_finite() || inline_x >= rect.x || inline_x <= parent_rect.x {
+        return None;
+    }
+
+    let right = rect.x + rect.w;
+    Some(Rect {
+        x: inline_x,
+        w: (right - inline_x).max(1.0),
+        ..rect
+    })
 }
+
+fn same_label_style(left: &UiIrTextStyle, right: &UiIrTextStyle) -> bool {
+    match (left.label_style.as_deref(), right.label_style.as_deref()) {
+        (Some(left), Some(right)) => left.eq_ignore_ascii_case(right),
+        _ => false,
+    }
+}
+
+fn parent_style_font_size(style: &UiIrTextStyle) -> f32 {
+    ir_value_to_px(&style.font_size).max(1.0)
+}
+
+fn debug_text_drawn_bounds_with_renderer(
+    node: &UiIrNode,
+    renderer: &TextRenderer,
+) -> Option<DebugTextDrawnBounds> {
+    let text = resolved_text_payload(node)?;
+    let rects = debug_text_rects_with_renderer(node, renderer)?;
+
+    let nominal_font_size = node
+        .text_style
+        .as_ref()
+        .map(|style| ir_value_to_px(&style.font_size))
+        .unwrap_or(18.0)
+        .max(1.0);
+    let fallback_font_size = (nominal_font_size * TEXT_RENDER_SIZE_CALIBRATION).max(1.0);
+    let primary_align = node
+        .text_style
+        .as_ref()
+        .map(|style| TextAlign::from_bb_str(&style.alignment))
+        .unwrap_or(TextAlign::Left);
+    let primary_vertical = node
+        .text_style
+        .as_ref()
+        .map(|style| VerticalAlign::from_bb_str(&style.vertical_alignment))
+        .unwrap_or(VerticalAlign::Centre);
+
+    let primary = renderer.measure_drawn_bounds(
+        text,
+        apply_font_style_vertical_offset(rects.primary, node.text_style.as_ref()),
+        FontKind::Sans,
+        fallback_font_size,
+        primary_align,
+        primary_vertical,
+        draw_line_spacing_for_node(node, text, node.text_style.as_ref()),
+    )?;
+
+    let secondary = if let Some(UiIrTextPayload::Resolved { text: secondary_text }) = node.secondary_text_payload.as_ref() {
+        let secondary_nominal_font_size = node
+            .secondary_text_style
+            .as_ref()
+            .map(|style| ir_value_to_px(&style.font_size))
+            .unwrap_or(nominal_font_size)
+            .max(1.0);
+        let secondary_fallback_font_size =
+            (secondary_nominal_font_size * TEXT_RENDER_SIZE_CALIBRATION).max(1.0);
+        rects.secondary.and_then(|secondary_rect| {
+            renderer.measure_drawn_bounds(
+                secondary_text,
+                apply_font_style_vertical_offset(
+                    secondary_rect,
+                    node.secondary_text_style.as_ref().or(node.text_style.as_ref()),
+                ),
+                FontKind::Sans,
+                secondary_fallback_font_size,
+                TextAlign::Left,
+                VerticalAlign::Centre,
+                draw_line_spacing_for_node(
+                    node,
+                    secondary_text,
+                    node.secondary_text_style.as_ref().or(node.text_style.as_ref()),
+                ),
+            )
+        })
+    } else {
+        None
+    };
+
+    Some(DebugTextDrawnBounds { primary, secondary })
+}
+
+fn text_origin_in_rect(
+    renderer: &TextRenderer,
+    text: &str,
+    rect: Rect,
+    kind: FontKind,
+    size_px: f32,
+    align: TextAlign,
+    vertical_align: VerticalAlign,
+) -> (f32, f32) {
+    let (text_w, text_h) = renderer.measure(text, kind, size_px.max(1.0));
+    let x = match align {
+        TextAlign::Left => rect.x,
+        TextAlign::Centre => rect.x + ((rect.w - text_w) * 0.5).max(0.0),
+        TextAlign::Right => rect.x + (rect.w - text_w).max(0.0),
+    };
+    let y = match vertical_align {
+        VerticalAlign::Top => rect.y,
+        VerticalAlign::Centre => rect.y + ((rect.h - text_h) * 0.5).max(0.0),
+        VerticalAlign::Bottom => rect.y + (rect.h - text_h).max(0.0),
+    };
+    (x, y)
+}
+
+fn stacked_label_caption_pair_text_rects(
+    rect: Rect,
+    primary_text_h: f32,
+    secondary_text_h: f32,
+    primary_anchor_y: Option<f32>,
+    right_anchored_pair: bool,
+) -> (Rect, Rect) {
+    let primary_h = primary_text_h.max(1.0).min(rect.h.max(1.0));
+    let secondary_h = secondary_text_h.max(1.0).min(rect.h.max(1.0));
+    let total_h = primary_h + secondary_h;
+    let max_top_padding = (rect.h - total_h).max(0.0);
+    let anchor_y = primary_anchor_y.unwrap_or(0.0).clamp(0.0, 0.999);
+    let derived_top_padding = if anchor_y > 0.0 {
+        ((anchor_y * (primary_h + secondary_h)) - (primary_h * 0.5)) / (1.0 - anchor_y)
+    } else {
+        0.0
+    };
+    let top_padding = if right_anchored_pair {
+        derived_top_padding.max(0.0)
+    } else {
+        derived_top_padding.clamp(0.0, max_top_padding)
+    };
+    let primary_y = rect.y + top_padding;
+    // Right-anchored metric stacks (e.g. MEDGELS/value) use two text bands
+    // with different font sizes; collapse their handoff by the measured line
+    // box delta so the visual gap follows typography instead of fixed pixels.
+    let line_box_overlap = (primary_h - secondary_h).max(0.0);
+    let secondary_y = (primary_y + primary_h - line_box_overlap).max(rect.y);
+    (
+        Rect {
+            x: rect.x,
+            y: primary_y,
+            w: rect.w,
+            h: primary_h,
+        },
+        Rect {
+            x: rect.x,
+            y: secondary_y,
+            w: rect.w,
+            h: secondary_h,
+        },
+    )
+}
+
+fn right_anchored_label_caption_pair_offset(
+    node: &UiIrNode,
+    primary_text_h: f32,
+    secondary_text_h: Option<f32>,
+) -> (f32, f32) {
+    if !node
+        .node_type
+        .eq_ignore_ascii_case("BuildingBlocks_ComponentLabelCaptionPair")
+        || node.secondary_text_payload.is_none()
+        || node.anchor[0] < 0.99
+        || node.pivot[0] < 0.99
+    {
+        return (0.0, 0.0);
+    }
+
+    let primary_h = primary_text_h.max(0.0);
+    let secondary_h = secondary_text_h.unwrap_or(primary_h).max(0.0);
+    let line_box_delta = (primary_h - secondary_h).max(0.0);
+    let stroke_pair_span = node.stroke_extent.unwrap_or(0.0).max(0.0) * 2.0;
+    (-(line_box_delta + stroke_pair_span), line_box_delta)
+}
+
+fn font_telemetry_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("SB_UI_FONT_TELEMETRY")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
+            .unwrap_or(false)
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FontSelectionSource {
+    ResolvedRecordSymbol,
+    Title3ExportFallback,
+    PreferredExportFallback,
+    PreferredNameFallback,
+}
+
+impl FontSelectionSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ResolvedRecordSymbol => "resolved-record-symbol",
+            Self::Title3ExportFallback => "title3-export-fallback",
+            Self::PreferredExportFallback => "preferred-export-fallback",
+            Self::PreferredNameFallback => "preferred-name-fallback",
+        }
+    }
+
+    fn is_fallback(self) -> bool {
+        !matches!(self, Self::ResolvedRecordSymbol)
+    }
+}
+
+struct SelectedImportedFont<'a> {
+    symbol: String,
+    font: &'a FontGlyphSet,
+    source: FontSelectionSource,
+}
+
+fn select_imported_ui_font<'a>(
+    ctx: &'a ComposeContext<'_>,
+    text_style: Option<&UiIrTextStyle>,
+) -> Option<SelectedImportedFont<'a>> {
+    if let Some(symbol) = font_symbol_from_text_style(text_style)
+        && let Some(id) = ctx.assets.lookup_export(symbol)
+        && let Some(font) = ctx.assets.get_font(id)
+    {
+        return Some(SelectedImportedFont {
+            symbol: symbol.to_string(),
+            font,
+            source: FontSelectionSource::ResolvedRecordSymbol,
+        });
+    }
+
+    let label_style = text_style.and_then(|style| style.label_style.as_deref());
+
+    if matches!(label_style, Some("Title3")) {
+        let mut text1_fonts: Vec<(String, &'a FontGlyphSet)> = ctx
+            .assets
+            .export_entries()
+            .filter(|(symbol, _)| symbol.starts_with("$Text1"))
+            .filter_map(|(symbol, id)| ctx.assets.get_font(id).map(|font| (symbol.to_string(), font)))
+            .collect();
+
+        text1_fonts.sort_by(|(left_name, left_font), (right_name, right_font)| {
+            title3_font_weight_rank(left_name, left_font)
+                .cmp(&title3_font_weight_rank(right_name, right_font))
+                .then_with(|| left_name.cmp(right_name))
+        });
+
+        if let Some((symbol, font)) = text1_fonts.into_iter().next() {
+            return Some(SelectedImportedFont {
+                symbol,
+                font,
+                source: FontSelectionSource::Title3ExportFallback,
+            });
+        }
+    }
+
+    let preferred_symbols: &[&str] = &["$Text1Book", "$Text1Med", "$OutfitRegular", "$Text1Bold", "$CIGDrake"];
+
+    for symbol in preferred_symbols {
+        if let Some(id) = ctx.assets.lookup_export(symbol)
+            && let Some(font) = ctx.assets.get_font(id)
+        {
+            return Some(SelectedImportedFont {
+                symbol: symbol.to_string(),
+                font,
+                source: FontSelectionSource::PreferredExportFallback,
+            });
+        }
+    }
+
+    let preferred_font_names: &[(&str, &str)] = match label_style {
+        Some("Title3") => &[
+            ("Blender Pro Light", "Blender Pro Light"),
+            ("Blender Pro Regular", "Blender Pro Regular"),
+            ("Blender Pro Thin", "Blender Pro Thin"),
+            ("Blender Pro Book", "Blender Pro Book"),
+            ("Blender Pro Medium", "Blender Pro Medium"),
+            ("CIG Drake Font", "CIGDrake"),
+        ],
+        _ => &[
+            ("Blender Pro Book", "Blender Pro Book"),
+            ("Blender Pro Medium", "Blender Pro Medium"),
+            ("Outfit", "Outfit"),
+            ("Open Sans", "Open Sans"),
+            ("CIG Drake Font", "CIGDrake"),
+        ],
+    };
+    for (query, label) in preferred_font_names {
+        if let Some(font) = ctx.assets.find_font_by_name(query) {
+            return Some(SelectedImportedFont {
+                symbol: label.to_string(),
+                font,
+                source: FontSelectionSource::PreferredNameFallback,
+            });
+        }
+    }
+    None
+}
+
+fn resolved_font_record_value(style: Option<&UiIrTextStyle>) -> Option<&serde_json::Value> {
+    let record = style?.resolved_font_record.as_ref()?;
+    Some(record.get("_RecordValue_").unwrap_or(record))
+}
+
+fn font_symbol_from_text_style(style: Option<&UiIrTextStyle>) -> Option<&str> {
+    resolved_font_record_value(style)
+        .and_then(|value| value.get("font"))
+        .and_then(|value| value.as_str())
+        .filter(|symbol| !symbol.is_empty())
+}
+
+fn font_style_has_paint_file(style: Option<&UiIrTextStyle>) -> bool {
+    resolved_font_record_value(style)
+        .and_then(|value| value.get("paintFile"))
+        .and_then(|value| value.as_str())
+        .is_some_and(|paint_file| !paint_file.trim().is_empty())
+}
+
+fn swf_text_size_calibration_for_style(style: Option<&UiIrTextStyle>) -> f32 {
+    if font_symbol_from_text_style(style).is_some_and(|symbol| symbol.eq_ignore_ascii_case("$Low-Reg")) {
+        return LOW_REG_SWF_SIZE_CALIBRATION;
+    }
+    if font_style_has_paint_file(style) {
+        PAINT_FILE_SWF_SIZE_CALIBRATION
+    } else {
+        SWF_TEXT_RENDER_SIZE_CALIBRATION
+    }
+}
+
+fn swf_style_should_fit_to_rect(style: Option<&UiIrTextStyle>) -> bool {
+    !font_symbol_from_text_style(style).is_some_and(|symbol| symbol.eq_ignore_ascii_case("$Low-Reg"))
+}
+

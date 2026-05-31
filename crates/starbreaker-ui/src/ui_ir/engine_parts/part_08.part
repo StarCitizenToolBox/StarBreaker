@@ -1,0 +1,437 @@
+fn separator_style_from_standard_record(
+    standard: &serde_json::Value,
+    selected_style_slug: &str,
+) -> Option<SeparatorStyleSource> {
+    let brand_styles = standard.get("_RecordValue_")?.get("brandStyles")?.as_array()?;
+    for brand_style in brand_styles {
+        let brand_identifier = brand_style.get("brandIdentifier").and_then(|value| value.as_str());
+        if style_source_slug(brand_identifier).as_deref() != Some(selected_style_slug) {
+            continue;
+        }
+
+        let mut source = SeparatorStyleSource::default();
+        for modifier in brand_style
+            .get("entries")
+            .and_then(|entries| entries.as_array())
+            .into_iter()
+            .flatten()
+            .flat_map(|entry| entry.get("modifiers").and_then(|modifiers| modifiers.as_array()))
+            .flatten()
+        {
+            let field = modifier_field_name(modifier).unwrap_or_default();
+            if field.eq_ignore_ascii_case("Alpha") {
+                source.alpha_override = modifier
+                    .get("value")
+                    .and_then(|value| value.as_f64())
+                    .map(|value| (value as f32).clamp(0.0, 1.0));
+                continue;
+            }
+
+            if !field.eq_ignore_ascii_case("FillColor")
+                && !field.eq_ignore_ascii_case("BackgroundColor")
+            {
+                continue;
+            }
+
+            let Some(color_value) = modifier.get("color") else {
+                continue;
+            };
+            source.colour = parse_raw_colour(color_value);
+            source.colour_token = colour_style_token(color_value);
+            source.colour_alpha = color_value
+                .get("alpha")
+                .and_then(|value| value.as_f64())
+                .map(|value| (value as f32).clamp(0.0, 1.0))
+                .or_else(|| source.colour.map(|colour| colour[3]));
+        }
+
+        if source.colour.is_some() || source.colour_token.is_some() || source.alpha_override.is_some() {
+            return Some(source);
+        }
+    }
+
+    None
+}
+
+fn style_source_slug(source: Option<&str>) -> Option<String> {
+    let source = source?.trim();
+    if source.is_empty() {
+        return None;
+    }
+
+    let source = source.strip_prefix("canvas:").unwrap_or(source);
+    let basename = source.rsplit(['/', '\\']).next().unwrap_or(source);
+    let slug = basename.strip_suffix(".json").unwrap_or(basename).to_ascii_lowercase();
+    (!slug.is_empty()).then_some(slug)
+}
+
+fn modifier_field_name(modifier: &serde_json::Value) -> Option<&str> {
+    modifier
+        .get("field")
+        .and_then(|field| field.as_str().or_else(|| field.get("value").and_then(|value| value.as_str())))
+}
+
+fn stroke_colour_token_from_raw(raw: &serde_json::Value) -> Option<String> {
+    raw.get("StrokeColorToken")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+        .or_else(|| raw.get("StrokeColor").and_then(colour_style_token))
+}
+
+fn icon_tint_colour_token_from_raw(raw: &serde_json::Value, allow_fill_colour: bool) -> Option<String> {
+    raw.get("iconProperties")
+        .and_then(|properties| properties.get("color"))
+        .and_then(colour_style_token)
+        .or_else(|| svg_fill_overlay_colour_token_from_raw(raw))
+        .or_else(|| {
+            allow_fill_colour.then(|| {
+                raw.get("FillColorToken")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|token| !token.is_empty())
+                    .map(str::to_owned)
+            }).flatten()
+        })
+        .or_else(|| {
+            allow_fill_colour.then(|| raw.get("FillColor").and_then(colour_style_token)).flatten()
+        })
+}
+
+fn svg_fill_overlay_colour_from_raw(raw: &serde_json::Value) -> Option<[f32; 4]> {
+    let svg_fill = raw.get("svgFill")?;
+    let render_shape = svg_fill
+        .get("renderShape")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let enable_color_overlay = svg_fill
+        .get("enableColorOverlay")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if !render_shape || !enable_color_overlay {
+        return None;
+    }
+
+    parse_raw_colour(svg_fill.get("color")?)
+}
+
+fn svg_fill_overlay_colour_token_from_raw(raw: &serde_json::Value) -> Option<String> {
+    let svg_fill = raw.get("svgFill")?;
+    let render_shape = svg_fill
+        .get("renderShape")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let enable_color_overlay = svg_fill
+        .get("enableColorOverlay")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if !render_shape || !enable_color_overlay {
+        return None;
+    }
+
+    svg_fill.get("color").and_then(colour_style_token)
+}
+
+fn svg_fill_overlay_alpha_from_raw(raw: &serde_json::Value) -> Option<f32> {
+    let svg_fill = raw.get("svgFill")?;
+    let render_shape = svg_fill
+        .get("renderShape")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let enable_color_overlay = svg_fill
+        .get("enableColorOverlay")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if !render_shape || !enable_color_overlay {
+        return None;
+    }
+
+    svg_fill
+        .get("color")
+        .and_then(|value| value.get("alpha"))
+        .and_then(|value| value.as_f64())
+        .map(|value| (value as f32).clamp(0.0, 1.0))
+}
+
+fn text_colour_token_from_raw(raw: &serde_json::Value) -> Option<String> {
+    raw.get("FillColorToken")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+        .or_else(|| raw.get("color").and_then(colour_style_token))
+        .or_else(|| raw.get("textColor").and_then(colour_style_token))
+        .or_else(|| raw.get("textColour").and_then(colour_style_token))
+        .or_else(|| raw.get("FillColor").and_then(colour_style_token))
+}
+
+fn auto_font_size_enabled(raw: &serde_json::Value) -> bool {
+    raw.get("autoFontSize")
+        .or_else(|| raw.get("AutoFontSize"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
+fn auto_font_size_from_signals(
+    node: &crate::bb_scene::BbNode,
+    node_rect_h: f32,
+    resolved_text: Option<&str>,
+) -> Option<f32> {
+    if !auto_font_size_enabled(&node.raw) {
+        return None;
+    }
+
+    let text = resolved_text.map(str::trim).filter(|value| !value.is_empty())?;
+    let text_len = text.chars().count();
+    let multiline = text.lines().nth(1).is_some();
+    let base_size = if matches!(node.ty, BbNodeType::WidgetText) {
+        if multiline {
+            (node_rect_h * 0.42).clamp(24.0, 160.0)
+        } else {
+            (node_rect_h * 0.72).clamp(36.0, 220.0)
+        }
+    } else if multiline {
+        (node_rect_h * 0.18).clamp(18.0, 72.0)
+    } else {
+        (node_rect_h * 0.28).clamp(18.0, 96.0)
+    };
+    let overflow_threshold = if multiline {
+        18
+    } else if matches!(node.ty, BbNodeType::WidgetText) {
+        8
+    } else {
+        10
+    };
+    let reduction_per_char = if matches!(node.ty, BbNodeType::WidgetText) {
+        1.2
+    } else {
+        2.0
+    };
+    let reduction_cap = if matches!(node.ty, BbNodeType::WidgetText) {
+        0.2
+    } else {
+        0.35
+    };
+    let overflow = text_len.saturating_sub(overflow_threshold) as f32;
+    let reduction = (overflow * reduction_per_char).min(base_size * reduction_cap);
+    let sized = (base_size - reduction).max(18.0);
+
+    if matches!(node.ty, BbNodeType::WidgetText) {
+        if let Some(authored_font_size) = font_size_fixed_value_from_raw(node) {
+            let short_single_line = !multiline && text_len <= 12;
+            let floor = if short_single_line {
+                (authored_font_size * 4.0).max(18.0)
+            } else {
+                18.0
+            };
+            let ceiling = (authored_font_size * 4.0).max(floor);
+            return Some(sized.clamp(floor, ceiling));
+        }
+    }
+
+    Some(sized)
+}
+
+fn semantic_text_colour_token_from_style_tags(
+    tags: &[UiIrStyleTag],
+    label_style: Option<&str>,
+) -> Option<String> {
+    let style_name = label_style
+        .map(str::trim)
+        .unwrap_or_default();
+    let is_title_style = !style_name.is_empty() && style_name.starts_with("Title");
+    let is_heading_style = !style_name.is_empty() && style_name.starts_with("Heading");
+
+    if is_heading_style
+        && tags.iter().any(|tag| {
+            matches!(
+                tag.tag_name.as_deref(),
+                Some("Target") | Some("TargetStatus") | Some("Text_Header")
+            )
+        })
+    {
+        return Some("Base".to_string());
+    }
+
+    if !is_title_style {
+        return None;
+    }
+
+    tags.iter().find_map(|tag| match tag.tag_name.as_deref() {
+        Some("Primary") => Some("Bright".to_string()),
+        _ => None,
+    })
+}
+
+fn resolved_style_tags_for_node(
+    canvas_fetcher: Option<&dyn CanvasFetcher>,
+    scene: &crate::bb_scene::BbScene,
+    node: &crate::bb_scene::BbNode,
+    node_id: BbNodeId,
+    binding_resolver: &BindingResolver,
+    defaults: &DefaultValueRegistry,
+) -> Vec<UiIrStyleTag> {
+    let mut resolved = node.raw
+        .get("styleTags")
+        .and_then(|v| v.as_array())
+        .map(|tags| {
+            tags.iter()
+                .filter_map(|tag| {
+                    let uuid = tag
+                        .get("_RecordId_")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)?;
+
+                    let resolved_record = resolve_style_tag_record(
+                        canvas_fetcher,
+                        tag,
+                        tag.get("_RecordPath_")
+                            .and_then(|v| v.as_str())
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or(""),
+                        tag.get("_RecordName_")
+                            .and_then(|v| v.as_str())
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or(""),
+                        &uuid,
+                    );
+
+                    let tag_name = resolved_record
+                        .as_ref()
+                        .and_then(|record| record.get("_RecordValue_"))
+                        .and_then(|v| v.get("tagName"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned);
+
+                    Some(UiIrStyleTag { uuid, tag_name })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+        if let Some(primary_state_tag) = binding_resolver.resolve_field_text(node_id, "PrimaryStateTag", defaults)
+        && let Some(tag_uuid) = parse_tag_uuid_from_reference(&primary_state_tag)
+            && !resolved.iter().any(|tag| tag.uuid == tag_uuid)
+    {
+        let tag_ref = serde_json::json!({
+            "_RecordId_": tag_uuid,
+            "_RecordName_": primary_state_tag,
+        });
+        let resolved_record = resolve_style_tag_record(
+            canvas_fetcher,
+            &tag_ref,
+            "",
+            &primary_state_tag,
+            &tag_uuid,
+        );
+        let tag_name = resolved_record
+            .as_ref()
+            .and_then(|record| record.get("_RecordValue_"))
+            .and_then(|v| v.get("tagName"))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+        resolved.push(UiIrStyleTag {
+            uuid: tag_uuid,
+            tag_name,
+        });
+    }
+
+    let mut ancestor_id = node.parent;
+    while let Some(parent_id) = ancestor_id {
+        let parent_node = scene.nodes.get(&parent_id);
+        if let Some(parent_primary_state_tag) =
+            binding_resolver.resolve_field_text(parent_id, "PrimaryStateTag", defaults)
+            && let Some(tag_uuid) = parse_tag_uuid_from_reference(&parent_primary_state_tag)
+                && !resolved.iter().any(|tag| tag.uuid == tag_uuid)
+        {
+            let tag_ref = serde_json::json!({
+                "_RecordId_": tag_uuid,
+                "_RecordName_": parent_primary_state_tag,
+            });
+            let resolved_record = resolve_style_tag_record(
+                canvas_fetcher,
+                &tag_ref,
+                "",
+                &parent_primary_state_tag,
+                &tag_uuid,
+            );
+            let tag_name = resolved_record
+                .as_ref()
+                .and_then(|record| record.get("_RecordValue_"))
+                .and_then(|v| v.get("tagName"))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            resolved.push(UiIrStyleTag {
+                uuid: tag_uuid,
+                tag_name,
+            });
+        }
+
+        ancestor_id = parent_node.and_then(|parent| parent.parent);
+    }
+
+    resolved
+}
+
+fn parse_tag_uuid_from_reference(reference: &str) -> Option<String> {
+    let trimmed = reference.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let candidate = trimmed
+        .rsplit('.')
+        .next()
+        .unwrap_or(trimmed)
+        .trim();
+    let is_uuid = candidate.len() == 36
+        && candidate
+            .chars()
+            .enumerate()
+            .all(|(i, ch)| match i {
+                8 | 13 | 18 | 23 => ch == '-',
+                _ => ch.is_ascii_hexdigit(),
+            });
+    is_uuid.then(|| candidate.to_ascii_lowercase())
+}
+
+fn default_style_text_colour_token_from_raw(
+    raw: &serde_json::Value,
+    node_type: &BbNodeType,
+    is_secondary: bool,
+) -> Option<String> {
+    if is_secondary {
+        return None;
+    }
+    if !node_type_name(node_type).eq_ignore_ascii_case("BuildingBlocks_ComponentLabelCaptionPair") {
+        return None;
+    }
+
+    raw.get("__BrandIdentifier")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|identifier| {
+            let lower = identifier.to_ascii_lowercase();
+            lower.starts_with("s_") || lower.starts_with("gen_")
+        })
+        .map(|_| "Base".to_string())
+}
+
+fn colour_style_token(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("_Type_")
+        .and_then(|v| v.as_str())
+        .filter(|ty| *ty == "BuildingBlocks_ColorStyle")?;
+
+    value
+        .get("color")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+}
+
