@@ -160,13 +160,50 @@ not only once at the end.
 
 ## Target Onboarding Happy Path
 
+Use this path only after the visual output has been fixed and explicitly approved as a new `gold` or `platinum` standard.
+
 1. Add or replace the manifest target with `./scripts/add_ui_regression_target.sh`.
-2. Generate local visual artifacts with `./scripts/generate_ui_regression_artifacts.sh` when visual inspection is needed.
-3. Generate or refresh the IR-only baseline with `./scripts/freeze_ui_snapshot_ir.sh --approver <name> --reason <why>`.
-4. Run `./scripts/validate_ui_snapshot_freeze.sh`.
-5. Run `./scripts/validate_ui_regression_artifacts.sh --quick`.
-6. Run the required full-scope UI regression path.
-7. Ask for explicit approval before committing any manifest, tier, or freeze update.
+
+```bash
+bash ./scripts/add_ui_regression_target.sh \
+	--id <target_id> \
+	--tier <gold|platinum> \
+	--source-generated-png ships/Data/UI/Generated/ship/<manufacturer>/<Ship>/<generated-file>.png
+```
+
+2. Refresh the IR-only baseline freeze with an explicit approver and reason.
+
+```bash
+bash ./scripts/freeze_ui_snapshot_ir.sh \
+	--approver <name> \
+	--reason "Add <target_id> as <gold|platinum> standard"
+```
+
+3. Regenerate local source UI images and copy all manifest artifacts into `test-artifacts/ui`.
+
+```bash
+SC_DATA_P4K="$HOME/Games/star-citizen/drive_c/Program Files/Roberts Space Industries/StarCitizen/LIVE/Data.p4k" \
+	bash ./scripts/generate_ui_regression_artifacts.sh
+```
+
+4. Freeze the artifact metadata after the artifact generator completes.
+
+```bash
+bash ./scripts/freeze_ui_regression_artifacts.sh \
+	--approver <name> \
+	--reason "Add <target_id> as <gold|platinum> standard"
+```
+
+5. Run `bash ./scripts/validate_ui_snapshot_freeze.sh`.
+6. Run `bash ./scripts/validate_ui_regression_artifacts.sh --quick`.
+7. Run the required full-scope UI regression path.
+8. Ask for explicit approval before committing any manifest, tier, or freeze update.
+
+Notes:
+
+- Use `--replace` with `add_ui_regression_target.sh` when intentionally changing an existing target path, tier, or ROI.
+- Do not commit `test-artifacts/ui/*.png`; the freeze commit should carry manifest/freeze metadata, not binary image artifacts.
+- If a generated image is stale, re-export the owning entity first or let `generate_ui_regression_artifacts.sh` refresh it from the manifest source paths.
 
 ## Tier Change Checklist
 

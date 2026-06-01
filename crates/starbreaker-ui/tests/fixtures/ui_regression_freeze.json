@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "frozen_at": "2026-05-31T22:10:44Z",
+  "frozen_at": "2026-06-01T01:15:18Z",
   "approver": "tom",
-  "reason": "Remove annunciator from gold/platinum standard target set",
+  "reason": "Restore fixed Clipper annunciator as gold standard",
   "signature": null,
   "manifest_path": "crates/starbreaker-ui/tests/fixtures/ui_ir/ui_snapshot_manifest.json",
   "artifacts": [
@@ -11,7 +11,7 @@
       "tier": "platinum",
       "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_i_med_medicalbed_a.png",
       "artifact_path": "test-artifacts/ui/ui_target_a.png",
-      "sha256": "e42071e0ba2cb8c74e0b98a5311682c79dfba25753e7286f001a59e36e426609",
+      "sha256": "a0eff2445f6ae316f4a84f790abb3afe32e29ddaf944a938f1f9e93e7e4a60ed",
       "width": 1920,
       "height": 1080,
       "channels": "srgba"
@@ -21,7 +21,7 @@
       "tier": "platinum",
       "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_i_med_medicalendofbed_a.png",
       "artifact_path": "test-artifacts/ui/ui_target_b.png",
-      "sha256": "971593f01fab14c826cb3412aba970242d6b871e751d869ca015ad5c5d5ba8a8",
+      "sha256": "013852c9e1f2afacd0112ba93940e40cb226dcfce4360f71c504b262a1be5215",
       "width": 1920,
       "height": 1080,
       "channels": "srgba"
@@ -34,6 +34,16 @@
       "sha256": "e2d5c793328d543c5a68c0a76e9921274932d816c91c5ffefb32bb0293f6f80e",
       "width": 1920,
       "height": 1080,
+      "channels": "srgba"
+    },
+    {
+      "id": "eng_annunciator_master_left",
+      "tier": "gold",
+      "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_h_eng_annunciator_master_left.png",
+      "artifact_path": "test-artifacts/ui/eng_annunciator_master_left.png",
+      "sha256": "594e82cc42546560d8889967a2ccc8c860fa1be7e93931dbcb87c9aa0bac1cfc",
+      "width": 1920,
+      "height": 432,
       "channels": "srgba"
     }
   ]
