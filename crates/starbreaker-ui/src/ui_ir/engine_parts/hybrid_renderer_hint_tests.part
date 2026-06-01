@@ -1,0 +1,50 @@
+    #[test]
+    fn compile_ir_with_selected_swf_source_preserves_hybrid_renderer_hint() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.CustomShapeWithSwf",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "label",
+                        "text": "READY",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 30.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetCustomShape",
+                        "name": "shape",
+                        "shapeType": "line",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 20.0},
+                            "height": {"behavior": "Fixed", "value": 20.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-custom-shape-with-swf",
+            Some("BuildingBlocks_Canvas.CustomShapeWithSwf"),
+            (100, 100),
+            &defaults(),
+            None,
+            Some("Data\\UI\\ShipInterface\\assets\\SWF\\test.swf".to_string()),
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        assert_eq!(ir.renderer_hint, UiRendererHint::Hybrid);
+    }

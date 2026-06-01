@@ -1,0 +1,88 @@
+    #[test]
+    fn manufacturer_logo_tint_prefers_source_icon_tint_over_derived_accent() {
+        let style = stub_style();
+        let defaults = crate::defaults::DefaultValueRegistry::with_well_known_path_defaults();
+        let assets = minimal_swf_assets();
+        let ctx = ComposeContext {
+            style: &style,
+            defaults: &defaults,
+            assets: &assets,
+        };
+        let mut node = blank_node("widget_manufacturer_logo");
+        node.icon_tint_colour = Some([0.2, 0.6, 0.9, 1.0]);
+
+        assert_eq!(manufacturer_logo_tint(&node, &ctx), [0.2, 0.6, 0.9, 1.0]);
+    }
+
+
+    #[test]
+    fn manufacturer_logo_tint_falls_back_to_neutral_when_ir_has_no_style() {
+        let style = stub_style();
+        let defaults = crate::defaults::DefaultValueRegistry::with_well_known_path_defaults();
+        let assets = minimal_swf_assets();
+        let ctx = ComposeContext {
+            style: &style,
+            defaults: &defaults,
+            assets: &assets,
+        };
+        let node = blank_node("widget_manufacturer_logo");
+
+        assert_eq!(manufacturer_logo_tint(&node, &ctx), [1.0, 1.0, 1.0, 1.0]);
+    }
+
+
+    #[test]
+    fn secondary_close_button_tint_prefers_source_stroke_over_derived_accent() {
+        let style = stub_style();
+        let defaults = crate::defaults::DefaultValueRegistry::with_well_known_path_defaults();
+        let assets = minimal_swf_assets();
+        let ctx = ComposeContext {
+            style: &style,
+            defaults: &defaults,
+            assets: &assets,
+        };
+        let mut node = blank_node("widget_close_button_secondary");
+        node.stroke_colour = Some([0.3, 0.7, 0.2, 1.0]);
+
+        assert_eq!(secondary_close_button_tint(&node, &ctx), [0.3, 0.7, 0.2, 1.0]);
+    }
+
+
+    #[test]
+    fn secondary_close_button_tint_falls_back_to_neutral_when_ir_has_no_style() {
+        let style = stub_style();
+        let defaults = crate::defaults::DefaultValueRegistry::with_well_known_path_defaults();
+        let assets = minimal_swf_assets();
+        let ctx = ComposeContext {
+            style: &style,
+            defaults: &defaults,
+            assets: &assets,
+        };
+        let node = blank_node("widget_close_button_secondary");
+
+        assert_eq!(secondary_close_button_tint(&node, &ctx), [1.0, 1.0, 1.0, 1.0]);
+    }
+
+
+    #[test]
+    fn custom_shape_svg_uses_source_over_blend() {
+        let mut node = blank_node("widget_custom_shape");
+        node.custom_shape = Some(UiIrCustomShape {
+            shape_type: None,
+            shape: None,
+            svg_path: None,
+            render_shape: Some(true),
+            enable_nine_slice_rect: None,
+            nine_slice_rect: None,
+            nine_slice_scale: None,
+        });
+
+        assert_eq!(
+            image_blend_mode_for_node(&node, "UI/Textures/Vector/General/FingerPrint.svg"),
+            BlendMode::SourceOver
+        );
+        assert_eq!(
+            image_blend_mode_for_node(&node, "UI/Textures/I_InteractiveScreens/Med/fingerprint_glow.tif"),
+            BlendMode::Plus
+        );
+    }

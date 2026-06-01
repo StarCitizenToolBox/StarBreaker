@@ -141,12 +141,10 @@ struct FnCtx<'a> {
     font_size_related_writes: Vec<(String, String)>,
     /// Variable writes that may feed text-size logic.
     font_size_related_var_writes: Vec<(String, String)>,
-    /// SWF version (needed to construct nested readers).
-    version: u8,
 }
 
 impl<'a> FnCtx<'a> {
-    fn new(version: u8) -> Self {
+    fn new() -> Self {
         Self {
             constant_pool: vec![],
             stack: vec![],
@@ -160,7 +158,6 @@ impl<'a> FnCtx<'a> {
             interesting_member_writes: vec![],
             font_size_related_writes: vec![],
             font_size_related_var_writes: vec![],
-            version,
         }
     }
 
@@ -690,7 +687,7 @@ fn analyse_action_block<'a>(
     version: u8,
     parent_pool: &[String],
 ) -> FnResult {
-    let mut ctx = FnCtx::new(version);
+    let mut ctx = FnCtx::new();
     // Inherit the outer constant pool so inner blocks can resolve references.
     ctx.constant_pool = parent_pool.to_vec();
 
@@ -973,25 +970,6 @@ fn print_fn_result(result: &FnResult, depth: usize) {
     for child in &result.children {
         print_fn_result(child, depth + 1);
     }
-}
-
-// ── Constant-pool string dump ────────────────────────────────────────────────
-
-fn collect_all_strings(result: &FnResult) -> Vec<String> {
-    // Re-parse to get the constant pool (we'd need to thread it through;
-    // instead, just collect all LiteralStr arguments from call sites).
-    let mut strings = vec![];
-    for c in &result.call_sites {
-        for a in &c.arg_kinds {
-            if a.starts_with('"') {
-                strings.push(a.trim_matches('"').to_string());
-            }
-        }
-    }
-    for child in &result.children {
-        strings.extend(collect_all_strings(child));
-    }
-    strings
 }
 
 // ── P4K extraction helper ────────────────────────────────────────────────────
