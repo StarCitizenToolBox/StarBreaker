@@ -1308,13 +1308,11 @@ impl StarBreakerMcp {
         };
         let manufacturer = req.manufacturer.as_deref();
         let fetch = |path: &str| index.fetch_record_json(path);
-        let defaults = starbreaker_ui::DefaultValueRegistry::with_well_known_path_defaults();
-        let scene = match starbreaker_ui::bb_resolve::resolve_canvas_graph_with_loc_and_defaults(
+        let scene = match starbreaker_ui::bb_resolve::resolve_canvas_graph_with_loc(
             &canvas,
             manufacturer,
             &fetch,
             None,
-            &defaults,
         ) {
             Ok(scene) => scene,
             Err(e) => return mcp_error_json("scene_resolve_failed", e),
