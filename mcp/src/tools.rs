@@ -2794,13 +2794,13 @@ mod ui_regression_registry_tests {
             json.get("summary")
                 .and_then(|v| v.get("total_targets"))
                 .and_then(|v| v.as_u64()),
-            Some(3)
+            Some(4)
         );
         assert_eq!(
             json.get("summary")
                 .and_then(|v| v.get("matched"))
                 .and_then(|v| v.as_u64()),
-            Some(3)
+            Some(4)
         );
     }
 
@@ -2920,7 +2920,7 @@ mod ui_regression_registry_tests {
     fn ui_regression_validate_reports_missing_freeze_file() {
         let server = StarBreakerMcp::new(None);
         let response = server.ui_regression_validate(Parameters(UiRegressionValidateRequest {
-            mode: Some("quick".to_string()),
+            mode: Some("full".to_string()),
             manifest_path: None,
             freeze_path: Some("does/not/exist-freeze.json".to_string()),
         }));
