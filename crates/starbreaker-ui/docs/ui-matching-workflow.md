@@ -45,6 +45,19 @@ MCP-first policy for UI matching:
 - Prefer StarBreaker MCP query tools first when investigating assets, style records, DataCore values, and chunk/material semantics.
 - Use CLI export commands for end-to-end render generation and regression artifact production, not for exploratory data archaeology that MCP can answer faster.
 
+UI-specific MCP diagnostics to run before ad-hoc shell probes or temporary logging:
+
+- `ui_canvas_style_inventory`: inspect authored style containers for a local decompiled canvas. Use this to confirm whether relevant entries live in `embeddedStyles`, `defaultStyles.entries`, `brandStyles[].entries`, or scene-node `inlineStyles`, and to inspect compact condition/modifier summaries.
+- `ui_scene_style_probe`: resolve the local BuildingBlocks canvas and list matching scene nodes with style tags, raw color/tint fields, and `__AppliedStyleEntries`. Use this to prove which authored style entries actually matched the node before changing style logic.
+- `ui_ir_query`: compile the canvas to canonical IR and return matching nodes with computed rects, draw rects, text bounds, style tags, resolved tokens, and colours. Use this for the numeric evidence that previously required `query_ui_layout` shell runs.
+
+For style/tag regressions, the expected investigation order is:
+
+1. Run `ui_canvas_style_inventory` on the source canvas and identify the actual style container and entry names involved.
+2. Run `ui_scene_style_probe` for the affected node family to confirm state tags, raw tokens/colours, and applied style-entry order.
+3. Run `ui_ir_query` for the same node family to confirm what the renderer will consume.
+4. Only then edit the owning stage. If the change has no effect in `ui_scene_style_probe` or `ui_ir_query`, remove it before trying another hypothesis.
+
 IR style authority rule:
 
 - IR is the sole styling authority for rendered UI semantics.

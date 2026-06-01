@@ -29,3 +29,4 @@ starbreaker-common = { path = "../crates/starbreaker-common" }
 starbreaker-chunks = { path = "../crates/starbreaker-chunks" }
 starbreaker-dds = { path = "../crates/starbreaker-dds" }
 starbreaker-3d = { path = "../crates/starbreaker-3d" }
+starbreaker-ui = { path = "../crates/starbreaker-ui" }

@@ -28,15 +28,21 @@ Important context:
 
 Operating rules:
 1. Follow `crates/starbreaker-ui/docs/ui-matching-workflow.md`.
-2. Use StarBreaker MCP tools first for investigation (DataCore/P4k/material/
-	 chunk lookups) whenever possible; use CLI export primarily for rendering and
-	 regression artifact generation.
-3. Keep IR as styling authority. Do not invent style semantics in renderer code.
-4. No hard-coded per-screen or per-name branches in production logic.
-5. If a change has no measurable effect, remove it immediately.
-6. Keep code lean: no dead helpers, no stale fallback paths, no layered
+2. Use StarBreaker MCP tools first for investigation whenever possible; use CLI
+	 export primarily for rendering and regression artifact generation.
+3. For UI style/layout questions, run the dedicated MCP diagnostics before
+	 ad-hoc shell probes or code edits:
+	 - `ui_canvas_style_inventory` to locate authored style containers and entries.
+	 - `ui_scene_style_probe` to confirm scene nodes, tags, raw colour fields, and
+		 matched applied style entries.
+	 - `ui_ir_query` to confirm canonical IR tokens, draw rects, text bounds, and
+		 renderer inputs.
+4. Keep IR as styling authority. Do not invent style semantics in renderer code.
+5. No hard-coded per-screen or per-name branches in production logic.
+6. If a change has no measurable effect, remove it immediately.
+7. Keep code lean: no dead helpers, no stale fallback paths, no layered
 	 speculative logic left behind.
-7. Run regular regression checks to prevent frozen-image regressions.
+8. Run regular regression checks to prevent frozen-image regressions.
 
 Required workflow:
 
@@ -54,6 +60,11 @@ Phase A - Baseline and decomposition
 	- bb_layout
 	- ui_ir compile/normalization
 	- ir_compose draw-time behavior
+- For each style/color/alpha/text-bound issue, capture MCP evidence before
+	editing:
+	- authored style entries from `ui_canvas_style_inventory`
+	- resolved scene node applied entries from `ui_scene_style_probe`
+	- canonical renderer inputs from `ui_ir_query`
 
 Phase B - Plan
 - Produce a concrete execution plan from the catalog.
@@ -68,7 +79,9 @@ Phase C - Execute iteratively
 	2) regenerate the target artifact,
 	3) compare against the same catalog,
 	4) update the remaining-differences list.
-- Do not keep no-effect code.
+- Do not keep no-effect code. If MCP diagnostics or rendered artifacts show no
+	measurable improvement, remove the experiment before trying the next
+	hypothesis.
 
 Phase D - Regression safety (run frequently, not just once)
 - Run required UI regression path from ui-matching-workflow.md.
