@@ -285,7 +285,7 @@ fn build_ui_ir_nodes(
                 .as_ref()
                 .is_some_and(|payload| matches!(payload, UiIrTextPayload::Resolved { text } if !text.trim().is_empty()));
 
-        let mut rect = if suppress_placeholder_only_label_caption_pair {
+        let rect = if suppress_placeholder_only_label_caption_pair {
             layout_rect
         } else {
             maybe_reanchor_active_label_caption_pair_rect(scene, &layout, id, node, layout_rect)
