@@ -357,10 +357,16 @@ fn icon_tint_colour_token_from_style_tags(
 }
 
 fn border_from_style_tags(
+    scene: &BbScene,
+    node: &BbNode,
     resolved_style_tags: &[UiIrStyleTag],
     node_type: &BbNodeType,
 ) -> Option<UiIrBorder> {
     if !matches!(node_type, BbNodeType::DisplayWidget) {
+        return None;
+    }
+
+    if is_annunciator_inner_item(scene, node, node_type) {
         return None;
     }
 
@@ -545,7 +551,7 @@ fn annunciator_gradient_tint_token(
     }
 
     if should_activate_annunciator_gradient(node, resolved_style_tags) {
-        return None;
+        return Some("Accent3".to_string());
     }
 
     None
@@ -655,6 +661,66 @@ fn tag_matches_any(resolved_style_tags: &[UiIrStyleTag], names: &[&str], uuids: 
                 .any(|candidate| trimmed.eq_ignore_ascii_case(candidate))
         }) || uuids.iter().any(|candidate| tag.uuid.eq_ignore_ascii_case(candidate))
     })
+}
+
+fn annunciator_inner_item_fill_token(
+    scene: &BbScene,
+    node: &BbNode,
+    node_type: &BbNodeType,
+    binding_resolver: &BindingResolver,
+    defaults: &DefaultValueRegistry,
+    resolved_style_tags: &[UiIrStyleTag],
+) -> Option<String> {
+    if !is_annunciator_inner_item(scene, node, node_type) {
+        return None;
+    }
+
+    if node
+        .children
+        .iter()
+        .filter_map(|child_id| scene.nodes.get(child_id))
+        .any(is_annunciator_gradient_image)
+    {
+        return None;
+    }
+
+    if has_annunciator_critical_state_tag(resolved_style_tags)
+        || annunciator_slot_label_matches(node, scene, binding_resolver, defaults, "WPN")
+    {
+        return Some("Accent3".to_string());
+    }
+
+    None
+}
+
+fn is_annunciator_inner_item(scene: &BbScene, node: &BbNode, node_type: &BbNodeType) -> bool {
+    if !matches!(node_type, BbNodeType::DisplayWidget) {
+        return false;
+    }
+
+    let mut ancestor_id = node.parent;
+    while let Some(id) = ancestor_id {
+        let Some(ancestor) = scene.nodes.get(&id) else {
+            return false;
+        };
+        if ancestor.name.trim().starts_with("Item ")
+            && ancestor
+                .parent
+                .and_then(|parent_id| scene.nodes.get(&parent_id))
+                .is_some_and(|parent| {
+                    parent
+                        .name
+                        .trim()
+                        .eq_ignore_ascii_case("root_annunciator_items")
+                })
+        {
+            return true;
+        }
+
+        ancestor_id = ancestor.parent;
+    }
+
+    false
 }
 
 fn colour_style_alpha(value: &serde_json::Value) -> Option<f32> {

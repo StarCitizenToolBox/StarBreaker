@@ -830,4 +830,93 @@ mod tests {
         assert_eq!(border.bottom.colour_token.as_deref(), Some("Accent3"));
         assert_eq!(border.left.colour_token.as_deref(), Some("Accent3"));
     }
+
+    #[test]
+    fn compile_ir_fills_critical_annunciator_inner_item_without_inner_border() {
+        let tag_db_path = "file://tagdatabase.tagdatabase.json";
+        let screen_tag_id = "ann-screen";
+        let item_tag_id = "ann-item";
+        let critical_tag_id = "ann-critical";
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.TestAnnunciatorInnerItem",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "root_annunciator_items",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 100.0},
+                            "height": {"behavior": "Fixed", "value": 100.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "Item 0",
+                        "parent": "_PointsTo_:ptr:1",
+                        "styleTags": [
+                            {"_RecordPath_": tag_db_path, "_RecordName_": "Tag.ann-screen", "_RecordId_": screen_tag_id},
+                            {"_RecordPath_": tag_db_path, "_RecordName_": "Tag.ann-item", "_RecordId_": item_tag_id},
+                            {"_RecordPath_": tag_db_path, "_RecordName_": "Tag.ann-critical", "_RecordId_": critical_tag_id}
+                        ],
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 80.0},
+                            "height": {"behavior": "Fixed", "value": 80.0}
+                        }
+                    },
+                    {
+                        "_Pointer_": "ptr:3",
+                        "_Type_": "BuildingBlocks_DisplayWidget",
+                        "name": "base_SubItem",
+                        "parent": "_PointsTo_:ptr:2",
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 60.0},
+                            "height": {"behavior": "Fixed", "value": 60.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+        let tag_db = serde_json::json!({
+            "_RecordName_": "TagDatabase",
+            "_RecordValue_": {
+                "tags": [
+                    {"_RecordId_": screen_tag_id, "_RecordName_": "Tag.ann-screen", "_Type_": "Tag", "tagName": "AnnunciatorScreen", "children": []},
+                    {"_RecordId_": item_tag_id, "_RecordName_": "Tag.ann-item", "_Type_": "Tag", "tagName": "AnnunciatorItem", "children": []},
+                    {"_RecordId_": critical_tag_id, "_RecordName_": "Tag.ann-critical", "_Type_": "Tag", "tagName": "StateCritical", "children": []}
+                ]
+            }
+        });
+        let fetcher = TestCanvasFetcher {
+            by_guid: std::collections::HashMap::new(),
+            by_path: [(tag_db_path.to_string(), tag_db)].into_iter().collect(),
+        };
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            Some(&fetcher),
+            "guid-ann-inner-item",
+            Some("BuildingBlocks_Canvas.TestAnnunciatorInnerItem"),
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let inner = ir
+            .nodes
+            .iter()
+            .find(|node| node.name == "base_SubItem")
+            .expect("inner annunciator item node");
+        assert_eq!(inner.background_fill_colour_token.as_deref(), Some("Accent3"));
+        assert!(inner.border.is_none(), "inner item must not draw inherited item border");
+    }
 }

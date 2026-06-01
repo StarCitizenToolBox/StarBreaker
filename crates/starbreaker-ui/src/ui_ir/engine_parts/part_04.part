@@ -344,6 +344,8 @@ fn build_ui_ir_nodes(
             defaults,
             &resolved_style_tags,
         );
+        let is_wpn_annunciator_gradient = is_annunciator_gradient_image(node)
+            && annunciator_slot_label_matches(node, scene, &binding_resolver, defaults, "WPN");
         let mut alpha = alpha_base
             * separator_style
                 .as_ref()
@@ -362,6 +364,16 @@ fn build_ui_ir_nodes(
         let background_fill_colour_token = background_fill_colour_token_from_raw(&node.raw, allow_background_fill)
             .or_else(|| {
                 background_fill_colour_token_from_style_tags(&resolved_style_tags, &node.ty)
+            })
+            .or_else(|| {
+                annunciator_inner_item_fill_token(
+                    scene,
+                    node,
+                    &node.ty,
+                    &binding_resolver,
+                    defaults,
+                    &resolved_style_tags,
+                )
             });
         let background_fill_alpha = background_fill_alpha_from_raw(&node.raw, allow_background_fill);
         let mut background_fill_colour = allow_background_fill
@@ -404,7 +416,7 @@ fn build_ui_ir_nodes(
             {
                 base_border
             } else {
-                border_from_style_tags(&resolved_style_tags, &node.ty)
+                border_from_style_tags(scene, node, &resolved_style_tags, &node.ty)
                     .or_else(|| {
                         border_from_annunciator_background_token(
                             &resolved_style_tags,
@@ -429,18 +441,18 @@ fn build_ui_ir_nodes(
             .and_then(|i| i.tint_colour)
             .or_else(|| svg_fill_overlay_colour_from_raw(&node.raw))
             .or_else(|| custom_shape.as_ref().and_then(|_| fill_colour_from_raw_for_text(&node.raw)));
-        let icon_tint_colour_token = icon_tint_colour_token_from_raw(
-            &node.raw,
-            true,
-        )
-        .or_else(|| icon_tint_colour_token_from_style_tags(&resolved_style_tags, &node.ty))
-        .or_else(|| annunciator_gradient_tint.clone());
+        let icon_tint_colour_token = if is_annunciator_gradient_image(node) {
+            annunciator_gradient_tint.clone()
+        } else {
+            icon_tint_colour_token_from_raw(
+                &node.raw,
+                true,
+            )
+            .or_else(|| icon_tint_colour_token_from_style_tags(&resolved_style_tags, &node.ty))
+        };
         if is_annunciator_gradient_image(node) && icon_tint_colour_token.is_some() {
             icon_tint_colour = None;
-            if icon_tint_colour_token
-                .as_deref()
-                .is_some_and(|token| token.eq_ignore_ascii_case("Accent2"))
-            {
+            if is_wpn_annunciator_gradient {
                 alpha = 0.0;
             } else {
                 alpha = alpha.max(1.0);

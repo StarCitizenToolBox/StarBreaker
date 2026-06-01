@@ -508,4 +508,65 @@ mod tests_e {
             .iter()
             .any(|uuid| uuid == "1477f18d-9b3e-4e5c-8047-dc60ba606ddb"));
     }
+
+    #[test]
+    fn compile_ir_includes_ancestor_style_tags_on_child_nodes() {
+        let canvas = serde_json::json!({
+            "_RecordName_": "BuildingBlocks_Canvas.AncestorStyleTags",
+            "_RecordValue_": {
+                "size": {"x": 100, "y": 100},
+                "scene": [
+                    {
+                        "_Pointer_": "ptr:1",
+                        "_Type_": "BuildingBlocks_WidgetCanvas",
+                        "name": "parent",
+                        "styleTags": [{"_RecordId_": "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"}],
+                        "isActive": true
+                    },
+                    {
+                        "_Pointer_": "ptr:2",
+                        "_Type_": "BuildingBlocks_WidgetTextField",
+                        "name": "child",
+                        "parent": "_PointsTo_:ptr:1",
+                        "styleTags": [{"_RecordId_": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}],
+                        "size": {
+                            "width": {"behavior": "Fixed", "value": 30.0},
+                            "height": {"behavior": "Fixed", "value": 10.0}
+                        }
+                    }
+                ],
+                "operations": []
+            }
+        });
+
+        let scene = crate::bb_scene::parse_bb_canvas(&canvas).expect("scene parse");
+        let ir = compile_ui_ir_from_scene(
+            &scene,
+            None,
+            "guid-ancestor-style-tags",
+            None,
+            (100, 100),
+            &defaults(),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            100,
+        );
+
+        let node = ir
+            .nodes
+            .iter()
+            .find(|node| node.name == "child")
+            .expect("child node missing");
+        assert!(node
+            .style_tag_uuids
+            .iter()
+            .any(|uuid| uuid == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"));
+        assert!(node
+            .style_tag_uuids
+            .iter()
+            .any(|uuid| uuid == "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"));
+    }
 }

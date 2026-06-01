@@ -300,51 +300,13 @@ fn resolved_style_tags_for_node(
     binding_resolver: &BindingResolver,
     defaults: &DefaultValueRegistry,
 ) -> Vec<UiIrStyleTag> {
-    let mut resolved = node.raw
-        .get("styleTags")
-        .and_then(|v| v.as_array())
-        .map(|tags| {
-            tags.iter()
-                .filter_map(|tag| {
-                    let uuid = tag
-                        .get("_RecordId_")
-                        .and_then(|v| v.as_str())
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_owned)?;
+    let mut resolved = Vec::new();
 
-                    let resolved_record = resolve_style_tag_record(
-                        canvas_fetcher,
-                        tag,
-                        tag.get("_RecordPath_")
-                            .and_then(|v| v.as_str())
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or(""),
-                        tag.get("_RecordName_")
-                            .and_then(|v| v.as_str())
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or(""),
-                        &uuid,
-                    );
+    push_style_tags_from_raw(canvas_fetcher, node.raw.get("styleTags"), &mut resolved);
 
-                    let tag_name = resolved_record
-                        .as_ref()
-                        .and_then(|record| record.get("_RecordValue_"))
-                        .and_then(|v| v.get("tagName"))
-                        .and_then(|v| v.as_str())
-                        .map(str::to_owned);
-
-                    Some(UiIrStyleTag { uuid, tag_name })
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
-        if let Some(primary_state_tag) = binding_resolver.resolve_field_text(node_id, "PrimaryStateTag", defaults)
+    if let Some(primary_state_tag) = binding_resolver.resolve_field_text(node_id, "PrimaryStateTag", defaults)
         && let Some(tag_uuid) = parse_tag_uuid_from_reference(&primary_state_tag)
-            && !resolved.iter().any(|tag| tag.uuid == tag_uuid)
+        && !resolved.iter().any(|tag| tag.uuid == tag_uuid)
     {
         let tag_ref = serde_json::json!({
             "_RecordId_": tag_uuid,
@@ -372,6 +334,9 @@ fn resolved_style_tags_for_node(
     let mut ancestor_id = node.parent;
     while let Some(parent_id) = ancestor_id {
         let parent_node = scene.nodes.get(&parent_id);
+        if let Some(parent_node) = parent_node {
+            push_style_tags_from_raw(canvas_fetcher, parent_node.raw.get("styleTags"), &mut resolved);
+        }
         if let Some(parent_primary_state_tag) =
             binding_resolver.resolve_field_text(parent_id, "PrimaryStateTag", defaults)
             && let Some(tag_uuid) = parse_tag_uuid_from_reference(&parent_primary_state_tag)
@@ -404,6 +369,57 @@ fn resolved_style_tags_for_node(
     }
 
     resolved
+}
+
+fn push_style_tags_from_raw(
+    canvas_fetcher: Option<&dyn CanvasFetcher>,
+    raw_tags: Option<&serde_json::Value>,
+    resolved: &mut Vec<UiIrStyleTag>,
+) {
+    let Some(tags) = raw_tags.and_then(|v| v.as_array()) else {
+        return;
+    };
+
+    for tag in tags {
+        let Some(uuid) = tag
+            .get("_RecordId_")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+
+        if resolved.iter().any(|existing| existing.uuid == uuid) {
+            continue;
+        }
+
+        let resolved_record = resolve_style_tag_record(
+            canvas_fetcher,
+            tag,
+            tag.get("_RecordPath_")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(""),
+            tag.get("_RecordName_")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(""),
+            &uuid,
+        );
+
+        let tag_name = resolved_record
+            .as_ref()
+            .and_then(|record| record.get("_RecordValue_"))
+            .and_then(|v| v.get("tagName"))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+
+        resolved.push(UiIrStyleTag { uuid, tag_name });
+    }
 }
 
 fn parse_tag_uuid_from_reference(reference: &str) -> Option<String> {
