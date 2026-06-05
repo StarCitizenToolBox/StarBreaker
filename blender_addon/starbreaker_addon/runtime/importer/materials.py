@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import math
+from pathlib import Path
 from typing import Any
 
 import bpy
@@ -80,6 +81,14 @@ from .utils import (
 )
 
 
+_MESH_DECAL_CONTROL_ONLY_POM_TEXTURE_INPUTS = {
+    "TexSlot1": "TexSlot1_DecalSource",
+    "TexSlot3": "TexSlot3_NormalGloss",
+    "TexSlot4": "TexSlot4_Height",
+}
+_CONTROL_ONLY_POM_RELIEF_MODE = "control_only_pom_relief_v1"
+
+
 def _material_datablock_is_valid(material: bpy.types.Material | None) -> bool:
     if material is None:
         return False
@@ -88,6 +97,75 @@ def _material_datablock_is_valid(material: bpy.types.Material | None) -> bool:
     except ReferenceError:
         return False
     return True
+
+
+def _illum_payload_is_local_opacity_decal(payload: dict[str, Any]) -> bool:
+    if str(payload.get("shader_family", "")).strip() != "Illum":
+        return False
+    flags = payload.get("decoded_feature_flags") or {}
+    tokens = {
+        str(token).strip().upper()
+        for token in flags.get("tokens", []) or []
+        if str(token).strip()
+    }
+    if not bool(flags.get("has_decal")) or "DECAL_OPACITY_MAP" not in tokens:
+        return False
+    if bool(flags.get("has_parallax_occlusion_mapping")):
+        return False
+    virtual_inputs = {
+        str(value).strip().lower()
+        for value in payload.get("virtual_inputs", []) or []
+        if str(value).strip()
+    }
+    if virtual_inputs.intersection({"$tintpalettedecal", "$rendertotexture"}):
+        return False
+    for texture in payload.get("texture_slots", []) or []:
+        if not isinstance(texture, dict):
+            continue
+        role = str(texture.get("role", "")).strip().lower()
+        if role == "tint_palette_decal" and bool(texture.get("is_virtual")):
+            return False
+    return True
+
+
+def _mesh_decal_pom_payload_is_control_only(payload: dict[str, Any]) -> bool:
+    if str(payload.get("shader_family", "")).strip() != "MeshDecal":
+        return False
+    flags = payload.get("decoded_feature_flags") or {}
+    if not bool(flags.get("has_parallax_occlusion_mapping")):
+        return False
+    if bool(flags.get("has_decal")) or bool(flags.get("has_stencil_map")):
+        return False
+    tokens = {
+        str(token).strip().upper()
+        for token in flags.get("tokens", []) or []
+        if str(token).strip()
+    }
+    if tokens.intersection({"DECAL", "STENCIL_MAP", "DECAL_OPACITY_MAP"}):
+        return False
+    visible_roles = {
+        "decal_sheet",
+        "opacity",
+        "stencil",
+        "tint_mask",
+        "tint_palette_decal",
+        "render_to_texture",
+    }
+    for texture in payload.get("texture_slots", []) or []:
+        if not isinstance(texture, dict):
+            continue
+        role = str(texture.get("role", "")).strip().lower()
+        if role in visible_roles:
+            return False
+        slot = str(texture.get("slot", "")).strip().lower()
+        if slot in {"texslot5", "texslot6", "texslot7", "texslot8"}:
+            return False
+    virtual_inputs = {
+        str(value).strip().lower()
+        for value in payload.get("virtual_inputs", []) or []
+        if str(value).strip()
+    }
+    return not virtual_inputs.intersection({"$tintpalettedecal", "$rendertotexture"})
 
 
 def _texture_reference_uses_packed_roughness_green(texture: Any) -> bool:
@@ -138,7 +216,10 @@ class MaterialsMixin:
                 isinstance(existing_identity, str)
                 and existing_identity == cache_key
                 and existing_template_key == expected_template_key
-                and self._material_needs_mesh_decal_emission_refresh(reusable, submaterial)
+                and (
+                    self._material_needs_mesh_decal_emission_refresh(reusable, submaterial)
+                    or self._material_needs_illum_decal_alpha_mode_refresh(reusable, submaterial)
+                )
             ):
                 self._build_managed_material(reusable, sidecar_path, sidecar, submaterial, palette, cache_key)
                 self.material_cache[cache_key] = reusable
@@ -218,14 +299,25 @@ class MaterialsMixin:
         if any(node.bl_idname in {"ShaderNodeAddShader", "ShaderNodeEmission"} for node in node_tree.nodes):
             return True
 
+        required_texture_inputs = self._mesh_decal_pom_required_texture_inputs(submaterial)
+        if (
+            required_texture_inputs
+            and material.get("starbreaker_mesh_decal_material_mode") != _CONTROL_ONLY_POM_RELIEF_MODE
+        ):
+            return True
+
         for node in node_tree.nodes:
             if node.bl_idname != "ShaderNodeGroup":
                 continue
             group_tree = getattr(node, "node_tree", None)
             if group_tree is None or group_tree.name != "SB_MeshDecal_v1":
                 continue
-            if group_tree.get("starbreaker_mesh_decal_emission_patch_version") != 3:
+            if group_tree.get("starbreaker_mesh_decal_emission_patch_version") != 7:
                 return True
+            for input_name in required_texture_inputs:
+                texture_socket = _input_socket(node, input_name)
+                if texture_socket is None or not getattr(texture_socket, "links", ()):
+                    return True
             emission_strength_socket = _input_socket(node, "Emission Strength")
             if emission_strength_socket is None:
                 return True
@@ -240,6 +332,81 @@ class MaterialsMixin:
             return False
         return True
 
+
+    @staticmethod
+    def _mesh_decal_pom_required_texture_inputs(submaterial: SubmaterialRecord) -> set[str]:
+        if submaterial.shader_family != "MeshDecal":
+            return set()
+        if not submaterial.decoded_feature_flags.has_parallax_occlusion_mapping:
+            return set()
+        raw = getattr(submaterial, "raw", None)
+        if not isinstance(raw, dict) or not _mesh_decal_pom_payload_is_control_only(raw):
+            return set()
+        required: set[str] = set()
+        for texture in submaterial.texture_slots:
+            input_name = _MESH_DECAL_CONTROL_ONLY_POM_TEXTURE_INPUTS.get(texture.slot)
+            if input_name is None:
+                continue
+            if not texture.export_path:
+                continue
+            if texture.is_virtual:
+                continue
+            required.add(input_name)
+        return required
+
+
+    @staticmethod
+    def _mesh_decal_pom_requires_decal_source_texture(submaterial: SubmaterialRecord) -> bool:
+        return "TexSlot1_DecalSource" in MaterialsMixin._mesh_decal_pom_required_texture_inputs(submaterial)
+
+
+    def _material_needs_illum_decal_alpha_mode_refresh(
+        self,
+        material: bpy.types.Material,
+        submaterial: SubmaterialRecord,
+    ) -> bool:
+        if not self._illum_submaterial_requires_premul_alpha(submaterial):
+            return False
+
+        node_tree = getattr(material, "node_tree", None)
+        if node_tree is None:
+            return True
+
+        expected_names = self._illum_opacity_decal_texture_names(submaterial)
+        found = False
+        for node in node_tree.nodes:
+            if node.bl_idname != "ShaderNodeTexImage":
+                continue
+            image = getattr(node, "image", None)
+            if image is None:
+                continue
+            if expected_names:
+                filepath = str(getattr(image, "filepath", "") or "")
+                if Path(filepath).name.lower() not in expected_names:
+                    continue
+            found = True
+            return getattr(image, "alpha_mode", None) != "PREMUL"
+        return not found
+
+
+    @staticmethod
+    def _illum_submaterial_requires_premul_alpha(submaterial: SubmaterialRecord) -> bool:
+        payload = getattr(submaterial, "raw", None)
+        return isinstance(payload, dict) and _illum_payload_is_local_opacity_decal(payload)
+
+
+    @staticmethod
+    def _illum_opacity_decal_texture_names(submaterial: SubmaterialRecord) -> set[str]:
+        names: set[str] = set()
+        for texture in [*submaterial.texture_slots, *submaterial.direct_textures, *submaterial.derived_textures]:
+            if texture.is_virtual:
+                continue
+            if texture.slot != "TexSlot1" and texture.role not in {"base_color", "diffuse"}:
+                continue
+            if not texture.export_path:
+                continue
+            names.add(Path(texture.export_path).name.lower())
+        return names
 
 
     def _reusable_material(
@@ -1163,6 +1330,7 @@ class MaterialsMixin:
         y: int,
         is_color: bool,
         reuse_any_existing: bool = False,
+        alpha_mode: str | None = None,
     ) -> bpy.types.ShaderNodeTexImage | None:
         resolved = self.package.resolve_path(image_path)
         if resolved is None or not resolved.is_file():
@@ -1178,20 +1346,65 @@ class MaterialsMixin:
                 continue
             if reuse_any_existing:
                 existing.location = (x, y)
+                self._set_image_alpha_mode(image, alpha_mode)
                 return existing
-            color_space = getattr(getattr(image, "colorspace_settings", None), "name", "")
-            if is_color and color_space != "Non-Color":
+            if self._image_matches_color_space(image, is_color=is_color):
                 existing.location = (x, y)
-                return existing
-            if not is_color and color_space == "Non-Color":
-                existing.location = (x, y)
+                self._set_image_alpha_mode(image, alpha_mode)
                 return existing
         node = nodes.new("ShaderNodeTexImage")
         node.location = (x, y)
-        node.image = bpy.data.images.load(str(resolved), check_existing=True)
-        if not is_color and node.image is not None and hasattr(node.image, "colorspace_settings"):
-            node.image.colorspace_settings.name = "Non-Color"
+        node.image = self._load_image_for_color_space(resolved_str, is_color=is_color)
+        self._set_image_alpha_mode(node.image, alpha_mode)
         return node
+
+
+    @staticmethod
+    def _image_matches_color_space(image: Any, *, is_color: bool) -> bool:
+        color_space = getattr(getattr(image, "colorspace_settings", None), "name", "")
+        return color_space != "Non-Color" if is_color else color_space == "Non-Color"
+
+
+    @staticmethod
+    def _image_file_path(image: Any) -> str:
+        try:
+            return bpy.path.abspath(image.filepath, library=image.library)
+        except Exception:
+            return str(getattr(image, "filepath", "") or "")
+
+
+    @classmethod
+    def _load_image_for_color_space(cls, resolved_path: str, *, is_color: bool) -> Any:
+        for image in getattr(bpy.data, "images", []) or []:
+            if cls._image_file_path(image) != resolved_path:
+                continue
+            if cls._image_matches_color_space(image, is_color=is_color):
+                return image
+
+        image = bpy.data.images.load(resolved_path, check_existing=False)
+        color_settings = getattr(image, "colorspace_settings", None)
+        if color_settings is not None:
+            try:
+                color_settings.name = "sRGB" if is_color else "Non-Color"
+            except Exception:
+                if not is_color:
+                    try:
+                        color_settings.name = "Non-Color"
+                    except Exception:
+                        pass
+        return image
+
+
+    @staticmethod
+    def _set_image_alpha_mode(image: Any, alpha_mode: str | None) -> None:
+        if image is None or not alpha_mode:
+            return
+        if not hasattr(image, "alpha_mode"):
+            return
+        try:
+            image.alpha_mode = alpha_mode
+        except Exception:
+            return
 
 
 

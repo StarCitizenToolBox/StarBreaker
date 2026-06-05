@@ -588,6 +588,8 @@ class SceneInstanceRecord:
     material_sidecar: str | None
     mesh_asset: str | None
     palette_id: str | None
+    decal_host_channel: str | None = None
+    decal_host_rgb: Color3 | None = None
     parent_entity_name: str | None = None
     parent_node_name: str | None = None
     source_transform_basis: str | None = None
@@ -610,6 +612,10 @@ class SceneInstanceRecord:
             material_sidecar=_normalize_relative_path(_as_str(data.get("material_sidecar"))),
             mesh_asset=_normalize_relative_path(_as_str(data.get("mesh_asset"))),
             palette_id=_as_str(data.get("palette_id")),
+            decal_host_channel=_as_str(data.get("decal_host_channel")),
+            decal_host_rgb=_float_tuple(data.get("decal_host_rgb"), 3)
+            if data.get("decal_host_rgb") is not None
+            else None,  # type: ignore[arg-type]
             parent_entity_name=_as_str(data.get("parent_entity_name")),
             parent_node_name=_as_str(data.get("parent_node_name")),
             source_transform_basis=_as_str(data.get("source_transform_basis")),

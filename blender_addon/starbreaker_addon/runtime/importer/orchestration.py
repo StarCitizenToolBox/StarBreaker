@@ -808,8 +808,23 @@ class OrchestrationMixin:
             # it overrides the container's palette so each gadget tints from
             # its own palette record.
             placement_palette_id = None
+            placement_decal_host_channel = None
+            placement_decal_host_rgb = None
             if isinstance(placement.raw, dict):
                 placement_palette_id = placement.raw.get("palette_id")
+                channel_value = placement.raw.get("decal_host_channel")
+                if channel_value:
+                    placement_decal_host_channel = str(channel_value)
+                rgb_value = placement.raw.get("decal_host_rgb")
+                if isinstance(rgb_value, (list, tuple)) and len(rgb_value) >= 3:
+                    try:
+                        placement_decal_host_rgb = (
+                            float(rgb_value[0]),
+                            float(rgb_value[1]),
+                            float(rgb_value[2]),
+                        )
+                    except (TypeError, ValueError):
+                        placement_decal_host_rgb = None
             effective_placement_palette = placement_palette_id or interior.palette_id
 
             instance = SceneInstanceRecord(
@@ -819,6 +834,8 @@ class OrchestrationMixin:
                 material_sidecar=placement.material_sidecar,
                 mesh_asset=placement.mesh_asset,
                 palette_id=effective_placement_palette,
+                decal_host_channel=placement_decal_host_channel,
+                decal_host_rgb=placement_decal_host_rgb,
                 raw=placement.raw,
             )
             effective_palette_id = self._effective_palette_id(instance.palette_id)
@@ -1212,6 +1229,8 @@ class OrchestrationMixin:
             "mesh_asset": record.mesh_asset,
             "material_sidecar": effective_material_sidecar,
             "palette_id": record.palette_id,
+            "decal_host_channel": record.decal_host_channel,
+            "decal_host_rgb": record.decal_host_rgb,
         }, sort_keys=True)
         port_flags = {part.strip().lower() for part in record.port_flags.split() if part.strip()}
         hidden_by_port = "invisible" in port_flags
@@ -1226,6 +1245,10 @@ class OrchestrationMixin:
                 obj[PROP_MATERIAL_SIDECAR] = effective_material_sidecar
             if effective_palette_id is not None:
                 obj[PROP_PALETTE_ID] = effective_palette_id
+            if record.decal_host_channel:
+                obj[PROP_DECAL_HOST_CHANNEL] = record.decal_host_channel
+            if record.decal_host_rgb is not None:
+                obj[PROP_DECAL_HOST_RGB] = [float(component) for component in record.decal_host_rgb]
             obj[PROP_INSTANCE_JSON] = serialized
             if hidden_by_port:
                 obj.hide_viewport = True
