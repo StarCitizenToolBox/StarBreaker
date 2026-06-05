@@ -24,6 +24,7 @@ from ..constants import (
     DECAL_OFFSET_EXTERNAL_DEFAULT,
     DECAL_OFFSET_MODIFIER_NAME,
     PACKAGE_ROOT_PREFIX,
+    PROP_ASSEMBLY_KIND,
     PROP_DECAL_HOST_CHANNEL,
     PROP_DECAL_HOST_RGB,
     PROP_ENGINE_GLOW_CONTROL_JSON,
@@ -195,6 +196,18 @@ class OrchestrationMixin:
         if self.material_identity_index_ready:
             return
         for material in bpy.data.materials:
+            if self._material_is_decal_host_variant(material):
+                self._set_decal_host_variant_identity(
+                    material,
+                    material.name,
+                    material.get("starbreaker_decal_host_base_key"),
+                    material.get("starbreaker_decal_host_material_key"),
+                    material.get("starbreaker_decal_host_channel"),
+                    material.get("starbreaker_decal_host_rgb_key"),
+                    material.get("starbreaker_mesh_decal_variant_mode"),
+                    material.get("starbreaker_decal_host_composite_mode"),
+                )
+                continue
             material_identity = material.get(PROP_MATERIAL_IDENTITY)
             if isinstance(material_identity, str) and material_identity:
                 self.material_identity_index[material_identity] = material
@@ -623,6 +636,10 @@ class OrchestrationMixin:
                 applied += 1
             if effective_palette_id is not None:
                 obj[PROP_PALETTE_ID] = effective_palette_id
+            self._restore_generated_decal_host_variant_polygons(
+                obj,
+                protected_slot_count=min(len(slot_mapping), len(obj.material_slots)),
+            )
             # Option E2-Lite: after every slot is assigned, rebind decal
             # slots to per-host-channel clones so each decal picks up the
             # palette colour of the nearest paint material on the mesh.
@@ -640,6 +657,7 @@ class OrchestrationMixin:
                 applied,
             )
             return applied
+        assigned_slot_count = 0
         for submaterial in sorted(sidecar.submaterials, key=lambda item: item.index):
             if mesh_materials is not None:
                 while len(mesh_materials) <= submaterial.index:
@@ -657,8 +675,13 @@ class OrchestrationMixin:
             if replaced_material is not material:
                 self._remove_replaced_slot_material(replaced_material)
             applied += 1
+            assigned_slot_count = max(assigned_slot_count, submaterial.index + 1)
         if effective_palette_id is not None:
             obj[PROP_PALETTE_ID] = effective_palette_id
+        self._restore_generated_decal_host_variant_polygons(
+            obj,
+            protected_slot_count=assigned_slot_count,
+        )
         # Option E2-Lite: after every slot is assigned, rebind decal
         # slots to per-host-channel clones so each decal picks up the
         # palette colour of the nearest paint material on the mesh.
@@ -1262,6 +1285,9 @@ class OrchestrationMixin:
         package_root[PROP_SCENE_PATH] = str(self.package.scene_path)
         package_root[PROP_EXPORT_ROOT] = str(self.package.export_root)
         package_root[PROP_PACKAGE_NAME] = self.package.package_name
+        assembly_kind = str(getattr(self.package.scene, "raw", {}).get("assembly_kind", "") or "")
+        if assembly_kind:
+            package_root[PROP_ASSEMBLY_KIND] = assembly_kind
         package_root[PROP_PALETTE_ID] = palette_id or self.package.scene.root_entity.palette_id or ""
         package_root[PROP_PALETTE_SCOPE] = uuid.uuid4().hex
         engine_glow_control = getattr(self.package.scene, "engine_glow_control", None)

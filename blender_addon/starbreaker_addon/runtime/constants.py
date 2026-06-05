@@ -13,6 +13,7 @@ from mathutils import Matrix, Quaternion
 
 
 PROP_PACKAGE_ROOT = "starbreaker_package_root"
+PROP_ASSEMBLY_KIND = "starbreaker_assembly_kind"
 PROP_SCENE_PATH = "starbreaker_scene_path"
 PROP_EXPORT_ROOT = "starbreaker_export_root"
 PROP_PACKAGE_NAME = "starbreaker_package_name"

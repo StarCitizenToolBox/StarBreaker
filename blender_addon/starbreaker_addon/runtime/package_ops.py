@@ -884,12 +884,16 @@ def apply_livery_to_package_root(context: bpy.types.Context, package_root: bpy.t
             instance = _scene_instance_from_object(obj)
             if instance is None:
                 continue
+            restored_sidecar = _restore_paint_object_sidecar(instance, None)
+            sidecar_for_livery = restored_sidecar or _string_prop(obj, PROP_MATERIAL_SIDECAR)
             effective_palette_id = palette_id_for_livery_instance(
                 package,
                 livery_id,
                 instance,
-                _string_prop(obj, PROP_MATERIAL_SIDECAR),
+                sidecar_for_livery,
             )
+            if restored_sidecar is not None:
+                obj[PROP_MATERIAL_SIDECAR] = restored_sidecar
             applied += importer.rebuild_object_materials(obj, effective_palette_id)
             if effective_palette_id is not None:
                 obj[PROP_PALETTE_ID] = effective_palette_id
@@ -904,6 +908,7 @@ def apply_livery_to_package_root(context: bpy.types.Context, package_root: bpy.t
             root_palette_id,
             package.scene.root_entity.palette_id,
         ) or ""
+        package_root.pop(PROP_PAINT_VARIANT_SIDECAR, None)
     _purge_orphaned_runtime_groups()
     _purge_orphaned_file_backed_images()
     return applied

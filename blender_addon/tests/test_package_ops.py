@@ -1372,6 +1372,100 @@ class PackageOpsTests(unittest.TestCase):
         self.assertNotIn("starbreaker_paint_variant_sidecar", package_root)
         self.assertEqual(rebuild_calls, [("livery_decal_body", "base.materials.json", "palette/rsi_scorpius")])
 
+    def test_apply_livery_to_package_root_exits_active_paint_variant(self) -> None:
+        @contextmanager
+        def _no_suspend(_context):
+            yield
+
+        @contextmanager
+        def _no_mode(_context):
+            yield
+
+        package_root = FakeObject(
+            "StarBreaker Behr P6LR",
+            starbreaker_paint_variant_sidecar="variant.materials.json",
+            starbreaker_palette_id="palette/store01",
+        )
+        package_root.type = "EMPTY"
+        child = FakeObject(
+            "p6lr_body",
+            starbreaker_material_sidecar="variant.materials.json",
+            starbreaker_instance_json=json.dumps({"material_sidecar": "base.materials.json"}),
+        )
+        child.type = "MESH"
+        child.parent = package_root
+        package_root.children.append(child)
+
+        fake_package = types.SimpleNamespace(
+            scene=types.SimpleNamespace(
+                root_entity=types.SimpleNamespace(
+                    material_sidecar="base.materials.json",
+                    palette_id="palette/base",
+                )
+            )
+        )
+
+        resolver_calls: list[tuple[str, str | None]] = []
+        rebuild_calls: list[tuple[str, str | None, str | None]] = []
+
+        def _resolver(_package, livery_id, _instance, sidecar):
+            resolver_calls.append((livery_id, sidecar))
+            return "palette/base"
+
+        class FakeImporter:
+            def __init__(self, context, package, package_root=None, create_template_collection=True):
+                self.context = context
+                self.package = package
+                self.package_root = package_root
+
+            def rebuild_object_materials(self, obj, palette_id):
+                rebuild_calls.append((obj.name, obj.get("starbreaker_material_sidecar"), palette_id))
+                return 1
+
+        importer_stub = sys.modules["sb_pkg_test_runtime.importer"]
+        original_importer = importer_stub.PackageImporter
+        original_loader = self.package_ops._load_package_from_root
+        original_resolver = self.package_ops.palette_id_for_livery_instance
+        original_scene_instance = self.package_ops._scene_instance_from_object
+        original_suspend = self.package_ops._suspend_heavy_viewports
+        original_mode = self.package_ops._temporary_object_mode
+        try:
+            importer_stub.PackageImporter = FakeImporter
+            self.package_ops._load_package_from_root = lambda _root: fake_package
+            self.package_ops.palette_id_for_livery_instance = _resolver
+            self.package_ops._scene_instance_from_object = (
+                lambda obj: types.SimpleNamespace(material_sidecar="base.materials.json")
+                if obj is child
+                else None
+            )
+            self.package_ops._suspend_heavy_viewports = _no_suspend
+            self.package_ops._temporary_object_mode = _no_mode
+
+            applied = self.package_ops.apply_livery_to_package_root(
+                types.SimpleNamespace(),
+                package_root,
+                "palette/behr_sniper_ballistic_01",
+            )
+        finally:
+            importer_stub.PackageImporter = original_importer
+            self.package_ops._load_package_from_root = original_loader
+            self.package_ops.palette_id_for_livery_instance = original_resolver
+            self.package_ops._scene_instance_from_object = original_scene_instance
+            self.package_ops._suspend_heavy_viewports = original_suspend
+            self.package_ops._temporary_object_mode = original_mode
+
+        self.assertEqual(applied, 1)
+        self.assertEqual(child.get("starbreaker_material_sidecar"), "base.materials.json")
+        self.assertNotIn("starbreaker_paint_variant_sidecar", package_root)
+        self.assertEqual(
+            resolver_calls,
+            [
+                ("palette/behr_sniper_ballistic_01", "base.materials.json"),
+                ("palette/behr_sniper_ballistic_01", "base.materials.json"),
+            ],
+        )
+        self.assertEqual(rebuild_calls, [("p6lr_body", "base.materials.json", "palette/base")])
+
 
 class AnimationDisplayNameTests(unittest.TestCase):
     """Tests for _animation_display_name and _entity_name_prefix."""

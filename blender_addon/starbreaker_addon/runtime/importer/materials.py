@@ -50,6 +50,7 @@ from ...templates import (
 )
 from ..constants import (
     NON_COLOR_INPUT_KEYWORDS,
+    PROP_ASSEMBLY_KIND,
     PROP_IMPORTED_SLOT_MAP,
     PROP_IMPORTED_SLOT_NAMES,
     PROP_MATERIAL_IDENTITY,
@@ -299,7 +300,11 @@ class MaterialsMixin:
         if any(node.bl_idname in {"ShaderNodeAddShader", "ShaderNodeEmission"} for node in node_tree.nodes):
             return True
 
-        required_texture_inputs = self._mesh_decal_pom_required_texture_inputs(submaterial)
+        required_texture_inputs = (
+            self._mesh_decal_pom_required_texture_inputs(submaterial)
+            if self._package_uses_fps_weapon_pom_material_logic()
+            else set()
+        )
         if (
             required_texture_inputs
             and material.get("starbreaker_mesh_decal_material_mode") != _CONTROL_ONLY_POM_RELIEF_MODE
@@ -331,6 +336,31 @@ class MaterialsMixin:
                 return True
             return False
         return True
+
+
+    def _package_uses_fps_weapon_pom_material_logic(self) -> bool:
+        """Return whether FPS weapon-only MeshDecal POM refresh rules apply."""
+
+        rebind_checker = getattr(self, "_package_uses_fps_weapon_pom_rebind", None)
+        if callable(rebind_checker):
+            try:
+                return bool(rebind_checker())
+            except TypeError:
+                pass
+
+        package = getattr(self, "package", None)
+        scene = getattr(package, "scene", None)
+        raw = getattr(scene, "raw", None)
+        if isinstance(raw, dict):
+            assembly_kind = str(raw.get("assembly_kind", "") or "").strip().lower()
+            if assembly_kind:
+                return assembly_kind == "fps_weapon"
+
+        root = getattr(self, "package_root", None)
+        if root is None or not hasattr(root, "get"):
+            return False
+        assembly_kind = str(root.get(PROP_ASSEMBLY_KIND, "") or "").strip().lower()
+        return assembly_kind == "fps_weapon"
 
 
     @staticmethod
@@ -365,6 +395,8 @@ class MaterialsMixin:
         material: bpy.types.Material,
         submaterial: SubmaterialRecord,
     ) -> bool:
+        if not self._package_uses_fps_weapon_pom_material_logic():
+            return False
         if not self._illum_submaterial_requires_premul_alpha(submaterial):
             return False
 
@@ -1336,6 +1368,32 @@ class MaterialsMixin:
         if resolved is None or not resolved.is_file():
             return None
         resolved_str = str(resolved)
+        if not self._package_uses_fps_weapon_pom_material_logic():
+            for existing in nodes:
+                if existing.bl_idname != "ShaderNodeTexImage":
+                    continue
+                image = getattr(existing, "image", None)
+                if image is None:
+                    continue
+                if bpy.path.abspath(image.filepath, library=image.library) != resolved_str:
+                    continue
+                if reuse_any_existing:
+                    existing.location = (x, y)
+                    return existing
+                color_space = getattr(getattr(image, "colorspace_settings", None), "name", "")
+                if is_color and color_space != "Non-Color":
+                    existing.location = (x, y)
+                    return existing
+                if not is_color and color_space == "Non-Color":
+                    existing.location = (x, y)
+                    return existing
+            node = nodes.new("ShaderNodeTexImage")
+            node.location = (x, y)
+            node.image = bpy.data.images.load(resolved_str, check_existing=True)
+            if not is_color and node.image is not None and hasattr(node.image, "colorspace_settings"):
+                node.image.colorspace_settings.name = "Non-Color"
+            return node
+
         for existing in nodes:
             if existing.bl_idname != "ShaderNodeTexImage":
                 continue
