@@ -74,6 +74,12 @@ The current runtime importer consumes the exported contract and instantiates the
 
 For the current core groups, explicit `Palette_*` sockets are now part of the library interface where the contract metadata says palette routing is required. The runtime connects those sockets directly instead of baking palette tint into the texture input before the group.
 
+`MeshDecal` control-only POM overlays are currently handled by the runtime
+importer rather than by adding a new template interface. Those materials use
+the authored POM alpha/normal/height as a host-material overlay, because
+Blender node groups cannot express a Star Engine-style normal/height-only
+GBuffer decal without still owning a visible surface shader.
+
 ## Editing Rules
 
 - Do not silently rename top-level shader groups.

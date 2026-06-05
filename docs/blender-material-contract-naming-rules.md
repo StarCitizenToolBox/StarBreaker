@@ -119,6 +119,14 @@ Stencil note:
 
 - when `TexSlot7` resolves to `$TintPaletteDecal`, the stencil also needs to route into the tint node-group path, not only the decal surface path
 
+Control-only POM note:
+
+- when a `MeshDecal` material has POM enabled but has no decal, stencil, or
+  tint-mask signals, `TexSlot1_DecalSource` is used as coverage alpha rather
+  than owned decal colour. Runtime reconstruction should keep the matched host
+  material as the colour/specular owner and inject only `TexSlot1` alpha,
+  `TexSlot3_NormalGloss`, and `TexSlot4_Height` into the host-material clone.
+
 ## UIPlane
 
 - `TexSlot9_ScreenSource`

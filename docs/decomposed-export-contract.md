@@ -22,6 +22,14 @@ Within that export root:
   (`parent_entity_name`, `parent_node_name`), placement records, and exported
   light data
 - material sidecar and palette references for every scene instance
+- optional decal-host hints for scene instances that carry projected decal
+  geometry:
+  - `decal_host_channel` is a palette channel hint such as `primary`,
+    `secondary`, `tertiary`, or `glass`
+  - `decal_host_rgb` is a fixed linear RGB host-colour fallback when no
+    palette channel is available
+  - these fields are advisory; importers should fall back to local spatial
+    host-material matching when they are absent
 - optional additive `controls.engine_glow` metadata for engine-emission tuning in importers:
   - absolute emission-strength range metadata (`min_strength`, `max_strength`, `default_strength`)
   - `targets[]` keyed by `mesh_asset` + `material_sidecar` + `source_material_index`
@@ -162,6 +170,16 @@ Each `*.materials.json` sidecar preserves:
 - material-set identity and palette-routing metadata
 - resolved paint-override selectors when equipped paints choose a palette or material through `SubGeometry` tag matching
 - variant-membership hints for palette-routed and layered materials
+
+Blender importer note:
+
+- Control-only `MeshDecal` POM materials are not treated as visible colour
+  decals. When they have POM enabled but no structural decal/stencil/tint-mask
+  signals, `TexSlot1` is used as a coverage alpha mask, `TexSlot3` as
+  normal-gloss input, and `TexSlot4` as height. Blender represents the
+  game-style GBuffer overlay by cloning the matched host material and injecting
+  only the POM alpha/normal/height into that clone, so the host material remains
+  the owner of base colour, roughness, metallic, and specular response.
 
 The current sidecar contract is now substantially closer to the raw `.mtl` XML surface, but it is still intentionally split into two layers:
 
