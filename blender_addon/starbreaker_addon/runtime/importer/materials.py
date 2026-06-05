@@ -11,6 +11,7 @@ contract-driven socket sources (``_contract_input_source_socket``,
 ``_roughness_group_source_socket``, ``_color_source_socket``,
 ``_alpha_source_socket``, ``_source_slot_alpha_socket``,
 ``_specular_socket_for_texture_path``, ``_roughness_socket_for_texture_reference``,
+``_texture_reference_uses_packed_roughness_green``,
 ``_illum_emission_strength``, ``_create_surface_bsdf``,
 ``_value_socket``/``_value_color_socket``, ``_invert_value_socket``,
 ``_image_node``, ``_apply_material_node_layout``, ``_configure_material``,
@@ -49,6 +50,7 @@ from ...templates import (
 from ..constants import (
     NON_COLOR_INPUT_KEYWORDS,
     PROP_IMPORTED_SLOT_MAP,
+    PROP_IMPORTED_SLOT_NAMES,
     PROP_MATERIAL_IDENTITY,
     PROP_TEMPLATE_KEY,
 )
@@ -86,6 +88,19 @@ def _material_datablock_is_valid(material: bpy.types.Material | None) -> bool:
     except ReferenceError:
         return False
     return True
+
+
+def _texture_reference_uses_packed_roughness_green(texture: Any) -> bool:
+    """Return true when a sidecar texture stores roughness in glTF MR green."""
+
+    if texture is None:
+        return False
+    if getattr(texture, "role", None) != "roughness":
+        return False
+    if getattr(texture, "packed_texture_format", None) != "gltf_metallic_roughness":
+        return False
+    value_channel = getattr(texture, "value_channel", None)
+    return value_channel is None or str(value_channel).lower() == "g"
 
 
 class MaterialsMixin:
@@ -284,6 +299,10 @@ class MaterialsMixin:
     ) -> tuple[Any, bool]:
         if texture is None or texture.export_path is None:
             return None, False
+        if _texture_reference_uses_packed_roughness_green(texture):
+            roughness = self._metallic_roughness_green_socket(nodes, texture.export_path, x=x, y=y)
+            if roughness is not None:
+                return roughness, False
         if texture.alpha_semantic == "smoothness":
             smoothness = self._texture_alpha_socket(nodes, texture.export_path, x=x, y=y, is_color=False)
             if smoothness is not None:
@@ -292,6 +311,21 @@ class MaterialsMixin:
         if image_node is None:
             return None, False
         return image_node.outputs[0], False
+
+    def _roughness_socket_for_layer_surface(
+        self,
+        nodes: bpy.types.Nodes,
+        texture: TextureReference | None,
+        *,
+        x: int,
+        y: int,
+    ) -> Any:
+        roughness, is_smoothness = self._roughness_socket_for_texture_reference(
+            nodes, texture, x=x, y=y
+        )
+        if roughness is not None and is_smoothness:
+            return self._invert_value_socket(nodes, roughness, x=x + 180, y=y)
+        return roughness
 
 
 
@@ -735,16 +769,14 @@ class MaterialsMixin:
         y: int,
     ) -> Any:
         if image_path:
-            image_node = self._image_node(nodes, image_path, x=x, y=y, is_color=False)
-            if image_node is not None:
-                image_node.label = "METALLIC ROUGHNESS"
-
-                separate = nodes.new("ShaderNodeSeparateColor")
-                separate.location = (x + 180, y)
-                if hasattr(separate, "mode"):
-                    separate.mode = "RGB"
-                image_node.id_data.links.new(image_node.outputs[0], separate.inputs[0])
-                return _output_socket(separate, "Green")
+            roughness_socket = self._metallic_roughness_green_socket(
+                nodes,
+                image_path,
+                x=x,
+                y=y,
+            )
+            if roughness_socket is not None:
+                return roughness_socket
 
         smoothness_texture = self._smoothness_texture_reference(submaterial)
         if smoothness_texture is None:
@@ -759,6 +791,27 @@ class MaterialsMixin:
         if smoothness_alpha is None:
             return None
         return self._invert_value_socket(nodes, smoothness_alpha, x=x + 180, y=y)
+
+
+    def _metallic_roughness_green_socket(
+        self,
+        nodes: bpy.types.Nodes,
+        image_path: str | None,
+        *,
+        x: int,
+        y: int,
+    ) -> Any:
+        image_node = self._image_node(nodes, image_path, x=x, y=y, is_color=False)
+        if image_node is None:
+            return None
+        image_node.label = "METALLIC ROUGHNESS"
+
+        separate = nodes.new("ShaderNodeSeparateColor")
+        separate.location = (x + 180, y)
+        if hasattr(separate, "mode"):
+            separate.mode = "RGB"
+        image_node.id_data.links.new(image_node.outputs[0], separate.inputs[0])
+        return _output_socket(separate, "Green")
 
 
 
@@ -1252,6 +1305,13 @@ class MaterialsMixin:
             slot_mapping = _imported_slot_mapping_from_materials(materials)
             if slot_mapping is not None:
                 obj.data[PROP_IMPORTED_SLOT_MAP] = json.dumps(slot_mapping)
+            else:
+                slot_names = [
+                    material.name if material is not None and getattr(material, "name", None) else None
+                    for material in materials
+                ]
+                if any(name is not None for name in slot_names):
+                    obj.data[PROP_IMPORTED_SLOT_NAMES] = json.dumps(slot_names)
             for index in range(len(materials)):
                 materials[index] = None
 

@@ -126,6 +126,28 @@ def _layered_wear_first_non_neutral_tint(
     return None
 
 
+def _layered_wear_uses_neutral_synthetic_palette_base(
+    base_layer: LayerManifestEntry | None,
+) -> bool:
+    """Return whether Base Image should stay neutral for a palette layer.
+
+    Star Engine synthetic LayerBlend layers use the palette channel as the
+    continuous paint/plastic colour. Their diffuse maps are high-frequency
+    surface breakup, not coverage masks; multiplying them directly into Base
+    Image makes a palette-tinted ring look partially unfilled.
+    """
+
+    if base_layer is None:
+        return False
+    if base_layer.palette_channel is None:
+        return False
+    tint = base_layer.tint_color
+    if tint is not None and any(abs(channel - 1.0) > 1e-6 for channel in tint):
+        return False
+    source_path = (base_layer.source_material_path or "").replace("\\", "/").lower()
+    return "/materials/layers/synthetic/" in source_path
+
+
 def _clamp_unit_float(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
@@ -160,6 +182,35 @@ def _layered_wear_metallic_values(
     return _clamp_unit_float(base_metallic), _clamp_unit_float(wear_metallic)
 
 
+def _layered_wear_base_palette_fallback(
+    submaterial: SubmaterialRecord,
+    base_layer: LayerManifestEntry | None,
+) -> tuple[float, float, float] | None:
+    """Return a Base Palette fallback for LayerBlend_V2 materials.
+
+    Star Engine's specular workflow stores conductor colour in the resolved
+    layer specular response. For metallic layers this colour must drive the
+    visible base colour instead of the near-black diffuse response.
+    """
+
+    if base_layer is not None:
+        metallic = _layer_snapshot_float(base_layer, "metallic")
+        specular = _triplet_from_any(getattr(base_layer, "layer_snapshot", {}).get("specular"))
+        if metallic > 0.5 and specular is not None:
+            return tuple(_clamp_unit_float(channel) for channel in specular)
+
+    fallback_tint = (
+        base_layer.tint_color
+        if (
+            base_layer is not None
+            and base_layer.tint_color is not None
+            and any(abs(c - 1.0) > 1e-6 for c in base_layer.tint_color)
+        )
+        else _layered_wear_first_non_neutral_tint(submaterial)
+    )
+    return fallback_tint
+
+
 def _mesh_decal_neutral_breakup_default(
     group_contract: ShaderGroupContract,
     submaterial: SubmaterialRecord,
@@ -175,6 +226,108 @@ def _mesh_decal_neutral_breakup_default(
     if template_plan_for_submaterial(submaterial).template_key != "decal_stencil":
         return None
     return (1.0, 1.0, 1.0, 1.0)
+
+
+def _mesh_decal_pom_payload_is_control_only(payload: dict[str, Any]) -> bool:
+    flags = payload.get("decoded_feature_flags") or {}
+    if bool(flags.get("has_decal")) or bool(flags.get("has_stencil_map")):
+        return False
+    tokens = {
+        str(token).strip().upper()
+        for token in flags.get("tokens", [])
+        if str(token).strip()
+    }
+    if tokens.intersection({"DECAL", "STENCIL_MAP", "DECAL_OPACITY_MAP"}):
+        return False
+    visible_roles = {
+        "decal_sheet",
+        "opacity",
+        "stencil",
+        "tint_mask",
+        "tint_palette_decal",
+        "render_to_texture",
+    }
+    for texture in payload.get("texture_slots", []) or []:
+        if not isinstance(texture, dict):
+            continue
+        role = str(texture.get("role", "")).strip().lower()
+        if role in visible_roles:
+            return False
+        slot = str(texture.get("slot", "")).strip().lower()
+        if slot in {"texslot5", "texslot6", "texslot7", "texslot8"}:
+            return False
+    virtual_inputs = {
+        str(value).strip().lower()
+        for value in payload.get("virtual_inputs", []) or []
+        if str(value).strip()
+    }
+    if virtual_inputs.intersection({"$tintpalettedecal", "$rendertotexture"}):
+        return False
+    return True
+
+
+def _mesh_decal_pom_submaterial_is_control_only(submaterial: SubmaterialRecord) -> bool:
+    if getattr(submaterial, "shader_family", None) != "MeshDecal":
+        return False
+    flags = getattr(submaterial, "decoded_feature_flags", None)
+    if flags is None or not bool(getattr(flags, "has_parallax_occlusion_mapping", False)):
+        return False
+    payload = getattr(submaterial, "raw", None)
+    if not isinstance(payload, dict):
+        return False
+    return _mesh_decal_pom_payload_is_control_only(payload)
+
+
+def _payload_tokens(payload: dict[str, Any]) -> set[str]:
+    flags = payload.get("decoded_feature_flags") or {}
+    return {
+        str(token).strip().upper()
+        for token in flags.get("tokens", [])
+        if str(token).strip()
+    }
+
+
+def _payload_virtual_inputs(payload: dict[str, Any]) -> set[str]:
+    return {
+        str(value).strip().lower()
+        for value in payload.get("virtual_inputs", []) or []
+        if str(value).strip()
+    }
+
+
+def _illum_payload_is_local_opacity_decal(payload: dict[str, Any]) -> bool:
+    """Return whether an Illum payload is a local texture opacity decal.
+
+    Star Engine's ``DECAL_OPACITY_MAP`` path uses the material's authored
+    TexSlot1 RGB/alpha as a decal overlay. It must not be treated as a palette
+    decal source; transparent pixels reveal the host surface while the decal
+    colour and normal are suppressed by the same TexSlot1 alpha coverage.
+    """
+
+    if str(payload.get("shader_family", "")).strip() != "Illum":
+        return False
+    flags = payload.get("decoded_feature_flags") or {}
+    tokens = _payload_tokens(payload)
+    if not bool(flags.get("has_decal")) or "DECAL_OPACITY_MAP" not in tokens:
+        return False
+    if bool(flags.get("has_parallax_occlusion_mapping")):
+        return False
+    if _payload_virtual_inputs(payload).intersection({"$tintpalettedecal", "$rendertotexture"}):
+        return False
+    for texture in payload.get("texture_slots", []) or []:
+        if not isinstance(texture, dict):
+            continue
+        role = str(texture.get("role", "")).strip().lower()
+        if role == "tint_palette_decal" and bool(texture.get("is_virtual")):
+            return False
+    return True
+
+
+def _illum_submaterial_is_local_opacity_decal(submaterial: SubmaterialRecord) -> bool:
+    payload = getattr(submaterial, "raw", None)
+    if not isinstance(payload, dict):
+        return False
+    return _illum_payload_is_local_opacity_decal(payload)
 
 
 class BuildersMixin:
@@ -602,7 +755,7 @@ class BuildersMixin:
     @staticmethod
     def _patch_mesh_decal_template_emission(group: bpy.types.ShaderNodeTree) -> None:
         """Route MeshDecal emissive data into Principled emission."""
-        if group.get("starbreaker_mesh_decal_emission_patch_version") == 4:
+        if group.get("starbreaker_mesh_decal_emission_patch_version") == 5:
             return
 
         nodes = group.nodes
@@ -764,7 +917,49 @@ class BuildersMixin:
                 links.remove(link)
             links.new(alpha_mul.outputs[0], principled_alpha)
 
-        group["starbreaker_mesh_decal_emission_patch_version"] = 4
+        final_alpha_socket = principled_alpha.links[0].from_socket if principled_alpha is not None and principled_alpha.links else base_alpha_socket
+        normal_map = nodes.get("Normal Map")
+        if (
+            normal_map is not None
+            and normal_map.bl_idname == "ShaderNodeNormalMap"
+            and final_alpha_socket is not None
+        ):
+            strength_socket = normal_map.inputs.get("Strength")
+            if strength_socket is not None:
+                alpha_mask = nodes.get("SB MeshDecal Normal Alpha Mask")
+                if alpha_mask is None or alpha_mask.bl_idname != "ShaderNodeMath":
+                    alpha_mask = nodes.new("ShaderNodeMath")
+                    alpha_mask.name = "SB MeshDecal Normal Alpha Mask"
+                alpha_mask.label = "Normal strength x alpha"
+                alpha_mask.location = (normal_map.location.x - 220, normal_map.location.y + 120)
+                alpha_mask.operation = "MULTIPLY"
+                alpha_mask.use_clamp = True
+                existing_strength_link = next(
+                    (
+                        link
+                        for link in list(strength_socket.links)
+                        if link.from_node is not alpha_mask
+                    ),
+                    None,
+                )
+                for link in list(alpha_mask.inputs[0].links):
+                    links.remove(link)
+                for link in list(alpha_mask.inputs[1].links):
+                    links.remove(link)
+                if existing_strength_link is not None:
+                    links.remove(existing_strength_link)
+                    links.new(existing_strength_link.from_socket, alpha_mask.inputs[0])
+                else:
+                    try:
+                        alpha_mask.inputs[0].default_value = float(strength_socket.default_value)
+                    except (TypeError, ValueError):
+                        alpha_mask.inputs[0].default_value = 1.0
+                links.new(final_alpha_socket, alpha_mask.inputs[1])
+                for link in list(strength_socket.links):
+                    links.remove(link)
+                links.new(alpha_mask.outputs[0], strength_socket)
+
+        group["starbreaker_mesh_decal_emission_patch_version"] = 5
 
     def _build_contract_group_material(
         self,
@@ -794,12 +989,27 @@ class BuildersMixin:
         surface_shader = shader_output
 
         y = 280
+        control_only_pom = (
+            group_contract.name == "SB_MeshDecal_v1"
+            and _mesh_decal_pom_submaterial_is_control_only(submaterial)
+        )
         for contract_input in group_contract.inputs:
             target_socket = _input_socket(group_node, contract_input.name)
             if target_socket is None:
                 continue
             semantic = (contract_input.semantic or contract_input.name).lower()
-            if "disable" in semantic and "shadow" in semantic:
+            if control_only_pom and semantic == "decal_source":
+                if hasattr(target_socket, "default_value"):
+                    target_socket.default_value = (1.0, 1.0, 1.0, 1.0)
+                source_socket = None
+            elif control_only_pom and semantic in {
+                "public_param_decaldiffuseopacity",
+                "public_param_decalalphamultiplier",
+            }:
+                if hasattr(target_socket, "default_value"):
+                    target_socket.default_value = 0.0
+                source_socket = None
+            elif "disable" in semantic and "shadow" in semantic:
                 if hasattr(target_socket, "default_value"):
                     target_socket.default_value = bool(self._plan_casts_no_shadows(plan, submaterial))
                 source_socket = None
@@ -1448,14 +1658,21 @@ class BuildersMixin:
             y=520,
             is_color=True,
         )
+        local_opacity_decal = _illum_submaterial_is_local_opacity_decal(submaterial)
         # Only Illum materials that explicitly declare a virtual tint-palette
         # decal source should read the palette's ship-UV-space decal color.
         # Generic Illum materials like BEHR_marksman_S1:dull_metal_01 have a
         # real TexSlot1 authored diffuse and no decal source; routing Decal
         # Color there leaks unrelated livery/decal imagery into the base coat.
-        # POM trims/details are also authored-texture driven and should bypass
-        # the palette decal source entirely.
-        if plan.template_key == "parallax_pom" or not _uses_virtual_tint_palette_decal(submaterial):
+        # POM trims/details are also authored-texture driven. Local
+        # DECAL_OPACITY_MAP decals are authored TexSlot1 overlays whose RGB and
+        # alpha must stay together; palette decal routing would replace the
+        # decal sheet and lose the game-authored opacity coverage.
+        if (
+            local_opacity_decal
+            or plan.template_key == "parallax_pom"
+            or not _uses_virtual_tint_palette_decal(submaterial)
+        ):
             decal_palette = type("_NoDecal", (), {"color": None, "alpha": None})()
         else:
             decal_palette = self._palette_decal_sockets(
@@ -1475,7 +1692,7 @@ class BuildersMixin:
             is_color=False,
         )
         primary_detail = self._detail_texture_channels(nodes, self._texture_path_for_slot(submaterial, "TexSlot6"), x=-720, y=-420)
-        primary_roughness, _primary_roughness_is_smoothness = self._roughness_socket_for_texture_reference(nodes, primary_normal_ref, x=-460, y=-140)
+        primary_roughness = self._roughness_socket_for_layer_surface(nodes, primary_normal_ref, x=-460, y=-140)
         primary_specular = self._specular_socket_for_texture_path(nodes, self._texture_path_for_slot(submaterial, "TexSlot4"), x=-720, y=760)
         primary = self._connect_layer_surface_group(
             nodes,
@@ -1508,14 +1725,6 @@ class BuildersMixin:
             label="Primary Layer",
         )
         
-        if material_channel is None:
-            for node in reversed(nodes):
-                if node.type == 'GROUP' and 'LayerSurface' in node.node_tree.name:
-                    palette_socket = _input_socket(node, "Palette Color")
-                    if palette_socket is not None:
-                        palette_socket.default_value = (0.0, 0.0, 0.0, 1.0)
-                    break
-
         secondary_color_ref = _submaterial_texture_reference(submaterial, slots=("TexSlot9",), roles=("alternate_base_color", "base_color", "diffuse"))
         if secondary_color_ref is not None:
             secondary_color_node = self._image_node(
@@ -1534,7 +1743,7 @@ class BuildersMixin:
                 is_color=False,
             )
             secondary_detail = self._detail_texture_channels(nodes, self._texture_path_for_slot(submaterial, "TexSlot13"), x=-720, y=-980)
-            secondary_roughness, _secondary_roughness_is_smoothness = self._roughness_socket_for_texture_reference(nodes, secondary_normal_ref, x=-460, y=-700)
+            secondary_roughness = self._roughness_socket_for_layer_surface(nodes, secondary_normal_ref, x=-460, y=-700)
             secondary_specular = self._specular_socket_for_texture_path(nodes, self._texture_path_for_slot(submaterial, "TexSlot10"), x=-720, y=980)
             secondary = self._connect_layer_surface_group(
                 nodes,
@@ -1786,10 +1995,13 @@ class BuildersMixin:
         layered_group.label = "StarBreaker LayeredInputs"
 
         textures = representative_textures(submaterial)
+        base_layer = _layered_wear_base_layer(submaterial)
+        neutral_palette_base = _layered_wear_uses_neutral_synthetic_palette_base(base_layer)
+        base_color_texture = None if neutral_palette_base else textures["base_color"]
 
         # Base image (primary diffuse).
         base_image_node = self._image_node(
-            nodes, textures["base_color"], x=-280, y=220, is_color=True
+            nodes, base_color_texture, x=-280, y=220, is_color=True
         )
         if base_image_node is not None:
             base_image_socket = _input_socket(layered_group, "Base Image")
@@ -1827,8 +2039,7 @@ class BuildersMixin:
         #     hijack that socket's default with the base layer's
         #     tint_color (Base Palette is multiplied with Base Image
         #     internally, so this works out as a base tint multiply).
-        base_layer = _layered_wear_base_layer(submaterial)
-        if base_image_node is None:
+        if base_image_node is None and not neutral_palette_base:
             image_source_layer = (
                 base_layer
                 if base_layer is not None and base_layer.diffuse_export_path
@@ -1846,15 +2057,7 @@ class BuildersMixin:
                     fallback_target = _input_socket(layered_group, "Base Image")
                     if fallback_target is not None:
                         links.new(fallback_image_node.outputs[0], fallback_target)
-        fallback_tint = (
-            base_layer.tint_color
-            if (
-                base_layer is not None
-                and base_layer.tint_color is not None
-                and any(abs(c - 1.0) > 1e-6 for c in base_layer.tint_color)
-            )
-            else _layered_wear_first_non_neutral_tint(submaterial)
-        )
+        fallback_tint = _layered_wear_base_palette_fallback(submaterial, base_layer)
         if not base_palette_linked and fallback_tint is not None:
             base_palette_target = _input_socket(layered_group, "Base Palette")
             if base_palette_target is not None and hasattr(
@@ -2205,7 +2408,7 @@ class BuildersMixin:
         "tertiary": "Tertiary Glossiness",
         "glass": "Glass Glossiness",
     }
-    _DECAL_HOST_VARIANT_MARKERS = ("__host_rgb_", "__host_")
+    _DECAL_HOST_VARIANT_MARKERS = ("__decal_", "__host_mat_", "__host_rgb_", "__host_")
 
     @classmethod
     def _decal_host_variant_base_name(cls, material: bpy.types.Material) -> str:
@@ -2267,6 +2470,737 @@ class BuildersMixin:
             return (float(rgb[0]), float(rgb[1]), float(rgb[2]))
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _mesh_decal_pom_is_control_only(material: bpy.types.Material) -> bool:
+        """Return whether a POM MeshDecal only carries control maps.
+
+        Star Engine can apply MeshDecal POM height/normal into the host
+        surface without authoring an additional decal colour. Those control
+        layers carry POM plus diffuse/normal/height slots, but lack the
+        structural decal/stencil/tint-mask signals used by visible decals.
+        """
+
+        if material is None or not hasattr(material, "get"):
+            return False
+        if material.get(PROP_SHADER_FAMILY) != "MeshDecal":
+            return False
+        if not bool(material.get(PROP_HAS_POM, False)):
+            return False
+        raw = material.get(PROP_SUBMATERIAL_JSON)
+        if not isinstance(raw, str) or not raw.strip():
+            return False
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError):
+            return False
+        flags = payload.get("decoded_feature_flags") or {}
+        if bool(flags.get("has_decal")) or bool(flags.get("has_stencil_map")):
+            return False
+        tokens = {
+            str(token).strip().upper()
+            for token in flags.get("tokens", [])
+            if str(token).strip()
+        }
+        if tokens.intersection({"DECAL", "STENCIL_MAP", "DECAL_OPACITY_MAP"}):
+            return False
+        visible_roles = {
+            "decal_sheet",
+            "opacity",
+            "stencil",
+            "tint_mask",
+            "tint_palette_decal",
+            "render_to_texture",
+        }
+        for texture in payload.get("texture_slots", []) or []:
+            if not isinstance(texture, dict):
+                continue
+            role = str(texture.get("role", "")).strip().lower()
+            if role in visible_roles:
+                return False
+            slot = str(texture.get("slot", "")).strip().lower()
+            if slot in {"texslot5", "texslot6", "texslot7", "texslot8"}:
+                return False
+        virtual_inputs = {
+            str(value).strip().lower()
+            for value in payload.get("virtual_inputs", []) or []
+            if str(value).strip()
+        }
+        if virtual_inputs.intersection({"$tintpalettedecal", "$rendertotexture"}):
+            return False
+        return True
+
+    def _mesh_decal_allows_rgb_host_variant(self, material: bpy.types.Material) -> bool:
+        """Return whether a MeshDecal can safely use a fixed-RGB host tint."""
+
+        if material is None or not hasattr(material, "get"):
+            return False
+        if material.get(PROP_SHADER_FAMILY) != "MeshDecal":
+            return False
+        return not self._mesh_decal_pom_is_control_only(material)
+
+    @staticmethod
+    def _illum_decal_needs_host_composite(material: bpy.types.Material) -> bool:
+        if material is None or not hasattr(material, "get"):
+            return False
+        if material.get(PROP_SHADER_FAMILY) != "Illum":
+            return False
+        if bool(material.get(PROP_HAS_POM, False)):
+            return False
+        if material.get(PROP_TEMPLATE_KEY) != "decal_stencil":
+            return False
+        raw = material.get(PROP_SUBMATERIAL_JSON)
+        if not isinstance(raw, str) or not raw.strip():
+            return False
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError):
+            return False
+        return _illum_payload_is_local_opacity_decal(payload)
+
+    def _material_palette_channel(self, material: bpy.types.Material | None) -> str | None:
+        if material is None or not hasattr(material, "get"):
+            return None
+        raw = material.get(PROP_SUBMATERIAL_JSON)
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        routing = payload.get("palette_routing") or {}
+        material_channel = routing.get("material_channel") or {}
+        name = material_channel.get("name")
+        if isinstance(name, str) and name.lower() in {"primary", "secondary", "tertiary", "glass"}:
+            return name.lower()
+        for binding in routing.get("layer_channels", []) or []:
+            channel = (binding or {}).get("channel") or {}
+            name = channel.get("name")
+            if isinstance(name, str) and name.lower() in {"primary", "secondary", "tertiary", "glass"}:
+                return name.lower()
+        return None
+
+    @staticmethod
+    def _polygon_center(obj: bpy.types.Object, polygon: Any) -> tuple[float, float, float] | None:
+        vertices = getattr(getattr(obj, "data", None), "vertices", None)
+        indices = getattr(polygon, "vertices", None)
+        if vertices is None or indices is None:
+            return None
+        coords: list[tuple[float, float, float]] = []
+        for index in indices:
+            try:
+                co = vertices[int(index)].co
+                coords.append((float(co.x), float(co.y), float(co.z)))
+            except Exception:
+                return None
+        if not coords:
+            return None
+        inv = 1.0 / float(len(coords))
+        return (
+            sum(co[0] for co in coords) * inv,
+            sum(co[1] for co in coords) * inv,
+            sum(co[2] for co in coords) * inv,
+        )
+
+    @staticmethod
+    def _squared_distance(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
+        return (
+            (a[0] - b[0]) * (a[0] - b[0])
+            + (a[1] - b[1]) * (a[1] - b[1])
+            + (a[2] - b[2]) * (a[2] - b[2])
+        )
+
+    def _object_material_index_for_variant(
+        self,
+        obj: bpy.types.Object,
+        material: bpy.types.Material,
+    ) -> int | None:
+        for index, slot in enumerate(getattr(obj, "material_slots", []) or []):
+            if slot is not None and slot.material is material:
+                return index
+        mesh_materials = getattr(getattr(obj, "data", None), "materials", None)
+        if mesh_materials is None or not hasattr(mesh_materials, "append"):
+            return None
+        try:
+            mesh_materials.append(material)
+            return len(mesh_materials) - 1
+        except Exception:
+            return None
+
+    @classmethod
+    def _decal_host_material_key(cls, material: bpy.types.Material) -> str:
+        identity = material.get(PROP_MATERIAL_IDENTITY) if hasattr(material, "get") else None
+        if isinstance(identity, str) and identity:
+            source = identity
+        else:
+            source = f"{getattr(material, 'name', 'material')}:{cls._id_pointer(material)}"
+        return uuid.uuid5(uuid.NAMESPACE_URL, source).hex[:8]
+
+    @staticmethod
+    def _host_material_color_socket(material: bpy.types.Material | None) -> Any:
+        node_tree = getattr(material, "node_tree", None)
+        if node_tree is None:
+            return None
+        for node in node_tree.nodes:
+            if node.bl_idname != "ShaderNodeGroup":
+                continue
+            tree = getattr(node, "node_tree", None)
+            if tree is None or tree.name != "StarBreaker Runtime Principled":
+                continue
+            base_color = node.inputs.get("Base Color")
+            if base_color is not None and base_color.links:
+                return base_color.links[0].from_socket
+        for node in node_tree.nodes:
+            if node.bl_idname != "ShaderNodeGroup":
+                continue
+            tree = getattr(node, "node_tree", None)
+            if tree is None:
+                continue
+            if tree.name in {
+                "StarBreaker Runtime LayerSurface",
+                "StarBreaker Runtime LayeredInputs",
+            }:
+                color = node.outputs.get("Color")
+                if color is not None:
+                    return color
+        return None
+
+    @staticmethod
+    def _copy_socket_upstream_into_tree(
+        source_socket: Any,
+        target_tree: bpy.types.NodeTree,
+        *,
+        name_prefix: str = "SB_Copy_",
+    ) -> Any:
+        source_node = getattr(source_socket, "node", None)
+        source_tree = getattr(source_node, "id_data", None)
+        if source_node is None:
+            return None
+        if source_tree is None:
+            # Unit-test fakes do not expose id_data; fall back to copying the
+            # source node alone so tests can validate the wiring contract.
+            source_tree = type("_SingleNodeTree", (), {"links": []})()
+
+        nodes_to_copy: list[Any] = []
+        visited_nodes: set[int] = set()
+
+        def visit(node: Any) -> None:
+            node_key = id(node)
+            if node_key in visited_nodes:
+                return
+            visited_nodes.add(node_key)
+            for link in getattr(source_tree, "links", []) or []:
+                if link.to_node is node:
+                    visit(link.from_node)
+            nodes_to_copy.append(node)
+
+        visit(source_node)
+
+        node_map: dict[Any, Any] = {}
+        for node in nodes_to_copy:
+            try:
+                clone = target_tree.nodes.new(node.bl_idname)
+            except Exception:
+                continue
+            node_map[node] = clone
+            clone.name = f"{name_prefix}{getattr(node, 'name', clone.name)}"
+            clone.label = getattr(node, "label", "")
+            try:
+                clone.location = (getattr(node.location, "x", 0.0) - 860.0, getattr(node.location, "y", 0.0) - 360.0)
+            except Exception:
+                pass
+            for attr in (
+                "blend_type",
+                "operation",
+                "use_clamp",
+                "data_type",
+                "factor_mode",
+                "clamp_factor",
+                "clamp_result",
+                "extension",
+                "interpolation",
+                "projection",
+            ):
+                if hasattr(node, attr) and hasattr(clone, attr):
+                    try:
+                        setattr(clone, attr, getattr(node, attr))
+                    except Exception:
+                        pass
+            if hasattr(node, "node_tree") and hasattr(clone, "node_tree"):
+                try:
+                    clone.node_tree = node.node_tree
+                    _refresh_group_node_sockets(clone)
+                except Exception:
+                    pass
+            if hasattr(node, "image") and hasattr(clone, "image"):
+                try:
+                    clone.image = node.image
+                except Exception:
+                    pass
+            for source_input in getattr(node, "inputs", []) or []:
+                target_input = clone.inputs.get(source_input.name)
+                if target_input is None or not hasattr(source_input, "default_value"):
+                    continue
+                try:
+                    target_input.default_value = source_input.default_value
+                except Exception:
+                    pass
+
+        for link in getattr(source_tree, "links", []) or []:
+            from_node = node_map.get(link.from_node)
+            to_node = node_map.get(link.to_node)
+            if from_node is None or to_node is None:
+                continue
+            from_socket = from_node.outputs.get(link.from_socket.name)
+            to_socket = to_node.inputs.get(link.to_socket.name)
+            if from_socket is None or to_socket is None:
+                continue
+            try:
+                target_tree.links.new(from_socket, to_socket)
+            except Exception:
+                pass
+
+        copied_source = node_map.get(source_node)
+        if copied_source is None:
+            return None
+        copied_socket = copied_source.outputs.get(source_socket.name)
+        if copied_socket is not None:
+            return copied_socket
+        try:
+            index = list(source_node.outputs).index(source_socket)
+            return copied_source.outputs[index]
+        except Exception:
+            return None
+
+    @staticmethod
+    def _socket_link_source(socket: Any) -> Any:
+        if socket is None:
+            return None
+        links = getattr(socket, "links", None)
+        if not links:
+            return None
+        try:
+            return links[0].from_socket
+        except Exception:
+            return None
+
+    @staticmethod
+    def _socket_default_color_source(
+        nodes: bpy.types.Nodes,
+        socket: Any,
+        *,
+        name: str,
+    ) -> Any:
+        if socket is None or not hasattr(socket, "default_value"):
+            return None
+        try:
+            value = socket.default_value
+            if isinstance(value, (int, float)):
+                color = (float(value), float(value), float(value), 1.0)
+            else:
+                parts = list(value)
+                color = (
+                    float(parts[0]),
+                    float(parts[1]),
+                    float(parts[2]),
+                    float(parts[3]) if len(parts) > 3 else 1.0,
+                )
+        except Exception:
+            return None
+        try:
+            rgb = nodes.new("ShaderNodeRGB")
+            rgb.name = name
+            rgb.label = name
+            rgb.outputs[0].default_value = color
+            return rgb.outputs[0]
+        except Exception:
+            return None
+
+    @staticmethod
+    def _illum_decal_overlay_factor(material: bpy.types.Material) -> float:
+        raw = material.get(PROP_SUBMATERIAL_JSON) if hasattr(material, "get") else None
+        if not isinstance(raw, str) or not raw.strip():
+            return 1.0
+        try:
+            submaterial = SubmaterialRecord.from_value(json.loads(raw))
+        except (TypeError, ValueError):
+            return 1.0
+        factor = 1.0
+        for name in ("DecalDiffuseOpacity", "DecalAlphaMult"):
+            value = _optional_float_public_param(submaterial, name)
+            if value is not None:
+                factor *= value
+        return _clamp_unit_float(factor)
+
+    @staticmethod
+    def _illum_decal_surface_sources(
+        material: bpy.types.Material,
+    ) -> tuple[Any, Any, Any]:
+        node_tree = getattr(material, "node_tree", None)
+        if node_tree is None:
+            return None, None, None
+        for node in node_tree.nodes:
+            if node.bl_idname != "ShaderNodeGroup":
+                continue
+            tree = getattr(node, "node_tree", None)
+            if tree is None or not tree.name.startswith("StarBreaker Runtime Illum"):
+                continue
+            return (
+                BuildersMixin._socket_link_source(node.inputs.get("Primary Color")),
+                BuildersMixin._socket_link_source(node.inputs.get("Primary Alpha")),
+                BuildersMixin._socket_link_source(node.inputs.get("Primary Normal")),
+            )
+        return None, None, None
+
+    @staticmethod
+    def _host_material_color_target(material: bpy.types.Material) -> tuple[Any, Any]:
+        node_tree = getattr(material, "node_tree", None)
+        if node_tree is None:
+            return None, None
+        for node in node_tree.nodes:
+            if node.bl_idname != "ShaderNodeGroup":
+                continue
+            tree = getattr(node, "node_tree", None)
+            if tree is None:
+                continue
+            if tree.name == "StarBreaker Runtime Principled":
+                target = node.inputs.get("Base Color")
+            elif tree.name.startswith("StarBreaker Runtime Illum"):
+                target = node.inputs.get("Primary Color")
+            elif tree.name.startswith("StarBreaker Runtime HardSurface"):
+                target = node.inputs.get("Primary Color")
+            elif tree.name.startswith("StarBreaker Runtime Glass"):
+                target = node.inputs.get("Base Color")
+            else:
+                target = None
+            if target is not None:
+                source = BuildersMixin._socket_link_source(target)
+                if source is not None or hasattr(target, "default_value"):
+                    return target, source
+        return None, None
+
+    @staticmethod
+    def _host_material_normal_target(material: bpy.types.Material) -> tuple[Any, Any]:
+        node_tree = getattr(material, "node_tree", None)
+        if node_tree is None:
+            return None, None
+        for node in node_tree.nodes:
+            if node.bl_idname != "ShaderNodeGroup":
+                continue
+            tree = getattr(node, "node_tree", None)
+            if tree is None:
+                continue
+            if tree.name.startswith("StarBreaker Runtime Illum") or tree.name.startswith("StarBreaker Runtime HardSurface"):
+                target = node.inputs.get("Primary Normal")
+            elif tree.name == "StarBreaker Runtime Principled":
+                target = node.inputs.get("Normal Color")
+            else:
+                target = None
+            if target is not None:
+                return target, BuildersMixin._socket_link_source(target)
+        return None, None
+
+    @staticmethod
+    def _apply_illum_decal_normal_overlay(
+        nodes: bpy.types.Nodes,
+        links: bpy.types.NodeLinks,
+        *,
+        normal_target: Any,
+        host_normal_source: Any,
+        decal_normal_source: Any,
+        factor_source: Any,
+    ) -> None:
+        if normal_target is None or host_normal_source is None or decal_normal_source is None or factor_source is None:
+            return
+        try:
+            mix = nodes.new("ShaderNodeMix")
+            mix.name = "SB_IllumDecalOverlayNormal"
+            mix.label = "Illum decal normal over host"
+            mix.data_type = "VECTOR"
+            mix.factor_mode = "UNIFORM"
+            factor_input = mix.inputs.get("Factor") or mix.inputs[0]
+            a_input = mix.inputs.get("A") or mix.inputs[4]
+            b_input = mix.inputs.get("B") or mix.inputs[5]
+            result_output = mix.outputs.get("Result") or mix.outputs[1]
+            links.new(factor_source, factor_input)
+            links.new(host_normal_source, a_input)
+            links.new(decal_normal_source, b_input)
+            for link in list(normal_target.links):
+                links.remove(link)
+            links.new(result_output, normal_target)
+        except Exception:
+            return
+
+    def _ensure_host_with_illum_decal_opacity_variant(
+        self,
+        decal_material: bpy.types.Material,
+        host_material: bpy.types.Material,
+    ) -> bpy.types.Material | None:
+        decal_color, decal_alpha, decal_normal = self._illum_decal_surface_sources(decal_material)
+        if decal_color is None or decal_alpha is None:
+            return None
+
+        host_key = self._decal_host_material_key(host_material)
+        decal_key = self._decal_host_material_key(decal_material)
+        composite_mode = "host_with_illum_decal_opacity_v2"
+        composite_key = uuid.uuid5(uuid.NAMESPACE_URL, f"{composite_mode}:{host_key}:{decal_key}").hex[:8]
+        base_host = self._decal_host_variant_base_material(host_material)
+        clone_name = f"{self._decal_host_variant_base_name(host_material)}__decal_{composite_key}"
+        clone = bpy.data.materials.get(clone_name)
+        if (
+            clone is not None
+            and clone.get("starbreaker_illum_decal_composite_mode") == composite_mode
+            and clone.get("starbreaker_illum_decal_composite_key") == composite_key
+        ):
+            return clone
+        if clone is None:
+            clone = base_host.copy()
+        clone.name = clone_name
+        clone["starbreaker_illum_decal_composite"] = True
+        clone["starbreaker_illum_decal_composite_mode"] = composite_mode
+        clone["starbreaker_illum_decal_composite_key"] = composite_key
+        clone["starbreaker_illum_decal_host_material_name"] = getattr(host_material, "name", "")
+        clone["starbreaker_illum_decal_material_name"] = getattr(decal_material, "name", "")
+        clone["starbreaker_illum_decal_host_material_key"] = host_key
+        clone["starbreaker_illum_decal_material_key"] = decal_key
+
+        nodes = clone.node_tree.nodes
+        links = clone.node_tree.links
+        color_target, host_color_source = self._host_material_color_target(clone)
+        if color_target is None:
+            return clone
+        if host_color_source is None:
+            host_color_source = self._socket_default_color_source(
+                nodes,
+                color_target,
+                name="SB_IllumDecalHostDefaultColor",
+            )
+        copied_decal_color = self._copy_socket_upstream_into_tree(
+            decal_color,
+            clone.node_tree,
+            name_prefix="SB_Decal_",
+        )
+        copied_decal_alpha = self._copy_socket_upstream_into_tree(
+            decal_alpha,
+            clone.node_tree,
+            name_prefix="SB_Decal_",
+        )
+        if host_color_source is None or copied_decal_color is None or copied_decal_alpha is None:
+            return clone
+
+        factor_source = copied_decal_alpha
+        overlay_factor = self._illum_decal_overlay_factor(decal_material)
+        if abs(overlay_factor - 1.0) > 1e-6:
+            alpha_mul = nodes.new("ShaderNodeMath")
+            alpha_mul.name = "SB_IllumDecalOverlayAlpha"
+            alpha_mul.label = "Decal alpha x public params"
+            alpha_mul.operation = "MULTIPLY"
+            alpha_mul.use_clamp = True
+            links.new(copied_decal_alpha, alpha_mul.inputs[0])
+            alpha_mul.inputs[1].default_value = overlay_factor
+            factor_source = alpha_mul.outputs[0]
+
+        mix = nodes.get("SB_IllumDecalOverlayColor")
+        if mix is None or mix.bl_idname != "ShaderNodeMixRGB":
+            mix = nodes.new("ShaderNodeMixRGB")
+            mix.name = "SB_IllumDecalOverlayColor"
+            mix.label = "Illum decal over host"
+            mix.blend_type = "MIX"
+        for socket in mix.inputs:
+            for link in list(socket.links):
+                links.remove(link)
+        links.new(factor_source, mix.inputs[0])
+        links.new(host_color_source, mix.inputs[1])
+        links.new(copied_decal_color, mix.inputs[2])
+        for link in list(color_target.links):
+            links.remove(link)
+        links.new(mix.outputs[0], color_target)
+
+        normal_target, host_normal_source = self._host_material_normal_target(clone)
+        copied_decal_normal = (
+            self._copy_socket_upstream_into_tree(
+                decal_normal,
+                clone.node_tree,
+                name_prefix="SB_Decal_",
+            )
+            if decal_normal is not None
+            else None
+        )
+        self._apply_illum_decal_normal_overlay(
+            nodes,
+            links,
+            normal_target=normal_target,
+            host_normal_source=host_normal_source,
+            decal_normal_source=copied_decal_normal,
+            factor_source=factor_source,
+        )
+        clone.blend_method = "OPAQUE"
+        clone.use_screen_refraction = False
+        return clone
+
+    def _ensure_illum_decal_host_material_variant(
+        self,
+        material: bpy.types.Material,
+        host_material: bpy.types.Material,
+    ) -> bpy.types.Material | None:
+        return self._ensure_host_with_illum_decal_opacity_variant(material, host_material)
+
+    def _rebind_illum_opacity_decals_by_nearest_host(
+        self,
+        obj: bpy.types.Object,
+        palette: PaletteRecord | None,
+        decal_slots: list[tuple[int, bpy.types.Material]],
+    ) -> int:
+        data = getattr(obj, "data", None)
+        polygons = list(getattr(data, "polygons", []) or [])
+        if not polygons:
+            return 0
+
+        host_materials_by_slot: dict[int, bpy.types.Material] = {}
+        for slot_index, slot in enumerate(getattr(obj, "material_slots", []) or []):
+            mat = slot.material if slot is not None else None
+            if mat is None:
+                continue
+            if mat.get(PROP_SHADER_FAMILY) in {"MeshDecal", "Illum"} and (
+                self._illum_decal_needs_host_composite(mat) or bool(mat.get(PROP_HAS_POM, False))
+            ):
+                continue
+            host_materials_by_slot[slot_index] = mat
+        if not host_materials_by_slot:
+            return 0
+
+        host_polygons: list[tuple[tuple[float, float, float], bpy.types.Material]] = []
+        for polygon in polygons:
+            host_material = host_materials_by_slot.get(int(getattr(polygon, "material_index", 0)))
+            if host_material is None:
+                continue
+            center = self._polygon_center(obj, polygon)
+            if center is not None:
+                host_polygons.append((center, host_material))
+        if not host_polygons:
+            return 0
+
+        decal_slot_indices = {slot_index for slot_index, _material in decal_slots}
+        variants_by_key: dict[tuple[str, str, int], int] = {}
+        changed = 0
+        for polygon in polygons:
+            source_slot = int(getattr(polygon, "material_index", 0))
+            if source_slot not in decal_slot_indices:
+                continue
+            center = self._polygon_center(obj, polygon)
+            if center is None:
+                continue
+            _host_center, host_material = min(
+                host_polygons,
+                key=lambda item: self._squared_distance(center, item[0]),
+            )
+            source_material = next((material for slot_index, material in decal_slots if slot_index == source_slot), None)
+            if source_material is None:
+                continue
+            host_key = self._decal_host_material_key(host_material)
+            decal_key = self._decal_host_material_key(source_material)
+            variant_key = ("host_decal", f"{host_key}:{decal_key}", id(source_material))
+            target_index = variants_by_key.get(variant_key)
+            if target_index is None:
+                variant = self._ensure_host_with_illum_decal_opacity_variant(source_material, host_material)
+                if variant is None:
+                    continue
+                target_index = self._object_material_index_for_variant(obj, variant)
+                if target_index is None:
+                    continue
+                variants_by_key[variant_key] = target_index
+            if polygon.material_index != target_index:
+                polygon.material_index = target_index
+                changed += 1
+        return changed
+
+    def _rebind_mesh_pom_decals_by_nearest_host(
+        self,
+        obj: bpy.types.Object,
+        palette: PaletteRecord | None,
+        decal_slots: list[tuple[int, bpy.types.Material]],
+    ) -> int:
+        data = getattr(obj, "data", None)
+        polygons = list(getattr(data, "polygons", []) or [])
+        if not polygons or not decal_slots:
+            return 0
+
+        host_materials_by_slot: dict[int, bpy.types.Material] = {}
+        for slot_index, slot in enumerate(getattr(obj, "material_slots", []) or []):
+            mat = slot.material if slot is not None else None
+            if mat is None:
+                continue
+            shader_family = mat.get(PROP_SHADER_FAMILY)
+            if shader_family in {"MeshDecal", "Illum"} and (
+                bool(mat.get(PROP_HAS_POM, False)) or self._illum_decal_needs_host_composite(mat)
+            ):
+                continue
+            host_materials_by_slot[slot_index] = mat
+        if not host_materials_by_slot:
+            return 0
+
+        host_polygons: list[tuple[tuple[float, float, float], bpy.types.Material]] = []
+        for polygon in polygons:
+            host_material = host_materials_by_slot.get(int(getattr(polygon, "material_index", 0)))
+            if host_material is None:
+                continue
+            center = self._polygon_center(obj, polygon)
+            if center is not None:
+                host_polygons.append((center, host_material))
+        if not host_polygons:
+            return 0
+
+        decal_slot_indices = {slot_index for slot_index, _material in decal_slots}
+        variants_by_key: dict[tuple[str, str, int], int] = {}
+        changed = 0
+        for polygon in polygons:
+            source_slot = int(getattr(polygon, "material_index", 0))
+            if source_slot not in decal_slot_indices:
+                continue
+            center = self._polygon_center(obj, polygon)
+            if center is None:
+                continue
+            _host_center, host_material = min(
+                host_polygons,
+                key=lambda item: self._squared_distance(center, item[0]),
+            )
+            source_material = next((material for slot_index, material in decal_slots if slot_index == source_slot), None)
+            if source_material is None:
+                continue
+
+            channel = self._material_palette_channel(host_material)
+            variant: bpy.types.Material | None = None
+            variant_key: tuple[str, str, int] | None = None
+            if channel is not None and palette is not None:
+                variant_key = ("channel", channel, id(source_material))
+                target_index = variants_by_key.get(variant_key)
+                if target_index is None:
+                    variant = self._ensure_mesh_decal_host_variant(source_material, channel, palette)
+            else:
+                if not self._mesh_decal_allows_rgb_host_variant(source_material):
+                    continue
+                rgb = self._read_paint_tint_rgb(host_material)
+                if rgb is None:
+                    continue
+                rgb_key = self._rgb_variant_key(rgb)
+                variant_key = ("rgb", rgb_key, id(source_material))
+                target_index = variants_by_key.get(variant_key)
+                if target_index is None:
+                    variant = self._ensure_mesh_decal_host_rgb_variant(source_material, rgb)
+            if variant_key is None:
+                continue
+            target_index = variants_by_key.get(variant_key)
+            if target_index is None:
+                if variant is None:
+                    continue
+                target_index = self._object_material_index_for_variant(obj, variant)
+                if target_index is None:
+                    continue
+                variants_by_key[variant_key] = target_index
+            if polygon.material_index != target_index:
+                polygon.material_index = target_index
+                changed += 1
+        return changed
 
     @staticmethod
     def _submaterial_palette_channel(submaterial: SubmaterialRecord) -> str | None:
@@ -2657,6 +3591,106 @@ class BuildersMixin:
                     pass
         return clone
 
+    def _ensure_illum_decal_host_rgb_variant(
+        self,
+        material: bpy.types.Material,
+        rgb: tuple[float, float, float],
+    ) -> bpy.types.Material:
+        """Clone an Illum opacity decal and composite transparent areas over RGB.
+
+        Some Star Engine decal faces are exported as standalone geometry. In
+        game the transparent parts reveal the host surface; in Blender there
+        may be no exact host face under the decal polygon, so using image alpha
+        as material alpha creates holes. This variant uses the decal alpha as
+        a color mix factor and leaves the material opaque.
+        """
+
+        if material is None or material.node_tree is None:
+            return material
+        rgb_key = self._rgb_variant_key(rgb)
+        base_material = self._decal_host_variant_base_material(material)
+        clone_name = f"{self._decal_host_variant_base_name(material)}__host_rgb_{rgb_key}"
+        composite_mode = "illum_primary_color_v2"
+        clone = bpy.data.materials.get(clone_name)
+        if (
+            clone is not None
+            and clone.get("starbreaker_decal_host_rgb_key") == rgb_key
+            and clone.get("starbreaker_decal_host_composite_mode") == composite_mode
+        ):
+            return clone
+        if clone is not None and clone.get("starbreaker_decal_host_composite_mode") != composite_mode:
+            if getattr(clone, "users", 0) == 0:
+                bpy.data.materials.remove(clone)
+                clone = None
+            elif base_material is not clone:
+                clone = base_material.copy()
+        if clone is None:
+            clone = base_material.copy()
+        clone.name = clone_name
+        clone["starbreaker_decal_host_rgb_key"] = rgb_key
+        clone["starbreaker_decal_host_composite"] = True
+        clone["starbreaker_decal_host_composite_mode"] = composite_mode
+
+        nodes = clone.node_tree.nodes
+        links = clone.node_tree.links
+        illum_group = next(
+            (
+                node
+                for node in nodes
+                if node.bl_idname == "ShaderNodeGroup"
+                and getattr(node, "node_tree", None) is not None
+                and node.node_tree.name.startswith("StarBreaker Runtime Illum")
+            ),
+            None,
+        )
+        if illum_group is None:
+            return clone
+        primary_color = illum_group.inputs.get("Primary Color")
+        primary_alpha = illum_group.inputs.get("Primary Alpha")
+        if primary_color is None or primary_alpha is None:
+            return clone
+        color_link = primary_color.links[0] if primary_color.links else None
+        alpha_link = primary_alpha.links[0] if primary_alpha.links else None
+        if color_link is None or alpha_link is None:
+            return clone
+        color_source = color_link.from_socket
+        alpha_source = alpha_link.from_socket
+        for link in list(primary_color.links):
+            links.remove(link)
+        for link in list(primary_alpha.links):
+            links.remove(link)
+
+        host_node = nodes.get("SB_DecalHostCompositeColor")
+        if host_node is None or host_node.bl_idname != "ShaderNodeRGB":
+            host_node = nodes.new("ShaderNodeRGB")
+            host_node.name = "SB_DecalHostCompositeColor"
+            host_node.label = "Host composite color"
+            host_node.location = (illum_group.location.x - 520.0, illum_group.location.y + 180.0)
+        host_node.outputs[0].default_value = (rgb[0], rgb[1], rgb[2], 1.0)
+
+        mix = nodes.get("SB_DecalHostCompositeMix")
+        if mix is None or mix.bl_idname != "ShaderNodeMixRGB":
+            mix = nodes.new("ShaderNodeMixRGB")
+            mix.name = "SB_DecalHostCompositeMix"
+            mix.label = "Decal over host"
+            mix.blend_type = "MIX"
+            mix.location = (illum_group.location.x - 280.0, illum_group.location.y + 120.0)
+        for link in list(mix.inputs[0].links):
+            links.remove(link)
+        for link in list(mix.inputs[1].links):
+            links.remove(link)
+        for link in list(mix.inputs[2].links):
+            links.remove(link)
+        links.new(alpha_source, mix.inputs[0])
+        links.new(host_node.outputs[0], mix.inputs[1])
+        links.new(color_source, mix.inputs[2])
+        links.new(mix.outputs[0], primary_color)
+        if hasattr(primary_alpha, "default_value"):
+            primary_alpha.default_value = 1.0
+        clone.blend_method = "OPAQUE"
+        clone.use_screen_refraction = False
+        return clone
+
     def _ensure_mesh_decal_host_variant(
         self,
         material: bpy.types.Material,
@@ -2677,13 +3711,31 @@ class BuildersMixin:
             return material
         base_material = self._decal_host_variant_base_material(material)
         clone_name = f"{self._decal_host_variant_base_name(material)}__host_{channel}"
+        control_only_pom = self._mesh_decal_pom_is_control_only(base_material)
+        variant_mode = "control_only_pom_masked_v2" if control_only_pom else ""
         clone = bpy.data.materials.get(clone_name)
-        if clone is not None and clone.get("starbreaker_decal_host_channel") == channel:
+        if (
+            clone is not None
+            and clone.get("starbreaker_decal_host_channel") == channel
+            and (not control_only_pom or clone.get("starbreaker_mesh_decal_variant_mode") == variant_mode)
+        ):
             return clone
+        if (
+            clone is not None
+            and control_only_pom
+            and clone.get("starbreaker_mesh_decal_variant_mode") != variant_mode
+        ):
+            if getattr(clone, "users", 0) == 0:
+                bpy.data.materials.remove(clone)
+                clone = None
+            elif base_material is not clone:
+                clone = base_material.copy()
         if clone is None:
             clone = base_material.copy()
-            clone.name = clone_name
+        clone.name = clone_name
         clone["starbreaker_decal_host_channel"] = channel
+        if control_only_pom:
+            clone["starbreaker_mesh_decal_variant_mode"] = variant_mode
 
         nodes = clone.node_tree.nodes
         links = clone.node_tree.links
@@ -2699,6 +3751,8 @@ class BuildersMixin:
         )
         if decal_group_node is None:
             return clone
+        if control_only_pom:
+            self._configure_control_only_mesh_decal_host_variant(decal_group_node)
         host_tint = decal_group_node.inputs.get("Host Tint")
         if host_tint is None:
             return clone
@@ -2768,6 +3822,25 @@ class BuildersMixin:
                 links.new(inv.outputs[0], rough_input)
         return clone
 
+    @staticmethod
+    def _configure_control_only_mesh_decal_host_variant(decal_group_node: bpy.types.Node) -> None:
+        """Make a control-only POM decal visible as host-colored relief.
+
+        The base material keeps the authored TexSlot1 alpha but stays
+        opacity-zero so an unmatched control decal never renders as a white
+        patch. Matched ``__host_*`` variants restore opacity and use a white
+        decal source; the visible colour then comes from ``Host Tint`` while
+        TexSlot1 alpha masks TexSlot3/TexSlot4 normal/height.
+        """
+
+        decal_source = decal_group_node.inputs.get("TexSlot1_DecalSource")
+        if decal_source is not None and hasattr(decal_source, "default_value"):
+            decal_source.default_value = (1.0, 1.0, 1.0, 1.0)
+        for name in ("Param_DecalDiffuseOpacity", "Param_DecalAlphaMultiplier"):
+            socket = decal_group_node.inputs.get(name)
+            if socket is not None and hasattr(socket, "default_value"):
+                socket.default_value = 1.0
+
     def _rebind_mesh_decal_for_host(
         self,
         obj: bpy.types.Object,
@@ -2789,26 +3862,85 @@ class BuildersMixin:
           wires Host Tint to the dominant host paint's authored tint
           when no palette channel can be identified.
         """
-        decal_slots: list[tuple[bpy.types.MaterialSlot, bpy.types.Material, bool]] = []
+        decal_slots: list[tuple[bpy.types.MaterialSlot, bpy.types.Material, str]] = []
+        illum_opacity_slots: list[tuple[int, bpy.types.Material]] = []
+        mesh_pom_slots: list[tuple[int, bpy.types.Material]] = []
         for slot in getattr(obj, "material_slots", []):
             mat = slot.material if slot is not None else None
             if mat is None:
                 continue
+            slot_index = len(decal_slots) + len(illum_opacity_slots)
             shader_family = mat.get("starbreaker_shader_family")
             is_mesh_decal = shader_family == "MeshDecal"
+            has_pom = bool(mat.get(PROP_HAS_POM, False))
             is_illum_pom_decal = (
                 shader_family == "Illum"
-                and bool(mat.get(PROP_HAS_POM, False))
+                and has_pom
                 and mat.get(PROP_TEMPLATE_KEY) == "decal_stencil"
             )
-            if not is_mesh_decal and not is_illum_pom_decal:
+            is_illum_opacity_decal = self._illum_decal_needs_host_composite(mat)
+            if not is_mesh_decal and not is_illum_pom_decal and not is_illum_opacity_decal:
+                continue
+            if is_illum_opacity_decal:
+                real_slot_index = next(
+                    (
+                        index
+                        for index, candidate in enumerate(getattr(obj, "material_slots", []) or [])
+                        if candidate is slot
+                    ),
+                    slot_index,
+                )
+                illum_opacity_slots.append((real_slot_index, mat))
+                continue
+            if is_illum_pom_decal:
+                # Illum POM decals are authored overlay materials in the
+                # source shader. Rebinding them to host RGB clones flattens
+                # their own texture stack and produces synthetic
+                # ``Poms__host_rgb_*`` materials instead of the game-style
+                # original-material overlay.
                 continue
             # Host-tint rebinding is only meaningful for POM-family decal
             # overlays. Non-POM branding/text decals author their own
             # colour and must not be retinted by the host.
-            if not bool(mat.get(PROP_HAS_POM, False)):
+            if not has_pom and not is_illum_opacity_decal:
                 continue
-            decal_slots.append((slot, mat, is_mesh_decal))
+            kind = "mesh" if is_mesh_decal else "illum_pom" if is_illum_pom_decal else "illum_opacity"
+            if kind == "mesh" and has_pom:
+                real_slot_index = next(
+                    (
+                        index
+                        for index, candidate in enumerate(getattr(obj, "material_slots", []) or [])
+                        if candidate is slot
+                    ),
+                    slot_index,
+                )
+                mesh_pom_slots.append((real_slot_index, mat))
+            decal_slots.append((slot, mat, kind))
+
+        rebound = self._rebind_mesh_pom_decals_by_nearest_host(
+            obj,
+            palette,
+            mesh_pom_slots,
+        )
+        if rebound > 0:
+            mesh_pom_slot_indices = {slot_index for slot_index, _mat in mesh_pom_slots}
+            slots = list(getattr(obj, "material_slots", []) or [])
+            decal_slots = [
+                (slot, mat, kind)
+                for slot, mat, kind in decal_slots
+                if not (kind == "mesh" and any(index < len(slots) and slots[index] is slot for index in mesh_pom_slot_indices))
+            ]
+
+        rebound += self._rebind_illum_opacity_decals_by_nearest_host(
+            obj,
+            palette,
+            illum_opacity_slots,
+        )
+        if not decal_slots:
+            return rebound
+        else:
+            if rebound > 0:
+                illum_opacity_slots = []
         if not decal_slots:
             return 0
 
@@ -2820,9 +3952,8 @@ class BuildersMixin:
             resolved_fallback_rgb = self._mesh_decal_host_rgb_for_object(obj)
         if channel is None and resolved_fallback_rgb is None:
             return 0
-        rebound = 0
-        for slot, mat, is_mesh_decal in decal_slots:
-            if is_mesh_decal and channel is not None:
+        for slot, mat, kind in decal_slots:
+            if kind == "mesh" and channel is not None:
                 if mat.get("starbreaker_decal_host_channel") == channel:
                     continue
                 variant = self._ensure_mesh_decal_host_variant(mat, channel, palette)
@@ -2834,14 +3965,18 @@ class BuildersMixin:
                     variant_rgb = resolved_fallback_rgb
                 if variant_rgb is None:
                     continue
+                if kind == "mesh" and not self._mesh_decal_allows_rgb_host_variant(mat):
+                    continue
                 key = mat.get("starbreaker_decal_host_rgb_key")
                 rgb_key = self._rgb_variant_key(variant_rgb)
                 if key == rgb_key:
                     continue
-                if is_mesh_decal:
+                if kind == "mesh":
                     variant = self._ensure_mesh_decal_host_rgb_variant(mat, variant_rgb)
-                else:
+                elif kind == "illum_pom":
                     variant = self._ensure_illum_pom_host_rgb_variant(mat, variant_rgb)
+                else:
+                    variant = self._ensure_illum_decal_host_rgb_variant(mat, variant_rgb)
             if variant is not mat:
                 slot.material = variant
                 rebound += 1

@@ -65,6 +65,10 @@ if "bpy" not in sys.modules:
     bpy.data = types.SimpleNamespace(node_groups=[], images=[])
     sys.modules["bpy"] = bpy
 
+if "numpy" not in sys.modules:
+    numpy = types.ModuleType("numpy")
+    sys.modules["numpy"] = numpy
+
 
 from starbreaker_addon.runtime.constants import (
     PROP_DECAL_HOST_CHANNEL,
@@ -79,6 +83,7 @@ from starbreaker_addon.runtime.constants import (
 from starbreaker_addon.manifest import MaterialSidecar, SubmaterialRecord
 from starbreaker_addon.runtime.importer.builders import (
     BuildersMixin,
+    _illum_payload_is_local_opacity_decal,
     _mesh_decal_neutral_breakup_default,
     _parallax_height_sampler_extension,
 )
@@ -112,6 +117,151 @@ class FakeMaterial(dict):
 
     def copy(self):
         return FakeMaterial(self.name, library=None, **dict(self))
+
+
+class FakeLink:
+    def __init__(self, from_socket, to_socket):
+        self.from_socket = from_socket
+        self.to_socket = to_socket
+
+
+class FakeSocket:
+    def __init__(self, name: str, *, is_output: bool):
+        self.name = name
+        self.is_output = is_output
+        self.links: list[FakeLink] = []
+        self.default_value = None
+        self.node = None
+
+
+class FakeSocketCollection:
+    def __init__(self, sockets: list[FakeSocket]):
+        self._sockets = sockets
+        self._by_name = {socket.name: socket for socket in sockets}
+
+    def __getitem__(self, index: int):
+        return self._sockets[index]
+
+    def __iter__(self):
+        return iter(self._sockets)
+
+    def get(self, name: str, default=None):
+        return self._by_name.get(name, default)
+
+
+class FakeLinks(list):
+    def new(self, from_socket, to_socket):
+        link = FakeLink(from_socket, to_socket)
+        self.append(link)
+        from_socket.links.append(link)
+        to_socket.links.append(link)
+        return link
+
+    def remove(self, link):
+        if link in self:
+            super().remove(link)
+        if link in link.from_socket.links:
+            link.from_socket.links.remove(link)
+        if link in link.to_socket.links:
+            link.to_socket.links.remove(link)
+
+
+class FakeNodeGroupTree:
+    def __init__(self, name: str):
+        self.name = name
+
+
+class FakeNode:
+    def __init__(
+        self,
+        bl_idname: str,
+        *,
+        name: str = "",
+        node_tree: FakeNodeGroupTree | None = None,
+        inputs: list[str] | None = None,
+        outputs: list[str] | None = None,
+    ):
+        self.bl_idname = bl_idname
+        self.name = name
+        self.label = ""
+        self.node_tree = node_tree
+        self.location = types.SimpleNamespace(x=0.0, y=0.0)
+        self.blend_type = ""
+        self.inputs = FakeSocketCollection([FakeSocket(socket, is_output=False) for socket in (inputs or [])])
+        self.outputs = FakeSocketCollection([FakeSocket(socket, is_output=True) for socket in (outputs or [])])
+        for socket in [*self.inputs._sockets, *self.outputs._sockets]:
+            socket.node = self
+
+
+class FakeNodes(list):
+    def new(self, bl_idname: str):
+        if bl_idname == "ShaderNodeRGB":
+            node = FakeNode(bl_idname, outputs=["Color"])
+        elif bl_idname == "ShaderNodeMixRGB":
+            node = FakeNode(bl_idname, inputs=["Fac", "Color1", "Color2"], outputs=["Color"])
+        elif bl_idname == "ShaderNodeMath":
+            node = FakeNode(bl_idname, inputs=["Value", "Value"], outputs=["Value"])
+        elif bl_idname == "ShaderNodeGroup":
+            node = FakeNode(bl_idname, inputs=["Base Color", "Base Alpha"], outputs=["Color", "Alpha", "Shader"])
+        elif bl_idname == "ShaderNodeTexImage":
+            node = FakeNode(bl_idname, inputs=["Vector"], outputs=["Color", "Alpha"])
+        else:
+            node = FakeNode(bl_idname)
+        self.append(node)
+        return node
+
+    def get(self, name: str, default=None):
+        for node in self:
+            if node.name == name:
+                return node
+        return default
+
+
+class FakeMaterialNodeTree:
+    def __init__(self):
+        self.nodes = FakeNodes()
+        self.links = FakeLinks()
+
+    def clone(self):
+        clone = FakeMaterialNodeTree()
+        mapping: dict[int, FakeNode] = {}
+        socket_mapping: dict[int, FakeSocket] = {}
+        for node in self.nodes:
+            copied = FakeNode(
+                node.bl_idname,
+                name=node.name,
+                node_tree=node.node_tree,
+                inputs=[socket.name for socket in node.inputs._sockets],
+                outputs=[socket.name for socket in node.outputs._sockets],
+            )
+            copied.label = node.label
+            copied.blend_type = node.blend_type
+            copied.location = types.SimpleNamespace(x=node.location.x, y=node.location.y)
+            clone.nodes.append(copied)
+            mapping[id(node)] = copied
+            for source, target in zip(node.inputs._sockets, copied.inputs._sockets):
+                target.default_value = source.default_value
+                socket_mapping[id(source)] = target
+            for source, target in zip(node.outputs._sockets, copied.outputs._sockets):
+                target.default_value = source.default_value
+                socket_mapping[id(source)] = target
+        for link in self.links:
+            clone.links.new(socket_mapping[id(link.from_socket)], socket_mapping[id(link.to_socket)])
+        return clone
+
+
+class FakeNodeMaterial(FakeMaterial):
+    def __init__(self, name: str, **props):
+        super().__init__(name, **props)
+        self.node_tree = FakeMaterialNodeTree()
+        self.blend_method = "BLEND"
+        self.use_screen_refraction = True
+        self.users = 0
+
+    def copy(self):
+        material = FakeNodeMaterial(self.name, **dict(self))
+        material.node_tree = self.node_tree.clone()
+        return material
 
 
 class FakeMaterialsCollection(dict):
@@ -151,9 +301,28 @@ class FakePolygon:
         self.vertices = vertices
 
 
+class FakeVertex:
+    def __init__(self, co: tuple[float, float, float]):
+        self.co = types.SimpleNamespace(x=co[0], y=co[1], z=co[2])
+
+
 class FakeMesh:
-    def __init__(self, polygons: list[FakePolygon], vertex_count: int):
+    def __init__(
+        self,
+        polygons: list[FakePolygon],
+        vertex_count: int,
+        vertices: list[tuple[float, float, float]] | None = None,
+    ):
         self.polygons = polygons
+        self.vertices = [
+            FakeVertex(co)
+            for co in (
+                vertices
+                if vertices is not None
+                else [(0.0, 0.0, 0.0) for _index in range(vertex_count)]
+            )
+        ]
+        self.materials = []
 
     def as_pointer(self) -> int:
         return id(self)
@@ -165,6 +334,8 @@ class FakeObject:
         self.type = "MESH"
         self.material_slots = material_slots
         self.data = mesh
+        if hasattr(self.data, "materials") and not self.data.materials:
+            self.data.materials.extend(slot.material for slot in material_slots)
         self._props = dict(props)
 
     def get(self, name: str, default=None):
@@ -176,6 +347,9 @@ class ImporterUnderTest(BuildersMixin):
         self.channel = channel
         self.fallback_rgb = fallback_rgb
         self.illum_rgb_calls: list[tuple[float, float, float]] = []
+        self.illum_decal_rgb_calls: list[tuple[float, float, float]] = []
+        self.illum_decal_material_calls: list[tuple[str, str]] = []
+        self.illum_host_decal_calls: list[tuple[str, str]] = []
 
     def _mesh_decal_host_channel_for_object(self, obj):
         return self.channel
@@ -186,6 +360,60 @@ class ImporterUnderTest(BuildersMixin):
     def _ensure_illum_pom_host_rgb_variant(self, material, rgb):
         self.illum_rgb_calls.append(rgb)
         return FakeMaterial(f"{material.name}__host_rgb", **dict(material))
+
+    def _ensure_illum_decal_host_rgb_variant(self, material, rgb):
+        self.illum_decal_rgb_calls.append(rgb)
+        return FakeMaterial(f"{material.name}__host_rgb", **dict(material))
+
+    def _ensure_illum_decal_host_material_variant(self, material, host_material):
+        self.illum_decal_material_calls.append((material.name, host_material.name))
+        return FakeMaterial(f"{material.name}__host_mat", **dict(material))
+
+    def _ensure_host_with_illum_decal_opacity_variant(self, decal_material, host_material):
+        self.illum_host_decal_calls.append((host_material.name, decal_material.name))
+        return FakeMaterial(f"{host_material.name}__decal_test", **dict(host_material))
+
+
+class MeshDecalRebindImporterUnderTest(BuildersMixin):
+    def __init__(
+        self,
+        channel: str | None = None,
+        authored_rgb: tuple[float, float, float] | None = None,
+    ):
+        self.channel = channel
+        self.authored_rgb = authored_rgb
+        self.mesh_variant_calls: list[tuple[str, str]] = []
+        self.mesh_rgb_variant_calls: list[tuple[str, tuple[float, float, float]]] = []
+
+    def _mesh_decal_host_channel_for_object(self, obj):
+        return self.channel
+
+    def _mesh_decal_host_rgb_for_object(self, obj):
+        return None
+
+    def _ensure_mesh_decal_host_variant(self, material, channel, palette):
+        self.mesh_variant_calls.append((material.name, channel))
+        return FakeMaterial(f"{material.name}__host_{channel}", **dict(material))
+
+    def _ensure_mesh_decal_host_rgb_variant(self, material, rgb):
+        self.mesh_rgb_variant_calls.append((material.name, rgb))
+        return FakeMaterial(f"{material.name}__host_rgb", **dict(material))
+
+    def _read_paint_tint_rgb(self, _material):
+        return self.authored_rgb
+
+
+class MeshDecalVariantImporterUnderTest(BuildersMixin):
+    def _palette_group_node(self, nodes, links, palette, *, x: int, y: int):
+        node = FakeNode(
+            "ShaderNodeGroup",
+            name="Palette",
+            node_tree=FakeNodeGroupTree("StarBreaker Palette test"),
+            outputs=["Secondary"],
+        )
+        node.location = types.SimpleNamespace(x=float(x), y=float(y))
+        nodes.append(node)
+        return node
 
 
 class HostRoutingImporterUnderTest(BuildersMixin):
@@ -503,7 +731,7 @@ class DecalOffsetTests(unittest.TestCase):
         self.assertIsNone(obj.material_slots[2].material)
         self.assertIsNone(obj.material_slots[3].material)
 
-    def test_illum_pom_rebind_uses_palette_channel_rgb_when_no_authored_fallback_exists(self) -> None:
+    def test_illum_pom_rebind_keeps_original_material_with_palette_channel(self) -> None:
         decal = FakeMaterial(
             "drak_vulture:pom_decals",
             starbreaker_shader_family="Illum",
@@ -526,11 +754,11 @@ class DecalOffsetTests(unittest.TestCase):
 
         rebound = importer._rebind_mesh_decal_for_host(obj, palette)
 
-        self.assertEqual(rebound, 1)
-        self.assertEqual(importer.illum_rgb_calls, [palette.primary])
-        self.assertEqual(obj.material_slots[0].material.name, "drak_vulture:pom_decals__host_rgb")
+        self.assertEqual(rebound, 0)
+        self.assertEqual(importer.illum_rgb_calls, [])
+        self.assertIs(obj.material_slots[0].material, decal)
 
-    def test_illum_pom_rebind_prefers_palette_channel_rgb_over_fallback_rgb(self) -> None:
+    def test_illum_pom_rebind_keeps_original_material_with_fallback_rgb(self) -> None:
         decal = FakeMaterial(
             "drak_vulture:pom_decals",
             starbreaker_shader_family="Illum",
@@ -556,9 +784,749 @@ class DecalOffsetTests(unittest.TestCase):
 
         rebound = importer._rebind_mesh_decal_for_host(obj, palette)
 
+        self.assertEqual(rebound, 0)
+        self.assertEqual(importer.illum_rgb_calls, [])
+        self.assertIs(obj.material_slots[0].material, decal)
+
+    def test_illum_decal_opacity_without_spatial_host_does_not_use_rgb_fallback(self) -> None:
+        decal = FakeMaterial(
+            "optc_s03_behr_02_mat:decals",
+            starbreaker_shader_family="Illum",
+            **{
+                PROP_HAS_POM: False,
+                PROP_TEMPLATE_KEY: "decal_stencil",
+                PROP_SUBMATERIAL_JSON: json.dumps(
+                    {
+                        "shader_family": "Illum",
+                        "decoded_feature_flags": {
+                            "tokens": ["NORMAL_MAP", "DECAL", "DECAL_OPACITY_MAP"],
+                            "has_decal": True,
+                        }
+                    }
+                ),
+            },
+        )
+        obj = FakeObject(
+            material_slots=[FakeSlot(decal)],
+            mesh=FakeMesh(polygons=[], vertex_count=0),
+        )
+        importer = ImporterUnderTest(channel=None, fallback_rgb=(0.02, 0.03, 0.04))
+
+        rebound = importer._rebind_mesh_decal_for_host(obj, None)
+
+        self.assertEqual(rebound, 0)
+        self.assertEqual(importer.illum_rgb_calls, [])
+        self.assertEqual(importer.illum_decal_rgb_calls, [])
+        self.assertIs(obj.material_slots[0].material, decal)
+
+    def test_illum_decal_opacity_payload_uses_local_texture_semantics(self) -> None:
+        payload = {
+            "shader_family": "Illum",
+            "decoded_feature_flags": {
+                "tokens": ["NORMAL_MAP", "DECAL", "DECAL_OPACITY_MAP"],
+                "has_decal": True,
+                "has_parallax_occlusion_mapping": False,
+            },
+            "texture_slots": [
+                {"slot": "TexSlot1", "role": "base_color", "is_virtual": False},
+                {"slot": "TexSlot2", "role": "normal_gloss", "is_virtual": False},
+            ],
+            "virtual_inputs": [],
+        }
+
+        self.assertTrue(_illum_payload_is_local_opacity_decal(payload))
+
+    def test_illum_decal_opacity_payload_rejects_virtual_tint_palette_source(self) -> None:
+        payload = {
+            "shader_family": "Illum",
+            "decoded_feature_flags": {
+                "tokens": ["NORMAL_MAP", "DECAL", "DECAL_OPACITY_MAP"],
+                "has_decal": True,
+                "has_parallax_occlusion_mapping": False,
+            },
+            "texture_slots": [
+                {"slot": "TexSlot7", "role": "tint_palette_decal", "is_virtual": True},
+            ],
+            "virtual_inputs": ["$TintPaletteDecal"],
+        }
+
+        self.assertFalse(_illum_payload_is_local_opacity_decal(payload))
+
+    def test_illum_decal_host_rgb_variant_keeps_decal_texture_at_illum_input(self) -> None:
+        import bpy
+
+        original_materials = getattr(bpy.data, "materials", None)
+        bpy.data.materials = FakeMaterialsCollection()
+        try:
+            decal = FakeNodeMaterial("optc_s03_behr_02_mat:decals")
+            image = FakeNode("ShaderNodeTexImage", name="Decal Image", outputs=["Color", "Alpha"])
+            layer = FakeNode(
+                "ShaderNodeGroup",
+                name="Layer Surface",
+                node_tree=FakeNodeGroupTree("StarBreaker Runtime LayerSurface"),
+                inputs=["Base Color", "Base Alpha"],
+                outputs=["Color", "Alpha"],
+            )
+            illum = FakeNode(
+                "ShaderNodeGroup",
+                name="Illum",
+                node_tree=FakeNodeGroupTree("StarBreaker Runtime Illum"),
+                inputs=["Primary Color", "Primary Alpha"],
+                outputs=["Shader"],
+            )
+            decal.node_tree.nodes.extend([image, layer, illum])
+            decal.node_tree.links.new(image.outputs[0], layer.inputs.get("Base Color"))
+            decal.node_tree.links.new(image.outputs[1], layer.inputs.get("Base Alpha"))
+            decal.node_tree.links.new(layer.outputs[0], illum.inputs.get("Primary Color"))
+            decal.node_tree.links.new(layer.outputs[1], illum.inputs.get("Primary Alpha"))
+
+            variant = BuildersMixin()._ensure_illum_decal_host_rgb_variant(decal, (0.1, 0.2, 0.3))
+
+            variant_illum = next(
+                node
+                for node in variant.node_tree.nodes
+                if getattr(getattr(node, "node_tree", None), "name", "") == "StarBreaker Runtime Illum"
+            )
+            self.assertEqual(variant.get("starbreaker_decal_host_composite_mode"), "illum_primary_color_v2")
+            primary_color = variant_illum.inputs.get("Primary Color")
+            primary_alpha = variant_illum.inputs.get("Primary Alpha")
+            self.assertEqual(primary_alpha.links, [])
+            self.assertEqual(primary_alpha.default_value, 1.0)
+            self.assertEqual(primary_color.links[0].from_socket.name, "Color")
+            self.assertEqual(primary_color.links[0].from_socket.node.name, "SB_DecalHostCompositeMix")
+            mix = primary_color.links[0].from_socket.node
+            self.assertEqual(mix.inputs[2].links[0].from_socket.node.name, "Layer Surface")
+            self.assertEqual(mix.inputs[2].links[0].from_socket.name, "Color")
+            self.assertEqual(variant.blend_method, "OPAQUE")
+        finally:
+            if original_materials is None:
+                delattr(bpy.data, "materials")
+            else:
+                bpy.data.materials = original_materials
+
+    def test_illum_opacity_nearest_host_rebind_uses_host_material_overlay(self) -> None:
+        decal = FakeMaterial(
+            "optc_s03_behr_02_mat:decals",
+            starbreaker_shader_family="Illum",
+            **{
+                PROP_HAS_POM: False,
+                PROP_TEMPLATE_KEY: "decal_stencil",
+                PROP_SUBMATERIAL_JSON: json.dumps(
+                    {
+                        "shader_family": "Illum",
+                        "decoded_feature_flags": {
+                            "tokens": ["NORMAL_MAP", "DECAL", "DECAL_OPACITY_MAP"],
+                            "has_decal": True,
+                        }
+                    }
+                ),
+            },
+        )
+        host = FakeMaterial(
+            "optc_s03_behr_02_mat:H_Paint_01_B",
+            starbreaker_shader_family="Illum",
+        )
+        mesh = FakeMesh(
+            polygons=[
+                FakePolygon(1, [0, 1, 2]),
+                FakePolygon(0, [3, 4, 5]),
+            ],
+            vertex_count=6,
+            vertices=[
+                (0.0, 0.0, 0.0),
+                (1.0, 0.0, 0.0),
+                (0.0, 1.0, 0.0),
+                (0.1, 0.1, 0.0),
+                (1.1, 0.1, 0.0),
+                (0.1, 1.1, 0.0),
+            ],
+        )
+        obj = FakeObject(material_slots=[FakeSlot(decal), FakeSlot(host)], mesh=mesh)
+        importer = ImporterUnderTest(channel=None, fallback_rgb=(0.02, 0.03, 0.04))
+
+        rebound = importer._rebind_illum_opacity_decals_by_nearest_host(obj, None, [(0, decal)])
+
         self.assertEqual(rebound, 1)
-        self.assertEqual(importer.illum_rgb_calls, [palette.primary])
-        self.assertEqual(obj.material_slots[0].material.name, "drak_vulture:pom_decals__host_rgb")
+        self.assertEqual(importer.illum_host_decal_calls, [(host.name, decal.name)])
+        self.assertEqual(importer.illum_decal_material_calls, [])
+        self.assertEqual(importer.illum_decal_rgb_calls, [])
+        self.assertEqual(mesh.polygons[1].material_index, 2)
+        self.assertEqual(mesh.materials[2].name, "optc_s03_behr_02_mat:H_Paint_01_B__decal_test")
+
+    def test_host_with_illum_decal_variant_overlays_decal_on_host_color(self) -> None:
+        import bpy
+
+        original_materials = getattr(bpy.data, "materials", None)
+        bpy.data.materials = FakeMaterialsCollection()
+        try:
+            decal = FakeNodeMaterial("optc_s03_behr_02_mat:decals")
+            image = FakeNode("ShaderNodeTexImage", name="Decal Image", outputs=["Color", "Alpha"])
+            layer = FakeNode(
+                "ShaderNodeGroup",
+                name="Layer Surface",
+                node_tree=FakeNodeGroupTree("StarBreaker Runtime LayerSurface"),
+                inputs=["Base Color", "Base Alpha"],
+                outputs=["Color", "Alpha"],
+            )
+            illum = FakeNode(
+                "ShaderNodeGroup",
+                name="Illum",
+                node_tree=FakeNodeGroupTree("StarBreaker Runtime Illum"),
+                inputs=["Primary Color", "Primary Alpha"],
+                outputs=["Shader"],
+            )
+            decal.node_tree.nodes.extend([image, layer, illum])
+            decal.node_tree.links.new(image.outputs.get("Color"), layer.inputs.get("Base Color"))
+            decal.node_tree.links.new(image.outputs.get("Alpha"), layer.inputs.get("Base Alpha"))
+            decal.node_tree.links.new(layer.outputs.get("Color"), illum.inputs.get("Primary Color"))
+            decal.node_tree.links.new(layer.outputs.get("Alpha"), illum.inputs.get("Primary Alpha"))
+
+            host = FakeNodeMaterial("optc_s03_behr_02_mat:H_Paint_01_B")
+            host_layered = FakeNode(
+                "ShaderNodeGroup",
+                name="Host LayeredInputs",
+                node_tree=FakeNodeGroupTree("StarBreaker Runtime LayeredInputs"),
+                outputs=["Color"],
+            )
+            host_principled = FakeNode(
+                "ShaderNodeGroup",
+                name="Host Principled",
+                node_tree=FakeNodeGroupTree("StarBreaker Runtime Principled"),
+                inputs=["Base Color", "Alpha", "Normal Color"],
+                outputs=["Shader"],
+            )
+            host.node_tree.nodes.extend([host_layered, host_principled])
+            host.node_tree.links.new(host_layered.outputs.get("Color"), host_principled.inputs.get("Base Color"))
+
+            variant = BuildersMixin()._ensure_host_with_illum_decal_opacity_variant(decal, host)
+
+            self.assertTrue(variant.name.startswith("optc_s03_behr_02_mat:H_Paint_01_B__decal_"))
+            self.assertNotIn("__host_mat_", variant.name)
+            self.assertEqual(variant.get("starbreaker_illum_decal_composite_mode"), "host_with_illum_decal_opacity_v2")
+            variant_principled = next(
+                node
+                for node in variant.node_tree.nodes
+                if getattr(getattr(node, "node_tree", None), "name", "") == "StarBreaker Runtime Principled"
+            )
+            base_color = variant_principled.inputs.get("Base Color")
+            mix = base_color.links[0].from_socket.node
+            self.assertEqual(mix.name, "SB_IllumDecalOverlayColor")
+            self.assertEqual(mix.inputs[0].links[0].from_socket.name, "Alpha")
+            self.assertEqual(mix.inputs[1].links[0].from_socket.node.name, "Host LayeredInputs")
+            self.assertEqual(mix.inputs[2].links[0].from_socket.node.name, "SB_Decal_Layer Surface")
+            self.assertEqual(variant.blend_method, "OPAQUE")
+        finally:
+            if original_materials is None:
+                delattr(bpy.data, "materials")
+            else:
+                bpy.data.materials = original_materials
+
+    def test_host_with_illum_decal_variant_multiplies_decal_public_opacity(self) -> None:
+        import bpy
+
+        original_materials = getattr(bpy.data, "materials", None)
+        bpy.data.materials = FakeMaterialsCollection()
+        try:
+            decal = FakeNodeMaterial(
+                "optc_s03_behr_02_mat:decals",
+                **{
+                    PROP_SUBMATERIAL_JSON: json.dumps(
+                        {
+                            "shader_family": "Illum",
+                            "decoded_feature_flags": {
+                                "tokens": ["NORMAL_MAP", "DECAL", "DECAL_OPACITY_MAP"],
+                                "has_decal": True,
+                            },
+                            "public_params": {
+                                "DecalDiffuseOpacity": 0.5,
+                                "DecalAlphaMult": 0.25,
+                            },
+                        }
+                    )
+                },
+            )
+            image = FakeNode("ShaderNodeTexImage", name="Decal Image", outputs=["Color", "Alpha"])
+            layer = FakeNode(
+                "ShaderNodeGroup",
+                name="Layer Surface",
+                node_tree=FakeNodeGroupTree("StarBreaker Runtime LayerSurface"),
+                inputs=["Base Color", "Base Alpha"],
+                outputs=["Color", "Alpha"],
+            )
+            illum = FakeNode(
+                "ShaderNodeGroup",
+                name="Illum",
+                node_tree=FakeNodeGroupTree("StarBreaker Runtime Illum"),
+                inputs=["Primary Color", "Primary Alpha"],
+                outputs=["Shader"],
+            )
+            decal.node_tree.nodes.extend([image, layer, illum])
+            decal.node_tree.links.new(image.outputs.get("Color"), layer.inputs.get("Base Color"))
+            decal.node_tree.links.new(image.outputs.get("Alpha"), layer.inputs.get("Base Alpha"))
+            decal.node_tree.links.new(layer.outputs.get("Color"), illum.inputs.get("Primary Color"))
+            decal.node_tree.links.new(layer.outputs.get("Alpha"), illum.inputs.get("Primary Alpha"))
+
+            host = FakeNodeMaterial("optc_s03_behr_02_mat:H_Paint_01_B")
+            host_layered = FakeNode(
+                "ShaderNodeGroup",
+                name="Host LayeredInputs",
+                node_tree=FakeNodeGroupTree("StarBreaker Runtime LayeredInputs"),
+                outputs=["Color"],
+            )
+            host_principled = FakeNode(
+                "ShaderNodeGroup",
+                name="Host Principled",
+                node_tree=FakeNodeGroupTree("StarBreaker Runtime Principled"),
+                inputs=["Base Color", "Alpha"],
+                outputs=["Shader"],
+            )
+            host.node_tree.nodes.extend([host_layered, host_principled])
+            host.node_tree.links.new(host_layered.outputs.get("Color"), host_principled.inputs.get("Base Color"))
+
+            variant = BuildersMixin()._ensure_host_with_illum_decal_opacity_variant(decal, host)
+
+            alpha_mul = next(node for node in variant.node_tree.nodes if node.name == "SB_IllumDecalOverlayAlpha")
+            self.assertEqual(alpha_mul.operation, "MULTIPLY")
+            self.assertTrue(alpha_mul.use_clamp)
+            self.assertAlmostEqual(alpha_mul.inputs[1].default_value, 0.125)
+            variant_principled = next(
+                node
+                for node in variant.node_tree.nodes
+                if getattr(getattr(node, "node_tree", None), "name", "") == "StarBreaker Runtime Principled"
+            )
+            self.assertEqual(variant_principled.inputs.get("Alpha").links, [])
+        finally:
+            if original_materials is None:
+                delattr(bpy.data, "materials")
+            else:
+                bpy.data.materials = original_materials
+
+    def test_host_with_illum_decal_variant_does_not_reuse_stale_v1_clone(self) -> None:
+        import bpy
+
+        original_materials = getattr(bpy.data, "materials", None)
+        bpy.data.materials = FakeMaterialsCollection()
+        try:
+            decal = FakeNodeMaterial("optc_s03_behr_02_mat:decals")
+            image = FakeNode("ShaderNodeTexImage", name="Decal Image", outputs=["Color", "Alpha"])
+            layer = FakeNode(
+                "ShaderNodeGroup",
+                name="Layer Surface",
+                node_tree=FakeNodeGroupTree("StarBreaker Runtime LayerSurface"),
+                inputs=["Base Color", "Base Alpha"],
+                outputs=["Color", "Alpha"],
+            )
+            illum = FakeNode(
+                "ShaderNodeGroup",
+                name="Illum",
+                node_tree=FakeNodeGroupTree("StarBreaker Runtime Illum"),
+                inputs=["Primary Color", "Primary Alpha"],
+                outputs=["Shader"],
+            )
+            decal.node_tree.nodes.extend([image, layer, illum])
+            decal.node_tree.links.new(image.outputs.get("Color"), layer.inputs.get("Base Color"))
+            decal.node_tree.links.new(image.outputs.get("Alpha"), layer.inputs.get("Base Alpha"))
+            decal.node_tree.links.new(layer.outputs.get("Color"), illum.inputs.get("Primary Color"))
+            decal.node_tree.links.new(layer.outputs.get("Alpha"), illum.inputs.get("Primary Alpha"))
+
+            host = FakeNodeMaterial("optc_s03_behr_02_mat:H_Paint_01_B")
+            host_layered = FakeNode(
+                "ShaderNodeGroup",
+                name="Host LayeredInputs",
+                node_tree=FakeNodeGroupTree("StarBreaker Runtime LayeredInputs"),
+                outputs=["Color"],
+            )
+            host_principled = FakeNode(
+                "ShaderNodeGroup",
+                name="Host Principled",
+                node_tree=FakeNodeGroupTree("StarBreaker Runtime Principled"),
+                inputs=["Base Color"],
+                outputs=["Shader"],
+            )
+            host.node_tree.nodes.extend([host_layered, host_principled])
+            host.node_tree.links.new(host_layered.outputs.get("Color"), host_principled.inputs.get("Base Color"))
+
+            old = FakeNodeMaterial("optc_s03_behr_02_mat:H_Paint_01_B__decal_deadbeef")
+            old["starbreaker_illum_decal_composite_mode"] = "host_with_illum_decal_opacity_v1"
+            bpy.data.materials[old.name] = old
+
+            variant = BuildersMixin()._ensure_host_with_illum_decal_opacity_variant(decal, host)
+
+            self.assertIsNot(variant, old)
+            self.assertEqual(variant.get("starbreaker_illum_decal_composite_mode"), "host_with_illum_decal_opacity_v2")
+            self.assertNotEqual(variant.name, old.name)
+        finally:
+            if original_materials is None:
+                delattr(bpy.data, "materials")
+            else:
+                bpy.data.materials = original_materials
+
+    def test_control_only_mesh_decal_pom_receives_host_tint_variant(self) -> None:
+        pom_control = FakeMaterial(
+            "bsnp_fps_behr_p6lr_mat:poms",
+            starbreaker_shader_family="MeshDecal",
+            **{
+                PROP_HAS_POM: True,
+                PROP_TEMPLATE_KEY: "decal_stencil",
+                PROP_SUBMATERIAL_JSON: json.dumps(
+                    {
+                        "shader_family": "MeshDecal",
+                        "decoded_feature_flags": {
+                            "tokens": ["DIFFUSE_MAP", "PARALLAX_OCCLUSION_MAPPING"],
+                            "has_decal": False,
+                            "has_stencil_map": False,
+                            "has_parallax_occlusion_mapping": True,
+                        },
+                        "texture_slots": [
+                            {"slot": "TexSlot1", "role": "base_color"},
+                            {"slot": "TexSlot3", "role": "normal_gloss"},
+                            {"slot": "TexSlot4", "role": "height"},
+                        ],
+                    }
+                ),
+            },
+        )
+        obj = FakeObject(
+            material_slots=[FakeSlot(pom_control)],
+            mesh=FakeMesh(polygons=[], vertex_count=0),
+        )
+        palette = types.SimpleNamespace(
+            primary=(0.2, 0.3, 0.4),
+            secondary=(0.5, 0.6, 0.7),
+            tertiary=(0.8, 0.1, 0.2),
+            glass=(0.9, 0.9, 0.95),
+        )
+        importer = MeshDecalRebindImporterUnderTest(channel="secondary")
+
+        rebound = importer._rebind_mesh_decal_for_host(obj, palette)
+
+        self.assertEqual(rebound, 1)
+        self.assertEqual(importer.mesh_variant_calls, [("bsnp_fps_behr_p6lr_mat:poms", "secondary")])
+        self.assertEqual(obj.material_slots[0].material.name, "bsnp_fps_behr_p6lr_mat:poms__host_secondary")
+
+    def test_control_only_mesh_decal_pom_ignores_object_level_rgb_fallback(self) -> None:
+        pom_control = FakeMaterial(
+            "bsnp_fps_behr_p6lr_mat:poms",
+            starbreaker_shader_family="MeshDecal",
+            **{
+                PROP_HAS_POM: True,
+                PROP_TEMPLATE_KEY: "decal_stencil",
+                PROP_SUBMATERIAL_JSON: json.dumps(
+                    {
+                        "shader_family": "MeshDecal",
+                        "decoded_feature_flags": {
+                            "tokens": ["DIFFUSE_MAP", "PARALLAX_OCCLUSION_MAPPING"],
+                            "has_decal": False,
+                            "has_stencil_map": False,
+                            "has_parallax_occlusion_mapping": True,
+                        },
+                        "texture_slots": [
+                            {"slot": "TexSlot1", "role": "base_color"},
+                            {"slot": "TexSlot3", "role": "normal_gloss"},
+                            {"slot": "TexSlot4", "role": "height"},
+                        ],
+                    }
+                ),
+            },
+        )
+        obj = FakeObject(
+            material_slots=[FakeSlot(pom_control)],
+            mesh=FakeMesh(polygons=[], vertex_count=0),
+        )
+        importer = MeshDecalRebindImporterUnderTest(channel=None)
+
+        rebound = importer._rebind_mesh_decal_for_host(
+            obj,
+            None,
+            fallback_rgb=(0.023, 0.023, 0.023),
+        )
+
+        self.assertEqual(rebound, 0)
+        self.assertEqual(importer.mesh_variant_calls, [])
+        self.assertEqual(importer.mesh_rgb_variant_calls, [])
+        self.assertIs(obj.material_slots[0].material, pom_control)
+
+    def test_control_only_mesh_decal_host_variant_restores_relief_alpha(self) -> None:
+        import bpy
+
+        original_materials = getattr(bpy.data, "materials", None)
+        bpy.data.materials = FakeMaterialsCollection()
+        try:
+            pom_control = FakeNodeMaterial(
+                "bsnp_fps_behr_p6lr_mat:poms",
+                starbreaker_shader_family="MeshDecal",
+                **{
+                    PROP_HAS_POM: True,
+                    PROP_SUBMATERIAL_JSON: json.dumps(
+                        {
+                            "shader_family": "MeshDecal",
+                            "decoded_feature_flags": {
+                                "tokens": ["DIFFUSE_MAP", "PARALLAX_OCCLUSION_MAPPING"],
+                                "has_decal": False,
+                                "has_stencil_map": False,
+                                "has_parallax_occlusion_mapping": True,
+                            },
+                            "texture_slots": [
+                                {"slot": "TexSlot1", "role": "base_color"},
+                                {"slot": "TexSlot3", "role": "normal_gloss"},
+                                {"slot": "TexSlot4", "role": "height"},
+                            ],
+                        }
+                    ),
+                },
+            )
+            decal_group = FakeNode(
+                "ShaderNodeGroup",
+                name="Mesh Decal",
+                node_tree=FakeNodeGroupTree("SB_MeshDecal_v1"),
+                inputs=[
+                    "TexSlot1_DecalSource",
+                    "TexSlot1_DecalSource_alpha",
+                    "Param_DecalDiffuseOpacity",
+                    "Param_DecalAlphaMultiplier",
+                    "Host Tint",
+                ],
+                outputs=["Shader"],
+            )
+            alpha_source = FakeNode("ShaderNodeTexImage", name="POM Mask", outputs=["Color", "Alpha"])
+            pom_control.node_tree.nodes.append(alpha_source)
+            pom_control.node_tree.links.new(alpha_source.outputs.get("Alpha"), decal_group.inputs.get("TexSlot1_DecalSource_alpha"))
+            decal_group.inputs.get("TexSlot1_DecalSource_alpha").default_value = 0.0
+            decal_group.inputs.get("Param_DecalDiffuseOpacity").default_value = 0.0
+            decal_group.inputs.get("Param_DecalAlphaMultiplier").default_value = 0.0
+            pom_control.node_tree.nodes.append(decal_group)
+            palette = types.SimpleNamespace(
+                primary=(0.2, 0.3, 0.4),
+                secondary=(0.5, 0.6, 0.7),
+                tertiary=(0.8, 0.1, 0.2),
+                glass=(0.9, 0.9, 0.95),
+            )
+
+            variant = MeshDecalVariantImporterUnderTest()._ensure_mesh_decal_host_variant(
+                pom_control,
+                "secondary",
+                palette,
+            )
+
+            variant_group = next(
+                node
+                for node in variant.node_tree.nodes
+                if getattr(getattr(node, "node_tree", None), "name", "") == "SB_MeshDecal_v1"
+            )
+            self.assertEqual(variant.name, "bsnp_fps_behr_p6lr_mat:poms__host_secondary")
+            self.assertEqual(variant.get("starbreaker_mesh_decal_variant_mode"), "control_only_pom_masked_v2")
+            self.assertEqual(variant_group.inputs.get("TexSlot1_DecalSource").default_value, (1.0, 1.0, 1.0, 1.0))
+            alpha = variant_group.inputs.get("TexSlot1_DecalSource_alpha")
+            self.assertEqual(alpha.default_value, 0.0)
+            self.assertEqual(alpha.links[0].from_socket.node.name, "POM Mask")
+            self.assertEqual(alpha.links[0].from_socket.name, "Alpha")
+            self.assertEqual(variant_group.inputs.get("Param_DecalDiffuseOpacity").default_value, 1.0)
+            self.assertEqual(variant_group.inputs.get("Param_DecalAlphaMultiplier").default_value, 1.0)
+            host_tint = variant_group.inputs.get("Host Tint")
+            self.assertEqual(host_tint.links[0].from_socket.node.name, "Palette")
+            self.assertEqual(host_tint.links[0].from_socket.name, "Secondary")
+        finally:
+            if original_materials is None:
+                delattr(bpy.data, "materials")
+            else:
+                bpy.data.materials = original_materials
+
+    def test_mesh_pom_decal_polygons_rebind_to_nearest_host_material(self) -> None:
+        import bpy
+
+        original_materials = getattr(bpy.data, "materials", None)
+        bpy.data.materials = FakeMaterialsCollection()
+        try:
+            poms = FakeMaterial(
+                "bsnp_fps_behr_p6lr_mat:poms",
+                starbreaker_shader_family="MeshDecal",
+                **{
+                    PROP_HAS_POM: True,
+                    PROP_SUBMATERIAL_JSON: json.dumps(
+                        {
+                            "shader_family": "MeshDecal",
+                            "decoded_feature_flags": {
+                                "tokens": ["DIFFUSE_MAP", "PARALLAX_OCCLUSION_MAPPING"],
+                                "has_decal": False,
+                                "has_stencil_map": False,
+                                "has_parallax_occlusion_mapping": True,
+                            },
+                            "texture_slots": [
+                                {"slot": "TexSlot1", "role": "base_color"},
+                                {"slot": "TexSlot3", "role": "normal_gloss"},
+                                {"slot": "TexSlot4", "role": "height"},
+                            ],
+                        }
+                    ),
+                },
+            )
+            primary_host = FakeMaterial(
+                "test:H_Paint_01_B",
+                starbreaker_shader_family="LayerBlend",
+                **{
+                    PROP_SUBMATERIAL_JSON: json.dumps(
+                        {"palette_routing": {"material_channel": {"name": "primary"}}}
+                    )
+                },
+            )
+            secondary_host = FakeMaterial(
+                "test:H_Parkerized_01_B",
+                starbreaker_shader_family="LayerBlend",
+                **{
+                    PROP_SUBMATERIAL_JSON: json.dumps(
+                        {"palette_routing": {"material_channel": {"name": "secondary"}}}
+                    )
+                },
+            )
+            mesh = FakeMesh(
+                polygons=[
+                    FakePolygon(1, [0, 1, 2]),
+                    FakePolygon(2, [3, 4, 5]),
+                    FakePolygon(0, [6, 7, 8]),
+                    FakePolygon(0, [9, 10, 11]),
+                ],
+                vertex_count=12,
+                vertices=[
+                    (0.0, 0.0, 0.0),
+                    (0.2, 0.0, 0.0),
+                    (0.0, 0.2, 0.0),
+                    (10.0, 0.0, 0.0),
+                    (10.2, 0.0, 0.0),
+                    (10.0, 0.2, 0.0),
+                    (0.05, 0.05, 0.05),
+                    (0.15, 0.05, 0.05),
+                    (0.05, 0.15, 0.05),
+                    (10.05, 0.05, 0.05),
+                    (10.15, 0.05, 0.05),
+                    (10.05, 0.15, 0.05),
+                ],
+            )
+            obj = FakeObject(
+                material_slots=[FakeSlot(poms), FakeSlot(primary_host), FakeSlot(secondary_host)],
+                mesh=mesh,
+            )
+            palette = types.SimpleNamespace(
+                primary=(0.2, 0.3, 0.4),
+                secondary=(0.5, 0.6, 0.7),
+                tertiary=(0.8, 0.1, 0.2),
+                glass=(0.9, 0.9, 0.95),
+            )
+            importer = MeshDecalRebindImporterUnderTest(channel="secondary")
+
+            rebound = importer._rebind_mesh_decal_for_host(obj, palette)
+
+            self.assertEqual(rebound, 2)
+            self.assertEqual(
+                importer.mesh_variant_calls,
+                [
+                    ("bsnp_fps_behr_p6lr_mat:poms", "primary"),
+                    ("bsnp_fps_behr_p6lr_mat:poms", "secondary"),
+                ],
+            )
+            self.assertEqual(mesh.polygons[2].material_index, 3)
+            self.assertEqual(mesh.polygons[3].material_index, 4)
+            self.assertEqual(mesh.materials[3].name, "bsnp_fps_behr_p6lr_mat:poms__host_primary")
+            self.assertEqual(mesh.materials[4].name, "bsnp_fps_behr_p6lr_mat:poms__host_secondary")
+        finally:
+            if original_materials is None:
+                delattr(bpy.data, "materials")
+            else:
+                bpy.data.materials = original_materials
+
+    def test_control_only_mesh_pom_spatial_rebind_does_not_create_rgb_variant(self) -> None:
+        poms = FakeMaterial(
+            "bsnp_fps_behr_p6lr_mat:poms",
+            starbreaker_shader_family="MeshDecal",
+            **{
+                PROP_HAS_POM: True,
+                PROP_SUBMATERIAL_JSON: json.dumps(
+                    {
+                        "shader_family": "MeshDecal",
+                        "decoded_feature_flags": {
+                            "tokens": ["DIFFUSE_MAP", "PARALLAX_OCCLUSION_MAPPING"],
+                            "has_decal": False,
+                            "has_stencil_map": False,
+                            "has_parallax_occlusion_mapping": True,
+                        },
+                        "texture_slots": [
+                            {"slot": "TexSlot1", "role": "base_color"},
+                            {"slot": "TexSlot3", "role": "normal_gloss"},
+                            {"slot": "TexSlot4", "role": "height"},
+                        ],
+                    }
+                ),
+            },
+        )
+        host = FakeMaterial("test:H_Paint_01_B", starbreaker_shader_family="LayerBlend")
+        mesh = FakeMesh(
+            polygons=[
+                FakePolygon(1, [0, 1, 2]),
+                FakePolygon(0, [3, 4, 5]),
+            ],
+            vertex_count=6,
+            vertices=[
+                (0.0, 0.0, 0.0),
+                (0.2, 0.0, 0.0),
+                (0.0, 0.2, 0.0),
+                (0.05, 0.05, 0.05),
+                (0.15, 0.05, 0.05),
+                (0.05, 0.15, 0.05),
+            ],
+        )
+        obj = FakeObject(material_slots=[FakeSlot(poms), FakeSlot(host)], mesh=mesh)
+        importer = MeshDecalRebindImporterUnderTest(channel=None, authored_rgb=(0.023, 0.023, 0.023))
+
+        rebound = importer._rebind_mesh_decal_for_host(obj, None)
+
+        self.assertEqual(rebound, 0)
+        self.assertEqual(importer.mesh_variant_calls, [])
+        self.assertEqual(importer.mesh_rgb_variant_calls, [])
+        self.assertEqual(mesh.polygons[1].material_index, 0)
+        self.assertEqual(len(mesh.materials), 2)
+
+    def test_visible_mesh_decal_pom_still_receives_host_tint(self) -> None:
+        pom_decal = FakeMaterial(
+            "drak_clipper_ext:Decal_POM_A",
+            starbreaker_shader_family="MeshDecal",
+            **{
+                PROP_HAS_POM: True,
+                PROP_TEMPLATE_KEY: "decal_stencil",
+                PROP_SUBMATERIAL_JSON: json.dumps(
+                    {
+                        "shader_family": "MeshDecal",
+                        "decoded_feature_flags": {
+                            "tokens": ["DECAL", "PARALLAX_OCCLUSION_MAPPING"],
+                            "has_decal": True,
+                            "has_stencil_map": False,
+                            "has_parallax_occlusion_mapping": True,
+                        },
+                        "texture_slots": [
+                            {"slot": "TexSlot1", "role": "base_color"},
+                            {"slot": "TexSlot3", "role": "normal_gloss"},
+                            {"slot": "TexSlot4", "role": "height"},
+                            {"slot": "TexSlot6", "role": "tint_mask"},
+                        ],
+                    }
+                ),
+            },
+        )
+        obj = FakeObject(
+            material_slots=[FakeSlot(pom_decal)],
+            mesh=FakeMesh(polygons=[], vertex_count=0),
+        )
+        palette = types.SimpleNamespace(
+            primary=(0.2, 0.3, 0.4),
+            secondary=(0.5, 0.6, 0.7),
+            tertiary=(0.8, 0.1, 0.2),
+            glass=(0.9, 0.9, 0.95),
+        )
+        importer = MeshDecalRebindImporterUnderTest(channel="secondary")
+
+        rebound = importer._rebind_mesh_decal_for_host(obj, palette)
+
+        self.assertEqual(rebound, 1)
+        self.assertEqual(importer.mesh_variant_calls, [("drak_clipper_ext:Decal_POM_A", "secondary")])
+        self.assertEqual(obj.material_slots[0].material.name, "drak_clipper_ext:Decal_POM_A__host_secondary")
 
     def test_mesh_decal_host_variant_names_do_not_chain_existing_host_suffixes(self) -> None:
         bpy = sys.modules["bpy"]

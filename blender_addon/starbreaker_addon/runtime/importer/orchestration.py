@@ -21,6 +21,8 @@ import bpy
 import mathutils
 
 from ..constants import (
+    DECAL_OFFSET_EXTERNAL_DEFAULT,
+    DECAL_OFFSET_MODIFIER_NAME,
     PACKAGE_ROOT_PREFIX,
     PROP_DECAL_HOST_CHANNEL,
     PROP_DECAL_HOST_RGB,
@@ -72,8 +74,10 @@ from .utils import (
     _scene_light_quaternion_to_blender,
     _scene_matrix_to_blender,
     _scene_position_to_blender,
+    _slot_mapping_from_slot_names,
     _slot_mapping_for_object,
     _slot_mapping_source_sidecar_path,
+    _slot_names_for_object,
     _should_neutralize_axis_root,
     _unique_submaterials_by_name,
 )
@@ -470,6 +474,14 @@ class OrchestrationMixin:
             self.slot_mapping_cache[data_pointer] = slot_mapping
         target_submaterials_by_name = self._submaterials_by_unique_name(sidecar_path, sidecar)
         target_submaterials_by_name_all = self._submaterials_by_name_all(sidecar_path, sidecar)
+        if slot_mapping is None:
+            slot_names = _slot_names_for_object(obj)
+            if slot_names is not None:
+                slot_mapping = _slot_mapping_from_slot_names(
+                    slot_names,
+                    target_submaterials_by_name,
+                    target_submaterials_by_name_all,
+                )
         if slot_mapping is None:
             inferred_slot_mapping: list[int | None] = []
             inferred_matches = 0
@@ -1030,24 +1042,7 @@ class OrchestrationMixin:
         if cached is not None:
             return cached
 
-        # Phase R3 perf fix: pass ``import_select_created_objects=False``
-        # to skip the Blender glTF addon's post-import O(n) selection
-        # pass directly via the official op param (replacing the prior
-        # monkey-patch on ``BlenderScene.select_imported_objects``). With
-        # hundreds of small template imports against a growing scene the
-        # selection step was costing ~24s on a Clipper import; the
-        # StarBreaker addon never reads selection state.
-        before = {obj.as_pointer() for obj in bpy.data.objects}
-        result = bpy.ops.import_scene.gltf(
-            filepath=str(asset_path),
-            import_pack_images=False,
-            merge_vertices=False,
-            import_select_created_objects=False,
-        )
-        if "FINISHED" not in result:
-            raise RuntimeError(f"Failed to import {asset_path}")
-
-        imported = [obj for obj in bpy.data.objects if obj.as_pointer() not in before]
+        imported = self._load_template_asset(asset_path)
         imported_materials_by_pointer: dict[int, bpy.types.Material] = {}
         for obj in imported:
             for slot in getattr(obj, "material_slots", []):
@@ -1081,6 +1076,35 @@ class OrchestrationMixin:
         template = ImportedTemplate(mesh_asset=mesh_asset, root_names=[obj.name for obj in root_objects])
         self.template_cache[asset_key] = template
         return template
+
+    def _load_template_asset(self, asset_path: Path) -> list[bpy.types.Object]:
+        if asset_path.suffix.lower() == ".blend":
+            return self._load_blend_template_asset(asset_path)
+        return self._load_gltf_template_asset(asset_path)
+
+    def _load_blend_template_asset(self, asset_path: Path) -> list[bpy.types.Object]:
+        with bpy.data.libraries.load(str(asset_path), link=False) as (data_from, data_to):
+            data_to.objects = list(data_from.objects)
+        return [obj for obj in data_to.objects if obj is not None]
+
+    def _load_gltf_template_asset(self, asset_path: Path) -> list[bpy.types.Object]:
+        # Phase R3 perf fix: pass ``import_select_created_objects=False``
+        # to skip the Blender glTF addon's post-import O(n) selection
+        # pass directly via the official op param (replacing the prior
+        # monkey-patch on ``BlenderScene.select_imported_objects``). With
+        # hundreds of small template imports against a growing scene the
+        # selection step was costing ~24s on a Clipper import; the
+        # StarBreaker addon never reads selection state.
+        before = {obj.as_pointer() for obj in bpy.data.objects}
+        result = bpy.ops.import_scene.gltf(
+            filepath=str(asset_path),
+            import_pack_images=False,
+            merge_vertices=False,
+            import_select_created_objects=False,
+        )
+        if "FINISHED" not in result:
+            raise RuntimeError(f"Failed to import {asset_path}")
+        return [obj for obj in bpy.data.objects if obj.as_pointer() not in before]
 
     def instantiate_template(
         self,
@@ -1124,6 +1148,7 @@ class OrchestrationMixin:
         if source.data is not None:
             clone.data = source.data
         clone.animation_data_clear()
+        OrchestrationMixin._normalize_template_decal_offset_modifier(clone)
         clone.hide_set(False)
         clone.hide_render = False
         clone[PROP_TEMPLATE_PATH] = mesh_asset
@@ -1144,6 +1169,21 @@ class OrchestrationMixin:
             child_clone.parent = clone
             child_clone.matrix_parent_inverse = child.matrix_parent_inverse.copy()
         return clone
+
+    @staticmethod
+    def _normalize_template_decal_offset_modifier(obj: bpy.types.Object) -> None:
+        modifiers = getattr(obj, "modifiers", None)
+        if modifiers is None:
+            return
+        dimensions = tuple(float(value) for value in getattr(obj, "dimensions", ()) if float(value) > 0.0)
+        relative_strength = min(dimensions) * 0.005 if dimensions else DECAL_OFFSET_EXTERNAL_DEFAULT
+        normalized_strength = min(DECAL_OFFSET_EXTERNAL_DEFAULT, max(0.00001, relative_strength))
+        for modifier in modifiers:
+            if (
+                getattr(modifier, "name", "") == DECAL_OFFSET_MODIFIER_NAME
+                and getattr(modifier, "type", "") == "DISPLACE"
+            ):
+                modifier.strength = min(float(getattr(modifier, "strength", normalized_strength)), normalized_strength)
 
     def _ensure_cycles_denoising_support(self) -> None:
         cycles = getattr(self.context.scene, "cycles", None)

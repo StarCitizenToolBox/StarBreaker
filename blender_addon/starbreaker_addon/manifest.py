@@ -215,8 +215,15 @@ class TextureReference:
     is_virtual: bool = False
     texture_identity: str | None = None
     alpha_semantic: str | None = None
+    alpha_channel: str | None = None
     derived_from_texture_identity: str | None = None
     derived_from_semantic: str | None = None
+    derived_from_channel: str | None = None
+    value_channel: str | None = None
+    value_transform: str | None = None
+    packed_texture_format: str | None = None
+    packed_channel_semantics: JsonDict | None = None
+    constant_channel_values: JsonDict | None = None
     texture_transform: JsonDict | None = None
 
     @classmethod
@@ -231,8 +238,15 @@ class TextureReference:
             is_virtual=_as_bool(data.get("is_virtual")),
             texture_identity=_as_str(data.get("texture_identity")),
             alpha_semantic=_as_str(data.get("alpha_semantic")),
+            alpha_channel=_as_str(data.get("alpha_channel")),
             derived_from_texture_identity=_as_str(data.get("derived_from_texture_identity")),
             derived_from_semantic=_as_str(data.get("derived_from_semantic")),
+            derived_from_channel=_as_str(data.get("derived_from_channel")),
+            value_channel=_as_str(data.get("value_channel")),
+            value_transform=_as_str(data.get("value_transform")),
+            packed_texture_format=_as_str(data.get("packed_texture_format")),
+            packed_channel_semantics=_as_dict(data.get("packed_channel_semantics")) or None,
+            constant_channel_values=_as_dict(data.get("constant_channel_values")) or None,
             texture_transform=_as_dict(data.get("texture_transform")) or None,
         )
 
@@ -245,6 +259,7 @@ class LayerManifestEntry:
     diffuse_export_path: str | None
     normal_export_path: str | None
     roughness_export_path: str | None
+    roughness_texture: TextureReference | None
     texture_slots: list[TextureReference]
     palette_channel: PaletteChannel | None
     tint_color: Color3 | None
@@ -275,6 +290,9 @@ class LayerManifestEntry:
             diffuse_export_path=_normalize_relative_path(_as_str(data.get("diffuse_export_path"))),
             normal_export_path=_normalize_relative_path(_as_str(data.get("normal_export_path"))),
             roughness_export_path=_normalize_relative_path(_as_str(data.get("roughness_export_path"))),
+            roughness_texture=TextureReference.from_value(data["roughness_texture"])
+            if isinstance(data.get("roughness_texture"), dict)
+            else None,
             texture_slots=[TextureReference.from_value(item) for item in data.get("texture_slots", [])],
             palette_channel=PaletteChannel.from_value(data.get("palette_channel")),
             tint_color=tint_color,

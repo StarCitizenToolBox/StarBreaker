@@ -143,8 +143,18 @@ class FakeUVLayers(list):
 
 
 class FakeMeshData:
-    def __init__(self, uv_layers: FakeUVLayers | None = None):
+    def __init__(
+        self,
+        uv_layers: FakeUVLayers | None = None,
+        *,
+        name: str = "Mesh",
+        vertex_count: int = 0,
+        polygon_count: int = 0,
+    ):
+        self.name = name
         self.uv_layers = uv_layers or FakeUVLayers([])
+        self.vertices = [object() for _index in range(vertex_count)]
+        self.polygons = [object() for _index in range(polygon_count)]
         self.update_tags: list[object] = []
 
     def update_tag(self, refresh=None):
@@ -329,11 +339,48 @@ class PackageOpsTests(unittest.TestCase):
         root = self.package_ops.import_package(context, "/tmp/vulture/scene.json", prefer_cycles=False, palette_id="palette/test")
 
         self.assertEqual(root, "imported-root")
-        self.assertEqual(events, [("cleanup", "/tmp/vulture/scene.json")])
+        self.assertEqual(events, [("cleanup", str(Path("/tmp/vulture/scene.json")))])
         self.assertEqual(
             importer_stub.events,
-            [("import", "/tmp/vulture/scene.json", False, "palette/test")],
+            [("import", str(Path("/tmp/vulture/scene.json")), False, "palette/test")],
         )
+
+    def test_import_package_removes_unmodified_blender_startup_cube(self) -> None:
+        @contextmanager
+        def _no_suspend(_context):
+            yield
+
+        cube = FakeObject("Cube")
+        cube.type = "MESH"
+        cube.data = FakeMeshData(name="Cube", vertex_count=8, polygon_count=6)
+        cube.location = (0.0, 0.0, 0.0)
+        cube.rotation_euler = (0.0, 0.0, 0.0)
+        cube.scale = (1.0, 1.0, 1.0)
+        self.bpy.data.objects.append(cube)
+        self.package_ops._suspend_heavy_viewports = _no_suspend
+        importer_stub = sys.modules["sb_pkg_test_runtime.importer"]
+        importer_stub.events = []
+
+        context = types.SimpleNamespace(scene=types.SimpleNamespace(render=types.SimpleNamespace(engine="BLENDER_EEVEE")))
+        self.package_ops.import_package(context, "/tmp/vulture/scene.json", prefer_cycles=False)
+
+        self.assertEqual(self.bpy.data.objects.removed, [("Cube", True)])
+        self.assertNotIn(cube, self.bpy.data.objects)
+
+    def test_startup_cube_cleanup_preserves_user_modified_cube(self) -> None:
+        cube = FakeObject("Cube", user_modified=True)
+        cube.type = "MESH"
+        cube.data = FakeMeshData(name="Cube", vertex_count=8, polygon_count=6)
+        cube.location = (0.0, 0.0, 0.0)
+        cube.rotation_euler = (0.0, 0.0, 0.0)
+        cube.scale = (1.0, 1.0, 1.0)
+        self.bpy.data.objects.append(cube)
+
+        removed = self.package_ops._remove_default_startup_cube()
+
+        self.assertEqual(removed, 0)
+        self.assertEqual(list(self.bpy.data.objects), [cube])
+        self.assertEqual(self.bpy.data.objects.removed, [])
 
     def test_refresh_materials_rebuilds_only_meshes_with_sidecars(self) -> None:
         @contextmanager
