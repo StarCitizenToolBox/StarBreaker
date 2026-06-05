@@ -28,8 +28,10 @@ Within that export root:
     `secondary`, `tertiary`, or `glass`
   - `decal_host_rgb` is a fixed linear RGB host-colour fallback when no
     palette channel is available
-  - these fields are advisory; importers should fall back to local spatial
-    host-material matching when they are absent
+  - these fields are advisory. Non-FPS importers may use them to rebind
+    MeshDecal `Host Tint` directly. FPS weapon importers may additionally fall
+    back to local spatial host-material matching for control-only POM overlays
+    when these hints are absent.
 - optional additive `controls.engine_glow` metadata for engine-emission tuning in importers:
   - absolute emission-strength range metadata (`min_strength`, `max_strength`, `default_strength`)
   - `targets[]` keyed by `mesh_asset` + `material_sidecar` + `source_material_index`
@@ -176,10 +178,16 @@ Blender importer note:
 - Control-only `MeshDecal` POM materials are not treated as visible colour
   decals. When they have POM enabled but no structural decal/stencil/tint-mask
   signals, `TexSlot1` is used as a coverage alpha mask, `TexSlot3` as
-  normal-gloss input, and `TexSlot4` as height. Blender represents the
-  game-style GBuffer overlay by cloning the matched host material and injecting
-  only the POM alpha/normal/height into that clone, so the host material remains
-  the owner of base colour, roughness, metallic, and specular response.
+  normal-gloss input, and `TexSlot4` as height.
+- For FPS weapon packages (`assembly_kind = "fps_weapon"`), Blender represents
+  the game-style GBuffer overlay by cloning the matched host material and
+  injecting only the POM alpha/normal/height into that clone, so the host
+  material remains the owner of base colour, roughness, metallic, and specular
+  response.
+- For non-FPS packages, the importer keeps the authored `SB_MeshDecal_v1`
+  material and applies the existing `Host Tint` channel/RGB rebind. This
+  preserves ship-style POM decals that intentionally render as coloured
+  MeshDecal overlays rather than FPS weapon relief-only host clones.
 
 The current sidecar contract is now substantially closer to the raw `.mtl` XML surface, but it is still intentionally split into two layers:
 

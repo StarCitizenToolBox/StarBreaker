@@ -243,9 +243,13 @@ Contract note:
 - `MeshDecal` needs explicit support for RTT, stencil tint, POM height, and breakup maps.
 - Control-only POM decals are a special reconstruction path. When `MeshDecal`
   has POM enabled but lacks decal/stencil/tint-mask signals, the material is a
-  host-surface control overlay: Blender should keep host colour/specular data
-  from the matched host material and inject only `TexSlot1` alpha, `TexSlot3`
-  normal-gloss, and `TexSlot4` height.
+  host-surface control overlay. FPS weapon imports use the full host-material
+  overlay path: Blender keeps colour/specular data from the matched host
+  material and injects only `TexSlot1` alpha, `TexSlot3` normal-gloss, and
+  `TexSlot4` height. Non-FPS imports, including ships, keep the older
+  MeshDecal material path and rebind `Host Tint` through the authored host
+  channel or fixed RGB fallback; disabling that rebind leaves the POM decal
+  white because the material's default `Host Tint` is white.
 - `Decal_Glow_Unlinked` also carries `%VERTCOLORS%`; its base decal color should be multiplied by mesh `COLOR_0` data when present.
 
 ## Vertex color finding
