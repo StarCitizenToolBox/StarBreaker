@@ -1,4 +1,5 @@
 pub mod dequant;
+pub mod api;
 pub(crate) mod decomposed;
 pub mod error;
 pub(crate) mod gltf;
