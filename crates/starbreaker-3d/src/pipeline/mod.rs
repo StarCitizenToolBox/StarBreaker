@@ -20,8 +20,11 @@ use crate::nmc;
 use crate::types::MaterialTextures;
 
 mod textures;
-pub(crate) use self::textures::{cached_load, load_diffuse_texture, load_normal_texture, PngCache};
 use self::textures::*;
+pub(crate) use self::textures::{
+    PngCache, cached_load, load_diffuse_texture, load_normal_texture, load_roughness_texture,
+    load_roughness_texture_result,
+};
 mod interiors;
 pub(crate) use self::interiors::*;
 mod nmc_bridge;
@@ -33,18 +36,18 @@ pub use self::loadout::resolve_loadout_meshes;
 pub(crate) use self::loadout::*;
 mod entity_export;
 pub(crate) use self::entity_export::*;
+mod weapon_assembly;
+pub(crate) use self::weapon_assembly::*;
 
 mod palette;
 pub use self::palette::*;
 mod vehicle;
 pub use self::vehicle::*;
 mod glb_assembly;
-pub use self::glb_assembly::{assemble_glb_with_loadout, assemble_glb_with_loadout_with_progress};
 pub(crate) use self::glb_assembly::path_is_shield_related;
+pub use self::glb_assembly::{assemble_glb_with_loadout, assemble_glb_with_loadout_with_progress};
 mod blend_assembly;
 pub use self::blend_assembly::write_decomposed_export_blend;
-
-
 
 type InteriorMeshAsset = (
     crate::Mesh,
@@ -202,7 +205,10 @@ impl ExportedFileKind {
     }
 
     pub fn is_reusable_asset(self) -> bool {
-        matches!(self, Self::MeshAsset | Self::MaterialSidecar | Self::TextureAsset)
+        matches!(
+            self,
+            Self::MeshAsset | Self::MaterialSidecar | Self::TextureAsset
+        )
     }
 }
 
@@ -240,7 +246,6 @@ impl ExportResult {
         }
     }
 }
-
 
 /// Export an entity with its loadout tree as a single GLB.
 ///
@@ -324,7 +329,8 @@ pub fn socpaks_to_glb(
         }
     }
 
-    let interiors = build_interiors_from_payloads(db, p4k, &payloads, opts.include_lights, opts.lod_level);
+    let interiors =
+        build_interiors_from_payloads(db, p4k, &payloads, opts.include_lights, opts.lod_level);
 
     let no_tex_opts = ExportOptions {
         material_mode: MaterialMode::Colors,
@@ -337,33 +343,39 @@ pub fn socpaks_to_glb(
         ) -> Option<MaterialTextures>,
     > = Box::new(|_, _| None);
     let mut interior_png_cache = PngCache::new();
-    let mut interior_mesh_loader =
-        |entry: &InteriorCgfEntry| -> Option<(crate::Mesh, Option<mtl::MtlFile>, Option<crate::nmc::NodeMeshCombo>)> {
-            match export_cgf_from_path(
-                p4k,
-                &entry.cgf_path,
-                entry.material_path.as_deref(),
-                &no_tex_opts,
-                &mut interior_png_cache,
-                false,
-            ) {
-                Ok((mesh, mtl, _tex, nmc, _palette, _, _, _bones, _skeleton_source_path)) => {
-                    let needs_bake = mesh.scaling_min.iter().zip(&mesh.model_min)
-                        .chain(mesh.scaling_max.iter().zip(&mesh.model_max))
-                        .any(|(s, m)| (s - m).abs() > 0.01);
-                    let mesh = if needs_bake {
-                        bake_nmc_into_mesh(mesh, nmc.as_ref(), false)
-                    } else {
-                        mesh
-                    };
-                    Some((mesh, mtl, nmc))
-                }
-                Err(e) => {
-                    log::warn!("failed to load CGF {}: {e}", entry.cgf_path);
-                    None
-                }
+    let mut interior_mesh_loader = |entry: &InteriorCgfEntry| -> Option<(
+        crate::Mesh,
+        Option<mtl::MtlFile>,
+        Option<crate::nmc::NodeMeshCombo>,
+    )> {
+        match export_cgf_from_path(
+            p4k,
+            &entry.cgf_path,
+            entry.material_path.as_deref(),
+            &no_tex_opts,
+            &mut interior_png_cache,
+            false,
+        ) {
+            Ok((mesh, mtl, _tex, nmc, _palette, _, _, _bones, _skeleton_source_path)) => {
+                let needs_bake = mesh
+                    .scaling_min
+                    .iter()
+                    .zip(&mesh.model_min)
+                    .chain(mesh.scaling_max.iter().zip(&mesh.model_max))
+                    .any(|(s, m)| (s - m).abs() > 0.01);
+                let mesh = if needs_bake {
+                    bake_nmc_into_mesh(mesh, nmc.as_ref(), false)
+                } else {
+                    mesh
+                };
+                Some((mesh, mtl, nmc))
             }
-        };
+            Err(e) => {
+                log::warn!("failed to load CGF {}: {e}", entry.cgf_path);
+                None
+            }
+        }
+    };
 
     crate::gltf::write_glb(
         crate::gltf::GlbInput {
@@ -405,30 +417,56 @@ pub fn socpaks_to_glb(
 /// Write NMC node properties for a geometry path into the JSON output.
 fn dump_nmc_nodes(out: &mut String, key: &str, p4k: &MappedP4k, geom: &str, mtl: &str) {
     use std::fmt::Write;
-    if geom.is_empty() { return; }
+    if geom.is_empty() {
+        return;
+    }
     let (nmc, _) = load_nmc_and_material(p4k, geom, mtl);
     if let Some(ref nmc) = nmc {
         let _ = write!(out, "  \"{key}\": [\n");
         for node in &nmc.nodes {
-            let _ = write!(out, "    {{\"node\": {:?}, \"type\": {}", node.name, node.geometry_type);
+            let _ = write!(
+                out,
+                "    {{\"node\": {:?}, \"type\": {}",
+                node.name, node.geometry_type
+            );
             // Include bone_to_world for non-identity transforms (helpers, attachment points)
             let b = &node.bone_to_world;
-            let is_identity = (b[0][0] - 1.0).abs() < 0.001 && (b[1][1] - 1.0).abs() < 0.001
+            let is_identity = (b[0][0] - 1.0).abs() < 0.001
+                && (b[1][1] - 1.0).abs() < 0.001
                 && (b[2][2] - 1.0).abs() < 0.001
-                && b[0][3].abs() < 0.001 && b[1][3].abs() < 0.001 && b[2][3].abs() < 0.001
-                && b[0][1].abs() < 0.001 && b[0][2].abs() < 0.001
-                && b[1][0].abs() < 0.001 && b[1][2].abs() < 0.001
-                && b[2][0].abs() < 0.001 && b[2][1].abs() < 0.001;
+                && b[0][3].abs() < 0.001
+                && b[1][3].abs() < 0.001
+                && b[2][3].abs() < 0.001
+                && b[0][1].abs() < 0.001
+                && b[0][2].abs() < 0.001
+                && b[1][0].abs() < 0.001
+                && b[1][2].abs() < 0.001
+                && b[2][0].abs() < 0.001
+                && b[2][1].abs() < 0.001;
             if !is_identity {
-                let _ = write!(out, ", \"bone_to_world\": [[{:.4},{:.4},{:.4},{:.4}],[{:.4},{:.4},{:.4},{:.4}],[{:.4},{:.4},{:.4},{:.4}]]",
-                    b[0][0], b[0][1], b[0][2], b[0][3],
-                    b[1][0], b[1][1], b[1][2], b[1][3],
-                    b[2][0], b[2][1], b[2][2], b[2][3]);
+                let _ = write!(
+                    out,
+                    ", \"bone_to_world\": [[{:.4},{:.4},{:.4},{:.4}],[{:.4},{:.4},{:.4},{:.4}],[{:.4},{:.4},{:.4},{:.4}]]",
+                    b[0][0],
+                    b[0][1],
+                    b[0][2],
+                    b[0][3],
+                    b[1][0],
+                    b[1][1],
+                    b[1][2],
+                    b[1][3],
+                    b[2][0],
+                    b[2][1],
+                    b[2][2],
+                    b[2][3]
+                );
             }
             if !node.properties.is_empty() {
                 let _ = write!(out, ", \"props\": {{");
                 for (i, (k, v)) in node.properties.iter().enumerate() {
-                    if i > 0 { let _ = write!(out, ", "); }
+                    if i > 0 {
+                        let _ = write!(out, ", ");
+                    }
                     let _ = write!(out, "{:?}: {:?}", k, v);
                 }
                 let _ = write!(out, "}}");
@@ -461,10 +499,12 @@ pub fn dump_hierarchy(
     let root_geom = geom_compiled
         .and_then(|c| db.query_single::<String>(&c, record).ok().flatten())
         .unwrap_or_default();
-    let mtl_compiled = db.compile_path::<String>(
-        record.struct_id(),
-        "Components[SGeometryResourceParams].Geometry.Geometry.Material.path",
-    ).ok();
+    let mtl_compiled = db
+        .compile_path::<String>(
+            record.struct_id(),
+            "Components[SGeometryResourceParams].Geometry.Geometry.Material.path",
+        )
+        .ok();
     let root_mtl = mtl_compiled
         .and_then(|c| db.query_single::<String>(&c, record).ok().flatten())
         .unwrap_or_default();
@@ -507,15 +547,20 @@ pub fn dump_hierarchy(
                 let mat = node.material_path.as_deref().unwrap_or("");
                 let (nmc, _) = load_nmc_and_material(p4k, geom, mat);
                 if let Some(ref nmc) = nmc {
-                    let nodes_with_props: Vec<_> = nmc.nodes.iter()
+                    let nodes_with_props: Vec<_> = nmc
+                        .nodes
+                        .iter()
                         .filter(|n| !n.properties.is_empty())
                         .collect();
                     if !nodes_with_props.is_empty() {
                         let _ = write!(out, ",\n{indent}  \"nmc_properties\": [\n");
                         for n in &nodes_with_props {
-                            let _ = write!(out, "{indent}    {{\"node\": {:?}, \"props\": {{", n.name);
+                            let _ =
+                                write!(out, "{indent}    {{\"node\": {:?}, \"props\": {{", n.name);
                             for (i, (k, v)) in n.properties.iter().enumerate() {
-                                if i > 0 { let _ = write!(out, ", "); }
+                                if i > 0 {
+                                    let _ = write!(out, ", ");
+                                }
                                 let _ = write!(out, "{:?}: {:?}", k, v);
                             }
                             let _ = write!(out, "}}}},\n");
@@ -526,7 +571,14 @@ pub fn dump_hierarchy(
             }
             if !node.children.is_empty() {
                 let _ = write!(out, ",\n{indent}  \"children\": [\n");
-                dump_loadout_nodes(out, p4k, &node.children, &node.entity_name, depth + 2, invisible_ports);
+                dump_loadout_nodes(
+                    out,
+                    p4k,
+                    &node.children,
+                    &node.entity_name,
+                    depth + 2,
+                    invisible_ports,
+                );
                 let _ = write!(out, "{indent}  ]\n");
             } else {
                 let _ = write!(out, "\n");
@@ -534,7 +586,14 @@ pub fn dump_hierarchy(
             let _ = write!(out, "{indent}}},\n");
         }
     }
-    dump_loadout_nodes(&mut out, p4k, &tree.root.children, &tree.root.entity_name, 0, &invisible_ports);
+    dump_loadout_nodes(
+        &mut out,
+        p4k,
+        &tree.root.children,
+        &tree.root.entity_name,
+        0,
+        &invisible_ports,
+    );
     let _ = write!(out, "  ],\n");
 
     // Interior containers
@@ -705,8 +764,8 @@ mod tests {
             sample_bone("foot", Some(0), [1.5, 2.5, 0.0], [5.0, 4.0, 0.0]),
         ];
 
-        let nmc = synthesize_nmc_from_bones(&mesh, &bones)
-            .expect("expected a synthetic node hierarchy");
+        let nmc =
+            synthesize_nmc_from_bones(&mesh, &bones).expect("expected a synthetic node hierarchy");
 
         assert_eq!(nmc.nodes.len(), 2);
         assert_eq!(nmc.nodes[0].name, "root");
@@ -805,14 +864,26 @@ mod tests {
             "hardpoint_proxy",
             false,
             false,
-            vec![resolved_node("weapon", "hardpoint_weapon", true, false, Vec::new())],
+            vec![resolved_node(
+                "weapon",
+                "hardpoint_weapon",
+                true,
+                false,
+                Vec::new(),
+            )],
         );
         let rack = resolved_node(
             "rack",
             "hardpoint_rack",
             false,
             true,
-            vec![resolved_node("missile", "hardpoint_missile", true, false, Vec::new())],
+            vec![resolved_node(
+                "missile",
+                "hardpoint_missile",
+                true,
+                false,
+                Vec::new(),
+            )],
         );
 
         let mut specs = Vec::new();
@@ -836,7 +907,10 @@ mod tests {
     fn tint_palette_family_keys_include_short_name_and_family_suffix() {
         let keys = tint_palette_family_keys("EntityClassDefinition.rsi_aurora_mk2");
 
-        assert_eq!(keys, vec!["aurora_mk2".to_string(), "rsi_aurora_mk2".to_string()]);
+        assert_eq!(
+            keys,
+            vec!["aurora_mk2".to_string(), "rsi_aurora_mk2".to_string()]
+        );
     }
 
     #[test]
@@ -844,9 +918,18 @@ mod tests {
         let keys = tint_palette_family_keys("rsi_aurora_mk2");
 
         assert!(tint_palette_matches_family("rsi_aurora_mk2", &keys));
-        assert!(tint_palette_matches_family("aurora_mk2_pink_green_purple", &keys));
-        assert!(!tint_palette_matches_family("rsi_interior_aurora_mk2_base", &keys));
-        assert!(!tint_palette_matches_family("misc_freelancer_black_red", &keys));
+        assert!(tint_palette_matches_family(
+            "aurora_mk2_pink_green_purple",
+            &keys
+        ));
+        assert!(!tint_palette_matches_family(
+            "rsi_interior_aurora_mk2_base",
+            &keys
+        ));
+        assert!(!tint_palette_matches_family(
+            "misc_freelancer_black_red",
+            &keys
+        ));
     }
 
     #[test]
@@ -856,8 +939,7 @@ mod tests {
             ..ExportOptions::default()
         };
 
-        ensure_supported_export_options(&opts)
-            .expect("decomposed export kind should be accepted");
+        ensure_supported_export_options(&opts).expect("decomposed export kind should be accepted");
     }
 
     #[test]
