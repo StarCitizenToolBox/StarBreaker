@@ -472,27 +472,55 @@ fn parse_entries(
     build_archive_indexes(entries)
 }
 
+/// Build the lookup indexes over `entries`.
+///
+/// The three indexes are independent, so they are built concurrently and
+/// the two sorts run in parallel: on a 1.36M-entry archive this is most of
+/// `open()`, ~0.85 s when built one after another.
 fn build_archive_indexes(entries: Vec<P4kEntry>) -> Result<CentralDirectory, P4kError> {
-    // Build path index — HashTable<u32> keyed by entry index, hashing through entries[i].name.
-    // Avoids the full-path String key duplication of FxHashMap<String, usize>.
-    let mut path_index: HashTable<u32> = HashTable::with_capacity(entries.len());
-    for (i, entry) in entries.iter().enumerate() {
-        let h = hash_path(&entry.name);
-        path_index.insert_unique(h, i as u32, |&j| hash_path(&entries[j as usize].name));
-    }
+    use rayon::prelude::*;
 
-    // Parallel lowercased view used by search and entry_case_insensitive.
-    let lowercase_names: Vec<String> = entries.iter().map(|e| e.name.to_ascii_lowercase()).collect();
+    let ((path_index, sorted_index), (lowercase_names, sorted_lower_index)) = rayon::join(
+        || {
+            rayon::join(
+                || {
+                    // HashTable<u32> keyed by entry index, hashing through entries[i].name.
+                    // Avoids the full-path String key duplication of FxHashMap<String, usize>.
+                    let mut path_index: HashTable<u32> = HashTable::with_capacity(entries.len());
+                    for (i, entry) in entries.iter().enumerate() {
+                        let h = hash_path(&entry.name);
+                        path_index
+                            .insert_unique(h, i as u32, |&j| hash_path(&entries[j as usize].name));
+                    }
+                    path_index
+                },
+                || {
+                    // Case-sensitive sorted index for list_dir / list_subdirs.
+                    let mut sorted_index: Vec<u32> = (0..entries.len() as u32).collect();
+                    sorted_index.par_sort_unstable_by(|&a, &b| {
+                        entries[a as usize].name.cmp(&entries[b as usize].name)
+                    });
+                    sorted_index
+                },
+            )
+        },
+        || {
+            // Parallel lowercased view used by search and entry_case_insensitive.
+            let lowercase_names: Vec<String> =
+                entries.par_iter().map(|e| e.name.to_ascii_lowercase()).collect();
 
-    // Case-sensitive sorted index for list_dir / list_subdirs.
-    let mut sorted_index: Vec<u32> = (0..entries.len() as u32).collect();
-    sorted_index.sort_unstable_by(|&a, &b| entries[a as usize].name.cmp(&entries[b as usize].name));
-
-    // Case-insensitive sorted index for entry_case_insensitive.
-    let mut sorted_lower_index: Vec<u32> = (0..entries.len() as u32).collect();
-    sorted_lower_index.sort_unstable_by(|&a, &b| {
-        lowercase_names[a as usize].cmp(&lowercase_names[b as usize])
-    });
+            // Case-insensitive sorted index for entry_case_insensitive. Names that
+            // differ only in case tie; ordering ties by entry index makes the
+            // lookup return the first such entry rather than an arbitrary one.
+            let mut sorted_lower_index: Vec<u32> = (0..entries.len() as u32).collect();
+            sorted_lower_index.par_sort_unstable_by(|&a, &b| {
+                lowercase_names[a as usize]
+                    .cmp(&lowercase_names[b as usize])
+                    .then(a.cmp(&b))
+            });
+            (lowercase_names, sorted_lower_index)
+        },
+    );
 
     Ok((entries, path_index, sorted_index, lowercase_names, sorted_lower_index))
 }
@@ -1051,25 +1079,8 @@ mod tests {
     /// Build a `P4kArchive<'static>` from a list of entries, matching the
     /// production index construction.
     fn build_test_archive(entries: Vec<P4kEntry>) -> P4kArchive<'static> {
-        let lowercase_names: Vec<String> =
-            entries.iter().map(|e| e.name.to_ascii_lowercase()).collect();
-
-        let mut sorted_index: Vec<u32> = (0..entries.len() as u32).collect();
-        sorted_index.sort_unstable_by(|&a, &b| {
-            entries[a as usize].name.cmp(&entries[b as usize].name)
-        });
-
-        let mut sorted_lower_index: Vec<u32> = (0..entries.len() as u32).collect();
-        sorted_lower_index.sort_unstable_by(|&a, &b| {
-            lowercase_names[a as usize].cmp(&lowercase_names[b as usize])
-        });
-
-        let mut path_index: hashbrown::HashTable<u32> =
-            hashbrown::HashTable::with_capacity(entries.len());
-        for (i, e) in entries.iter().enumerate() {
-            let h = hash_path(&e.name);
-            path_index.insert_unique(h, i as u32, |&j| hash_path(&entries[j as usize].name));
-        }
+        let (entries, path_index, sorted_index, lowercase_names, sorted_lower_index) =
+            build_archive_indexes(entries).unwrap();
 
         P4kArchive {
             data: &[],
@@ -1079,6 +1090,64 @@ mod tests {
             lowercase_names,
             sorted_lower_index,
         }
+    }
+
+    /// Enough entries to exercise the parallel index build, with names that
+    /// collide once lowercased.
+    fn many_entries() -> Vec<P4kEntry> {
+        let mut entries = Vec::new();
+        for i in 0..20_000u32 {
+            let dir = ["Data\\Objects", "data\\objects", "Data\\Sounds", "Engine"][(i % 4) as usize];
+            let ext = ["dds", "DDS", "wem", "cgf"][(i % 7 % 4) as usize];
+            entries.push(make_entry(&format!("{dir}\\f{:05}.{ext}", (i * 7919) % 20_000)));
+        }
+        entries
+    }
+
+    #[test]
+    fn built_indexes_are_sorted_and_complete() {
+        let archive = build_test_archive(many_entries());
+        let names: Vec<&str> = archive.entries.iter().map(|e| e.name.as_str()).collect();
+
+        assert_eq!(archive.sorted_index.len(), names.len());
+        for w in archive.sorted_index.windows(2) {
+            assert!(names[w[0] as usize] <= names[w[1] as usize]);
+        }
+
+        assert_eq!(archive.sorted_lower_index.len(), names.len());
+        for w in archive.sorted_lower_index.windows(2) {
+            let (a, b) = (w[0] as usize, w[1] as usize);
+            let key_a = (&archive.lowercase_names[a], a);
+            let key_b = (&archive.lowercase_names[b], b);
+            assert!(key_a < key_b, "lowercase index out of order at {a}/{b}");
+        }
+
+        for (i, e) in archive.entries.iter().enumerate() {
+            assert_eq!(archive.lowercase_names[i], e.name.to_ascii_lowercase());
+            assert!(archive.entry(&e.name).is_some(), "exact lookup missed {}", e.name);
+        }
+    }
+
+    #[test]
+    fn case_insensitive_lookup_returns_first_entry_on_case_collision() {
+        let mut entries = many_entries();
+        entries.insert(0, make_entry("Data\\Collide.DDS"));
+        entries.push(make_entry("data\\collide.dds"));
+        entries.push(make_entry("DATA\\COLLIDE.dds"));
+        let archive = build_test_archive(entries);
+
+        assert_eq!(
+            archive.entry_case_insensitive("data\\collide.dds").map(|e| e.name.as_str()),
+            Some("Data\\Collide.DDS")
+        );
+    }
+
+    #[test]
+    fn built_indexes_handle_empty_archive() {
+        let archive = build_test_archive(Vec::new());
+        assert!(archive.sorted_index.is_empty());
+        assert!(archive.sorted_lower_index.is_empty());
+        assert!(archive.entry_case_insensitive("anything").is_none());
     }
 
     #[test]
