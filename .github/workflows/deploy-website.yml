@@ -19,6 +19,8 @@ concurrency:
 
 jobs:
   build:
+    # GitHub Pages lives on the upstream repo; forks skip (deploy needs build).
+    if: github.repository == 'diogotr7/StarBreaker'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
