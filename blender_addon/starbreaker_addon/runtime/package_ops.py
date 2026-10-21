@@ -52,6 +52,7 @@ from .constants import (
 from .animation_fps import (
     FPS_POLICY_ADAPT_SCENE,
     describe_reconciliation,
+    extend_frame_end,
     reconcile_animation_fps,
 )
 from .validators import (
@@ -693,6 +694,13 @@ def _material_slot_can_refresh(
         return False
     canonical_name = _canonical_source_name(material_name)
     if not canonical_name:
+        # An unnamed submaterial (e.g. a UIPlane screen) exports to a material
+        # whose name canonicalises to "". Match it by the exporter's 1:1
+        # slot->submaterial index — but only when the object carries no slot
+        # map. A present map that sends this slot to None is a deliberate
+        # "no match" and must not be widened.
+        if slot_mapping is None:
+            return _sidecar_has_submaterial_index(sidecar, slot_index)
         return False
     if canonical_name in _unique_submaterials_by_name(sidecar):
         return True
@@ -2860,6 +2868,24 @@ def apply_animation_mode_to_package_root(
 
     mode_map[animation_name] = normalized_mode
     package_root[_ANIMATION_MODES_PROP] = json.dumps(mode_map, separators=(",", ":"), sort_keys=True)
+
+    # Extend the scene frame range to cover the applied NLA strips. Socpak
+    # door/elevator clips run hundreds of frames (e.g. 648, 1200) past Blender's
+    # default 250-frame range, so without this the big mechanisms look frozen at
+    # default playback. Best-effort: never shrinks the range (see
+    # extend_frame_end) and is skipped when the scene exposes no frame_end.
+    scene = getattr(context, "scene", None)
+    current_end = getattr(scene, "frame_end", None)
+    if isinstance(current_end, (int, float)):
+        strip_ends = [
+            strip.frame_end
+            for obj in _iter_package_objects(package_root)
+            if getattr(obj, "animation_data", None) is not None
+            for track in obj.animation_data.nla_tracks
+            for strip in track.strips
+        ]
+        scene.frame_end = extend_frame_end(current_end, strip_ends)
+
     return updated
 
 

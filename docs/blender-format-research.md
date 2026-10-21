@@ -291,14 +291,15 @@ per mesh domain.
 
 | Domain        | Type                  | Name          | Notes                           |
 |---------------|-----------------------|---------------|---------------------------------|
-| `face_corner` | `CD_PROP_INT16_2D`    | `"N"`         | Split (custom) normals (octahedral) |
+| `face_corner` | `CD_PROP_INT16_2D`    | `"custom_normal"` | Custom split normals (fan-space, §6) |
 | `face_corner` | `CD_PROP_FLOAT2`      | `"UVMap"`     | Primary UV (always in output)   |
 | `face_corner` | `CD_PROP_FLOAT2`      | `"UVMap.001"` | Secondary UV (if source has UV1)|
 | `face_corner` | `CD_PROP_BYTE_COLOR`  | `"Color"`     | Vertex colors (if source has)   |
 
 ### Custom normals flag
 
-The mechanism for enabling custom normals is controlled via a flag on the Mesh struct or CustomData layer. In Python: `mesh.has_custom_normals == True` after custom normals are set.
+There is no flag: the presence of the `custom_normal` attribute enables custom
+normals (`mesh.has_custom_normals`). See §6.
 
 ### Vertex groups
 
@@ -341,18 +342,23 @@ Custom split normals are stored as an attribute named `"custom_normal"` with typ
 - **Data type**: `INT16_2D` = 2 (two `i16` per loop = 4 bytes per loop)
 - **Domain**: `CORNER` = 3
 - **SDNA sdna_idx**: 73 (AttributeArray) for the data block — same as all other attributes
-- **Encoding**: The two `i16` values encode the normal as a **delta from the face normal**
-  using an octahedral scheme. Writing zeros means "use face normal" (flat shading).
-- **Effect**: When this attribute is present, `mesh.has_custom_normals` returns `True` in Python.
+- **Encoding**: each `short2` is relative to the corner's *fan space* (the smooth fan of
+  corners around a vertex, split at sharp, boundary, non-manifold and flipped-winding
+  edges): `x` scales the angle from the fan's default (angle-weighted) normal, `y` the
+  angle around it from the fan's first edge. `(0, 0)` = the default normal. Each fan
+  decodes the average of its corners' values.
+- **No flag** and no `sharp_edge` / `sharp_face` layer is required; those only shape the
+  fans. `mesh.has_custom_normals` is `True` when the attribute is present.
+- **Free normals**: a `FLOAT3` `custom_normal` (point/face/corner domain) is also accepted
+  and stores absolute normals, but those do NOT follow Armature / shape-key deformation,
+  so StarBreaker uses the `INT16_2D` fan-space form.
 
-### Octahedral encoding
+### Encoder
 
-Blender uses `BLI_normal_float_to_short()` to encode absolute normals relative to the
-face normal. The exact mapping is:
-- Zero `(0, 0)` = face-aligned normal (no deviation from polygon normal)
-- Non-zero values = deviation encoded as two `snorm16` values in octahedral space
-
-For real normals: convert absolute normals to this face-relative delta encoding before writing.
+`starbreaker_blend::custom_normals::encode_vertex_normals` mirrors Blender 5.1's
+`normals_split_custom_set_from_vertices` (`mesh_normals.cc`: `normals_calc_corners`,
+`corner_fan_space_define`, `corner_space_custom_normal_to_data`, `safe_acos_approx`) and
+matches Blender bit-exactly on the fixture in `crates/starbreaker-blend/tests/data/`.
 
 ### Block ordering note
 
@@ -618,13 +624,13 @@ Library blocks represent references to external .blend files. This is essential 
 
 **Location**: `DNA_ID.h:210 - struct Library`
 
-**Total Serialized Size**: **1426 bytes** (408 ID + 1024 filepath + 2 flag + 2 undo_tag + 4 pad + 24 pointers)
+**Total Serialized Size**: **1472 bytes** (408 ID + 1024 filepath + 2 flag + 2 undo_tag + 4 pad + 24 pointers + 8 pad; see the serialization order below)
 
 | Field | Offset | Size | Type | Description |
 |-------|--------|------|------|-------------|
 | `id` | 0 | 408 | `ID` | Base ID struct (name, flags, tags, etc.) |
 | `filepath` | 408 | 1024 | `char[1024]` | Path to external .blend file (UTF-8, null-terminated) |
-| `flag` | 1432 | 4 | `int32` | Library flags (mostly unused in 5.1) |
+| `flag` | 1432 | 2 | `uint16_t` | Library flags (mostly unused in 5.1) |
 
 ### Filepath Encoding
 
@@ -640,7 +646,7 @@ Library blocks represent references to external .blend files. This is essential 
 |-------|-------|
 | `code` | `ID_LI` |
 | `sdna_idx` | Points to Library struct SDNA index |
-| `len` | 1426 (serialized Library struct size) |
+| `len` | 1472 (serialized Library struct size) |
 | `count` | 1 (one struct per block) |
 
 ### Multiple Library Blocks
@@ -653,7 +659,7 @@ Library blocks represent references to external .blend files. This is essential 
 
 1. Create `BHead` with:
    - `code = ID_LI`
-   - `len = 1426`
+   - `len = 1472`
    - `sdna_idx = <SDNA index of Library struct>`
 2. Serialize Library struct:
    - Set `id.name` to unique identifier
@@ -853,7 +859,7 @@ Library blocks are written with exact field ordering by `library_blend_write_dat
 2. **Scan for ID_LI blocks** — Find all Library references
 3. **READ LIBRARY BLOCKS FIRST** (mandatory):
    - For each Library BHead:
-   - Deserialize 1426-byte Library struct
+   - Deserialize 1472-byte Library struct
    - Call `direct_link_library()`:
      - Compute absolute paths via `BLI_path_abs()`
      - Create new Main context for library

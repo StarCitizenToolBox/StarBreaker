@@ -5,33 +5,43 @@ use std::path::Path;
 // Tests verify that exported Blender files (scene.blend and individual mesh files)
 // are valid, loadable, and have correct structure.
 
-const AURORA_EXPORT_ROOT: &str = "/home/tom/projects/scorg_tools/ships/Packages/RSI Aurora Mk2_LOD0_TEX0";
-const AURORA_SCENE_BLEND: &str = "/home/tom/projects/scorg_tools/ships/Packages/RSI Aurora Mk2_LOD0_TEX0/scene.blend";
-const AURORA_SHIPS_ROOT: &str = "/home/tom/projects/scorg_tools/ships";
+fn home() -> String {
+    std::env::var("HOME").unwrap_or_default()
+}
+fn aurora_export_root() -> String {
+    format!("{}/projects/scorg_tools/ships/Packages/RSI Aurora Mk2_LOD0_TEX0", home())
+}
+fn aurora_scene_blend() -> String {
+    format!("{}/scene.blend", aurora_export_root())
+}
+fn aurora_ships_root() -> String {
+    format!("{}/projects/scorg_tools/ships", home())
+}
 
 /// Tests that scene.blend file exists and is readable
-#[ignore = "requires local Aurora export at hard-coded /home/tom/... path"]
+#[ignore = "requires a local Aurora export under ~/projects/scorg_tools/ships"]
 #[test]
 fn test_aurora_scene_blend_exists() {
-    let path = Path::new(AURORA_SCENE_BLEND);
+    let scene_blend = aurora_scene_blend();
+    let path = Path::new(&scene_blend);
     assert!(
         path.exists(),
         "Scene file should exist at {}",
-        AURORA_SCENE_BLEND
+        aurora_scene_blend()
     );
     assert!(
         path.is_file(),
         "Scene blend path should be a file: {}",
-        AURORA_SCENE_BLEND
+        aurora_scene_blend()
     );
 }
 
 /// Tests that scene.blend has valid Zstandard format header
 /// (Blender 3.2+ exports with zstandard compression)
-#[ignore = "requires local Aurora export at hard-coded /home/tom/... path"]
+#[ignore = "requires a local Aurora export under ~/projects/scorg_tools/ships"]
 #[test]
 fn test_aurora_scene_blend_has_valid_format() {
-    let data = fs::read(AURORA_SCENE_BLEND)
+    let data = fs::read(aurora_scene_blend())
         .expect("Should read scene.blend file");
     
     // Blender .blend files exported with zstandard compression start with:
@@ -46,10 +56,10 @@ fn test_aurora_scene_blend_has_valid_format() {
 }
 
 /// Tests that scene.blend has reasonable file size (> 10KB, < 10MB)
-#[ignore = "requires local Aurora export at hard-coded /home/tom/... path"]
+#[ignore = "requires a local Aurora export under ~/projects/scorg_tools/ships"]
 #[test]
 fn test_aurora_scene_blend_has_valid_size() {
-    let metadata = fs::metadata(AURORA_SCENE_BLEND)
+    let metadata = fs::metadata(aurora_scene_blend())
         .expect("Should read scene.blend metadata");
     let size = metadata.len();
     
@@ -62,10 +72,10 @@ fn test_aurora_scene_blend_has_valid_size() {
 }
 
 /// Tests that scene.blend JSON metadata (scene.json) exists and is valid
-#[ignore = "requires local Aurora export at hard-coded /home/tom/... path"]
+#[ignore = "requires a local Aurora export under ~/projects/scorg_tools/ships"]
 #[test]
 fn test_aurora_scene_json_exists_and_valid() {
-    let scene_json_path = Path::new(AURORA_EXPORT_ROOT).join("scene.json");
+    let scene_json_path = Path::new(&aurora_export_root()).join("scene.json");
     assert!(
         scene_json_path.exists(),
         "scene.json should exist at {}",
@@ -90,10 +100,10 @@ fn test_aurora_scene_json_exists_and_valid() {
 }
 
 /// Tests that all referenced mesh .blend files in scene.json exist
-#[ignore = "requires local Aurora export at hard-coded /home/tom/... path"]
+#[ignore = "requires a local Aurora export under ~/projects/scorg_tools/ships"]
 #[test]
 fn test_all_referenced_mesh_files_exist() {
-    let scene_json_path = Path::new(AURORA_EXPORT_ROOT).join("scene.json");
+    let scene_json_path = Path::new(&aurora_export_root()).join("scene.json");
     let content = fs::read_to_string(&scene_json_path)
         .expect("Should read scene.json");
     let json: serde_json::Value = serde_json::from_str(&content)
@@ -109,7 +119,7 @@ fn test_all_referenced_mesh_files_exist() {
     for child in children {
         if let Some(mesh_asset) = child.get("mesh_asset").and_then(|v| v.as_str()) {
             mesh_count += 1;
-            let full_path = Path::new(AURORA_SHIPS_ROOT).join(mesh_asset);
+            let full_path = Path::new(&aurora_ships_root()).join(mesh_asset);
             if !full_path.exists() {
                 missing_files.push(mesh_asset.to_string());
             }
@@ -135,10 +145,10 @@ fn test_all_referenced_mesh_files_exist() {
 }
 
 /// Tests that individual mesh .blend files have valid headers
-#[ignore = "requires local Aurora export at hard-coded /home/tom/... path"]
+#[ignore = "requires a local Aurora export under ~/projects/scorg_tools/ships"]
 #[test]
 fn test_mesh_blend_files_have_valid_headers() {
-    let scene_json_path = Path::new(AURORA_EXPORT_ROOT).join("scene.json");
+    let scene_json_path = Path::new(&aurora_export_root()).join("scene.json");
     let content = fs::read_to_string(&scene_json_path)
         .expect("Should read scene.json");
     let json: serde_json::Value = serde_json::from_str(&content)
@@ -154,7 +164,7 @@ fn test_mesh_blend_files_have_valid_headers() {
     for child in children.iter().take(5) {
         // Sample first 5 mesh files for header validation
         if let Some(mesh_asset) = child.get("mesh_asset").and_then(|v| v.as_str()) {
-            let full_path = Path::new(AURORA_SHIPS_ROOT).join(mesh_asset);
+            let full_path = Path::new(&aurora_ships_root()).join(mesh_asset);
             if full_path.exists() {
                 checked_count += 1;
                 if let Ok(data) = fs::read(&full_path) {
@@ -182,10 +192,10 @@ fn test_mesh_blend_files_have_valid_headers() {
 }
 
 /// Tests that mesh files have reasonable sizes (not empty, not huge)
-#[ignore = "requires local Aurora export at hard-coded /home/tom/... path"]
+#[ignore = "requires a local Aurora export under ~/projects/scorg_tools/ships"]
 #[test]
 fn test_mesh_files_have_valid_sizes() {
-    let scene_json_path = Path::new(AURORA_EXPORT_ROOT).join("scene.json");
+    let scene_json_path = Path::new(&aurora_export_root()).join("scene.json");
     let content = fs::read_to_string(&scene_json_path)
         .expect("Should read scene.json");
     let json: serde_json::Value = serde_json::from_str(&content)
@@ -199,7 +209,7 @@ fn test_mesh_files_have_valid_sizes() {
     
     for child in children {
         if let Some(mesh_asset) = child.get("mesh_asset").and_then(|v| v.as_str()) {
-            let full_path = Path::new(AURORA_SHIPS_ROOT).join(mesh_asset);
+            let full_path = Path::new(&aurora_ships_root()).join(mesh_asset);
             if full_path.exists() {
                 if let Ok(metadata) = fs::metadata(&full_path) {
                     let size = metadata.len();
@@ -224,22 +234,22 @@ fn test_mesh_files_have_valid_sizes() {
 }
 
 /// Tests that materials metadata files exist
-#[ignore = "requires local Aurora export at hard-coded /home/tom/... path"]
+#[ignore = "requires a local Aurora export under ~/projects/scorg_tools/ships"]
 #[test]
 fn test_materials_metadata_files_exist() {
-    let materials_json = Path::new(AURORA_EXPORT_ROOT).join("paints.json");
+    let materials_json = Path::new(&aurora_export_root()).join("paints.json");
     assert!(
         materials_json.exists(),
         "paints.json should exist"
     );
     
-    let palettes_json = Path::new(AURORA_EXPORT_ROOT).join("palettes.json");
+    let palettes_json = Path::new(&aurora_export_root()).join("palettes.json");
     assert!(
         palettes_json.exists(),
         "palettes.json should exist"
     );
     
-    let liveries_json = Path::new(AURORA_EXPORT_ROOT).join("liveries.json");
+    let liveries_json = Path::new(&aurora_export_root()).join("liveries.json");
     assert!(
         liveries_json.exists(),
         "liveries.json should exist"
@@ -247,10 +257,10 @@ fn test_materials_metadata_files_exist() {
 }
 
 /// Tests that paints.json is valid JSON with expected structure
-#[ignore = "requires local Aurora export at hard-coded /home/tom/... path"]
+#[ignore = "requires a local Aurora export under ~/projects/scorg_tools/ships"]
 #[test]
 fn test_paints_json_valid_structure() {
-    let paints_json = Path::new(AURORA_EXPORT_ROOT).join("paints.json");
+    let paints_json = Path::new(&aurora_export_root()).join("paints.json");
     let content = fs::read_to_string(&paints_json)
         .expect("Should read paints.json");
     let json: serde_json::Value = serde_json::from_str(&content)
@@ -263,10 +273,10 @@ fn test_paints_json_valid_structure() {
 }
 
 /// Tests that palettes.json is valid JSON and contains paint palette data
-#[ignore = "requires local Aurora export at hard-coded /home/tom/... path"]
+#[ignore = "requires a local Aurora export under ~/projects/scorg_tools/ships"]
 #[test]
 fn test_palettes_json_valid_structure() {
-    let palettes_json = Path::new(AURORA_EXPORT_ROOT).join("palettes.json");
+    let palettes_json = Path::new(&aurora_export_root()).join("palettes.json");
     let content = fs::read_to_string(&palettes_json)
         .expect("Should read palettes.json");
     let json: serde_json::Value = serde_json::from_str(&content)
@@ -279,10 +289,10 @@ fn test_palettes_json_valid_structure() {
 }
 
 /// Tests that animations directory exists with animation metadata
-#[ignore = "requires local Aurora export at hard-coded /home/tom/... path"]
+#[ignore = "requires a local Aurora export under ~/projects/scorg_tools/ships"]
 #[test]
 fn test_animations_directory_exists() {
-    let animations_dir = Path::new(AURORA_EXPORT_ROOT).join("animations");
+    let animations_dir = Path::new(&aurora_export_root()).join("animations");
     assert!(
         animations_dir.exists(),
         "animations directory should exist"
@@ -303,10 +313,10 @@ fn test_animations_directory_exists() {
 }
 
 /// Tests that animation files are valid JSON
-#[ignore = "requires local Aurora export at hard-coded /home/tom/... path"]
+#[ignore = "requires a local Aurora export under ~/projects/scorg_tools/ships"]
 #[test]
 fn test_animation_files_valid_json() {
-    let animations_dir = Path::new(AURORA_EXPORT_ROOT).join("animations");
+    let animations_dir = Path::new(&aurora_export_root()).join("animations");
     
     for entry in fs::read_dir(&animations_dir)
         .expect("Should read animations directory")
@@ -325,10 +335,11 @@ fn test_animation_files_valid_json() {
 }
 
 /// Tests that the export package maintains directory structure consistency
-#[ignore = "requires local Aurora export at hard-coded /home/tom/... path"]
+#[ignore = "requires a local Aurora export under ~/projects/scorg_tools/ships"]
 #[test]
 fn test_export_structure_consistency() {
-    let root = Path::new(AURORA_EXPORT_ROOT);
+    let export_root = aurora_export_root();
+    let root = Path::new(&export_root);
     
     // Core files/dirs should exist
     assert!(root.join("scene.blend").exists(), "scene.blend should exist");
@@ -340,10 +351,10 @@ fn test_export_structure_consistency() {
 }
 
 /// Tests that mesh asset paths in scene.json are consistent (use forward slashes)
-#[ignore = "requires local Aurora export at hard-coded /home/tom/... path"]
+#[ignore = "requires a local Aurora export under ~/projects/scorg_tools/ships"]
 #[test]
 fn test_scene_json_paths_consistent() {
-    let scene_json_path = Path::new(AURORA_EXPORT_ROOT).join("scene.json");
+    let scene_json_path = Path::new(&aurora_export_root()).join("scene.json");
     let content = fs::read_to_string(&scene_json_path)
         .expect("Should read scene.json");
     let json: serde_json::Value = serde_json::from_str(&content)

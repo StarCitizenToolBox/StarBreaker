@@ -1,0 +1,215 @@
+{
+  "schema_version": 1,
+  "targets": [
+    {
+      "id": "ui_target_a",
+      "category": "image",
+      "baseline_path": "ui_target_a.baseline",
+      "current_path": "ui_target_a.current",
+      "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_i_med_medicalbed_a.png",
+      "tier": "platinum",
+      "roi": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 1.0,
+        "h": 1.0
+      }
+    },
+    {
+      "id": "ui_target_b",
+      "category": "image",
+      "baseline_path": "ui_target_b.baseline",
+      "current_path": "ui_target_b.current",
+      "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_i_med_medicalendofbed_a.png",
+      "tier": "platinum",
+      "roi": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 1.0,
+        "h": 1.0
+      }
+    },
+    {
+      "id": "clipper_small_door",
+      "category": "image",
+      "baseline_path": "clipper_small_door.baseline",
+      "current_path": "clipper_small_door.current",
+      "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_i_door_small_drak.png",
+      "tier": "gold",
+      "roi": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 1.0,
+        "h": 1.0
+      }
+    },
+    {
+      "id": "eng_annunciator_master_left",
+      "category": "image",
+      "baseline_path": "eng_annunciator_master_left.baseline",
+      "current_path": "eng_annunciator_master_left.current",
+      "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_h_eng_annunciator_master_left.png",
+      "tier": "platinum",
+      "roi": {
+        "x": 0,
+        "y": 0,
+        "w": 1,
+        "h": 1
+      }
+    },
+    {
+      "id": "clipper_target_master",
+      "category": "image",
+      "baseline_path": "clipper_target_master.baseline",
+      "current_path": "clipper_target_master.current",
+      "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_mc_s_target_master.png",
+      "tier": "platinum",
+      "roi": {
+        "x": 0,
+        "y": 0,
+        "w": 1,
+        "h": 1
+      }
+    },
+    {
+      "id": "clipper_power_master",
+      "category": "image",
+      "baseline_path": "clipper_power_master.baseline",
+      "current_path": "clipper_power_master.current",
+      "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_mc_s_power_master.png",
+      "tier": "gold",
+      "roi": {
+        "x": 0,
+        "y": 0,
+        "w": 1,
+        "h": 1
+      }
+    },
+    {
+      "id": "eng_annunciator_master_right",
+      "category": "image",
+      "baseline_path": "eng_annunciator_master_right.baseline",
+      "current_path": "eng_annunciator_master_right.current",
+      "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_h_eng_annunciator_master_right.png",
+      "tier": "platinum",
+      "roi": {
+        "x": 0,
+        "y": 0,
+        "w": 1,
+        "h": 1
+      }
+    },
+    {
+      "id": "clipper_g_force_ball_master",
+      "category": "image",
+      "baseline_path": "clipper_g_force_ball_master.baseline",
+      "current_path": "clipper_g_force_ball_master.current",
+      "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_hc_hud_ship_g_force_ball_master.png",
+      "tier": "platinum",
+      "roi": {
+        "x": 0,
+        "y": 0,
+        "w": 1,
+        "h": 1
+      }
+    },
+    {
+      "id": "clipper_velocity_ball_master",
+      "category": "image",
+      "baseline_path": "clipper_velocity_ball_master.baseline",
+      "current_path": "clipper_velocity_ball_master.current",
+      "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_hc_hud_ship_velocity_ball_master.png",
+      "tier": "platinum",
+      "roi": {
+        "x": 0,
+        "y": 0,
+        "w": 1,
+        "h": 1
+      }
+    },
+    {
+      "id": "clipper_velocity_num_master",
+      "category": "image",
+      "baseline_path": "clipper_velocity_num_master.baseline",
+      "current_path": "clipper_velocity_num_master.current",
+      "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_hc_hud_ship_velocity_num_master.png",
+      "tier": "gold",
+      "roi": {
+        "x": 0,
+        "y": 0,
+        "w": 1,
+        "h": 1
+      }
+    },
+    {
+      "id": "clipper_compass_master",
+      "category": "image",
+      "baseline_path": "clipper_compass_master.baseline",
+      "current_path": "clipper_compass_master.current",
+      "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_hc_hud_ship_compass_master.png",
+      "tier": "gold",
+      "roi": {
+        "x": 0,
+        "y": 0,
+        "w": 1,
+        "h": 1
+      }
+    },
+    {
+      "id": "clipper_self_master",
+      "category": "text",
+      "baseline_path": "clipper_self_master.baseline",
+      "current_path": "clipper_self_master.current",
+      "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_mc_s_self_master.png",
+      "tier": "gold",
+      "roi": {
+        "x": 0,
+        "y": 0,
+        "w": 1,
+        "h": 1
+      }
+    },
+    {
+      "id": "clipper_master_mode_display_master",
+      "category": "image",
+      "baseline_path": "clipper_master_mode_display_master.baseline",
+      "current_path": "clipper_master_mode_display_master.current",
+      "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_hc_hud_ship_master_mode_display_master.png",
+      "tier": "gold",
+      "roi": {
+        "x": 0,
+        "y": 0,
+        "w": 1,
+        "h": 1
+      }
+    },
+    {
+      "id": "clipper_countermeasures_master",
+      "category": "image",
+      "baseline_path": "clipper_countermeasures_master.baseline",
+      "current_path": "clipper_countermeasures_master.current",
+      "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_hc_hud_ship_countermeasures_master.png",
+      "tier": "gold",
+      "roi": {
+        "x": 0,
+        "y": 0,
+        "w": 1,
+        "h": 1
+      }
+    },
+    {
+      "id": "clipper_lrind_master",
+      "category": "image",
+      "baseline_path": "clipper_lrind_master.baseline",
+      "current_path": "clipper_lrind_master.current",
+      "source_generated_png": "ships/Data/UI/Generated/ship/drak/Clipper/buildingblocks_canvas_hc_hud_ship_lrind_master.png",
+      "tier": "gold",
+      "roi": {
+        "x": 0,
+        "y": 0,
+        "w": 1,
+        "h": 1
+      }
+    }
+  ]
+}

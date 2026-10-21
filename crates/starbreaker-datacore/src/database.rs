@@ -968,6 +968,12 @@ impl<'a> Database<'a> {
 
 /// Scan from byte offset to next null byte in the raw string table.
 fn resolve_string_from_table(table: &[u8], offset: i32) -> &str {
+    // Negative offsets are the DataCore "no string" sentinel (e.g. a record with
+    // no name uses -1); a string-table position is never legitimately negative,
+    // so resolve them to the empty string rather than panicking on the cast.
+    if offset < 0 {
+        return "";
+    }
     let start = offset as usize;
     let end = table[start..]
         .iter()
@@ -1008,5 +1014,20 @@ impl OwnedDatabase {
     /// Borrow the owned data as a `Database`.
     pub fn as_database(&self) -> Result<Database<'_>, ParseError> {
         Database::from_bytes(&self.data)
+    }
+}
+
+#[cfg(test)]
+mod string_table_tests {
+    use super::resolve_string_from_table;
+
+    #[test]
+    fn negative_offset_is_the_no_string_sentinel() {
+        let table = b"\0hello\0world\0";
+        // -1 ("no string") must resolve to empty, not panic on the usize cast.
+        assert_eq!(resolve_string_from_table(table, -1), "");
+        // Valid offsets still scan to the next null.
+        assert_eq!(resolve_string_from_table(table, 1), "hello");
+        assert_eq!(resolve_string_from_table(table, 7), "world");
     }
 }

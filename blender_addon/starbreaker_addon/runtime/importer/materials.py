@@ -185,22 +185,33 @@ def _texture_reference_uses_packed_roughness_green(texture: Any) -> bool:
 class MaterialsMixin:
     """Material lifecycle + node/socket utilities for ``PackageImporter``."""
 
+    _LOCALIZED_COPY_PROP = "starbreaker_localized_copy"
+
     def material_for_submaterial(
         self,
         sidecar_path: str,
         sidecar: MaterialSidecar,
         submaterial: SubmaterialRecord,
         palette: PaletteRecord | None,
+        ui_image_path: str | None = None,
     ) -> bpy.types.Material:
         palette_scope = self._palette_scope(palette)
         identity_cache = getattr(self, "material_identity_cache", None)
-        identity_key = (sidecar_path, int(submaterial.index), palette_scope)
+        expected_template_key = template_plan_for_submaterial(submaterial).template_key
+        effective_ui_image_path = ui_image_path if expected_template_key == "screen_hud" else None
+        identity_key = (
+            sidecar_path,
+            int(submaterial.index),
+            palette_scope,
+            effective_ui_image_path or "",
+        )
         cache_key = identity_cache.get(identity_key) if identity_cache is not None else None
         if cache_key is None:
             cache_key = _material_identity(sidecar_path, sidecar, submaterial, palette, palette_scope)
+            if effective_ui_image_path:
+                cache_key = f"{cache_key}|ui:{effective_ui_image_path}"
             if identity_cache is not None:
                 identity_cache[identity_key] = cache_key
-        expected_template_key = template_plan_for_submaterial(submaterial).template_key
         cached = self.material_cache.get(cache_key)
         if cached is not None:
             if _material_datablock_is_valid(cached):
@@ -210,9 +221,26 @@ class MaterialsMixin:
 
         reusable = self._reusable_material(sidecar_path, sidecar, submaterial, palette, palette_scope, cache_key)
         if reusable is not None:
-            reusable = self._local_editable_material(reusable, cache_key)
+            reusable, localized_copy = self._local_editable_material(reusable, cache_key)
             existing_identity = reusable.get(PROP_MATERIAL_IDENTITY)
             existing_template_key = reusable.get(PROP_TEMPLATE_KEY)
+            if localized_copy:
+                self._build_managed_material(
+                    reusable,
+                    sidecar_path,
+                    sidecar,
+                    submaterial,
+                    palette,
+                    cache_key,
+                    ui_image_path=effective_ui_image_path,
+                )
+                try:
+                    del reusable[self._LOCALIZED_COPY_PROP]
+                except Exception:
+                    pass
+                self.material_cache[cache_key] = reusable
+                self.material_identity_index[cache_key] = reusable
+                return reusable
             if (
                 isinstance(existing_identity, str)
                 and existing_identity == cache_key
@@ -222,7 +250,15 @@ class MaterialsMixin:
                     or self._material_needs_illum_decal_alpha_mode_refresh(reusable, submaterial)
                 )
             ):
-                self._build_managed_material(reusable, sidecar_path, sidecar, submaterial, palette, cache_key)
+                self._build_managed_material(
+                    reusable,
+                    sidecar_path,
+                    sidecar,
+                    submaterial,
+                    palette,
+                    cache_key,
+                    ui_image_path=effective_ui_image_path,
+                )
                 self.material_cache[cache_key] = reusable
                 self.material_identity_index[cache_key] = reusable
                 return reusable
@@ -234,23 +270,56 @@ class MaterialsMixin:
                 self.material_cache[cache_key] = reusable
                 self.material_identity_index[cache_key] = reusable
                 return reusable
-            self._build_managed_material(reusable, sidecar_path, sidecar, submaterial, palette, cache_key)
+            if isinstance(existing_identity, str) and existing_identity != cache_key:
+                self._build_managed_material(
+                    reusable,
+                    sidecar_path,
+                    sidecar,
+                    submaterial,
+                    palette,
+                    cache_key,
+                    ui_image_path=effective_ui_image_path,
+                )
+                self.material_cache[cache_key] = reusable
+                self.material_identity_index[cache_key] = reusable
+                return reusable
+            self._build_managed_material(
+                reusable,
+                sidecar_path,
+                sidecar,
+                submaterial,
+                palette,
+                cache_key,
+                ui_image_path=effective_ui_image_path,
+            )
             self.material_cache[cache_key] = reusable
             self.material_identity_index[cache_key] = reusable
             return reusable
 
         material_name = _material_name(sidecar_path, sidecar, submaterial, cache_key)
         material = bpy.data.materials.new(material_name)
-        self._build_managed_material(material, sidecar_path, sidecar, submaterial, palette, cache_key)
+        self._build_managed_material(
+            material,
+            sidecar_path,
+            sidecar,
+            submaterial,
+            palette,
+            cache_key,
+            ui_image_path=effective_ui_image_path,
+        )
         self.material_cache[cache_key] = material
         self.material_identity_index[cache_key] = material
         return material
 
 
 
-    def _local_editable_material(self, material: bpy.types.Material, material_identity: str) -> bpy.types.Material:
+    def _local_editable_material(
+        self,
+        material: bpy.types.Material,
+        material_identity: str,
+    ) -> tuple[bpy.types.Material, bool]:
         if getattr(material, "library", None) is None:
-            return material
+            return material, False
 
         self._ensure_material_identity_index()
         indexed_material = self.material_identity_index.get(material_identity)
@@ -258,7 +327,7 @@ class MaterialsMixin:
             self.material_identity_index.pop(material_identity, None)
             indexed_material = None
         if indexed_material is not None and getattr(indexed_material, "library", None) is None:
-            return indexed_material
+            return indexed_material, False
 
         for candidate in bpy.data.materials:
             if candidate is material:
@@ -267,7 +336,7 @@ class MaterialsMixin:
                 continue
             if candidate.get(PROP_MATERIAL_IDENTITY) == material_identity:
                 self.material_identity_index[material_identity] = candidate
-                return candidate
+                return candidate, False
 
         local_material = material.copy()
         try:
@@ -275,8 +344,9 @@ class MaterialsMixin:
         except Exception:
             pass
         local_material[PROP_MATERIAL_IDENTITY] = material_identity
+        local_material[self._LOCALIZED_COPY_PROP] = True
         self.material_identity_index[material_identity] = local_material
-        return local_material
+        return local_material, True
 
 
 
@@ -450,6 +520,9 @@ class MaterialsMixin:
         palette_scope: str,
         material_identity: str,
     ) -> bpy.types.Material | None:
+        ui_image_path = None
+        if material_identity and "|ui:" in material_identity:
+            ui_image_path = material_identity.split("|ui:", 1)[1]
         preferred_name = submaterial.blender_material_name or _derived_material_name(sidecar_path, sidecar, submaterial)
         preferred = bpy.data.materials.get(preferred_name)
         if preferred is not None and _material_is_compatible(
@@ -460,6 +533,7 @@ class MaterialsMixin:
             submaterial,
             palette,
             palette_scope,
+            ui_image_path=ui_image_path,
         ):
             return preferred
 
@@ -476,6 +550,7 @@ class MaterialsMixin:
             submaterial,
             palette,
             palette_scope,
+            ui_image_path=ui_image_path,
         ):
             return indexed_material
         return None
@@ -1390,6 +1465,7 @@ class MaterialsMixin:
             node = nodes.new("ShaderNodeTexImage")
             node.location = (x, y)
             node.image = bpy.data.images.load(resolved_str, check_existing=True)
+            self._refresh_image_source(node.image, resolved_str)
             if not is_color and node.image is not None and hasattr(node.image, "colorspace_settings"):
                 node.image.colorspace_settings.name = "Non-Color"
             return node
@@ -1430,6 +1506,29 @@ class MaterialsMixin:
         except Exception:
             return str(getattr(image, "filepath", "") or "")
 
+    @staticmethod
+    def _refresh_image_source(image: Any, resolved_path: str) -> None:
+        """Reload a reused image datablock when its source file changed on disk and
+        stamp the source mtime so re-exports pick up fresh pixels. Inert on objects
+        that don't expose Blender ID-property access (e.g. test stubs)."""
+        if image is None:
+            return
+        try:
+            token = str(Path(resolved_path).stat().st_mtime_ns)
+        except OSError:
+            return
+        getter = getattr(image, "get", None)
+        current = getter("starbreaker_source_mtime_ns", "") if callable(getter) else ""
+        if current and str(current) != token:
+            reload_fn = getattr(image, "reload", None)
+            if callable(reload_fn):
+                reload_fn()
+        try:
+            # Blender ID properties use C-backed ints and can overflow on ns timestamps.
+            image["starbreaker_source_mtime_ns"] = token
+        except TypeError:
+            pass
+
 
     @classmethod
     def _load_image_for_color_space(cls, resolved_path: str, *, is_color: bool) -> Any:
@@ -1437,9 +1536,11 @@ class MaterialsMixin:
             if cls._image_file_path(image) != resolved_path:
                 continue
             if cls._image_matches_color_space(image, is_color=is_color):
+                cls._refresh_image_source(image, resolved_path)
                 return image
 
         image = bpy.data.images.load(resolved_path, check_existing=False)
+        cls._refresh_image_source(image, resolved_path)
         color_settings = getattr(image, "colorspace_settings", None)
         if color_settings is not None:
             try:

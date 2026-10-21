@@ -87,7 +87,7 @@ pub fn assemble_glb_with_loadout_with_progress(
 
     // Export root entity (mesh + textures).
     let (
-        root_mesh,
+        mut root_mesh,
         root_mtl,
         root_tex,
         exported_root_nmc,
@@ -115,8 +115,14 @@ pub fn assemble_glb_with_loadout_with_progress(
 
     // Check for equipped paint item and resolve its SubGeometry palette/material override.
     let phase_start = Instant::now();
-    let (mut root_palette, root_mtl) =
+    let (mut root_palette, mut root_mtl) =
         resolve_paint_override(db, p4k, record, &tree.root, root_palette, root_mtl);
+    // The paint's material set serves the mesh's slots the engine's way too.
+    if let Some(mtl) = root_mtl.as_mut() {
+        crate::material_slots::resolve_material_slots(&mut root_mesh, mtl, || {
+            crate::material_slots::load_default_material(p4k)
+        })?;
+    }
     log::info!(
         "[timing] resolve_paint_override: {:.2}s",
         phase_start.elapsed().as_secs_f32()
@@ -232,6 +238,7 @@ pub fn assemble_glb_with_loadout_with_progress(
                     offset_rotation: [0.0; 3],
                     detach_direction: [0.0; 3],
                     port_flags: String::new(),
+                    ui_bindings: Vec::new(),
                 });
                 log::info!("  landing gear '{gear_path}' → '{bone_name}', {verts} verts");
             }
@@ -467,10 +474,12 @@ pub fn assemble_glb_with_loadout_with_progress(
             children: child_payloads,
             interiors: loaded_interiors,
             paint_variants,
+            animations: Vec::new(),
         };
 
         let phase_start = Instant::now();
         let decomposed = crate::pipeline::write_decomposed_export_blend(
+            db,
             p4k,
             decomposed_input,
             opts,
@@ -509,6 +518,7 @@ pub fn assemble_glb_with_loadout_with_progress(
             skeleton_bones: root_bones,
             children: child_payloads,
             interiors: loaded_interiors,
+            animations: Vec::new(),
         },
         &mut crate::gltf::GlbLoaders {
             load_textures: &mut tex_loader,

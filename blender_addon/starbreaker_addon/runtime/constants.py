@@ -55,6 +55,12 @@ PROP_HAS_POM = "starbreaker_has_pom"
 PROP_LIGHT_STATES_JSON = "starbreaker_light_states"
 PROP_LIGHT_ACTIVE_STATE = "starbreaker_light_active_state"
 PROP_LIGHT_SEMANTIC_KIND = "starbreaker_light_semantic_kind"
+# True when the entity's authored default state is "off" (e.g. an
+# `SCItemDisplayScreen` whose `defaultView` resolved to a view with no
+# concrete canvas content). The exporter still renders a "switched on" image
+# so the texture is non-blank, but downstream tools can use this flag to gate
+# initial visibility of the UI surface.
+PROP_UI_DEFAULT_STATE_IS_OFF = "starbreaker_ui_default_state_is_off"
 PROP_ENGINE_GLOW_CONTROL_JSON = "starbreaker_engine_glow_control"
 PROP_ENGINE_GLOW_STRENGTH = "starbreaker_engine_glow_strength"
 PROP_SHARED_GLOW_CONTROL_JSON = "starbreaker_shared_glow_control"
@@ -66,10 +72,36 @@ SCENE_SHARED_GLOW_PROP = "starbreaker_shared_glow_strength"
 SURFACE_SHADER_MODE_PRINCIPLED = "principled_first"
 SURFACE_SHADER_MODE_GLASS = "glass_bsdf"
 DECAL_OFFSET_MODIFIER_NAME = "StarBreaker Decal Offset"
-DECAL_OFFSET_EXTERNAL_DEFAULT = 0.0005
-DECAL_OFFSET_INTERNAL_DEFAULT = 0.0001
+# Ship-facing decal Displace defaults. These mirror the values the Rust .blend
+# writer bakes per instance (exterior hull 0.005, interior/loadout 0.001 — see
+# `instance_decal_offset_strength` in crates/starbreaker-3d) so the addon UI
+# default and the baked modifier agree.
+DECAL_OFFSET_EXTERNAL_DEFAULT = 0.005
+DECAL_OFFSET_INTERNAL_DEFAULT = 0.001
+# Duplicated reusable templates (e.g. control-only MeshDecal POM host overlays on
+# FPS weapons) cap their decal Displace offset tighter than the ship hull default
+# so the relief overlay does not visibly lift off small geometry.
+DECAL_OFFSET_TEMPLATE_CAP = 0.0005
 
 POM_DETAIL_DEFAULT = "MEDIUM"
+# Neutral roughness applied to control-only MeshDecal POM relief overlays (POM
+# height/normal with no authored decal colour or gloss). Aesthetic neutral knob,
+# not a value derived from game data.
+CONTROL_ONLY_POM_DEFAULT_ROUGHNESS = 0.55
+# Parallax-occlusion calibration. The bundled POM_Vector (original StarFab
+# pipeline) is driven from game data: Scale (parallax depth) from the authored
+# CryEngine PomDisplacement times POM_SCALE_MULTIPLIER, clamped into the
+# proven-good [MIN, MAX] range so relief is always visible (floor) but never
+# swims (cap) -- the reference pom.blend reads at ~1.5. Bias (the reference
+# plane) is set per-material to the height-map background so the mid-level sits
+# flush and Scale can grow independently (see ``_resolve_parallax_bias``); this
+# is the functional compensation that the earlier runtime POM_Vector
+# modification (Layers->UV Scale) had broken. POM_VECTOR_LAYERS is the ray-march
+# resolution; the reference uses 40.
+POM_SCALE_MULTIPLIER = 30.0
+POM_SCALE_MIN = 1.5
+POM_SCALE_MAX = 3.0
+POM_VECTOR_LAYERS = 40
 POM_DETAIL_ITEMS = (
     ("LOW", "Low", "20 layers with reduced scale for faster viewport playback"),
     ("MEDIUM", "Medium", "50 layers with balanced scale; default"),
@@ -109,7 +141,7 @@ LUMENS_PER_WATT_WHITE = 120.0
 # luminous flux = intensity * 4π, which divided by 683 lm/W gives Watts.
 # Updated to 1500.0 for brighter interior lighting
 # (Phase 36+: aligned with Max script's PowerModifier and user-verified brightness).
-# See ``docs/StarBreaker/lights-research.md``.
+# See ``docs/star-citizen-lighting-research.md``.
 import math as _math
 
 SC_LIGHT_CANDELA_SCALE = 1500.0
@@ -132,3 +164,17 @@ SCENE_AXIS_CONVERSION_INV = SCENE_AXIS_CONVERSION.inverted()
 GLTF_LIGHT_BASIS_CORRECTION = Quaternion((math.sqrt(0.5), 0.0, -math.sqrt(0.5), 0.0))
 NON_COLOR_INPUT_KEYWORDS = ("normal", "roughness", "gloss", "mask", "height", "specular", "opacity", "id_map")
 MATERIAL_IDENTITY_SCHEMA = "runtime_material_v11"
+
+# HumanSkin_V2 → Principled BSDF. CryEngine's LIGHTINGMODEL_SKIN (screen-space
+# skin scattering + thin-region transmittance) has no direct Principled
+# equivalent; skin is rendered as random-walk subsurface with these knobs.
+SKIN_SUBSURFACE_RADIUS = (1.0, 0.35, 0.2)  # per-channel scatter ratio; red travels furthest
+SKIN_SUBSURFACE_SCALE = 0.004  # metres (packages are metre-scale)
+# HumanSkin_V2 transmittance = TexSlot12.r * TranslucencyMultiplier * 0.25;
+# widens the subsurface distance in thin regions (ears, nostrils).
+SKIN_TRANSMITTANCE_SCALE_GAIN = 4.0
+
+# HairPBR -> Principled BSDF. HairPBR diffuse is a wrapped term
+# lerp((N.L + 1)/4, KajiyaKay, k) * hairColor * 0.5 - about half the energy of
+# a Lambertian with albedo hairColor - so fibre/cap colour is scaled by this.
+HAIR_DIFFUSE_SCALE = 0.5

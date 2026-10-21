@@ -21,6 +21,9 @@ import uuid
 from typing import Any
 
 import bpy
+from .layer_blend_gloss import build_layer_blend_roughness
+from .layer_blend_color import apply_layer_blend_color
+from .layer_blend_decals import apply_layer_blend_decals
 
 try:
     from mathutils import kdtree as _mathutils_kdtree
@@ -28,7 +31,12 @@ except ImportError:  # pragma: no cover - Blender provides this at runtime.
     _mathutils_kdtree = None
 
 from ..constants import (
+    CONTROL_ONLY_POM_DEFAULT_ROUGHNESS,
     MATERIAL_IDENTITY_SCHEMA,
+    POM_SCALE_MAX,
+    POM_SCALE_MIN,
+    POM_SCALE_MULTIPLIER,
+    POM_VECTOR_LAYERS,
     NON_COLOR_INPUT_KEYWORDS,
     POM_DETAIL_DEFAULT,
     PROP_ASSEMBLY_KIND,
@@ -85,8 +93,16 @@ from ...palette import (
     palette_finish_glossiness_factor,
     palette_finish_specular,
 )
-from ...templates import has_virtual_input, material_palette_channels, representative_textures, template_plan_for_submaterial
+from ...templates import (
+    has_virtual_input,
+    material_palette_channels,
+    representative_textures,
+    screen_effects_apply_crt,
+    template_plan_for_submaterial,
+)
 from ..palette_utils import _hard_surface_palette_iridescence_channel
+from ..hair_utils import is_hair_cap, is_hair_fibre
+from ..skin_utils import HUMAN_SKIN_FAMILY
 from .types import LayerSurfaceSockets
 
 
@@ -161,16 +177,20 @@ def _clamp_unit_float(value: float) -> float:
 
 
 def _parallax_height_sampler_extension(uv_tile: float) -> str:
-    """Mirror authored repeat intent for runtime POM height samplers.
+    """Wrap mode for the runtime POM height sampler — always ``REPEAT``.
 
-    POM materials only need sampler wrap mode ``REPEAT`` when the authored
-    material explicitly tiles the underlying surface beyond the base 0-1 UV
-    range. The exported layer manifest preserves that as ``uv_tiling``; every
-    other case should stay on ``CLIP`` to avoid sampling neighboring atlas
-    islands at glancing angles.
+    The POM ray-march walks the UV across the height field, so the height
+    sampler must wrap. With ``CLIP``, samples that step outside the 0-1 range
+    return transparent black, which collapses the march: the reference plane
+    (Bias) goes inert and the parallax degenerates to a constant UV shift
+    (decals render offset, e.g. "SEMI" reads as "EMI-F"). ``REPEAT`` matches the
+    original StarFab / reference ``pom.blend`` behaviour. Cross-cell bleed on
+    atlas decals is prevented instead by the background-referenced Bias keeping
+    the parallax offset small (see ``_resolve_parallax_bias``), not by clamping
+    the height sampler. ``uv_tile`` is retained for call-site compatibility.
     """
 
-    return "REPEAT" if float(uv_tile) > 1.0 + 1e-4 else "CLIP"
+    return "REPEAT"
 
 
 def _layered_wear_metallic_values(
@@ -242,7 +262,7 @@ def _mesh_decal_pom_payload_is_control_only(payload: dict[str, Any]) -> bool:
         return False
     tokens = {
         str(token).strip().upper()
-        for token in flags.get("tokens", [])
+        for token in flags.get("tokens", []) or []
         if str(token).strip()
     }
     if tokens.intersection({"DECAL", "STENCIL_MAP", "DECAL_OPACITY_MAP"}):
@@ -274,6 +294,59 @@ def _mesh_decal_pom_payload_is_control_only(payload: dict[str, Any]) -> bool:
     return True
 
 
+def _height_image_background_bias(image: Any) -> float | None:
+    """Luminance of a height image's top-left pixel — its atlas background.
+
+    Used as the POM reference plane (``Bias``) when no authored ``HeightBias``
+    exists: a decal atlas's corner is the flat surface level, so referencing
+    the parallax to it keeps the mid-level flush. Returns ``None`` when the
+    image has no readable pixel data.
+    """
+    if image is None:
+        return None
+    cache_key = "starbreaker_pom_bg_bias"
+    try:
+        cached = image.get(cache_key)
+        if cached is not None:
+            return float(cached)
+    except Exception:
+        pass
+
+    def _luma(buf) -> float | None:
+        if buf is None or len(buf) < 4:
+            return None
+        return float(0.299 * buf[0] + 0.587 * buf[1] + 0.114 * buf[2])
+
+    # Reading the existing datablock's ``pixels`` is unreliable during a full
+    # import — Blender evicts image buffers under load pressure, so the read
+    # returns empty and Bias falls back to 0.5. A fresh temporary load straight
+    # from the source file decodes reliably; fall back to the shared buffer only
+    # if the file can't be loaded.
+    bias = None
+    try:
+        path = bpy.path.abspath(getattr(image, "filepath", "") or "")
+        if path:
+            tmp = bpy.data.images.load(path, check_existing=False)
+            try:
+                bias = _luma(tmp.pixels[0:4])
+            finally:
+                bpy.data.images.remove(tmp)
+    except Exception:
+        bias = None
+    if bias is None:
+        try:
+            bias = _luma(image.pixels[0:4])
+        except Exception:
+            bias = None
+    if bias is None:
+        return None
+    try:
+        image[cache_key] = bias
+    except Exception:
+        pass
+    return bias
+
+
 def _mesh_decal_pom_submaterial_is_control_only(submaterial: SubmaterialRecord) -> bool:
     if getattr(submaterial, "shader_family", None) != "MeshDecal":
         return False
@@ -294,7 +367,7 @@ def _payload_tokens(payload: dict[str, Any]) -> set[str]:
     flags = payload.get("decoded_feature_flags") or {}
     return {
         str(token).strip().upper()
-        for token in flags.get("tokens", [])
+        for token in flags.get("tokens", []) or []
         if str(token).strip()
     }
 
@@ -434,7 +507,7 @@ class BuildersMixin:
         height_node: bpy.types.Node,
         target_image_nodes: list[bpy.types.Node],
         scale_value: float,
-        bias_value: float = 0.5,
+        bias_value: float | None = None,
         location: tuple[float, float] = (-1280, 720),
         uv_tile: float = 1.0,
     ) -> bpy.types.Node | None:
@@ -479,7 +552,7 @@ class BuildersMixin:
         node_tree = material.node_tree
         if node_tree is None or height_node is None:
             return None
-        if height_node.bl_idname != "ShaderNodeTexImage" or height_node.image is None:
+        if height_node.bl_idname != "ShaderNodeTexImage" or getattr(height_node, "image", None) is None:
             return None
 
         pom_tree = self._ensure_runtime_parallax_group(
@@ -497,18 +570,31 @@ class BuildersMixin:
         parallax_node.location = (location[0], location[1])
         parallax_node.label = "StarBreaker POM"
 
-        # POM_Vector inputs: Scale (Float), Bias (Float), Non-planar
-        # (Bool), UV Scale X/Y (Float). Layer count is controlled inside
-        # the runtime POM root group based on the active scene profile.
-        # Drive Scale from the authored PomDisplacement
-        # (CryEngine-space ≈0.02–0.1) rescaled into POM-test's default
-        # range (≈1.5 for 0.05 input) by multiplying by 30.
-        self._set_socket_default(_input_socket(parallax_node, "Scale"), min(3.0, scale_value * 30.0))
-        self._set_socket_default(_input_socket(parallax_node, "Bias"), max(0.0, min(1.0, bias_value)))
+        # POM_Vector inputs (original StarFab pipeline): Layers, Scale, Bias,
+        # Non-planar. Layers is the ray-march resolution (reference = 40). Scale
+        # is the parallax depth from the authored PomDisplacement, clamped into
+        # the visible-but-stable range. Bias is the reference plane = the
+        # height-map background so the mid-level renders flush and Scale stays
+        # independent of depth (the compensation the broken UV-Scale variant
+        # lost). See constants.py and ``_resolve_parallax_bias``.
+        self._set_socket_default(_input_socket(parallax_node, "Layers"), POM_VECTOR_LAYERS)
+        self._set_socket_default(
+            _input_socket(parallax_node, "Scale"),
+            max(POM_SCALE_MIN, min(POM_SCALE_MAX, scale_value * POM_SCALE_MULTIPLIER)),
+        )
+        self._set_socket_default(
+            _input_socket(parallax_node, "Bias"),
+            self._resolve_parallax_bias(bias_value, height_node),
+        )
+        # The background-bias read can fail at build time — Blender frees image
+        # buffers under a full import's load pressure, so the top-left read
+        # returns empty and Bias falls back to 0.5. Tag nodes that depend on the
+        # background so a deferred post-import pass (when buffers reliably load)
+        # can re-resolve them. See ``_apply_deferred_pom_background_bias``.
+        _bg_image = getattr(height_node, "image", None)
+        if (bias_value is None or bias_value <= 0.0) and _bg_image is not None:
+            parallax_node["sb_pom_height_image"] = _bg_image.name
         self._set_socket_default(_input_socket(parallax_node, "Non-planar"), True)
-        clamped_tile = max(0.001, uv_tile)
-        self._set_socket_default(_input_socket(parallax_node, "UV Scale X"), clamped_tile)
-        self._set_socket_default(_input_socket(parallax_node, "UV Scale Y"), clamped_tile)
 
         offset_vec = _output_socket(parallax_node, "Vector")
         if offset_vec is None:
@@ -530,20 +616,77 @@ class BuildersMixin:
         return parallax_node
 
     @staticmethod
-    def _parallax_bias_value(submaterial: SubmaterialRecord) -> float:
-        return max(
-            0.0,
-            min(
-                1.0,
-                _float_public_param(
-                    submaterial,
-                    "HeightBias",
-                    "POMHeightBias",
-                    "POM_HeightBias",
-                )
-                or 0.5,
-            ),
+    def _parallax_bias_value(submaterial: SubmaterialRecord) -> float | None:
+        """Game-authored POM reference plane (``HeightBias``), or ``None``.
+
+        Returns the authored value clamped to [0, 1] when the material carries a
+        usable ``HeightBias`` public param; ``None`` otherwise so the caller can
+        fall back to the height-map background (the original StarFab behaviour —
+        most decal atlases ship no ``HeightBias`` and rely on the background).
+        """
+        value = _float_public_param(
+            submaterial,
+            "HeightBias",
+            "POMHeightBias",
+            "POM_HeightBias",
         )
+        if value is None or value <= 0.0:
+            return None
+        return max(0.0, min(1.0, value))
+
+    def _resolve_parallax_bias(
+        self,
+        bias_value: float | None,
+        height_node: bpy.types.Node | None,
+    ) -> float:
+        """Resolve the POM reference plane (POM_Vector ``Bias``).
+
+        Game-authored ``HeightBias`` wins when present; otherwise derive it from
+        the height map's background — the top-left pixel luminance, which for a
+        decal atlas is the flat surface level — so the mid-level sits flush
+        (matching the original StarFab POM). Falls back to 0.5 if no pixels are
+        readable.
+        """
+        if bias_value is not None and bias_value > 0.0:
+            return max(0.0, min(1.0, bias_value))
+        background = _height_image_background_bias(getattr(height_node, "image", None))
+        if background is not None:
+            return max(0.0, min(1.0, background))
+        return 0.5
+
+    def _apply_deferred_pom_background_bias(self) -> None:
+        """Re-resolve POM ``Bias`` from the height-map background post-import.
+
+        The build-time top-left read can return an empty buffer (Blender frees
+        image buffers under the load pressure of a full import), leaving Bias at
+        the 0.5 fallback. ``_wire_runtime_parallax`` tags every background-driven
+        POM node with ``sb_pom_height_image``; by now the buffers load reliably,
+        so recompute each tagged node's background and update its Bias once.
+        """
+        background_by_image: dict[str, float | None] = {}
+        for material in bpy.data.materials:
+            tree = getattr(material, "node_tree", None)
+            if tree is None:
+                continue
+            for node in tree.nodes:
+                if node.bl_idname != "ShaderNodeGroup":
+                    continue
+                image_name = node.get("sb_pom_height_image")
+                if not image_name:
+                    continue
+                if image_name not in background_by_image:
+                    background_by_image[image_name] = _height_image_background_bias(
+                        bpy.data.images.get(image_name)
+                    )
+                background = background_by_image[image_name]
+                if background is not None:
+                    socket = _input_socket(node, "Bias")
+                    if socket is not None and hasattr(socket, "default_value"):
+                        socket.default_value = max(0.0, min(1.0, background))
+                try:
+                    del node["sb_pom_height_image"]
+                except Exception:
+                    pass
 
     def _build_managed_material(
         self,
@@ -553,6 +696,7 @@ class BuildersMixin:
         submaterial: SubmaterialRecord,
         palette: PaletteRecord | None,
         material_identity: str,
+        ui_image_path: str | None = None,
     ) -> None:
         palette_key = palette.id if palette is not None else "none"
         material.use_nodes = True
@@ -564,16 +708,22 @@ class BuildersMixin:
             self._build_hard_surface_material(material, submaterial, palette, plan)
         elif submaterial.shader_family == "Illum":
             self._build_illum_material(material, submaterial, palette, plan)
+        elif submaterial.shader_family == HUMAN_SKIN_FAMILY:
+            self._build_human_skin_material(material, sidecar, submaterial, plan)
+        elif is_hair_cap(submaterial):
+            self._build_hair_cap_material(material, submaterial, plan)
+        elif is_hair_fibre(submaterial):
+            self._build_hair_fibre_material(material, sidecar, submaterial, plan)
         else:
             group_contract = None if plan.template_key == "layered_wear" else self._group_contract_for_submaterial(submaterial)
-            if group_contract is not None and self._build_contract_group_material(material, submaterial, palette, plan, group_contract):
+            if plan.template_key == "screen_hud":
+                self._build_screen_material(material, submaterial, palette, plan, ui_image_path)
+            elif group_contract is not None and self._build_contract_group_material(material, submaterial, palette, plan, group_contract):
                 if submaterial.shader_family == "GlassPBR":
                     surface_mode = SURFACE_SHADER_MODE_GLASS
             elif submaterial.shader_family == "GlassPBR":
                 self._build_glass_material(material, submaterial, palette, plan)
                 surface_mode = SURFACE_SHADER_MODE_GLASS
-            elif plan.template_key == "screen_hud":
-                self._build_screen_material(material, submaterial, palette, plan)
             elif plan.template_key == "effects":
                 self._build_effect_material(material, submaterial, palette, plan)
             else:
@@ -1277,7 +1427,9 @@ class BuildersMixin:
         shader_group["starbreaker_mesh_decal_material_mode"] = CONTROL_ONLY_POM_RELIEF_MODE
 
         self._set_socket_default(_input_socket(shader_group, "Base Color"), (0.5, 0.5, 0.5, 1.0))
-        self._set_socket_default(_input_socket(shader_group, "Roughness"), 0.55)
+        self._set_socket_default(
+            _input_socket(shader_group, "Roughness"), CONTROL_ONLY_POM_DEFAULT_ROUGHNESS
+        )
         self._set_socket_default(_input_socket(shader_group, "Metallic"), 0.0)
         self._set_socket_default(_input_socket(shader_group, "Normal Color"), (0.5, 0.5, 1.0, 1.0))
         self._set_socket_default(_input_socket(shader_group, "Normal Strength"), 1.0)
@@ -1341,6 +1493,32 @@ class BuildersMixin:
             bump_strength = 0.0 if displacement is None else max(0.0, min(0.2, float(displacement) * 30.0))
             self._set_socket_default(_input_socket(shader_group, "Bump Strength"), bump_strength)
             self._set_socket_default(_input_socket(shader_group, "Use Bump"), 1.0 if bump_strength > 0.0 else 0.0)
+
+            # True parallax-occlusion mapping: the height map drives the bundled
+            # POM_Vector ray-march, whose offset UVs feed the coverage + normal
+            # samplers. Without this the relief was only a bump, never POM.
+            pom_scale = min(0.2, float(displacement)) if (displacement is not None and displacement > 0.0) else 0.05
+            pom_bias = self._parallax_bias_value(submaterial)
+            parallax_targets = [node for node in (coverage_node, normal_node) if node is not None]
+            if parallax_targets:
+                self._wire_runtime_parallax(
+                    material,
+                    height_node=height_node,
+                    target_image_nodes=parallax_targets,
+                    scale_value=pom_scale,
+                    bias_value=pom_bias,
+                    location=(-900, 360),
+                )
+            # Stash the resolved POM parameters so host-material variants can
+            # rebuild the same parallax/relief without re-reading the submaterial.
+            material["starbreaker_pom_displacement"] = pom_scale
+            # Only stash a real authored HeightBias; ``None`` means "resolve from
+            # the height-map background", which host variants must do too (custom
+            # props can't hold None, and a 0.5 fallback would skip the
+            # background-referenced flush mid-level).
+            if pom_bias is not None:
+                material["starbreaker_pom_bias"] = pom_bias
+            material["starbreaker_pom_bump_strength"] = bump_strength
 
         self._wire_surface_shader_to_output(
             nodes,
@@ -2006,30 +2184,55 @@ class BuildersMixin:
         submaterial: SubmaterialRecord,
         palette: PaletteRecord | None,
         plan: Any,
+        ui_image_path: str | None = None,
     ) -> None:
         nodes = material.node_tree.nodes
         links = material.node_tree.links
         nodes.clear()
 
         output = nodes.new("ShaderNodeOutputMaterial")
-        output.location = (550, 0)
+        output.location = (780, -112.25)
 
         shader_group = nodes.new("ShaderNodeGroup")
         shader_group.node_tree = self._ensure_runtime_screen_group()
         _refresh_group_node_sockets(shader_group)
-        shader_group.location = (250, 0)
+        shader_group.location = (357.6, -112.25)
         shader_group.label = "StarBreaker Screen"
         self._set_socket_default(_input_socket(shader_group, "Base Color"), (0.5, 0.5, 0.5, 1.0))
         self._set_socket_default(_input_socket(shader_group, "Emission Strength"), 3.0)
-        self._set_socket_default(_input_socket(shader_group, "Mix Factor"), 0.12)
-        self._set_socket_default(_input_socket(shader_group, "Use Checker"), 0.0)
+        self._set_socket_default(_input_socket(shader_group, "Use CRT"), bool(screen_effects_apply_crt(submaterial)))
+        self._set_socket_default(_input_socket(shader_group, "X pixels"), 800.0)
+        self._set_socket_default(_input_socket(shader_group, "Y pixels"), 600.0)
 
-        image_path = representative_textures(submaterial)["base_color"]
-        color_source = self._color_source_socket(nodes, submaterial, palette, image_path, x=0, y=0)
-        if color_source is not None:
-            self._link_group_input(links, color_source, shader_group, "Base Color")
-        elif has_virtual_input(submaterial, "$RenderToTexture"):
-            self._set_socket_default(_input_socket(shader_group, "Use Checker"), 1.0)
+        image_path = ui_image_path or representative_textures(submaterial)["base_color"]
+        image_node = self._image_node(nodes, image_path, x=-60, y=-112, is_color=True)
+        if image_node is not None:
+            self._link_group_input(links, image_node.outputs[0], shader_group, "Base Color")
+
+            _rgb_grid_group, pixelate_group = self._ensure_runtime_screen_effect_groups()
+            if pixelate_group is not None:
+                tex_coord = nodes.new("ShaderNodeTexCoord")
+                tex_coord.location = (-607, -112)
+
+                pixelate_node = nodes.new("ShaderNodeGroup")
+                pixelate_node.node_tree = pixelate_group
+                _refresh_group_node_sockets(pixelate_node)
+                pixelate_node.location = (-367, -112)
+                pixelate_node.label = "Pixelate"
+                self._set_socket_default(_input_socket(pixelate_node, "X Pixels"), 320.0)
+                self._set_socket_default(_input_socket(pixelate_node, "Y Pixels"), 240.0)
+                self._set_socket_default(_input_socket(pixelate_node, "pixelate"), False)
+
+                links.new(_output_socket(tex_coord, "UV"), _input_socket(pixelate_node, "Vector"))
+                links.new(_output_socket(pixelate_node, "Vector"), _input_socket(image_node, "Vector"))
+                self._link_group_input(
+                    links,
+                    _output_socket(pixelate_node, "Vector Passthrough"),
+                    shader_group,
+                    "Vector",
+                )
+                self._link_group_input(links, _output_socket(pixelate_node, "X Pixels"), shader_group, "X pixels")
+                self._link_group_input(links, _output_socket(pixelate_node, "Y Pixels"), shader_group, "Y pixels")
 
         surface = _output_socket(shader_group, "Shader")
         self._wire_surface_shader_to_output(nodes, links, surface, output, plan, submaterial)
@@ -2117,6 +2320,16 @@ class BuildersMixin:
             nodes, base_color_texture, x=-280, y=220, is_color=True
         )
         if base_image_node is not None:
+            image_source_layer = next(
+                (layer for layer in submaterial.layer_manifest
+                 if layer.diffuse_export_path == base_color_texture), None
+            )
+            if image_source_layer is not None:
+                self._apply_uv_tiling(
+                    nodes, links, base_image_node,
+                    image_source_layer.uv_tiling if image_source_layer.uv_tiling is not None else 1.0,
+                    x=-700, y=220,
+                )
             base_image_socket = _input_socket(layered_group, "Base Image")
             if base_image_socket is not None:
                 links.new(base_image_node.outputs[0], base_image_socket)
@@ -2167,6 +2380,11 @@ class BuildersMixin:
                     is_color=True,
                 )
                 if fallback_image_node is not None:
+                    self._apply_uv_tiling(
+                        nodes, links, fallback_image_node,
+                        image_source_layer.uv_tiling if image_source_layer.uv_tiling is not None else 1.0,
+                        x=-700, y=220,
+                    )
                     fallback_target = _input_socket(layered_group, "Base Image")
                     if fallback_target is not None:
                         links.new(fallback_image_node.outputs[0], fallback_target)
@@ -2194,6 +2412,11 @@ class BuildersMixin:
                     nodes, wear_layer.diffuse_export_path, x=-280, y=-140, is_color=True
                 )
                 if layer_image_node is not None:
+                    self._apply_uv_tiling(
+                        nodes, links, layer_image_node,
+                        wear_layer.uv_tiling if wear_layer.uv_tiling is not None else 1.0,
+                        x=-700, y=-140,
+                    )
                     target = _input_socket(layered_group, "Layer Image")
                     if target is not None:
                         links.new(layer_image_node.outputs[0], target)
@@ -2249,6 +2472,13 @@ class BuildersMixin:
             nodes, submaterial, x=-280, y=-780
         )
         layer_roughness_target = _input_socket(layered_group, "Layer Roughness")
+        layer_blend_roughness = build_layer_blend_roughness(self, nodes, submaterial)
+        if layer_blend_roughness is not None:
+            base_roughness_source, wear_roughness_source = layer_blend_roughness
+            if base_roughness_target is not None:
+                links.new(base_roughness_source, base_roughness_target)
+            if wear_roughness_source is not None:
+                layer_roughness_source = wear_roughness_source
         if layer_roughness_source is not None and layer_roughness_target is not None:
             links.new(layer_roughness_source, layer_roughness_target)
 
@@ -2263,6 +2493,9 @@ class BuildersMixin:
             target = _input_socket(principled_group, "Roughness")
             if target is not None:
                 links.new(roughness_output, target)
+
+        apply_layer_blend_color(self, nodes, submaterial, palette, wear_factor_socket, principled_group)
+        apply_layer_blend_decals(self, nodes, submaterial, wear_factor_socket, principled_group)
 
         # Normal map.
         normal_path = textures["normal"]
@@ -2620,7 +2853,7 @@ class BuildersMixin:
             return False
         tokens = {
             str(token).strip().upper()
-            for token in flags.get("tokens", [])
+            for token in flags.get("tokens", []) or []
             if str(token).strip()
         }
         if tokens.intersection({"DECAL", "STENCIL_MAP", "DECAL_OPACITY_MAP"}):
@@ -4222,91 +4455,190 @@ class BuildersMixin:
     ) -> bool:
         """Inject a control-only MeshDecal POM into a host-material clone.
 
-        Star Engine applies these MeshDecal POM entries as control overlays:
-        the host material remains the colour/specular owner while the decal
-        contributes coverage, normal, and height. Blender cannot write only
-        GBuffer normal/height, so the closest representation is a host material
-        clone clipped by the decal alpha with the POM normal/height wired into
-        the host runtime shader.
+        Star Engine applies these MeshDecal POM entries as control overlays: the
+        host material stays the colour/specular owner while the decal contributes
+        coverage, normal, and parallax-occlusion height. The ``clone`` is a copy
+        of the host material (so it already owns the host colour/roughness/
+        metallic chain); this routine rebuilds the full POM relief on top of it:
+        fresh coverage/normal/height samplers, the bundled ``POM_Vector``
+        parallax offset on their UVs, a host-normal overlay clipped by the decal
+        coverage alpha, the height bump, and the shadowless wrapper. The earlier
+        socket-copy approach dropped the height texture, never wired parallax,
+        and skipped the wrapper, so the overlay is built explicitly here.
         """
 
-        sources = self._control_only_pom_relief_sources(pom_material)
-        if not sources:
-            return False
         node_tree = getattr(clone, "node_tree", None)
         if node_tree is None:
+            return False
+        relief_images = self._control_only_pom_relief_image_nodes(pom_material)
+        if not relief_images:
             return False
         nodes = node_tree.nodes
         links = node_tree.links
 
-        alpha_source = sources.get("alpha")
-        copied_alpha = (
-            self._copy_socket_upstream_into_tree(alpha_source, node_tree, name_prefix="SB_POM_")
-            if alpha_source is not None
-            else None
-        )
-        if copied_alpha is not None:
+        def make_pom_tex(src_node: Any, y: int, *, is_color: bool) -> Any:
+            if src_node is None:
+                return None
+            tex = nodes.new("ShaderNodeTexImage")
+            tex.image = getattr(src_node, "image", None)
+            tex.name = f"SB_POM_{getattr(src_node, 'name', 'tex')}"
+            tex.label = "StarBreaker POM source"
+            tex.location = (-1200, y)
+            settings = getattr(getattr(tex, "image", None), "colorspace_settings", None)
+            if settings is not None:
+                try:
+                    settings.name = "sRGB" if is_color else "Non-Color"
+                except Exception:
+                    pass
+            return tex
+
+        coverage_node = make_pom_tex(relief_images.get("diff"), 360, is_color=True)
+        normal_node = make_pom_tex(relief_images.get("normal"), 100, is_color=False)
+        height_node = make_pom_tex(relief_images.get("height"), -180, is_color=False)
+
+        coverage_alpha = _output_socket(coverage_node, "Alpha") if coverage_node is not None else None
+        if coverage_alpha is not None:
             alpha_target = self._host_material_runtime_input(
-                clone,
-                ("Alpha", "Primary Alpha", "Base Alpha", "Top Alpha"),
+                clone, ("Alpha", "Primary Alpha", "Base Alpha", "Top Alpha")
             )
             if alpha_target is not None:
-                self._replace_socket_link(links, alpha_target, copied_alpha)
+                self._replace_socket_link(links, alpha_target, coverage_alpha)
                 clone.blend_method = "HASHED"
                 try:
                     clone.shadow_method = "HASHED"
                 except Exception:
                     pass
 
-        normal_source = sources.get("normal")
-        copied_normal = (
-            self._copy_socket_upstream_into_tree(normal_source, node_tree, name_prefix="SB_POM_")
-            if normal_source is not None
-            else None
-        )
-        normal_target, host_normal_source = self._host_material_normal_target(clone)
-        if normal_target is not None and copied_normal is not None:
-            if host_normal_source is not None and copied_alpha is not None:
-                self._apply_illum_decal_normal_overlay(
-                    nodes,
-                    links,
-                    normal_target=normal_target,
-                    host_normal_source=host_normal_source,
-                    decal_normal_source=copied_normal,
-                    factor_source=copied_alpha,
-                )
-            else:
-                self._replace_socket_link(links, normal_target, copied_normal)
-            use_normal = self._host_material_runtime_input(clone, ("Use Normal",))
-            if use_normal is not None and hasattr(use_normal, "default_value"):
-                use_normal.default_value = 1.0
+        if normal_node is not None:
+            normal_target, host_normal_source = self._host_material_normal_target(clone)
+            decal_normal = _output_socket(normal_node, "Color")
+            if normal_target is not None and decal_normal is not None:
+                if host_normal_source is not None and coverage_alpha is not None:
+                    self._apply_illum_decal_normal_overlay(
+                        nodes,
+                        links,
+                        normal_target=normal_target,
+                        host_normal_source=host_normal_source,
+                        decal_normal_source=decal_normal,
+                        factor_source=coverage_alpha,
+                    )
+                else:
+                    self._replace_socket_link(links, normal_target, decal_normal)
+                use_normal = self._host_material_runtime_input(clone, ("Use Normal",))
+                if use_normal is not None and hasattr(use_normal, "default_value"):
+                    use_normal.default_value = 1.0
 
-        height_source = sources.get("height")
-        copied_height = (
-            self._copy_socket_upstream_into_tree(height_source, node_tree, name_prefix="SB_POM_")
-            if height_source is not None
-            else None
-        )
-        if copied_height is not None:
+        if height_node is not None:
+            separate = nodes.new("ShaderNodeSeparateColor")
+            separate.name = "SB_POM_POM Height Channel"
+            separate.label = "POM height"
+            separate.location = (-940, -180)
+            links.new(_output_socket(height_node, "Color") or height_node.outputs[0], separate.inputs[0])
+            height_socket = separate.outputs.get("Red") or separate.outputs[0]
             height_target = self._host_material_runtime_input(
-                clone,
-                ("Height", "Primary Height", "Displacement Height"),
+                clone, ("Height", "Primary Height", "Displacement Height")
             )
             if height_target is not None:
-                self._replace_socket_link(links, height_target, copied_height)
+                self._replace_socket_link(links, height_target, height_socket)
             use_bump = self._host_material_runtime_input(clone, ("Use Bump",))
             if use_bump is not None and hasattr(use_bump, "default_value"):
                 use_bump.default_value = 1.0
             bump_strength = self._host_material_runtime_input(clone, ("Bump Strength", "POM Strength"))
-            source_bump_strength = sources.get("bump_strength")
+            relief_bump = pom_material.get("starbreaker_pom_bump_strength")
             if (
                 bump_strength is not None
                 and hasattr(bump_strength, "default_value")
-                and isinstance(source_bump_strength, (int, float))
-                and float(source_bump_strength) > 0.0
+                and isinstance(relief_bump, (int, float))
+                and float(relief_bump) > 0.0
             ):
-                bump_strength.default_value = float(source_bump_strength)
+                bump_strength.default_value = float(relief_bump)
+
+        # True POM parallax: the height map drives the ray-march; the resulting
+        # offset UVs feed the coverage + normal samplers so the decal reads as
+        # parallax relief over the host surface rather than a flat bump.
+        parallax_targets = [node for node in (coverage_node, normal_node) if node is not None]
+        if height_node is not None and parallax_targets:
+            pom_scale = pom_material.get("starbreaker_pom_displacement")
+            if not isinstance(pom_scale, (int, float)) or pom_scale <= 0.0:
+                pom_scale = 0.05
+            pom_bias = pom_material.get("starbreaker_pom_bias")
+            if not isinstance(pom_bias, (int, float)):
+                # No authored HeightBias stashed -> resolve from the height-map
+                # background (the flush mid-level), same as the relief material.
+                pom_bias = None
+            self._wire_runtime_parallax(
+                clone,
+                height_node=height_node,
+                target_image_nodes=parallax_targets,
+                scale_value=min(0.2, float(pom_scale)),
+                bias_value=pom_bias,
+                location=(-1700, 360),
+            )
+
+        # GBuffer control overlays do not cast shadows in Star Engine; wrap the
+        # host surface shader so the relief stays shadow-invisible.
+        self._insert_shadowless_wrapper(clone)
         return True
+
+    @classmethod
+    def _control_only_pom_relief_image_nodes(cls, material: bpy.types.Material) -> dict[str, Any]:
+        """Return the POM source image nodes (``diff``/``normal``/``height``)
+        wired into a control-only POM relief material's runtime group."""
+        relief_group = cls._control_only_pom_relief_group_node(material)
+        if relief_group is None:
+            return {}
+
+        def tex_behind(socket_name: str, through_separate: bool = False) -> Any:
+            source = cls._socket_link_source(relief_group.inputs.get(socket_name))
+            node = getattr(source, "node", None)
+            if node is None:
+                return None
+            if through_separate and node.bl_idname == "ShaderNodeSeparateColor":
+                upstream = cls._socket_link_source(node.inputs[0]) if node.inputs else None
+                node = getattr(upstream, "node", None)
+            if node is not None and node.bl_idname == "ShaderNodeTexImage":
+                return node
+            return None
+
+        source_nodes = {
+            "diff": tex_behind("Alpha"),
+            "normal": tex_behind("Normal Color"),
+            "height": tex_behind("Height", through_separate=True),
+        }
+        return {key: value for key, value in source_nodes.items() if value is not None}
+
+    def _insert_shadowless_wrapper(self, material: bpy.types.Material) -> None:
+        """Insert the shared Shadowless Wrapper between the material's surface
+        shader and its Material Output, unless it is already wrapped."""
+        node_tree = getattr(material, "node_tree", None)
+        if node_tree is None:
+            return
+        output = next(
+            (n for n in node_tree.nodes if n.bl_idname == "ShaderNodeOutputMaterial"), None
+        )
+        if output is None:
+            return
+        surface = output.inputs.get("Surface")
+        if surface is None or not surface.is_linked:
+            return
+        link = surface.links[0]
+        source_socket = link.from_socket
+        source_node = link.from_node
+        if (
+            source_node.bl_idname == "ShaderNodeGroup"
+            and getattr(getattr(source_node, "node_tree", None), "name", "")
+            == "StarBreaker Runtime Shadowless Wrapper"
+        ):
+            return
+        wrapper = node_tree.nodes.new("ShaderNodeGroup")
+        wrapper.node_tree = self._ensure_runtime_shadowless_wrapper_group()
+        _refresh_group_node_sockets(wrapper)
+        wrapper.location = (output.location.x - 180, output.location.y - 140)
+        wrapper.label = "StarBreaker Shadowless"
+        for existing in list(surface.links):
+            node_tree.links.remove(existing)
+        node_tree.links.new(source_socket, wrapper.inputs["Shader"])
+        node_tree.links.new(wrapper.outputs["Shader"], surface)
 
     @staticmethod
     def _control_only_pom_relief_group_node(material: bpy.types.Material) -> Any:

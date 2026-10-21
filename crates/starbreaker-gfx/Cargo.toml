@@ -1,0 +1,13 @@
+[package]
+name = "starbreaker-gfx"
+edition = "2024"
+version.workspace = true
+
+[dependencies]
+flate2 = { workspace = true }
+image = { workspace = true, features = ["png", "jpeg", "tiff"] }
+starbreaker-dds = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

@@ -18,22 +18,39 @@ pub fn load_dcb_bytes(
     p4k_path: Option<&Path>,
     dcb_path: Option<&Path>,
 ) -> Result<(Option<MappedP4k>, Vec<u8>)> {
+    let (p4k, bytes, _) = load_dcb(p4k_path, dcb_path)?;
+    Ok((p4k, bytes))
+}
+
+/// [`load_dcb_bytes`], plus the file stem of the `.dcb` read (`Game2`, or
+/// `Game` for older builds).
+pub fn load_dcb(
+    p4k_path: Option<&Path>,
+    dcb_path: Option<&Path>,
+) -> Result<(Option<MappedP4k>, Vec<u8>, String)> {
     if let Some(dcb) = dcb_path {
         let bytes = std::fs::read(dcb)
             .map_err(|e| crate::error::CliError::IoPath { source: e, path: dcb.display().to_string() })?;
         let p4k = load_p4k(p4k_path).ok();
-        return Ok((p4k, bytes));
+        let stem = dcb
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .ok_or_else(|| crate::error::CliError::InvalidInput(format!("{}: not a .dcb file path", dcb.display())))?;
+        return Ok((p4k, bytes, stem));
     }
     let p4k = load_p4k(p4k_path)?;
-    let bytes = p4k
-        .read_file("Data\\Game2.dcb")
-        .or_else(|_| p4k.read_file("Data\\Game.dcb"))?;
-    Ok((Some(p4k), bytes))
+    let (bytes, stem) = match p4k.read_file("Data\\Game2.dcb") {
+        Ok(bytes) => (bytes, "Game2"),
+        Err(_) => (p4k.read_file("Data\\Game.dcb")?, "Game"),
+    };
+    Ok((Some(p4k), bytes, stem.to_owned()))
 }
 
 /// Shared glTF export options.
 #[derive(clap::Args, Debug)]
 pub struct ExportOpts {
+    #[arg(long)]
+    pub geometry_tag: Option<String>,
     /// Export kind: bundled or decomposed
     #[arg(long, default_value = "bundled")]
     pub kind: String,
@@ -67,6 +84,10 @@ pub struct ExportOpts {
     /// Include shield helper meshes and shield attachments in exports
     #[arg(long)]
     pub include_shields: bool,
+    /// Write only UI outputs and required sidecars in decomposed exports.
+    /// This preserves UI PNG parity with full export while reducing output churn.
+    #[arg(long)]
+    pub ui_only_files: bool,
 }
 
 impl From<&ExportOpts> for starbreaker_3d::ExportOptions {
@@ -104,7 +125,10 @@ impl From<&ExportOpts> for starbreaker_3d::ExportOptions {
             include_animations: matches!(kind, starbreaker_3d::ExportKind::Decomposed),
             apply_default_animation_pose: !matches!(kind, starbreaker_3d::ExportKind::Decomposed),
             default_animation_tags: vec!["landing_gear_extend".to_string()],
-            decomposed_package_subdir: None,
+            decomposed_package_subdir: opts.geometry_tag.as_ref().map(|tag| crate::entity::sanitize_export_name(tag)),
+            ui_only_files: opts.ui_only_files,
+            socpak_path_filter: None,
+            geometry_tag: opts.geometry_tag.clone(),
         }
     }
 }

@@ -3,7 +3,10 @@
 fn find_gobo_dds_files() {
     use starbreaker_p4k::MappedP4k;
 
-    let p4k_path = "/home/tom/Games/star-citizen/drive_c/Program Files/Roberts Space Industries/StarCitizen/LIVE/Data.p4k";
+    let p4k_path = format!(
+        "{}/Games/star-citizen/drive_c/Program Files/Roberts Space Industries/StarCitizen/LIVE/Data.p4k",
+        std::env::var("HOME").unwrap_or_default()
+    );
     let p4k = MappedP4k::open(p4k_path).expect("Failed to open P4k");
 
     println!("\n=== Finding gobo DDS files ===");

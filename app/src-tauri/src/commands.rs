@@ -848,6 +848,7 @@ pub struct EntityDto {
     /// True if not a player-available variant (inclusionMode != "ReadyToInclude").
     /// Covers AI, template, unmanned, and other non-player variants.
     pub is_npc_or_internal: bool,
+    pub armor_type: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -886,6 +887,10 @@ pub async fn scan_categories(state: State<'_, AppState>) -> Result<Vec<CategoryD
 
         let inclusion_compiled = db.compile_rooted::<Value>(
             "EntityClassDefinition.StaticEntityClassData[EAEntityDataParams].inclusionMode",
+        ).optional()?;
+
+        let armor_compiled = db.compile_rooted::<String>(
+            "EntityClassDefinition.Components[SAttachableComponentParams].AttachDef.Type",
         ).optional()?;
 
         let mut ships = Vec::new();
@@ -935,6 +940,13 @@ pub async fn scan_categories(state: State<'_, AppState>) -> Result<Vec<CategoryD
                 id: format!("{}", record.id),
                 display_name,
                 is_npc_or_internal,
+                armor_type: armor_compiled.as_ref()
+                    .map(|query| db.query_single::<String>(query, record))
+                    .transpose()?
+                    .flatten()
+                    .and_then(|kind| kind.strip_prefix("Char_Armor_")
+                        .filter(|part| !part.is_empty())
+                        .map(|part| part.replace('_', " "))),
             };
 
             if file_path_lower.contains("entities/spaceships") {
@@ -1044,6 +1056,8 @@ fn decomposed_package_directory_name(
 
 #[derive(Debug, serde::Deserialize)]
 pub struct ExportRequest {
+    #[serde(default)]
+    pub geometry_tag: Option<String>,
     pub record_ids: Vec<String>,
     pub names: Vec<String>,
     pub output_dir: String,
@@ -1063,11 +1077,72 @@ pub struct ExportRequest {
     pub include_object_type_directory: bool,
 }
 
+#[derive(Clone, Serialize)]
+pub struct SocpakDto {
+    pub path: String,
+    /// Top-level group derived from the container's path (see
+    /// `socpak_category`). Lets the export view present collapsible sections.
+    pub category: String,
+    /// Second-tier label within the category (manufacturer, city, set kind…).
+    pub subcategory: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct SocpakHierarchyRequest {
+    pub socpak_paths: Vec<String>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct SocpakHierarchyNodeDto {
+    pub path: String,
+    pub name: String,
+    pub entity_name: Option<String>,
+    pub class_name: Option<String>,
+    pub depth: usize,
+    pub mesh_count: usize,
+    pub light_count: usize,
+    pub children: Vec<SocpakHierarchyNodeDto>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct SocpakExportRequest {
+    pub socpak_paths: Vec<String>,
+    pub output_dir: String,
+    pub lod: u32,
+    pub mip: u32,
+    /// "none", "colors", "textures", "all"
+    pub material_mode: String,
+    pub include_lights: bool,
+    pub overwrite_existing_assets: bool,
+    pub include_nodraw: bool,
+    #[serde(default)]
+    pub socpak_path_filter: Option<Vec<String>>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct SocpakExportDone {
+    pub file_count: usize,
+    pub package_names: Vec<String>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct SocpakExportProgress {
+    pub current: usize,
+    pub total: usize,
+    pub fraction: f32,
+    pub socpak_path: String,
+    pub package_name: String,
+    pub stage: String,
+    pub files_written: usize,
+    pub files_total: usize,
+    pub error: Option<String>,
+}
+
 #[derive(Clone)]
 struct ExportProgressSlot {
     entity_name: String,
     entity_id: String,
-    progress: Arc<Progress>,
+    progress: Arc<Progress<'static>>,
     done: Arc<AtomicBool>,
 }
 
@@ -1441,6 +1516,359 @@ fn read_reusable_decomposed_asset(
     std::fs::read(output_root.join(relative_path)).ok()
 }
 
+struct SocpakProgressDetails<'a> {
+    current_index: usize,
+    total: usize,
+    package_fraction: f32,
+    socpak_path: &'a str,
+    package_name: &'a str,
+    stage: &'a str,
+    files_written: usize,
+    files_total: usize,
+    error: Option<String>,
+}
+
+fn emit_socpak_progress(app: &AppHandle, details: SocpakProgressDetails<'_>) {
+    let total = details.total.max(1);
+    let fraction = ((details.current_index as f32 + details.package_fraction) / total as f32)
+        .clamp(0.0, 1.0);
+    let current = details.current_index.min(total);
+    let _ = app.emit(
+        "socpak-export-progress",
+        SocpakExportProgress {
+            current,
+            total,
+            fraction,
+            socpak_path: details.socpak_path.to_string(),
+            package_name: details.package_name.to_string(),
+            stage: details.stage.to_string(),
+            files_written: details.files_written,
+            files_total: details.files_total,
+            error: details.error,
+        },
+    );
+}
+
+#[tauri::command]
+pub async fn scan_socpaks(
+    state: State<'_, AppState>,
+    query: Option<String>,
+) -> Result<Vec<SocpakDto>, AppError> {
+    let query = query.unwrap_or_default().to_ascii_lowercase();
+    let p4k = state.p4k.lock();
+    let p4k = p4k
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("P4k not loaded".into()))?;
+    let mut matches = p4k
+        .entries()
+        .iter()
+        .filter_map(|entry| {
+            let path = entry.name.clone();
+            let normalized = path.to_ascii_lowercase();
+            if !normalized.ends_with(".socpak") {
+                return None;
+            }
+            if !query.is_empty() && !normalized.contains(&query) {
+                return None;
+            }
+            let classified = crate::socpak_category::categorize_socpak(&path);
+            Some(SocpakDto {
+                path,
+                category: classified.category.to_string(),
+                subcategory: classified.subcategory,
+            })
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(matches)
+}
+
+#[tauri::command]
+pub async fn inspect_socpak_hierarchy(
+    state: State<'_, AppState>,
+    request: SocpakHierarchyRequest,
+) -> Result<Vec<SocpakHierarchyNodeDto>, AppError> {
+    if request.socpak_paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let p4k = {
+        let guard = state.p4k.lock();
+        guard
+            .as_ref()
+            .ok_or_else(|| AppError::Internal("P4k not loaded".into()))?
+            .clone()
+    };
+    tokio::task::spawn_blocking(move || -> Result<Vec<SocpakHierarchyNodeDto>, AppError> {
+        let mut nodes = Vec::new();
+        for socpak_path in request.socpak_paths {
+            match starbreaker_3d::inspect_socpak_hierarchy(&p4k, &socpak_path) {
+                Ok(node) => nodes.push(socpak_hierarchy_node_dto(node)),
+                Err(error) => log::warn!("failed to inspect {socpak_path}: {error}"),
+            }
+        }
+        Ok(nodes)
+    })
+    .await
+    .map_err(|error| AppError::Internal(format!("socpak hierarchy inspection failed: {error}")))?
+}
+
+fn socpak_hierarchy_node_dto(node: starbreaker_3d::SocpakHierarchyNode) -> SocpakHierarchyNodeDto {
+    SocpakHierarchyNodeDto {
+        path: node.path,
+        name: node.name,
+        entity_name: node.entity_name,
+        class_name: node.class_name,
+        depth: node.depth,
+        mesh_count: node.mesh_count,
+        light_count: node.light_count,
+        children: node.children.into_iter().map(socpak_hierarchy_node_dto).collect(),
+    }
+}
+
+fn normalize_socpak_path_filter(paths: &Vec<String>) -> HashSet<String> {
+    paths
+        .iter()
+        .map(|path| {
+            let normalized = path.replace('/', "\\");
+            if normalized.to_ascii_lowercase().starts_with("data\\") {
+                normalized.to_ascii_lowercase()
+            } else {
+                format!("data\\{}", normalized.to_ascii_lowercase())
+            }
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub async fn export_socpaks(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: SocpakExportRequest,
+) -> Result<SocpakExportDone, AppError> {
+    if request.socpak_paths.is_empty() {
+        return Err(AppError::Internal("Select at least one socpak to export".into()));
+    }
+
+    let p4k = {
+        let guard = state.p4k.lock();
+        guard
+            .as_ref()
+            .ok_or_else(|| AppError::Internal("P4k not loaded".into()))?
+            .clone()
+    };
+    let dcb_bytes = {
+        let guard = state.dcb_bytes.lock();
+        guard
+            .as_ref()
+            .ok_or_else(|| AppError::Internal("DataCore not loaded".into()))?
+            .clone()
+    };
+
+    tokio::task::spawn_blocking(move || -> Result<SocpakExportDone, AppError> {
+        let db = starbreaker_datacore::database::Database::from_bytes(&dcb_bytes)?;
+        let material_mode = match request.material_mode.to_lowercase().as_str() {
+            "none" => starbreaker_3d::MaterialMode::None,
+            "colors" => starbreaker_3d::MaterialMode::Colors,
+            "all" => starbreaker_3d::MaterialMode::All,
+            _ => starbreaker_3d::MaterialMode::Textures,
+        };
+        let opts = starbreaker_3d::ExportOptions {
+            kind: starbreaker_3d::ExportKind::Decomposed,
+            format: starbreaker_3d::ExportFormat::Blend,
+            material_mode,
+            include_attachments: false,
+            include_interior: true,
+            include_lights: request.include_lights,
+            include_nodraw: request.include_nodraw,
+            include_shields: false,
+            texture_mip: request.mip,
+            lod_level: request.lod,
+            threads: 0,
+            include_animations: false,
+            apply_default_animation_pose: false,
+            default_animation_tags: vec!["landing_gear_extend".to_string()],
+            decomposed_package_subdir: None,
+            ui_only_files: false,
+            socpak_path_filter: request.socpak_path_filter.as_ref().map(normalize_socpak_path_filter),
+            geometry_tag: None,
+        };
+        let output_root = PathBuf::from(&request.output_dir);
+        let mut file_count = 0usize;
+        let mut package_names = Vec::new();
+        let total = request.socpak_paths.len();
+
+        for (index, socpak_path) in request.socpak_paths.iter().enumerate() {
+            let export_name = socpak_export_name(socpak_path);
+            let package_result = (|| -> Result<(usize, String), AppError> {
+                emit_socpak_progress(
+                    &app,
+                    SocpakProgressDetails {
+                        current_index: index,
+                        total,
+                        package_fraction: 0.02,
+                        socpak_path,
+                        package_name: &export_name,
+                        stage: "Resolving recursive container tree",
+                        files_written: 0,
+                        files_total: 0,
+                        error: None,
+                    },
+                );
+                let mut max_tree_fraction = 0.02f32;
+                let decomposed = starbreaker_3d::socpaks_to_decomposed_blend_with_progress(
+                    &db,
+                    &p4k,
+                    std::slice::from_ref(socpak_path),
+                    &export_name,
+                    &opts,
+                    &mut |tree_progress| {
+                        let tree_fraction =
+                            (0.04 + (tree_progress.containers_loaded as f32 * 0.025)).min(0.74);
+                        max_tree_fraction = max_tree_fraction.max(tree_fraction);
+                        let indent = if tree_progress.depth == 0 {
+                            String::new()
+                        } else {
+                            format!("depth {} - ", tree_progress.depth)
+                        };
+                        let stage = if tree_progress.child_count > 0 {
+                            format!(
+                                "{}{}: {} child container(s), {} mesh refs, {} lights",
+                                indent,
+                                tree_progress.stage,
+                                tree_progress.child_count,
+                                tree_progress.mesh_count,
+                                tree_progress.light_count
+                            )
+                        } else if tree_progress.mesh_count > 0 || tree_progress.light_count > 0 {
+                            format!(
+                                "{}{}: {} mesh refs, {} lights",
+                                indent,
+                                tree_progress.stage,
+                                tree_progress.mesh_count,
+                                tree_progress.light_count
+                            )
+                        } else {
+                            format!("{}{}", indent, tree_progress.stage)
+                        };
+                        emit_socpak_progress(
+                            &app,
+                            SocpakProgressDetails {
+                                current_index: index,
+                                total,
+                                package_fraction: max_tree_fraction,
+                                socpak_path: &tree_progress.socpak_path,
+                                package_name: &export_name,
+                                stage: &stage,
+                                files_written: tree_progress.containers_loaded,
+                                files_total: 0,
+                                error: None,
+                            },
+                        );
+                    },
+                )?;
+                let package_name = decomposed_package_directory_name(&decomposed.files, &export_name);
+                let files_total = decomposed.files.len().max(1);
+                emit_socpak_progress(
+                    &app,
+                    SocpakProgressDetails {
+                        current_index: index,
+                        total,
+                        package_fraction: 0.86,
+                        socpak_path,
+                        package_name: &package_name,
+                        stage: "Prepared Blender package files",
+                        files_written: 0,
+                        files_total,
+                        error: None,
+                    },
+                );
+                prepare_decomposed_output_root(&output_root, &package_name)?;
+                for (file_index, file) in decomposed.files.iter().enumerate() {
+                    let file_path = output_root.join(&file.relative_path);
+                    if let Some(parent) = file_path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    let outcome = write_decomposed_file(
+                        file,
+                        &file_path,
+                        request.overwrite_existing_assets,
+                        None,
+                        &p4k,
+                    )?;
+                    let written = file_index + 1;
+                    let write_fraction = written as f32 / files_total as f32;
+                    let stage = match outcome {
+                        DecomposedWriteOutcome::Written => "Writing package files",
+                        DecomposedWriteOutcome::SkippedExisting => "Skipping existing reusable assets",
+                    };
+                    emit_socpak_progress(
+                        &app,
+                        SocpakProgressDetails {
+                            current_index: index,
+                            total,
+                            package_fraction: 0.86 + 0.13 * write_fraction,
+                            socpak_path,
+                            package_name: &package_name,
+                            stage,
+                            files_written: written,
+                            files_total,
+                            error: None,
+                        },
+                    );
+                }
+                let files_len = decomposed.files.len();
+                let done_package_name = package_name.clone();
+                emit_socpak_progress(
+                    &app,
+                    SocpakProgressDetails {
+                        current_index: index + 1,
+                        total,
+                        package_fraction: 0.0,
+                        socpak_path,
+                        package_name: &done_package_name,
+                        stage: "Done",
+                        files_written: files_total,
+                        files_total,
+                        error: None,
+                    },
+                );
+                Ok((files_len, done_package_name))
+            })();
+
+            match package_result {
+                Ok((files_len, package_name)) => {
+                    file_count += files_len;
+                    package_names.push(package_name);
+                }
+                Err(error) => {
+                    emit_socpak_progress(
+                        &app,
+                        SocpakProgressDetails {
+                            current_index: index,
+                            total,
+                            package_fraction: 0.0,
+                            socpak_path,
+                            package_name: &export_name,
+                            stage: "Failed",
+                            files_written: 0,
+                            files_total: 0,
+                            error: Some(error.to_string()),
+                        },
+                    );
+                    return Err(error);
+                }
+            }
+        }
+
+        Ok(SocpakExportDone {
+            file_count,
+            package_names,
+        })
+    })
+    .await
+    .map_err(|error| AppError::Internal(format!("socpak export task failed: {error}")))?
+}
+
 /// Start exporting selected entities to bundled files.
 #[tauri::command]
 pub async fn start_export(
@@ -1542,7 +1970,10 @@ pub async fn start_export(
         include_animations: request.include_animations,
         apply_default_animation_pose: !request.include_animations,
         default_animation_tags: vec!["landing_gear_extend".to_string()],
+        ui_only_files: false,
         decomposed_package_subdir: None,
+        socpak_path_filter: None,
+        geometry_tag: request.geometry_tag.clone(),
     };
 
     log::info!(
@@ -1584,16 +2015,18 @@ pub async fn start_export(
         let errors = AtomicUsize::new(0);
         let succeeded_ids: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
-        // 0 = auto (half cores), otherwise use the requested count.
-        let num_threads = if requested_threads > 0 {
+        // 0 = auto (use available cores minus one spare core), otherwise use
+        // the requested count from the UI slider.
+        let requested_or_auto_threads = if requested_threads > 0 {
             requested_threads
         } else {
-            (std::thread::available_parallelism()
+            std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(4)
-                / 2)
-            .max(2)
+                .saturating_sub(1)
+                .max(1)
         };
+        let num_threads = requested_or_auto_threads.min(total.max(1));
         let pool = match rayon::ThreadPoolBuilder::new()
             .num_threads(num_threads)
             .build()
@@ -1726,10 +2159,14 @@ fn export_single(
         .ok_or_else(|| AppError::Internal("record not found".into()))?;
     let idx = starbreaker_datacore::loadout::EntityIndex::new(db);
     let tree = starbreaker_datacore::loadout::resolve_loadout_indexed(&idx, record);
-    let reusable_asset_paths = {
+    let use_reusable_assets =
+        opts.kind == starbreaker_3d::ExportKind::Decomposed && !overwrite_existing_assets;
+    let reusable_asset_paths = if use_reusable_assets {
         let mut paths = existing_asset_paths.clone();
         paths.extend(export_session_asset_paths.lock().unwrap().iter().cloned());
         paths
+    } else {
+        HashSet::new()
     };
     let existing_asset_loader = |relative_path: &str| {
         read_reusable_decomposed_asset(output_path, &reusable_asset_paths, relative_path)
@@ -1741,16 +2178,26 @@ fn export_single(
         &tree,
         &starbreaker_3d::ExportOptions {
             decomposed_package_subdir: if opts.kind == starbreaker_3d::ExportKind::Decomposed {
-                object_type_dir.map(ToOwned::to_owned)
+                let parts: Vec<String> = object_type_dir.into_iter().map(ToOwned::to_owned)
+                    .chain(opts.geometry_tag.as_deref().map(sanitize_export_name)).collect();
+                if parts.is_empty() { None } else { Some(parts.join("/")) }
             } else {
                 None
             },
             ..opts.clone()
         },
         progress,
-        Some(&reusable_asset_paths),
+        if use_reusable_assets {
+            Some(&reusable_asset_paths)
+        } else {
+            None
+        },
         Some(existing_interior_assets),
-        Some(&existing_asset_loader),
+        if use_reusable_assets {
+            Some(&existing_asset_loader)
+        } else {
+            None
+        },
     )?;
     match result.kind {
         starbreaker_3d::ExportKind::Bundled => {
@@ -1831,6 +2278,15 @@ fn output_object_type_directory_for_record(
     } else {
         Some("other")
     }
+}
+
+fn socpak_export_name(path: &str) -> String {
+    let file_name = path
+        .rsplit(&['/', '\\'])
+        .next()
+        .unwrap_or(path);
+    let stem = file_name.strip_suffix(".socpak").unwrap_or(file_name);
+    sanitize_export_name(stem)
 }
 
 fn sanitize_export_name(name: &str) -> String {

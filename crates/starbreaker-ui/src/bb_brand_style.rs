@@ -1,0 +1,424 @@
+//! Brand style resolution for BuildingBlocks canvases.
+//!
+//! The unified identity+family resolver ([`resolve_brand_identity`]): a per-canvas
+//! brand override (IC_* family), then ordered IDENTITY candidates
+//! ([`brand_candidate_identifiers`]) keyed on the canvas style-link and the
+//! manufacturer's hud/env [`BrandClass`] sibling pair (per-element [`BrandPolicy`]),
+//! then a `gen_`/`s_default_` family fallback. Replaced the legacy
+//! manufacturer-prefix scan (B1), which could not distinguish the
+//! `s_<mfr>_hud`/`s_<mfr>_env` sibling pair.
+
+use crate::record_name::extract_record_name;
+
+/// Canvas family classification by record-name prefix.
+///
+/// Different families follow different brand-resolution rules:
+/// - `MC_*` → ship manufacturer brand (e.g. `s_drak` for Drake ships)
+/// - `IC_*` → per-canvas brand override (e.g. `s_bioc` for medical screens)
+/// - `M_*` → MFD-root composites (ship manufacturer brand)
+/// - Fluff modular → passive ambient (template + override, no brand styles)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanvasFamily {
+    /// Master Canvas (cockpit MFD, brand-styled per ship).
+    Mfd,
+    /// Fluff Modular (passive ambient; template + override).
+    FluffModular,
+    /// Interactive Canvas (terminal w/ user input; shared PU asset,
+    /// brand-styled per *canvas*, not per ship).
+    InteractiveCanvas,
+    /// MFD-root composite canvases (top-level for cockpit MFDs; embeds
+    /// `MC_*` per-manufacturer sub-canvases).
+    MfdRoot,
+    /// Any other canvas type.
+    Other,
+}
+
+/// Classify a canvas by its record name prefix.
+///
+/// Case-insensitive prefix matching on the `_RecordName_` field.
+pub fn classify_canvas_family(record_name: &str) -> CanvasFamily {
+    let lower = record_name.to_ascii_lowercase();
+    
+    // MC_* but NOT M_* alone (M_ would match MC_ too, so check MC_ first)
+    if lower.starts_with("mc_") {
+        return CanvasFamily::Mfd;
+    }
+    
+    // M_* (MFD root) after MC_ check
+    if lower.starts_with("m_") {
+        return CanvasFamily::MfdRoot;
+    }
+    
+    // Fluff modular families
+    if lower.starts_with("fms_") || lower.starts_with("fmp_") 
+        || lower.starts_with("fmt_") || lower.starts_with("f_") {
+        return CanvasFamily::FluffModular;
+    }
+    
+    // Interactive Canvas
+    if lower.starts_with("ic_") {
+        return CanvasFamily::InteractiveCanvas;
+    }
+    
+    CanvasFamily::Other
+}
+
+/// Whether a canvas is a cockpit HUD ship-component — the dashboard HUD
+/// gauges/strips (`HC_HUD_Ship_*`: compass, velocity, g-force, countermeasures,
+/// …) and the engineering annunciator (`H_Eng_*`). Like the MFD masters these
+/// author the manufacturer's HUD-typography brand `s_<mfr>_hud` (the compass /
+/// velocity / g-force masters all declare `s_drak_hud`), but
+/// `classify_canvas_family` only routes `MC_*`/`M_*` to `Mfd`/`MfdRoot`. Used by
+/// the standard text-style brand selection so HUD components resolve
+/// `s_<mfr>_hud` rather than `s_<mfr>_env` — the env H1 is audimatmono-Bold /
+/// Bright, the HUD H1 is audimatmono-regular / Accent2 (the compass heading
+/// labels render bold-and-white instead of light-and-orange under env). This is
+/// a record-name family test, the same convention as the `MC_*`/`M_*`/`IC_*`
+/// classifiers above.
+pub fn is_cockpit_hud_canvas(record_name: &str) -> bool {
+    let lower = record_name.to_ascii_lowercase();
+    lower.starts_with("hc_hud_") || lower.starts_with("h_hud_") || lower.starts_with("h_eng_")
+}
+
+/// hud vs env brand class of a canvas, by record-name family.
+///
+/// The single source of the `s_<mfr>_{hud|env}` split: MFD masters (`MC_*`/`M_*`)
+/// and cockpit HUD ship-components (`HC_HUD_*`/`H_Eng_*`) author the HUD-typography
+/// brand `s_<mfr>_hud`; every other canvas the environment brand `s_<mfr>_env`.
+/// Extracted from the standard text-style path (`ui_ir`) so the text, separator,
+/// and body-background paths share ONE classifier (B1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrandClass {
+    /// HUD-typography family (`s_<mfr>_hud`).
+    Hud,
+    /// Environment family (`s_<mfr>_env`).
+    Env,
+}
+
+impl BrandClass {
+    /// The slug segment: `"hud"` or `"env"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BrandClass::Hud => "hud",
+            BrandClass::Env => "env",
+        }
+    }
+}
+
+/// Classify a canvas into its brand class (hud/env) by record-name family.
+///
+/// Strips a leading `BuildingBlocks_Canvas.`, then returns [`BrandClass::Hud`] iff
+/// the family is [`CanvasFamily::Mfd`]/[`CanvasFamily::MfdRoot`] OR the canvas is a
+/// cockpit HUD component ([`is_cockpit_hud_canvas`]); otherwise [`BrandClass::Env`].
+/// `None` (no canvas name) → [`BrandClass::Env`].
+pub fn brand_class_for_canvas(canvas_name: Option<&str>) -> BrandClass {
+    let stripped =
+        canvas_name.map(|name| name.strip_prefix("BuildingBlocks_Canvas.").unwrap_or(name));
+    let family = stripped.map(classify_canvas_family);
+    let is_hud = matches!(family, Some(CanvasFamily::Mfd | CanvasFamily::MfdRoot))
+        || stripped.map(is_cockpit_hud_canvas).unwrap_or(false);
+    if is_hud {
+        BrandClass::Hud
+    } else {
+        BrandClass::Env
+    }
+}
+
+/// Per-element brand policy: which sibling of the hud/env pair to prefer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrandPolicy {
+    /// Prefer the canvas's own family class (hud for MFD/HUD canvases, env
+    /// otherwise), falling back to the sibling then the bare `s_<mfr>`.
+    Default,
+    /// Separator elements: the modularkit authors the dotted divider glyph only
+    /// under `s_<mfr>_env`, so prefer the env sibling regardless of canvas family.
+    SeparatorEnv,
+}
+
+/// Ordered, de-duplicated, lowercased brand IDENTITY candidates for a canvas.
+///
+/// Priority: the canvas's own `style`-link identity first (if any); then the
+/// family/policy sibling pair (`s_<mfr>_<class>` then its sibling, or env-first
+/// for [`BrandPolicy::SeparatorEnv`]); then the bare `s_<mfr>`. **Identity only —
+/// no manufacturer-prefix scan.** `gen_`/`s_default_` are family fallbacks matched
+/// separately by [`resolve_brand_identity`], not listed here. This is the single
+/// B1 primitive shared by the text, separator, body-background, and cascade paths.
+pub fn brand_candidate_identifiers(
+    style_link: Option<&str>,
+    manufacturer: Option<&str>,
+    class: BrandClass,
+    policy: BrandPolicy,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(link) = style_link {
+        out.push(link.to_ascii_lowercase());
+    }
+    if let Some(mfr) = manufacturer {
+        let mfr = mfr.to_ascii_lowercase();
+        let (first, second) = match policy {
+            BrandPolicy::Default => match class {
+                BrandClass::Hud => ("hud", "env"),
+                BrandClass::Env => ("env", "hud"),
+            },
+            BrandPolicy::SeparatorEnv => ("env", "hud"),
+        };
+        out.push(format!("s_{mfr}_{first}"));
+        out.push(format!("s_{mfr}_{second}"));
+        out.push(format!("s_{mfr}"));
+    }
+    out.dedup();
+    out
+}
+
+/// Resolve the active brand-style entry by ORDERED IDENTITY (the B1 unified
+/// resolver — replaced the legacy manufacturer-prefix scan, which could not
+/// distinguish the `s_<mfr>_hud`/`s_<mfr>_env` sibling pair).
+///
+/// 1. IC_* single-entry override (per-canvas brand, e.g. BioCorp medical).
+/// 2. First `brandStyles[]` entry whose `brandIdentifier` basename matches a
+///    [`brand_candidate_identifiers`] candidate, in priority order.
+/// 3. `gen_`/`s_default_` family fallback (only when a manufacturer was supplied).
+pub fn resolve_brand_identity<'a>(
+    record_or_value: &'a serde_json::Value,
+    style_link: Option<&str>,
+    manufacturer: Option<&str>,
+    class: BrandClass,
+    policy: BrandPolicy,
+) -> Option<BrandStyle<'a>> {
+    let record_value = record_or_value
+        .get("_RecordValue_")
+        .unwrap_or(record_or_value);
+    let brand_styles = record_value.get("brandStyles").and_then(|v| v.as_array())?;
+    if brand_styles.is_empty() {
+        return None;
+    }
+
+    // 1. IC_* single-entry override (BioCorp medical is one entry on every ship).
+    let record_name = record_or_value
+        .get("_RecordName_")
+        .and_then(|v| v.as_str())
+        .or_else(|| record_value.get("_RecordName_").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    if classify_canvas_family(record_name) == CanvasFamily::InteractiveCanvas
+        && brand_styles.len() == 1
+    {
+        return build_brand_style(&brand_styles[0]);
+    }
+
+    // 2. Ordered identity candidates (priority by candidate order, not array order).
+    let candidates = brand_candidate_identifiers(style_link, manufacturer, class, policy);
+    for candidate in &candidates {
+        for entry in brand_styles {
+            if let Some(basename) = brand_identifier_basename(entry) {
+                if basename.eq_ignore_ascii_case(candidate) {
+                    return build_brand_style(entry);
+                }
+            }
+        }
+    }
+
+    // 3. gen_/s_default_ manufacturer-agnostic family fallback.
+    if manufacturer.is_some() {
+        for entry in brand_styles {
+            if let Some(basename) = brand_identifier_basename(entry) {
+                let lower = basename.to_ascii_lowercase();
+                if lower.starts_with("gen_") || lower.starts_with("s_default_") {
+                    return build_brand_style(entry);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Borrowed view into a selected brand-style entry.
+///
+/// Provides access to the entries array without copying.
+#[derive(Debug)]
+pub struct BrandStyle<'a> {
+    /// Basename of brandIdentifier file://… path, e.g. "s_drak".
+    pub identifier: String,
+    /// Reference to the entries array for this brand.
+    pub entries: &'a [serde_json::Value],
+    /// Reference to the raw brand-styles entry JSON.
+    pub raw: &'a serde_json::Value,
+}
+
+/// Helper to construct a `BrandStyle` from a brand-styles entry.
+fn build_brand_style(entry: &serde_json::Value) -> Option<BrandStyle<'_>> {
+    let identifier = brand_identifier_basename(entry)?;
+    let entries_arr = entry.get("entries").and_then(|v| v.as_array())?;
+    
+    Some(BrandStyle {
+        identifier,
+        entries: entries_arr.as_slice(),
+        raw: entry,
+    })
+}
+
+/// Extract and lower-case the basename of a `brandIdentifier` field.
+///
+/// The `brandIdentifier` is a `_PointsTo_` ref with `value: "file://path/to/s_drak.json"`.
+/// Returns the basename without the directory path or `.json` extension.
+pub fn brand_identifier_basename(brand_styles_entry: &serde_json::Value) -> Option<String> {
+    let brand_id = brand_styles_entry
+        .get("brandIdentifier")
+        .and_then(|v| v.as_str())?;
+    
+    Some(extract_record_name(brand_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_classify_canvas_family() {
+        assert_eq!(classify_canvas_family("MC_S_Target_Master"), CanvasFamily::Mfd);
+        assert_eq!(classify_canvas_family("mc_s_self"), CanvasFamily::Mfd);
+        assert_eq!(classify_canvas_family("M_MFD_Screen"), CanvasFamily::MfdRoot);
+        assert_eq!(classify_canvas_family("m_physical_screen"), CanvasFamily::MfdRoot);
+        assert_eq!(classify_canvas_family("IC_Med_MedicalCommon_A_MainMenu"), CanvasFamily::InteractiveCanvas);
+        assert_eq!(classify_canvas_family("ic_door_standard"), CanvasFamily::InteractiveCanvas);
+        assert_eq!(classify_canvas_family("FMS_Test"), CanvasFamily::FluffModular);
+        assert_eq!(classify_canvas_family("FMP_Test"), CanvasFamily::FluffModular);
+        assert_eq!(classify_canvas_family("FMT_Test"), CanvasFamily::FluffModular);
+        assert_eq!(classify_canvas_family("F_Test"), CanvasFamily::FluffModular);
+        assert_eq!(classify_canvas_family("gen_mc_s_target"), CanvasFamily::Other);
+        assert_eq!(classify_canvas_family("Some_Random_Canvas"), CanvasFamily::Other);
+    }
+
+    #[test]
+    fn test_brand_class_for_canvas() {
+        // MFD masters (MC_*/M_*) and cockpit HUD components → Hud (s_<mfr>_hud).
+        assert_eq!(brand_class_for_canvas(Some("MC_S_Target_Master")), BrandClass::Hud);
+        assert_eq!(brand_class_for_canvas(Some("M_MFD_Screen")), BrandClass::Hud);
+        assert_eq!(brand_class_for_canvas(Some("HC_HUD_Ship_Compass")), BrandClass::Hud);
+        assert_eq!(brand_class_for_canvas(Some("H_Eng_Annunciator")), BrandClass::Hud);
+        assert_eq!(brand_class_for_canvas(Some("H_HUD_Something")), BrandClass::Hud);
+        // Everything else → Env (s_<mfr>_env).
+        assert_eq!(brand_class_for_canvas(Some("IC_Med_MedicalCommon_A")), BrandClass::Env);
+        assert_eq!(brand_class_for_canvas(Some("FMS_Ambient")), BrandClass::Env);
+        assert_eq!(brand_class_for_canvas(Some("Some_Random_Canvas")), BrandClass::Env);
+        // Strips a leading `BuildingBlocks_Canvas.` before classifying.
+        assert_eq!(
+            brand_class_for_canvas(Some("BuildingBlocks_Canvas.MC_S_Target_Master")),
+            BrandClass::Hud
+        );
+        // None → Env.
+        assert_eq!(brand_class_for_canvas(None), BrandClass::Env);
+        // Slug segments.
+        assert_eq!(BrandClass::Hud.as_str(), "hud");
+        assert_eq!(BrandClass::Env.as_str(), "env");
+    }
+
+    /// Synthetic brandStyles record — identifiers only, no real palette values.
+    fn syn_record(record_name: &str, ids: &[&str]) -> serde_json::Value {
+        json!({
+            "_RecordName_": record_name,
+            "brandStyles": ids.iter().map(|id| json!({
+                "brandIdentifier": format!("file://foo/{}.json", id),
+                "entries": []
+            })).collect::<Vec<_>>(),
+        })
+    }
+
+    #[test]
+    fn test_brand_candidate_identifiers_order() {
+        // Default+Hud: class first, then sibling, then bare.
+        assert_eq!(
+            brand_candidate_identifiers(None, Some("syn"), BrandClass::Hud, BrandPolicy::Default),
+            vec!["s_syn_hud", "s_syn_env", "s_syn"]
+        );
+        // Default+Env: env first.
+        assert_eq!(
+            brand_candidate_identifiers(None, Some("syn"), BrandClass::Env, BrandPolicy::Default),
+            vec!["s_syn_env", "s_syn_hud", "s_syn"]
+        );
+        // SeparatorEnv forces env-first regardless of class.
+        assert_eq!(
+            brand_candidate_identifiers(None, Some("syn"), BrandClass::Hud, BrandPolicy::SeparatorEnv),
+            vec!["s_syn_env", "s_syn_hud", "s_syn"]
+        );
+        // Style-link identity leads.
+        assert_eq!(
+            brand_candidate_identifiers(Some("s_bioc"), Some("syn"), BrandClass::Hud, BrandPolicy::Default),
+            vec!["s_bioc", "s_syn_hud", "s_syn_env", "s_syn"]
+        );
+    }
+
+    #[test]
+    fn test_resolve_brand_identity() {
+        // (a) style-link identity wins over the family class.
+        let rec = syn_record("MC_Foo", &["s_syn_hud", "s_syn_env"]);
+        let r = resolve_brand_identity(&rec, Some("s_syn_env"), Some("syn"), BrandClass::Hud, BrandPolicy::Default).unwrap();
+        assert_eq!(r.identifier, "s_syn_env");
+        // (b) Default+Hud picks the hud sibling.
+        let r = resolve_brand_identity(&rec, None, Some("syn"), BrandClass::Hud, BrandPolicy::Default).unwrap();
+        assert_eq!(r.identifier, "s_syn_hud");
+        // (c) SeparatorEnv picks the env sibling.
+        let r = resolve_brand_identity(&rec, None, Some("syn"), BrandClass::Hud, BrandPolicy::SeparatorEnv).unwrap();
+        assert_eq!(r.identifier, "s_syn_env");
+        // (d) bare s_<mfr> matches when no suffixed sibling exists.
+        let bare = syn_record("MC_Foo", &["s_syn"]);
+        let r = resolve_brand_identity(&bare, None, Some("syn"), BrandClass::Hud, BrandPolicy::Default).unwrap();
+        assert_eq!(r.identifier, "s_syn");
+        // (e) IC_* single-entry override ignores the manufacturer.
+        let ic = syn_record("IC_Med_Common", &["s_bioc"]);
+        let r = resolve_brand_identity(&ic, None, Some("drak"), BrandClass::Env, BrandPolicy::Default).unwrap();
+        assert_eq!(r.identifier, "s_bioc");
+        // (f) gen_/s_default_ fallback when no s_<mfr> entry.
+        let gen_rec = syn_record("MC_Foo", &["gen_mc"]);
+        let r = resolve_brand_identity(&gen_rec, None, Some("syn"), BrandClass::Hud, BrandPolicy::Default).unwrap();
+        assert_eq!(r.identifier, "gen_mc");
+        // no match → None.
+        let empty = syn_record("MC_Foo", &["s_other"]);
+        assert!(resolve_brand_identity(&empty, Some("s_none"), None, BrandClass::Hud, BrandPolicy::Default).is_none());
+    }
+
+    #[test]
+    fn test_resolve_brand_identity_sole_nonmatching_entry_is_none() {
+        // A HUD canvas that declares only `s_grey_hud` (the grey-HUD ship look)
+        // does NOT resolve a brand for a `drak` ship: drak has no matching
+        // brandStyles entry, and `s_grey_hud` is neither a `gen_`/`s_default_`
+        // family fallback. The variant's no-brand-match look comes from its
+        // `defaultStyles` instead (applied as a fallback in the resolve cascade,
+        // see `apply_canvas_style_cascade`), NOT by mis-applying the grey-HUD
+        // brand. Keeps the drak velocity-num readouts white, not grey-HUD green.
+        let record = json!({
+            "_RecordName_": "HC_HUD_Ship_Velocity_Num_Master",
+            "brandStyles": [
+                {
+                    "brandIdentifier": "file://libs/foundry/records/ui/buildingblocks/styles/s_grey_hud.json",
+                    "entries": []
+                }
+            ]
+        });
+        let record_value = record.get("_RecordValue_").unwrap_or(&record);
+        let class = brand_class_for_canvas(Some("HC_HUD_Ship_Velocity_Num_Master"));
+        assert!(
+            resolve_brand_identity(record_value, None, Some("drak"), class, BrandPolicy::Default)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_brand_identifier_basename() {
+        let entry = json!({
+            "brandIdentifier": "file://libs/foundry/records/ui/buildingblocks/brands/s_drak.json"
+        });
+        assert_eq!(brand_identifier_basename(&entry), Some("s_drak".to_string()));
+
+        let entry = json!({
+            "brandIdentifier": "file://path/to/gen_s.json"
+        });
+        assert_eq!(brand_identifier_basename(&entry), Some("gen_s".to_string()));
+
+        let entry = json!({
+            "brandIdentifier": "s_rsi.json"
+        });
+        assert_eq!(brand_identifier_basename(&entry), Some("s_rsi".to_string()));
+    }
+}

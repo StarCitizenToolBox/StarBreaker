@@ -620,6 +620,33 @@ fn type_matches(db: &Database, actual_si: i32, filter: Option<i32>) -> bool {
 /// plus ~6 levels of loadout nesting above) without cascading through the
 /// entire entity graph.
 const MAX_MATERIALIZE_DEPTH: usize = 24;
+const MAX_MATERIALIZED_VALUE_NODES: usize = 50_000;
+const MAX_MATERIALIZE_FIELDS: usize = 1_024;
+const MAX_MATERIALIZE_ARRAY_LEN: usize = 4_096;
+
+struct MaterializeBudget {
+    remaining_nodes: usize,
+}
+
+impl MaterializeBudget {
+    fn new() -> Self {
+        Self {
+            remaining_nodes: MAX_MATERIALIZED_VALUE_NODES,
+        }
+    }
+
+    fn consume(&mut self, detail: impl Into<String>) -> Result<(), QueryError> {
+        if self.remaining_nodes == 0 {
+            return Err(QueryError::MaterializationLimitExceeded {
+                kind: "value nodes",
+                limit: MAX_MATERIALIZED_VALUE_NODES,
+                detail: detail.into(),
+            });
+        }
+        self.remaining_nodes -= 1;
+        Ok(())
+    }
+}
 
 /// Materialize a struct instance as a Value::Object, reading all fields recursively.
 pub fn materialize_struct_as_value<'a>(
@@ -628,7 +655,8 @@ pub fn materialize_struct_as_value<'a>(
     reader: &mut SpanReader,
 ) -> Result<Value<'a>, QueryError> {
     let mut visited = std::collections::HashSet::new();
-    materialize_struct_depth(db, struct_index, reader, 0, &mut visited, false)
+    let mut budget = MaterializeBudget::new();
+    materialize_struct_depth(db, struct_index, reader, 0, &mut visited, false, &mut budget)
 }
 
 /// Materialize a struct instance as a Value::Object, but return `Value::Guid(record_id)`
@@ -641,7 +669,8 @@ pub fn materialize_struct_as_value_no_refs<'a>(
     reader: &mut SpanReader,
 ) -> Result<Value<'a>, QueryError> {
     let mut visited = std::collections::HashSet::new();
-    materialize_struct_depth(db, struct_index, reader, 0, &mut visited, true)
+    let mut budget = MaterializeBudget::new();
+    materialize_struct_depth(db, struct_index, reader, 0, &mut visited, true, &mut budget)
 }
 
 fn materialize_struct_depth<'a>(
@@ -651,8 +680,10 @@ fn materialize_struct_depth<'a>(
     depth: usize,
     visited: &mut std::collections::HashSet<crate::types::CigGuid>,
     skip_references: bool,
+    budget: &mut MaterializeBudget,
 ) -> Result<Value<'a>, QueryError> {
     let type_name = db.resolve_string2(db.struct_def(struct_index).name_offset);
+    budget.consume(format!("struct {type_name}"))?;
 
     if depth >= MAX_MATERIALIZE_DEPTH {
         log::warn!("Value materialization hit depth limit ({MAX_MATERIALIZE_DEPTH}) at struct '{type_name}'");
@@ -665,6 +696,13 @@ fn materialize_struct_depth<'a>(
     }
 
     let prop_indices = db.all_property_indices(struct_index);
+    if prop_indices.len() > MAX_MATERIALIZE_FIELDS {
+        return Err(QueryError::MaterializationLimitExceeded {
+            kind: "object fields",
+            limit: MAX_MATERIALIZE_FIELDS,
+            detail: format!("{type_name} has {} fields", prop_indices.len()),
+        });
+    }
     let property_defs = db.property_defs();
     let mut fields = Vec::with_capacity(prop_indices.len());
 
@@ -677,9 +715,27 @@ fn materialize_struct_depth<'a>(
             .map_err(|_| QueryError::UnknownType(prop.conversion_type))?;
 
         let value = if ct != ConversionType::Attribute {
-            materialize_array_depth(db, dt, prop.struct_index as i32, reader, depth, visited, skip_references)?
+            materialize_array_depth(
+                db,
+                dt,
+                prop.struct_index as i32,
+                reader,
+                depth,
+                visited,
+                skip_references,
+                budget,
+            )?
         } else {
-            materialize_attribute_depth(db, dt, prop.struct_index as i32, reader, depth, visited, skip_references)?
+            materialize_attribute_depth(
+                db,
+                dt,
+                prop.struct_index as i32,
+                reader,
+                depth,
+                visited,
+                skip_references,
+                budget,
+            )?
         };
 
         fields.push((name, value));
@@ -696,40 +752,70 @@ fn materialize_attribute_depth<'a>(
     depth: usize,
     visited: &mut std::collections::HashSet<crate::types::CigGuid>,
     skip_references: bool,
+    budget: &mut MaterializeBudget,
 ) -> Result<Value<'a>, QueryError> {
     match data_type {
-        DataType::Class => materialize_struct_depth(db, prop_struct_index, reader, depth + 1, visited, skip_references),
+        DataType::Class => materialize_struct_depth(
+            db,
+            prop_struct_index,
+            reader,
+            depth + 1,
+            visited,
+            skip_references,
+            budget,
+        ),
         DataType::StrongPointer | DataType::WeakPointer => {
             let ptr = reader.read_type::<Pointer>()?;
             if ptr.is_null() {
+                budget.consume("null pointer")?;
                 return Ok(Value::Null);
             }
             let instance = db.get_instance(ptr.struct_index, ptr.instance_index);
             let mut sub = SpanReader::new(instance);
-            materialize_struct_depth(db, ptr.struct_index, &mut sub, depth + 1, visited, skip_references)
+            materialize_struct_depth(
+                db,
+                ptr.struct_index,
+                &mut sub,
+                depth + 1,
+                visited,
+                skip_references,
+                budget,
+            )
         }
         DataType::Reference => {
             let reference = reader.read_type::<Reference>()?;
             if reference.is_null() {
+                budget.consume("null reference")?;
                 return Ok(Value::Null);
             }
             // When skip_references is set, return Guid immediately without recursing.
             if skip_references {
+                budget.consume(format!("reference {}", reference.record_id))?;
                 return Ok(Value::Guid(reference.record_id));
             }
             // Cycle detection: if we've already materialized this record, return Guid.
             if !visited.insert(reference.record_id) {
+                budget.consume(format!("cyclic reference {}", reference.record_id))?;
                 return Ok(Value::Guid(reference.record_id));
             }
             if depth >= MAX_MATERIALIZE_DEPTH {
                 log::warn!("Reference materialization hit depth limit ({MAX_MATERIALIZE_DEPTH})");
+                budget.consume(format!("depth-limited reference {}", reference.record_id))?;
                 return Ok(Value::Guid(reference.record_id));
             }
             let result = match db.record_by_id(&reference.record_id) {
                 Some(target) => {
                     let inst = db.get_instance(target.struct_index, target.instance_index as i32);
                     let mut sub = SpanReader::new(inst);
-                    let mut val = materialize_struct_depth(db, target.struct_index, &mut sub, depth + 1, visited, false)?;
+                    let mut val = materialize_struct_depth(
+                        db,
+                        target.struct_index,
+                        &mut sub,
+                        depth + 1,
+                        visited,
+                        false,
+                        budget,
+                    )?;
                     if let Value::Object { ref mut record_id, .. } = val {
                         *record_id = Some(reference.record_id);
                     }
@@ -741,31 +827,68 @@ fn materialize_attribute_depth<'a>(
             visited.remove(&reference.record_id);
             result
         }
-        DataType::Boolean => Ok(Value::Bool(reader.read_bool()?)),
-        DataType::SByte => Ok(Value::Int8(reader.read_i8()?)),
-        DataType::Int16 => Ok(Value::Int16(reader.read_i16()?)),
-        DataType::Int32 => Ok(Value::Int32(reader.read_i32()?)),
-        DataType::Int64 => Ok(Value::Int64(reader.read_i64()?)),
-        DataType::Byte => Ok(Value::UInt8(reader.read_u8()?)),
-        DataType::UInt16 => Ok(Value::UInt16(reader.read_u16()?)),
-        DataType::UInt32 => Ok(Value::UInt32(reader.read_u32()?)),
-        DataType::UInt64 => Ok(Value::UInt64(reader.read_u64()?)),
-        DataType::Single => Ok(Value::Float(reader.read_f32()?)),
-        DataType::Double => Ok(Value::Double(reader.read_f64()?)),
+        DataType::Boolean => {
+            budget.consume("bool")?;
+            Ok(Value::Bool(reader.read_bool()?))
+        }
+        DataType::SByte => {
+            budget.consume("i8")?;
+            Ok(Value::Int8(reader.read_i8()?))
+        }
+        DataType::Int16 => {
+            budget.consume("i16")?;
+            Ok(Value::Int16(reader.read_i16()?))
+        }
+        DataType::Int32 => {
+            budget.consume("i32")?;
+            Ok(Value::Int32(reader.read_i32()?))
+        }
+        DataType::Int64 => {
+            budget.consume("i64")?;
+            Ok(Value::Int64(reader.read_i64()?))
+        }
+        DataType::Byte => {
+            budget.consume("u8")?;
+            Ok(Value::UInt8(reader.read_u8()?))
+        }
+        DataType::UInt16 => {
+            budget.consume("u16")?;
+            Ok(Value::UInt16(reader.read_u16()?))
+        }
+        DataType::UInt32 => {
+            budget.consume("u32")?;
+            Ok(Value::UInt32(reader.read_u32()?))
+        }
+        DataType::UInt64 => {
+            budget.consume("u64")?;
+            Ok(Value::UInt64(reader.read_u64()?))
+        }
+        DataType::Single => {
+            budget.consume("f32")?;
+            Ok(Value::Float(reader.read_f32()?))
+        }
+        DataType::Double => {
+            budget.consume("f64")?;
+            Ok(Value::Double(reader.read_f64()?))
+        }
         DataType::String => {
             let sid = *reader.read_type::<crate::types::StringId>()?;
+            budget.consume("string")?;
             Ok(Value::String(db.resolve_string(sid)))
         }
         DataType::Locale => {
             let sid = *reader.read_type::<crate::types::StringId>()?;
+            budget.consume("locale")?;
             Ok(Value::Locale(db.resolve_string(sid)))
         }
         DataType::EnumChoice => {
             let sid = *reader.read_type::<crate::types::StringId>()?;
+            budget.consume("enum")?;
             Ok(Value::Enum(db.resolve_string(sid)))
         }
         DataType::Guid => {
             let guid = *reader.read_type::<CigGuid>()?;
+            budget.consume("guid")?;
             Ok(Value::Guid(guid))
         }
     }
@@ -779,51 +902,97 @@ fn materialize_array_depth<'a>(
     depth: usize,
     visited: &mut std::collections::HashSet<crate::types::CigGuid>,
     skip_references: bool,
+    budget: &mut MaterializeBudget,
 ) -> Result<Value<'a>, QueryError> {
     let count = reader.read_i32()?;
     let first_index = reader.read_i32()?;
-    let mut elements = Vec::with_capacity(count as usize);
+    if count < 0 {
+        return Err(QueryError::InvalidArrayCount { count });
+    }
+    if first_index < 0 {
+        return Err(QueryError::InvalidArrayCount { count: first_index });
+    }
+    let count = count as usize;
+    if count > MAX_MATERIALIZE_ARRAY_LEN {
+        return Err(QueryError::MaterializationLimitExceeded {
+            kind: "array elements",
+            limit: MAX_MATERIALIZE_ARRAY_LEN,
+            detail: format!("{count} elements"),
+        });
+    }
+    budget.consume(format!("array[{count}]"))?;
+    let mut elements = Vec::with_capacity(count);
 
     for i in 0..count {
-        let idx = (first_index + i) as usize;
+        let idx = (first_index as usize) + i;
         let val = match data_type {
             DataType::Class => {
-                let inst = db.get_instance(prop_struct_index, first_index + i);
+                let inst = db.get_instance(prop_struct_index, first_index + i as i32);
                 let mut sub = SpanReader::new(inst);
-                materialize_struct_depth(db, prop_struct_index, &mut sub, depth + 1, visited, skip_references)?
+                materialize_struct_depth(
+                    db,
+                    prop_struct_index,
+                    &mut sub,
+                    depth + 1,
+                    visited,
+                    skip_references,
+                    budget,
+                )?
             }
             DataType::StrongPointer => {
                 let ptr = &db.strong_values[idx];
                 if ptr.is_null() {
+                    budget.consume("null strong pointer")?;
                     Value::Null
                 } else {
                     let inst = db.get_instance(ptr.struct_index, ptr.instance_index);
                     let mut sub = SpanReader::new(inst);
-                    materialize_struct_depth(db, ptr.struct_index, &mut sub, depth + 1, visited, skip_references)?
+                    materialize_struct_depth(
+                        db,
+                        ptr.struct_index,
+                        &mut sub,
+                        depth + 1,
+                        visited,
+                        skip_references,
+                        budget,
+                    )?
                 }
             }
             DataType::WeakPointer => {
                 let ptr = &db.weak_values[idx];
                 if ptr.is_null() {
+                    budget.consume("null weak pointer")?;
                     Value::Null
                 } else {
                     let inst = db.get_instance(ptr.struct_index, ptr.instance_index);
                     let mut sub = SpanReader::new(inst);
-                    materialize_struct_depth(db, ptr.struct_index, &mut sub, depth + 1, visited, skip_references)?
+                    materialize_struct_depth(
+                        db,
+                        ptr.struct_index,
+                        &mut sub,
+                        depth + 1,
+                        visited,
+                        skip_references,
+                        budget,
+                    )?
                 }
             }
             DataType::Reference => {
                 let reference = &db.reference_values[idx];
                 if reference.is_null() {
+                    budget.consume("null array reference")?;
                     Value::Null
                 } else if skip_references {
                     // When skip_references is set, return Guid immediately without recursing.
+                    budget.consume(format!("array reference {}", reference.record_id))?;
                     Value::Guid(reference.record_id)
                 } else if !visited.insert(reference.record_id) {
                     // Cycle: already materializing this record
+                    budget.consume(format!("cyclic array reference {}", reference.record_id))?;
                     Value::Guid(reference.record_id)
                 } else if depth >= MAX_MATERIALIZE_DEPTH {
                     log::warn!("Array reference materialization hit depth limit ({MAX_MATERIALIZE_DEPTH})");
+                    budget.consume(format!("depth-limited array reference {}", reference.record_id))?;
                     Value::Guid(reference.record_id)
                 } else {
                     let result = match db.record_by_id(&reference.record_id) {
@@ -831,7 +1000,15 @@ fn materialize_array_depth<'a>(
                             let inst =
                                 db.get_instance(target.struct_index, target.instance_index as i32);
                             let mut sub = SpanReader::new(inst);
-                            let mut val = materialize_struct_depth(db, target.struct_index, &mut sub, depth + 1, visited, false)?;
+                            let mut val = materialize_struct_depth(
+                                db,
+                                target.struct_index,
+                                &mut sub,
+                                depth + 1,
+                                visited,
+                                false,
+                                budget,
+                            )?;
                             if let Value::Object { ref mut record_id, .. } = val {
                                 *record_id = Some(reference.record_id);
                             }
@@ -843,21 +1020,66 @@ fn materialize_array_depth<'a>(
                     result
                 }
             }
-            DataType::Boolean => Value::Bool(db.get_bool(idx)?),
-            DataType::SByte => Value::Int8(db.get_int8(idx)?),
-            DataType::Int16 => Value::Int16(db.get_int16(idx)?),
-            DataType::Int32 => Value::Int32(db.get_int32(idx)?),
-            DataType::Int64 => Value::Int64(db.get_int64(idx)?),
-            DataType::Byte => Value::UInt8(db.get_uint8(idx)?),
-            DataType::UInt16 => Value::UInt16(db.get_uint16(idx)?),
-            DataType::UInt32 => Value::UInt32(db.get_uint32(idx)?),
-            DataType::UInt64 => Value::UInt64(db.get_uint64(idx)?),
-            DataType::Single => Value::Float(db.get_single(idx)?),
-            DataType::Double => Value::Double(db.get_double(idx)?),
-            DataType::String => Value::String(db.resolve_string(db.string_id_values[idx])),
-            DataType::Locale => Value::Locale(db.resolve_string(db.locale_values[idx])),
-            DataType::EnumChoice => Value::Enum(db.resolve_string(db.enum_values[idx])),
-            DataType::Guid => Value::Guid(db.guid_values[idx]),
+            DataType::Boolean => {
+                budget.consume("array bool")?;
+                Value::Bool(db.get_bool(idx)?)
+            }
+            DataType::SByte => {
+                budget.consume("array i8")?;
+                Value::Int8(db.get_int8(idx)?)
+            }
+            DataType::Int16 => {
+                budget.consume("array i16")?;
+                Value::Int16(db.get_int16(idx)?)
+            }
+            DataType::Int32 => {
+                budget.consume("array i32")?;
+                Value::Int32(db.get_int32(idx)?)
+            }
+            DataType::Int64 => {
+                budget.consume("array i64")?;
+                Value::Int64(db.get_int64(idx)?)
+            }
+            DataType::Byte => {
+                budget.consume("array u8")?;
+                Value::UInt8(db.get_uint8(idx)?)
+            }
+            DataType::UInt16 => {
+                budget.consume("array u16")?;
+                Value::UInt16(db.get_uint16(idx)?)
+            }
+            DataType::UInt32 => {
+                budget.consume("array u32")?;
+                Value::UInt32(db.get_uint32(idx)?)
+            }
+            DataType::UInt64 => {
+                budget.consume("array u64")?;
+                Value::UInt64(db.get_uint64(idx)?)
+            }
+            DataType::Single => {
+                budget.consume("array f32")?;
+                Value::Float(db.get_single(idx)?)
+            }
+            DataType::Double => {
+                budget.consume("array f64")?;
+                Value::Double(db.get_double(idx)?)
+            }
+            DataType::String => {
+                budget.consume("array string")?;
+                Value::String(db.resolve_string(db.string_id_values[idx]))
+            }
+            DataType::Locale => {
+                budget.consume("array locale")?;
+                Value::Locale(db.resolve_string(db.locale_values[idx]))
+            }
+            DataType::EnumChoice => {
+                budget.consume("array enum")?;
+                Value::Enum(db.resolve_string(db.enum_values[idx]))
+            }
+            DataType::Guid => {
+                budget.consume("array guid")?;
+                Value::Guid(db.guid_values[idx])
+            }
         };
         elements.push(val);
     }

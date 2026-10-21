@@ -8,20 +8,24 @@
 //! `expand_loadout_into_placements` (loadout→interior placement expansion).
 //! Public types: `LoadedInteriors`, `InteriorCgfEntry`, `InteriorContainerData`.
 
+use std::str::FromStr;
+
 use starbreaker_datacore::database::Database;
 use starbreaker_datacore::query::value::Value;
 use starbreaker_datacore::types::Record;
 use starbreaker_p4k::MappedP4k;
 
 use crate::mtl;
-use crate::types::MaterialTextures;
+use crate::types::{InteriorPlacement, MaterialTextures, UiBinding};
 
 use super::*;
 
 pub(crate) struct LoadedInteriors {
     /// Unique CGF entries (deduplicated by path).
     pub unique_cgfs: Vec<InteriorCgfEntry>,
-    /// Per-container data (one per socpak).
+    /// Per-container data (one per container in the loaded socpak tree; a
+    /// socpak with child socpak references expands to its root container plus
+    /// one entry per recursively-discovered child socpak).
     pub containers: Vec<InteriorContainerData>,
 }
 
@@ -50,12 +54,10 @@ pub(crate) struct InteriorContainerData {
     pub parent_node_name: Option<String>,
     /// 4×4 column-major transform positioning this container relative to the hull.
     pub container_transform: [[f32; 4]; 4],
-    /// Each entry: (index into unique_cgfs, per-object local transform,
-    /// optional per-placement tint palette override that takes precedence over
-    /// the container's palette). Loadout-attached children resolve their own
+    /// Per-object mesh placements. Loadout-attached children resolve their own
     /// palette from the child entity's SGeometryResourceParams so each gadget
     /// tints independently of the parent socpak's tint palette.
-    pub placements: Vec<(usize, [[f32; 4]; 4], Option<mtl::TintPalette>)>,
+    pub placements: Vec<crate::types::InteriorPlacement>,
     pub lights: Vec<crate::types::LightInfo>,
     /// Tint palette resolved from the socpak's IncludedObjects tint_palette_paths.
     pub palette: Option<mtl::TintPalette>,
@@ -95,6 +97,7 @@ pub(crate) fn load_interiors(
         .flatten();
     let container_instances: Vec<_> = containers
         .iter()
+        .filter(|container| socpak_included(opts, &container.file_name))
         .map(|container| {
             let helper_transform =
                 resolve_nmc_helper_transform(root_nmc.as_ref(), container.bone_name.as_deref());
@@ -135,22 +138,23 @@ pub(crate) fn load_interiors(
             .get(&container.file_name.to_ascii_lowercase())
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        match socpak::load_interior_from_socpak(
+        match socpak::load_interior_tree_from_socpak_filtered_with_progress(
             p4k,
             &container.file_name,
             *container_transform,
             glam::Mat4::IDENTITY.to_cols_array_2d(),
             reference_candidates,
+            opts.socpak_path_filter.as_ref(),
+            &mut |_| {},
         ) {
-            Ok(mut payload) => {
-                payload.container_transform = normalize_root_light_only_container_transform(
-                    payload.container_transform,
-                    parent_entity_name.is_some(),
-                    &payload,
+            Ok(mut tree_payloads) => {
+                apply_root_container_parenting(
+                    &mut tree_payloads,
+                    parent_entity_name.clone(),
+                    parent_node_name.clone(),
+                    true,
                 );
-                payload.parent_entity_name = parent_entity_name.clone();
-                payload.parent_node_name = parent_node_name.clone();
-                payloads.push(payload);
+                payloads.append(&mut tree_payloads);
             }
             Err(e) => log::warn!("failed to load {}: {e}", container.file_name),
         }
@@ -158,8 +162,11 @@ pub(crate) fn load_interiors(
 
     let mut loaded =
         build_interiors_from_payloads(db, p4k, &payloads, opts.include_lights, opts.lod_level);
-    let removed =
-        remove_root_geometry_duplicate_interior_placements(&mut loaded, &root_geometry_path);
+    let removed = remove_root_geometry_duplicate_interior_placements(
+        &mut loaded,
+        &root_entity_name,
+        &root_geometry_path,
+    );
     if removed > 0 {
         log::info!(
             "Skipped {removed} root-geometry duplicate interior placement(s) for '{}'",
@@ -190,6 +197,7 @@ fn normalize_geometry_path_key(path: &str) -> String {
 
 fn remove_root_geometry_duplicate_interior_placements(
     interiors: &mut LoadedInteriors,
+    root_entity_name: &str,
     root_geometry_path: &str,
 ) -> usize {
     let root_key = normalize_geometry_path_key(root_geometry_path);
@@ -199,13 +207,24 @@ fn remove_root_geometry_duplicate_interior_placements(
 
     let mut removed = 0usize;
     for container in &mut interiors.containers {
-        if container.parent_entity_name.is_some() {
+        // Only skip containers attached to a *child* entity, whose placements
+        // live in the child's frame. A container parented to the root entity
+        // itself — the ship's own interior attached at a hull helper bone such
+        // as `hardpoint_interior_oc` (e.g. the RSI Aurora Mk2 cabin) — must
+        // still have the root exterior hull stripped: that hull is a baked
+        // occluder/visarea shell, never real interior geometry, and is already
+        // rendered as the exterior.
+        if container
+            .parent_entity_name
+            .as_deref()
+            .is_some_and(|parent| parent != root_entity_name)
+        {
             continue;
         }
-        container.placements.retain(|(mesh_index, _, _)| {
+        container.placements.retain(|placement| {
             let duplicate = interiors
                 .unique_cgfs
-                .get(*mesh_index)
+                .get(placement.mesh_index)
                 .is_some_and(|entry| normalize_geometry_path_key(&entry.cgf_path) == root_key);
             if duplicate {
                 removed += 1;
@@ -220,8 +239,8 @@ fn remove_root_geometry_duplicate_interior_placements(
 
     let mut used_indices = std::collections::HashSet::<usize>::new();
     for container in &interiors.containers {
-        for (mesh_index, _, _) in &container.placements {
-            used_indices.insert(*mesh_index);
+        for placement in &container.placements {
+            used_indices.insert(placement.mesh_index);
         }
     }
 
@@ -240,9 +259,9 @@ fn remove_root_geometry_duplicate_interior_placements(
     }
 
     for container in &mut interiors.containers {
-        for (mesh_index, _, _) in &mut container.placements {
-            if let Some(new_index) = remap.get(mesh_index).copied() {
-                *mesh_index = new_index;
+        for placement in &mut container.placements {
+            if let Some(new_index) = remap.get(&placement.mesh_index).copied() {
+                placement.mesh_index = new_index;
             }
         }
     }
@@ -359,6 +378,36 @@ fn normalize_root_light_only_container_transform(
     }
 }
 
+/// Apply the parent container's parenting metadata to a freshly loaded socpak tree.
+///
+/// Only the first payload is the container instance authored on the parent
+/// entity; the remaining payloads are recursively-discovered child socpaks whose
+/// transforms are already composed into world/container space by
+/// [`load_interior_tree_from_socpak_filtered_with_progress`]. Those children must
+/// NOT inherit the root's helper-bone parenting (which would re-parent them under
+/// the wrong scene node) or its light-only transform normalisation (which would
+/// zero a light-only child's composed transform), so the post-processing is
+/// applied to the root payload alone.
+fn apply_root_container_parenting(
+    tree_payloads: &mut [crate::types::InteriorPayload],
+    parent_entity_name: Option<String>,
+    parent_node_name: Option<String>,
+    normalize_light_only_root: bool,
+) {
+    let Some(root) = tree_payloads.first_mut() else {
+        return;
+    };
+    if normalize_light_only_root {
+        root.container_transform = normalize_root_light_only_container_transform(
+            root.container_transform,
+            parent_entity_name.is_some(),
+            root,
+        );
+    }
+    root.parent_entity_name = parent_entity_name;
+    root.parent_node_name = parent_node_name;
+}
+
 /// Discovery pass for object containers authored on child loadout entities.
 pub(crate) fn load_child_interiors(
     db: &Database,
@@ -378,6 +427,7 @@ pub(crate) fn load_child_interiors(
         scene_parent_entity_name: &str,
         override_attachment: Option<&str>,
         root_container_names: &std::collections::HashSet<String>,
+        path_filter: Option<&std::collections::HashSet<String>>,
         payloads: &mut Vec<crate::types::InteriorPayload>,
     ) {
         let containers = if child.allows_child_object_containers {
@@ -392,6 +442,11 @@ pub(crate) fn load_child_interiors(
                 child.entity_name
             );
             for container in &containers {
+                if path_filter
+                    .is_some_and(|filter| !filter.contains(&socpak::normalize_socpak_filter_key(&container.file_name)))
+                {
+                    continue;
+                }
                 let container_name = interior_container_name_key(&container.file_name);
                 if root_container_names.contains(&container_name) {
                     log::debug!(
@@ -403,23 +458,29 @@ pub(crate) fn load_child_interiors(
                 }
                 let container_transform =
                     socpak::build_container_transform(container.offset_position, container.offset_rotation);
-                match socpak::load_interior_from_socpak(
+                match socpak::load_interior_tree_from_socpak_filtered_with_progress(
                     p4k,
                     &container.file_name,
                     container_transform,
                     glam::Mat4::IDENTITY.to_cols_array_2d(),
                     std::slice::from_ref(&container_transform),
+                    path_filter,
+                    &mut |_| {},
                 ) {
-                    Ok(mut payload) => {
+                    Ok(mut tree_payloads) => {
                         let (parent_entity_name, parent_node_name) = child_interior_parent_target(
                             child,
                             scene_parent_entity_name,
                             override_attachment,
                             container.bone_name.as_deref(),
                         );
-                        payload.parent_entity_name = parent_entity_name;
-                        payload.parent_node_name = parent_node_name;
-                        payloads.push(payload);
+                        apply_root_container_parenting(
+                            &mut tree_payloads,
+                            parent_entity_name,
+                            parent_node_name,
+                            false,
+                        );
+                        payloads.append(&mut tree_payloads);
                     }
                     Err(e) => log::warn!("failed to load {}: {e}", container.file_name),
                 }
@@ -445,6 +506,7 @@ pub(crate) fn load_child_interiors(
                     Some(inherited_attachment)
                 },
                 root_container_names,
+                path_filter,
                 payloads,
             );
         }
@@ -458,11 +520,18 @@ pub(crate) fn load_child_interiors(
             root_entity_name,
             None,
             root_container_names,
+            opts.socpak_path_filter.as_ref(),
             &mut payloads,
         );
     }
 
     build_interiors_from_payloads(db, p4k, &payloads, opts.include_lights, opts.lod_level)
+}
+
+fn socpak_included(opts: &ExportOptions, path: &str) -> bool {
+    opts.socpak_path_filter
+        .as_ref()
+        .map_or(true, |filter| filter.contains(&crate::socpak::normalize_socpak_filter_key(path)))
 }
 
 pub(crate) fn merge_interiors(target: &mut LoadedInteriors, source: LoadedInteriors) {
@@ -482,7 +551,7 @@ pub(crate) fn merge_interiors(target: &mut LoadedInteriors, source: LoadedInteri
 
     for mut container in source.containers {
         for placement in &mut container.placements {
-            let entry = &source.unique_cgfs[placement.0];
+            let entry = &source.unique_cgfs[placement.mesh_index];
             let key = (entry.cgf_path.to_ascii_lowercase(), entry.material_path.clone());
             let merged_index = if let Some(index) = index_by_key.get(&key).copied() {
                 index
@@ -496,10 +565,28 @@ pub(crate) fn merge_interiors(target: &mut LoadedInteriors, source: LoadedInteri
                 index_by_key.insert(key, index);
                 index
             };
-            placement.0 = merged_index;
+            placement.mesh_index = merged_index;
         }
         target.containers.push(container);
     }
+}
+
+/// Resolve a socpak per-object tint-palette record path (e.g.
+/// `Libs/Foundry/Records/TintPalettes/brand/microtech/microtech_default`) to its
+/// colours. Matches the `TintPaletteTree` record by EXACT short name — the
+/// previous `ends_with` match could resolve `default` to any `*_default` record.
+fn resolve_interior_palette(db: &Database, palette_path: &str) -> Option<mtl::TintPalette> {
+    let short = palette_path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(palette_path)
+        .to_lowercase();
+    let tpt_si = db.struct_id("TintPaletteTree")?;
+    let record = db.records_of_type(tpt_si).find(|r| {
+        let name = db.resolve_string2(r.name_offset).to_lowercase();
+        name.rsplit('.').next().unwrap_or(&name) == short
+    })?;
+    query_tint_from_record(db, record, Some(short))
 }
 
 /// Shared interior building: dedup CGFs, resolve GUIDs, collect placements and lights.
@@ -513,7 +600,6 @@ pub(crate) fn build_interiors_from_payloads(
 ) -> LoadedInteriors {
     use std::collections::{HashMap, HashSet};
     use starbreaker_common::CigGuid;
-    use std::str::FromStr;
 
     let guid_geom_compiled = db.compile_rooted::<String>(
         "EntityClassDefinition.Components[SGeometryResourceParams].Geometry.Geometry.Geometry.path",
@@ -542,6 +628,8 @@ pub(crate) fn build_interiors_from_payloads(
 
         let mut placements = Vec::new();
         let mut placement_keys: HashSet<(String, [u32; 16])> = HashSet::new();
+        // Resolve each distinct per-object tint palette once per payload.
+        let mut palette_cache: HashMap<String, Option<mtl::TintPalette>> = HashMap::new();
 
         for im in &payload.meshes {
             let (cgf_path, mtl_path) = if !im.cgf_path.is_empty() {
@@ -613,7 +701,19 @@ pub(crate) fn build_interiors_from_payloads(
                 if !placement_keys.insert(placement_key) {
                     continue;
                 }
-                placements.push((idx, im.transform, None));
+                let ui_bindings = interior_ui_bindings_for_mesh(db, im);
+                let palette = im.tint_palette_name.as_ref().and_then(|name| {
+                    palette_cache
+                        .entry(name.clone())
+                        .or_insert_with(|| resolve_interior_palette(db, name))
+                        .clone()
+                });
+                placements.push(InteriorPlacement {
+                    mesh_index: idx,
+                    transform: im.transform,
+                    palette,
+                    ui_bindings,
+                });
 
                 // Expand entity loadout attachments. Many interior entities
                 // (e.g. fire-extinguisher cabinets, kit lockers) carry their
@@ -649,29 +749,8 @@ pub(crate) fn build_interiors_from_payloads(
             }
         }
 
-        // Resolve tint palette from the socpak's IncludedObjects palette names.
-        // These are DataCore TintPaletteTree record paths — extract the short name
-        // (last path component) and look up the record.
-        let palette = payload.tint_palette_names.first().and_then(|path| {
-            let short_name = path.rsplit('/').next().unwrap_or(path).to_lowercase();
-            let tpt_si = db.struct_id("TintPaletteTree")?;
-            let record = db.records_of_type(tpt_si).find(|r| {
-                db.resolve_string2(r.name_offset).to_lowercase().ends_with(&short_name)
-            })?;
-            query_tint_from_record(
-                db,
-                record,
-                Some(short_name),
-            )
-        });
-
-        if let Some(ref p) = palette {
-            log::debug!(
-                "  {} palette: primary=[{:.2},{:.2},{:.2}] secondary=[{:.2},{:.2},{:.2}]",
-                payload.name, p.primary[0], p.primary[1], p.primary[2],
-                p.secondary[0], p.secondary[1], p.secondary[2],
-            );
-        }
+        prune_colocated_standard_canvas_overlays(&mut placements);
+        inherit_colocated_ui_rotations(&mut placements);
 
         container_data.push(InteriorContainerData {
             name: payload.name.clone(),
@@ -680,7 +759,12 @@ pub(crate) fn build_interiors_from_payloads(
             container_transform: payload.container_transform,
             placements,
             lights: if include_lights { payload.lights.clone() } else { Vec::new() },
-            palette,
+            // Tint palettes are resolved per object placement above (each socpak
+            // object indexes its own palette); there is no single container-wide
+            // palette. The previous `tint_palette_names.first()` fallback wrongly
+            // applied the generic `default` palette (a placeholder carrying a
+            // Gemini weapon decal + near-black tints) to the whole interior.
+            palette: None,
         });
     }
 
@@ -702,6 +786,76 @@ fn is_metadata_only_geometry(p4k: &MappedP4k, cgf_path: &str, lod_level: u32) ->
         && p4k
             .entry_case_insensitive(&resolve_companion_path(p4k, &p4k_geom_path, lod_level))
             .is_none()
+}
+
+fn interior_ui_bindings_for_mesh(
+    db: &Database,
+    mesh: &crate::types::InteriorMesh,
+) -> Vec<UiBinding> {
+    // A transit-peripheral screen (elevator call console / in-lift display)
+    // authors its canvas inline on its `.soc` `EntityComponentUIBuildingBlocks`,
+    // overriding the entity class default. When present, that per-instance
+    // canvas is authoritative — the inline-geometry entity carries neither an
+    // `entity_class_name` nor an `entity_class_guid`, so the class-record path
+    // below would otherwise yield nothing and the screen would render blank.
+    if let Some(canvas_guid) = mesh.ui_canvas_guid.as_deref()
+        && let Some(mut binding) =
+            super::child_payload::ui_binding_for_building_blocks_canvas(db, canvas_guid)
+    {
+        binding.source_entity_name = mesh
+            .cgf_path
+            .rsplit(['/', '\\'])
+            .next()
+            .and_then(|file| file.strip_suffix(".cgf"))
+            .unwrap_or_default()
+            .to_string();
+        // The floor this transit screen serves (nearest SCTransitDestination,
+        // resolved at socpak parse) — pins `transitdisplay.panelLocation` so
+        // the console's floor-name heading renders (e.g. "SUB DECK").
+        binding.transit_location_loc_key = mesh.ui_location_loc_key.clone();
+        return vec![binding];
+    }
+
+    let source = mesh
+        .entity_class_name
+        .as_ref()
+        .and_then(|entity_class_name| {
+            resolve_named_entity_record(db, entity_class_name)
+                .map(|record| (record, entity_class_name.clone()))
+        })
+        .or_else(|| {
+            let guid_str = mesh.entity_class_guid.as_ref()?;
+            let guid = starbreaker_common::CigGuid::from_str(guid_str).ok()?;
+            let record = db.record_by_id(&guid)?;
+            let source_entity_name = db
+                .resolve_string2(record.name_offset)
+                .rsplit('.')
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            Some((record, source_entity_name))
+        });
+
+    let Some((record, source_entity_name)) = source else {
+        return Vec::new();
+    };
+    let Some(mut binding) = super::child_payload::ui_binding_for_record(db, record) else {
+        return Vec::new();
+    };
+    binding.source_entity_name = source_entity_name;
+    vec![binding]
+}
+
+fn ui_binding_for_loadout_node(
+    db: &Database,
+    child: &starbreaker_datacore::loadout::LoadoutNode,
+) -> Vec<UiBinding> {
+    let Some(mut binding) = super::child_payload::ui_binding_for_record(db, &child.record) else {
+        return Vec::new();
+    };
+    binding.source_entity_name = child.entity_name.clone();
+    binding.helper_name = child.helper_bone_name.clone();
+    vec![binding]
 }
 
 /// Resolve an EntityClassGUID to its geometry + material paths via DataCore.
@@ -771,6 +925,140 @@ fn transform_bits_key(transform: &[[f32; 4]; 4]) -> [u32; 16] {
         }
     }
     key
+}
+
+fn inherit_colocated_ui_rotations(placements: &mut [InteriorPlacement]) {
+    for i in 0..placements.len() {
+        if !placement_has_ui_binding(&placements[i]) || !is_identity_rotation(placements[i].transform) {
+            continue;
+        }
+
+        let position = placement_position(placements[i].transform);
+        let mut candidate_rotation: Option<[[f32; 4]; 4]> = None;
+        let mut ambiguous = false;
+
+        for (j, candidate) in placements.iter().enumerate() {
+            if i == j
+                || !placement_has_ui_binding(candidate)
+                || !same_position(position, placement_position(candidate.transform))
+                || is_identity_rotation(candidate.transform)
+            {
+                continue;
+            }
+
+            if let Some(existing) = candidate_rotation {
+                if !same_rotation(existing, candidate.transform) {
+                    ambiguous = true;
+                    break;
+                }
+            } else {
+                candidate_rotation = Some(candidate.transform);
+            }
+        }
+
+        if ambiguous {
+            continue;
+        }
+        if let Some(rotation) = candidate_rotation {
+            placements[i].transform[0][0] = rotation[0][0];
+            placements[i].transform[0][1] = rotation[0][1];
+            placements[i].transform[0][2] = rotation[0][2];
+            placements[i].transform[1][0] = rotation[1][0];
+            placements[i].transform[1][1] = rotation[1][1];
+            placements[i].transform[1][2] = rotation[1][2];
+            placements[i].transform[2][0] = rotation[2][0];
+            placements[i].transform[2][1] = rotation[2][1];
+            placements[i].transform[2][2] = rotation[2][2];
+        }
+    }
+}
+
+fn prune_colocated_standard_canvas_overlays(placements: &mut Vec<InteriorPlacement>) {
+    let mut remove = vec![false; placements.len()];
+
+    for i in 0..placements.len() {
+        if !placement_has_ui_binding(&placements[i]) {
+            continue;
+        }
+        let Some(canvas) = placement_canvas_name(&placements[i]) else {
+            continue;
+        };
+        if !is_standard_canvas_name(canvas) {
+            continue;
+        }
+
+        let position = placement_position(placements[i].transform);
+        // Only prune a `_standard` canvas when it is shadowed by a co-located
+        // NON-standard (specialised/content) canvas. Requiring the peer to be
+        // non-standard prevents two co-located `_standard` canvases from each
+        // marking the other for removal — which would delete BOTH and silently
+        // drop the screen geometry.
+        let has_specialised_peer = placements.iter().enumerate().any(|(j, candidate)| {
+            i != j
+                && placement_has_ui_binding(candidate)
+                && same_position(position, placement_position(candidate.transform))
+                && !placement_canvas_name(candidate).is_some_and(is_standard_canvas_name)
+        });
+        if has_specialised_peer {
+            remove[i] = true;
+        }
+    }
+
+    if remove.iter().any(|flag| *flag) {
+        let mut index = 0usize;
+        placements.retain(|_| {
+            let keep = !remove[index];
+            index += 1;
+            keep
+        });
+    }
+}
+
+fn placement_has_ui_binding(placement: &InteriorPlacement) -> bool {
+    !placement.ui_bindings.is_empty()
+}
+
+fn placement_canvas_name(placement: &InteriorPlacement) -> Option<&str> {
+    placement
+        .ui_bindings
+        .first()
+        .and_then(|binding| binding.canvas_record_name.as_deref())
+}
+
+fn is_standard_canvas_name(name: &str) -> bool {
+    name.to_ascii_lowercase().ends_with("_standard")
+}
+
+fn placement_position(transform: [[f32; 4]; 4]) -> [f32; 3] {
+    [transform[3][0], transform[3][1], transform[3][2]]
+}
+
+fn same_position(a: [f32; 3], b: [f32; 3]) -> bool {
+    (a[0] - b[0]).abs() <= 1e-3 && (a[1] - b[1]).abs() <= 1e-3 && (a[2] - b[2]).abs() <= 1e-3
+}
+
+fn is_identity_rotation(transform: [[f32; 4]; 4]) -> bool {
+    same_rotation(
+        transform,
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+    )
+}
+
+fn same_rotation(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> bool {
+    (a[0][0] - b[0][0]).abs() <= 1e-4
+        && (a[0][1] - b[0][1]).abs() <= 1e-4
+        && (a[0][2] - b[0][2]).abs() <= 1e-4
+        && (a[1][0] - b[1][0]).abs() <= 1e-4
+        && (a[1][1] - b[1][1]).abs() <= 1e-4
+        && (a[1][2] - b[1][2]).abs() <= 1e-4
+        && (a[2][0] - b[2][0]).abs() <= 1e-4
+        && (a[2][1] - b[2][1]).abs() <= 1e-4
+        && (a[2][2] - b[2][2]).abs() <= 1e-4
 }
 
 fn entity_class_name_matches_record_short_name(entity_class_name: &str, record_short_name: &str) -> bool {
@@ -889,7 +1177,7 @@ pub(crate) fn expand_loadout_into_placements(
     nmc_cache: &mut std::collections::HashMap<String, Option<crate::nmc::NodeMeshCombo>>,
     cgf_cache: &mut std::collections::HashMap<String, Option<usize>>,
     unique_cgfs: &mut Vec<InteriorCgfEntry>,
-    placements: &mut Vec<(usize, [[f32; 4]; 4], Option<mtl::TintPalette>)>,
+    placements: &mut Vec<InteriorPlacement>,
 ) {
     if children.is_empty() {
         return;
@@ -960,7 +1248,12 @@ pub(crate) fn expand_loadout_into_placements(
             Some(idx)
         });
         if let Some(idx) = child_idx {
-            placements.push((idx, mat4_to_array(child_world), child_palette));
+            placements.push(InteriorPlacement {
+                mesh_index: idx,
+                transform: mat4_to_array(child_world),
+                palette: child_palette,
+                ui_bindings: ui_binding_for_loadout_node(db, child),
+            });
         }
 
         if !child.children.is_empty() {
@@ -1084,8 +1377,8 @@ pub(crate) fn collect_interior_palettes(
 
         // Per-placement palette overrides (e.g. loadout-attached gadgets that
         // carry their own tint palette via SGeometryResourceParams).
-        for (_, _, placement_palette) in &container.placements {
-            if let Some(pal) = placement_palette {
+        for placement in &container.placements {
+            if let Some(pal) = &placement.palette {
                 let h = tint_palette_hash(Some(pal));
                 if seen.insert(h) {
                     palettes.push((h, Some(pal.clone())));
@@ -1173,7 +1466,10 @@ pub(crate) fn preload_interior_textures(
 #[cfg(test)]
 mod tests {
     use super::{
-        child_interior_parent_target, compose_helper_relative_container_transform,
+        apply_root_container_parenting, build_interiors_from_payloads, child_interior_parent_target,
+        compose_helper_relative_container_transform,
+        inherit_colocated_ui_rotations,
+        prune_colocated_standard_canvas_overlays,
         normalize_root_light_only_container_transform,
         compose_root_container_transform, entity_class_name_matches_record_short_name,
         helper_node_name_matches, helper_transform_duplicates_offset,
@@ -1181,6 +1477,90 @@ mod tests {
         transform_bits_key, InteriorCgfEntry, InteriorContainerData, LoadedInteriors,
     };
     use crate::pipeline::nmc_bridge::mat4_from_array;
+    use crate::types::{InteriorPlacement, UiBinding};
+
+    /// Real-P4K regression: the transit-peripheral inline canvas override must
+    /// flow through to an emitted `physical` UI binding. The Carrack in-lift
+    /// screen resolves `OLD_TransitUIPanelInterior_ANVL` (`4a8bbd52-…`), NOT the
+    /// generic class default. Skips when `SC_DATA_P4K` is unavailable.
+    #[test]
+    fn transit_peripheral_inline_canvas_emits_ui_binding() {
+        let Ok(p4k_path) = std::env::var("SC_DATA_P4K") else {
+            eprintln!("SC_DATA_P4K not set; skipping transit binding test");
+            return;
+        };
+        let Ok(p4k) = starbreaker_p4k::MappedP4k::open(std::path::Path::new(&p4k_path)) else {
+            eprintln!("SC_DATA_P4K set but Data.p4k could not be opened; skipping");
+            return;
+        };
+        let dcb = p4k
+            .read_file("Data\\Game2.dcb")
+            .or_else(|_| p4k.read_file("Data\\Game.dcb"))
+            .expect("Game.dcb should be readable");
+        let db = starbreaker_datacore::database::Database::from_bytes(&dcb)
+            .expect("Game.dcb should parse");
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+        let payload = crate::socpak::load_interior_from_socpak(
+            &p4k,
+            "Data\\ObjectContainers\\Ships\\ANVL\\Carrack\\elevators.socpak",
+            identity,
+            identity,
+            &[],
+        )
+        .expect("elevators.socpak should load");
+        let interiors = build_interiors_from_payloads(&db, &p4k, &[payload], false, 0);
+        let binding = interiors
+            .containers
+            .iter()
+            .flat_map(|c| &c.placements)
+            .flat_map(|p| &p.ui_bindings)
+            .find(|b| b.canvas_guid.as_deref() == Some("4a8bbd52-234f-4888-87fe-e157ec147ee5"))
+            .expect("a placement should emit the inline transit-panel canvas binding");
+        assert_eq!(binding.binding_kind, "physical");
+        assert!(
+            binding
+                .canvas_record_name
+                .as_deref()
+                .is_some_and(|name| name.ends_with("OLD_TransitUIPanelInterior_ANVL")),
+            "binding should resolve the ANVL interior panel record name, got {:?}",
+            binding.canvas_record_name
+        );
+    }
+
+    fn test_ui_binding() -> UiBinding {
+        UiBinding {
+            binding_kind: String::new(),
+            source_entity_name: String::new(),
+            helper_name: None,
+            default_view: None,
+            default_state_is_off: false,
+            default_state_name: None,
+            default_light_color: None,
+            default_light_intensity_milli: None,
+            canvas_guid: None,
+            canvas_record_name: None,
+            canvas_record_path: None,
+            canvas_widget_canvas_path: None,
+            canvas_widget_url_postfix: None,
+            canvas_widget_url_optional: None,
+            canvas_variable_binding: None,
+            content_canvas_guid: None,
+            content_canvas_record_name: None,
+            screen_name_loc_key: None,
+            transit_location_loc_key: None,
+            dashboard_view_index: None,
+            dashboard_screen_slot: None,
+            owner_source_file: None,
+            runtime_image_source: None,
+            generated_image_path: None,
+            generated_context_manifest_path: None,
+            generated_resolved_source_path: None,
+            generated_backend: None,
+            generated_provenance: None,
+            generated_confidence: None,
+            ui_screen_aspect_w_over_h: None,
+        }
+    }
 
     #[test]
     fn helper_node_name_matches_prefixed_helper_suffix() {
@@ -1362,8 +1742,102 @@ mod tests {
     }
 
     #[test]
-    fn root_geometry_duplicate_filter_only_removes_root_container_matches() {
+    fn inherit_colocated_ui_rotations_copies_non_identity_basis() {
+        let position = glam::Vec3::new(1.0, 2.0, 3.0);
+        let source_rotation = glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+        let source_transform = glam::Mat4::from_rotation_translation(source_rotation, position).to_cols_array_2d();
+        let target_transform = glam::Mat4::from_translation(position).to_cols_array_2d();
+        let mut placements = vec![
+            InteriorPlacement {
+                mesh_index: 0,
+                transform: source_transform,
+                palette: None,
+                ui_bindings: vec![test_ui_binding()],
+            },
+            InteriorPlacement {
+                mesh_index: 1,
+                transform: target_transform,
+                palette: None,
+                ui_bindings: vec![test_ui_binding()],
+            },
+        ];
+
+        inherit_colocated_ui_rotations(&mut placements);
+
+        assert!(super::same_rotation(
+            placements[0].transform,
+            placements[1].transform,
+        ));
+    }
+
+    #[test]
+    fn prune_colocated_standard_canvas_overlays_prefers_specialized_canvas() {
+        let transform = glam::Mat4::from_translation(glam::Vec3::new(1.0, 2.0, 3.0)).to_cols_array_2d();
+        let mut standard = test_ui_binding();
+        standard.canvas_record_name = Some("BuildingBlocks_Canvas.I_Door_Standard".to_string());
+        let mut specialized = test_ui_binding();
+        specialized.canvas_record_name = Some("BuildingBlocks_Canvas.I_Door_Small_DRAK".to_string());
+        let mut placements = vec![
+            InteriorPlacement {
+                mesh_index: 0,
+                transform,
+                palette: None,
+                ui_bindings: vec![standard],
+            },
+            InteriorPlacement {
+                mesh_index: 1,
+                transform,
+                palette: None,
+                ui_bindings: vec![specialized],
+            },
+        ];
+
+        prune_colocated_standard_canvas_overlays(&mut placements);
+
+        assert_eq!(placements.len(), 1);
+        assert_eq!(placements[0].mesh_index, 1);
+    }
+
+    #[test]
+    fn prune_colocated_standard_canvas_overlays_keeps_both_when_only_standards_colocate() {
+        // Two co-located `_standard` canvases must NOT annihilate each other:
+        // pruning a standard requires a co-located NON-standard (specialised)
+        // peer. Regression for the mutual-removal bug that dropped both.
+        let transform = glam::Mat4::from_translation(glam::Vec3::new(1.0, 2.0, 3.0)).to_cols_array_2d();
+        let mut standard_a = test_ui_binding();
+        standard_a.canvas_record_name = Some("BuildingBlocks_Canvas.I_Door_Standard".to_string());
+        let mut standard_b = test_ui_binding();
+        standard_b.canvas_record_name = Some("BuildingBlocks_Canvas.I_Screen_Standard".to_string());
+        let mut placements = vec![
+            InteriorPlacement {
+                mesh_index: 0,
+                transform,
+                palette: None,
+                ui_bindings: vec![standard_a],
+            },
+            InteriorPlacement {
+                mesh_index: 1,
+                transform,
+                palette: None,
+                ui_bindings: vec![standard_b],
+            },
+        ];
+
+        prune_colocated_standard_canvas_overlays(&mut placements);
+
+        assert_eq!(placements.len(), 2);
+    }
+
+    #[test]
+    fn root_geometry_duplicate_filter_removes_root_and_root_helper_matches() {
         let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+        let root_entity_name = "EntityClassDefinition.Test_Ship";
+        let root_placement = |mesh_index| InteriorPlacement {
+            mesh_index,
+            transform: identity,
+            palette: None,
+            ui_bindings: Vec::new(),
+        };
         let mut interiors = LoadedInteriors {
             unique_cgfs: vec![
                 InteriorCgfEntry {
@@ -1378,21 +1852,36 @@ mod tests {
                 },
             ],
             containers: vec![
+                // Root-level container with no parent: root-hull dup removed.
                 InteriorContainerData {
                     name: "root_container".to_string(),
                     parent_entity_name: None,
                     parent_node_name: None,
                     container_transform: identity,
-                    placements: vec![(0, identity, None), (1, identity, None)],
+                    placements: vec![root_placement(0), root_placement(1)],
                     lights: Vec::new(),
                     palette: None,
                 },
+                // The root entity's own interior attached at a hull helper bone
+                // (the RSI Aurora Mk2 `hardpoint_interior_oc` cabin case):
+                // root-hull dup must STILL be removed.
+                InteriorContainerData {
+                    name: "root_helper_container".to_string(),
+                    parent_entity_name: Some(root_entity_name.to_string()),
+                    parent_node_name: Some("hardpoint_interior_oc".to_string()),
+                    container_transform: identity,
+                    placements: vec![root_placement(0), root_placement(1)],
+                    lights: Vec::new(),
+                    palette: None,
+                },
+                // A genuine child-entity container: its placements are in the
+                // child's frame and must be left untouched.
                 InteriorContainerData {
                     name: "child_container".to_string(),
-                    parent_entity_name: Some("child".to_string()),
+                    parent_entity_name: Some("Test_Child_Module".to_string()),
                     parent_node_name: Some("helper".to_string()),
                     container_transform: identity,
-                    placements: vec![(0, identity, None)],
+                    placements: vec![root_placement(0)],
                     lights: Vec::new(),
                     palette: None,
                 },
@@ -1401,12 +1890,16 @@ mod tests {
 
         let removed = remove_root_geometry_duplicate_interior_placements(
             &mut interiors,
+            root_entity_name,
             "Data/Objects/Ships/Test/root.cga",
         );
 
-        assert_eq!(removed, 1);
+        // Both the no-parent root container and the root-helper container drop
+        // their root.cga placement; the genuine child container keeps its own.
+        assert_eq!(removed, 2);
         assert_eq!(interiors.containers[0].placements.len(), 1);
         assert_eq!(interiors.containers[1].placements.len(), 1);
+        assert_eq!(interiors.containers[2].placements.len(), 1);
     }
 
     #[test]
@@ -1538,5 +2031,74 @@ mod tests {
         assert!(scale.abs_diff_eq(glam::Vec3::ONE, 1e-5));
         assert!(rotation.angle_between(glam::Quat::IDENTITY) < 1e-5);
         assert!(translation.abs_diff_eq(glam::Vec3::ZERO, 1e-5));
+    }
+
+    fn light_only_payload(name: &str, pos: [f32; 3]) -> crate::types::InteriorPayload {
+        crate::types::InteriorPayload {
+            name: name.to_string(),
+            parent_entity_name: None,
+            parent_node_name: None,
+            meshes: Vec::new(),
+            lights: vec![crate::types::LightInfo {
+                name: "Light".to_string(),
+                position: [0.0, 0.0, 0.0],
+                transform_basis: "cryengine_z_up".to_string(),
+                rotation: [1.0, 0.0, 0.0, 0.0],
+                direction_sc: [1.0, 0.0, 0.0],
+                color: [1.0, 1.0, 1.0],
+                light_type: "Omni".to_string(),
+                semantic_light_kind: "point".to_string(),
+                intensity_raw: 1.0,
+                intensity_unit: "cryengine_authored_intensity".to_string(),
+                intensity_candela_proxy: 1.0,
+                intensity: 1.0,
+                radius: 1.0,
+                radius_m: 1.0,
+                inner_angle: None,
+                outer_angle: None,
+                projector_texture: None,
+                active_state: String::new(),
+                states: std::collections::BTreeMap::new(),
+            }],
+            container_transform: crate::socpak::build_container_transform(pos, [0.0, 0.0, 0.0]),
+            tint_palette_names: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn root_container_parenting_does_not_touch_child_socpak_payloads() {
+        // payload[0] is the root container instance authored on a parent helper
+        // bone; payload[1] is a recursively-discovered child socpak that already
+        // carries its own world-composed transform.
+        let root = light_only_payload("root", [0.0, -35.0, 0.0]);
+        let child = light_only_payload("child", [12.0, 3.0, -7.0]);
+        let mut tree = vec![root, child];
+
+        apply_root_container_parenting(
+            &mut tree,
+            Some("EntityClassDefinition.Ship".to_string()),
+            Some("bone".to_string()),
+            true,
+        );
+
+        // Root inherits the parent metadata; being light-only under a helper it is
+        // normalised to identity.
+        assert_eq!(
+            tree[0].parent_entity_name.as_deref(),
+            Some("EntityClassDefinition.Ship")
+        );
+        assert_eq!(tree[0].parent_node_name.as_deref(), Some("bone"));
+        assert!(mat4_from_array(&tree[0].container_transform)
+            .abs_diff_eq(glam::Mat4::IDENTITY, 1e-5));
+
+        // The child socpak keeps its own composed transform and is NOT re-parented
+        // to the root's helper bone, nor normalised to identity.
+        assert_eq!(tree[1].parent_entity_name, None);
+        assert_eq!(tree[1].parent_node_name, None);
+        let expected_child = mat4_from_array(&crate::socpak::build_container_transform(
+            [12.0, 3.0, -7.0],
+            [0.0, 0.0, 0.0],
+        ));
+        assert!(mat4_from_array(&tree[1].container_transform).abs_diff_eq(expected_child, 1e-5));
     }
 }

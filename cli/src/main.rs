@@ -1,4 +1,5 @@
-mod blend;
+mod animation;
+mod armour;
 mod chf;
 mod common;
 mod cryxml;
@@ -9,8 +10,10 @@ mod error;
 mod glb;
 mod nmc;
 mod p4k;
+mod riglogic;
 mod skin;
 mod socpak;
+mod ui;
 mod wwise;
 
 use clap::{Parser, Subcommand};
@@ -133,6 +136,11 @@ enum Command {
         #[command(subcommand)]
         command: chf::ChfCommand,
     },
+    /// Armour and clothing export (single pieces: `entity export`)
+    Armour {
+        #[command(subcommand)]
+        command: armour::ArmourCommand,
+    },
     /// Wwise soundbank (BNK/WEM) operations
     Wwise {
         #[command(subcommand)]
@@ -142,6 +150,21 @@ enum Command {
     Nmc {
         #[command(subcommand)]
         command: nmc::NmcCommand,
+    },
+    /// UI render replay helpers
+    Ui {
+        #[command(subcommand)]
+        command: ui::UiCommand,
+    },
+    /// Animation binding diagnostics (report-only)
+    Animation {
+        #[command(subcommand)]
+        command: animation::AnimationCommand,
+    },
+    /// RigLogic facial DNA inspection
+    Riglogic {
+        #[command(subcommand)]
+        command: riglogic::RigLogicCommand,
     },
 }
 
@@ -156,7 +179,24 @@ fn main() {
         }
         .to_string()
     });
-    env_logger::Builder::new().parse_filters(&env_filter).init();
+    let mut logger = env_logger::Builder::new();
+    logger.parse_filters(&env_filter);
+    // Some upstream SWF assets have header length mismatches that are benign for
+    // export and currently emit noisy warnings from the dependency parser.
+    // Keep CLI output actionable by suppressing that single warning source.
+    if std::env::var("STARBREAKER_ALLOW_SWF_READ_WARN")
+        .map(|v| v != "1")
+        .unwrap_or(true)
+    {
+        logger.filter_module("swf::read", log::LevelFilter::Error);
+    }
+    if std::env::var("STARBREAKER_ALLOW_USVG_IMAGE_WARN")
+        .map(|v| v != "1")
+        .unwrap_or(true)
+    {
+        logger.filter_module("usvg::parser::image", log::LevelFilter::Error);
+    }
+    logger.init();
 
     if cli.mem_cap > 0 {
         set_mem_cap(cli.mem_cap * 1_048_576);
@@ -173,8 +213,12 @@ fn main() {
         Command::Dds { command } => command.run(),
         Command::Glb { command } => command.run(),
         Command::Chf { command } => command.run(),
+        Command::Armour { command } => command.run(),
         Command::Wwise { command } => command.run(),
         Command::Nmc { command } => command.run(),
+        Command::Ui { command } => command.run(),
+        Command::Animation { command } => command.run(),
+        Command::Riglogic { command } => command.run(),
     };
 
     if let Err(e) = result {

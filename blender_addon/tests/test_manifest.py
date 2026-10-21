@@ -110,6 +110,28 @@ class ManifestTests(unittest.TestCase):
         palette_layer = next(layer for layer in layered.layer_manifest if layer.palette_channel is not None)
         self.assertEqual(palette_layer.palette_channel.name, "primary")
 
+    def test_material_sidecar_parses_screen_effects_contract(self) -> None:
+        sidecar = MaterialSidecar.from_value(
+            {
+                "submaterials": [
+                    {
+                        "index": 0,
+                        "shader_family": "UIPlane",
+                        "screen_effects": {
+                            "apply_crt": True,
+                            "source": "screen_pixel_layout",
+                            "pixel_layout_slot": "TexSlot17",
+                            "pixel_grid_tiling": {"x": 300.0, "y": 120.0},
+                        },
+                    }
+                ]
+            }
+        )
+
+        self.assertTrue(sidecar.submaterials[0].screen_effects["apply_crt"])
+        self.assertEqual(sidecar.submaterials[0].screen_effects["pixel_layout_slot"], "TexSlot17")
+        self.assertEqual(sidecar.submaterials[0].screen_effects["pixel_grid_tiling"]["x"], 300.0)
+
     def test_light_record_preserves_type_for_decomposed_runtime(self) -> None:
         light = LightRecord.from_value(
             {
@@ -404,6 +426,25 @@ class ManifestTests(unittest.TestCase):
 
         self.assertEqual(texture.texture_transform["scale"], [2.0, 3.0])
         self.assertEqual(texture.texture_transform["attributes"]["TileU"], 2)
+
+    def test_direct_hit_does_not_build_path_index(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "Data" / "Objects").mkdir(parents=True)
+            target = root / "Data" / "Objects" / "thing_LOD0.glb"
+            target.write_bytes(b"glb")
+            bundle = PackageBundle(
+                export_root=root,
+                scene_path=root / "Packages" / "X" / "scene.json",
+                scene=None,
+                palettes={},
+                liveries={},
+                paints={},
+            )
+            resolved = bundle.resolve_path("Data/Objects/thing_LOD0.glb")
+            self.assertEqual(resolved, target)
+            self.assertIsNone(bundle._path_index)
 
 
 if __name__ == "__main__":

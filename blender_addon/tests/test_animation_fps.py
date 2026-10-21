@@ -19,8 +19,24 @@ for _pkg in ("starbreaker_addon", "starbreaker_addon.runtime"):
 from starbreaker_addon.runtime.animation_fps import (
     FPS_POLICY_ADAPT_SCENE,
     FPS_POLICY_MATCH_SCENE_TO_CLIP,
+    extend_frame_end,
     reconcile_animation_fps,
 )
+
+
+class TestExtendFrameEnd(unittest.TestCase):
+    def test_extends_to_longest_strip(self) -> None:
+        # Hangar door/elevator clips run far past the default 250-frame range.
+        self.assertEqual(extend_frame_end(250, [648.0, 120.0]), 648)
+
+    def test_never_shrinks(self) -> None:
+        self.assertEqual(extend_frame_end(1000, [648.0]), 1000)
+
+    def test_no_strips_leaves_range_unchanged(self) -> None:
+        self.assertEqual(extend_frame_end(250, []), 250)
+
+    def test_rounds_up_to_whole_frame(self) -> None:
+        self.assertEqual(extend_frame_end(250, [647.6]), 648)
 
 
 class _Render:

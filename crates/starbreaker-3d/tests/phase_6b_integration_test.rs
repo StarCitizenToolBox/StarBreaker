@@ -168,7 +168,10 @@ fn test_phase_6b_export_aurora_mk2_full_integration() {
             include_animations: false,
             apply_default_animation_pose: true,
             default_animation_tags: vec!["landing_gear_extend".to_string()],
+            ui_only_files: false,
             decomposed_package_subdir: None,
+            socpak_path_filter: None,
+            geometry_tag: None,
         };
 
         // Run the full export pipeline
@@ -247,7 +250,10 @@ fn test_phase_6b_aurora_mesh_file_count_and_headers() {
             include_animations: false,
             apply_default_animation_pose: true,
             default_animation_tags: vec!["landing_gear_extend".to_string()],
+            ui_only_files: false,
             decomposed_package_subdir: None,
+            socpak_path_filter: None,
+            geometry_tag: None,
         };
 
         let result = starbreaker_3d::assemble_glb_with_loadout(
@@ -330,7 +336,10 @@ fn test_phase_6b_aurora_scene_json_valid() {
             include_animations: false,
             apply_default_animation_pose: true,
             default_animation_tags: vec!["landing_gear_extend".to_string()],
+            ui_only_files: false,
             decomposed_package_subdir: None,
+            socpak_path_filter: None,
+            geometry_tag: None,
         };
 
         let result = starbreaker_3d::assemble_glb_with_loadout(
@@ -405,7 +414,10 @@ fn test_phase_6b_aurora_validation_framework() {
             include_animations: false,
             apply_default_animation_pose: true,
             default_animation_tags: vec!["landing_gear_extend".to_string()],
+            ui_only_files: false,
             decomposed_package_subdir: None,
+            socpak_path_filter: None,
+            geometry_tag: None,
         };
 
         let result = starbreaker_3d::assemble_glb_with_loadout(
@@ -474,7 +486,10 @@ fn test_phase_6b_aurora_texture_export() {
             include_animations: false,
             apply_default_animation_pose: true,
             default_animation_tags: vec!["landing_gear_extend".to_string()],
+            ui_only_files: false,
             decomposed_package_subdir: None,
+            socpak_path_filter: None,
+            geometry_tag: None,
         };
 
         let result = starbreaker_3d::assemble_glb_with_loadout(

@@ -7,8 +7,6 @@
 //! `dump_nmc_nodes`, `dump_hierarchy`.
 
 use std::collections::HashSet;
-use std::str::FromStr;
-
 use starbreaker_datacore::database::Database;
 use starbreaker_datacore::types::Record;
 use starbreaker_dds::ReadSibling;
@@ -21,12 +19,14 @@ use crate::types::MaterialTextures;
 
 mod textures;
 use self::textures::*;
+pub(crate) use self::textures::cached_load;
 pub(crate) use self::textures::{
-    PngCache, cached_load, load_diffuse_texture, load_normal_texture, load_roughness_texture,
-    load_roughness_texture_result,
+    PngCache, RoughnessCache, cached_load_keyed, load_diffuse_texture, load_normal_texture,
+    load_roughness_texture, load_roughness_texture_result, png_cache_key,
 };
 mod interiors;
 pub(crate) use self::interiors::*;
+pub use crate::socpak::SocpakHierarchyNode;
 mod nmc_bridge;
 pub(crate) use self::nmc_bridge::*;
 mod child_payload;
@@ -34,20 +34,31 @@ pub(crate) use self::child_payload::*;
 mod loadout;
 pub use self::loadout::resolve_loadout_meshes;
 pub(crate) use self::loadout::*;
-mod entity_export;
+pub(crate) mod entity_export;
+mod geometry_variant;
 pub(crate) use self::entity_export::*;
 mod weapon_assembly;
 pub(crate) use self::weapon_assembly::*;
 
 mod palette;
 pub use self::palette::*;
+mod interior_animation;
+pub(crate) use self::interior_animation::*;
 mod vehicle;
 pub use self::vehicle::*;
 mod glb_assembly;
 pub(crate) use self::glb_assembly::path_is_shield_related;
 pub use self::glb_assembly::{assemble_glb_with_loadout, assemble_glb_with_loadout_with_progress};
 mod blend_assembly;
+pub(crate) use blend_assembly::mesh_to_blend;
 pub use self::blend_assembly::write_decomposed_export_blend;
+
+pub fn inspect_socpak_hierarchy(
+    p4k: &MappedP4k,
+    socpak_path: &str,
+) -> Result<crate::socpak::SocpakHierarchyNode, Error> {
+    crate::socpak::inspect_interior_tree_from_socpak(p4k, socpak_path)
+}
 
 type InteriorMeshAsset = (
     crate::Mesh,
@@ -137,6 +148,12 @@ pub struct ExportOptions {
     /// Example: `ship` writes manifests to `Packages/ship/<package>/...` while
     /// still keeping shared assets under `Data/...`.
     pub decomposed_package_subdir: Option<String>,
+    /// Decomposed fast path: emit only UI-generated images and required scene manifests.
+    pub ui_only_files: bool,
+    /// Optional normalized lowercase socpak paths to include during inherited
+    /// interior discovery. `None` exports every discovered container.
+    pub socpak_path_filter: Option<HashSet<String>>,
+    pub geometry_tag: Option<String>,
 }
 
 impl Default for ExportOptions {
@@ -157,6 +174,9 @@ impl Default for ExportOptions {
             apply_default_animation_pose: true,
             default_animation_tags: vec!["landing_gear_extend".to_string()],
             decomposed_package_subdir: None,
+            ui_only_files: false,
+            socpak_path_filter: None,
+            geometry_tag: None,
         }
     }
 }
@@ -317,14 +337,23 @@ pub fn socpaks_to_glb(
 
     let mut payloads = Vec::new();
     for socpak_path in socpak_paths {
-        match socpak::load_interior_from_socpak(
+        if opts
+            .socpak_path_filter
+            .as_ref()
+            .is_some_and(|filter| !filter.contains(&socpak::normalize_socpak_filter_key(socpak_path)))
+        {
+            continue;
+        }
+        match socpak::load_interior_tree_from_socpak_filtered_with_progress(
             p4k,
             socpak_path,
             identity,
             identity,
             std::slice::from_ref(&identity),
+            opts.socpak_path_filter.as_ref(),
+            &mut |_| {},
         ) {
-            Ok(p) => payloads.push(p),
+            Ok(mut tree_payloads) => payloads.append(&mut tree_payloads),
             Err(e) => log::warn!("failed to load {socpak_path}: {e}"),
         }
     }
@@ -387,6 +416,7 @@ pub fn socpaks_to_glb(
             skeleton_bones: Vec::new(),
             children: Vec::new(),
             interiors,
+            animations: Vec::new(),
         },
         &mut crate::gltf::GlbLoaders {
             load_textures: &mut no_tex,
@@ -412,6 +442,141 @@ pub fn socpaks_to_glb(
             fallback_palette: None,
         },
     )
+}
+
+/// Export explicit socpak roots as a decomposed native Blender package.
+///
+/// Socpaks do not have a ship/entity root mesh, so the package uses an empty
+/// generated root asset and carries the real visual content through `interiors`.
+pub fn socpaks_to_decomposed_blend(
+    db: &Database,
+    p4k: &MappedP4k,
+    socpak_paths: &[String],
+    export_name: &str,
+    opts: &ExportOptions,
+) -> Result<DecomposedExport, Error> {
+    let mut ignore_progress = |_progress: SocpakExportProgress| {};
+    socpaks_to_decomposed_blend_with_progress(
+        db,
+        p4k,
+        socpak_paths,
+        export_name,
+        opts,
+        &mut ignore_progress,
+    )
+}
+
+#[derive(Debug, Clone)]
+pub struct SocpakExportProgress {
+    pub socpak_path: String,
+    pub depth: usize,
+    pub containers_loaded: usize,
+    pub child_count: usize,
+    pub mesh_count: usize,
+    pub light_count: usize,
+    pub stage: String,
+}
+
+/// Export explicit socpak roots as a decomposed native Blender package, reporting
+/// cheap progress from the recursive socpak tree walk.
+pub fn socpaks_to_decomposed_blend_with_progress<F>(
+    db: &Database,
+    p4k: &MappedP4k,
+    socpak_paths: &[String],
+    export_name: &str,
+    opts: &ExportOptions,
+    progress: &mut F,
+) -> Result<DecomposedExport, Error>
+where
+    F: FnMut(SocpakExportProgress),
+{
+    use crate::decomposed::DecomposedInput;
+    use crate::socpak;
+
+    ensure_supported_export_options(opts)?;
+    if opts.kind != ExportKind::Decomposed || opts.format != ExportFormat::Blend {
+        return Err(Error::UnsupportedExportFormat(
+            "socpak decomposed blend export requires kind=Decomposed and format=Blend".to_string(),
+        ));
+    }
+
+    let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+    let mut payloads = Vec::new();
+    for socpak_path in socpak_paths {
+        if opts
+            .socpak_path_filter
+            .as_ref()
+            .is_some_and(|filter| !filter.contains(&socpak::normalize_socpak_filter_key(socpak_path)))
+        {
+            continue;
+        }
+        match socpak::load_interior_tree_from_socpak_filtered_with_progress(
+            p4k,
+            socpak_path,
+            identity,
+            identity,
+            std::slice::from_ref(&identity),
+            opts.socpak_path_filter.as_ref(),
+            &mut |tree_progress| {
+                progress(SocpakExportProgress {
+                    socpak_path: tree_progress.socpak_path,
+                    depth: tree_progress.depth,
+                    containers_loaded: tree_progress.containers_loaded,
+                    child_count: tree_progress.child_count,
+                    mesh_count: tree_progress.mesh_count,
+                    light_count: tree_progress.light_count,
+                    stage: tree_progress.stage,
+                });
+            },
+        ) {
+            Ok(mut tree_payloads) => payloads.append(&mut tree_payloads),
+            Err(e) => log::warn!("failed to load {socpak_path}: {e}"),
+        }
+    }
+
+    let mut interiors =
+        build_interiors_from_payloads(db, p4k, &payloads, opts.include_lights, opts.lod_level);
+    // Animated interior entities (`.cga` doors/elevators with a sibling
+    // `.chrparams`) become decomposed children so their skeletal `.caf` clips are
+    // extracted by the existing animation pipeline; this also removes them from
+    // the static interior placements to avoid duplicate geometry.
+    let anim_children_start = std::time::Instant::now();
+    let children = if opts.include_animations {
+        extract_animated_interior_children(db, p4k, &mut interiors, opts)
+    } else {
+        Vec::new()
+    };
+    log::info!(
+        "[timing][socpak] animated_interior_children ({} children): {:.2}s",
+        children.len(),
+        anim_children_start.elapsed().as_secs_f32()
+    );
+    let input = DecomposedInput {
+        entity_name: export_name.to_string(),
+        geometry_path: String::new(),
+        material_path: String::new(),
+        assembly_kind: None,
+        weapon_assembly: None,
+        weapon_assembly_diagnostics: None,
+        root_mesh: empty_socpak_scene_root_mesh(),
+        root_materials: None,
+        root_nmc: None,
+        root_palette: None,
+        available_palettes: Vec::new(),
+        root_bones: Vec::new(),
+        root_skeleton_source_path: None,
+        root_animation_controller: None,
+        children,
+        interiors,
+        paint_variants: Vec::new(),
+        animations: Vec::new(),
+    };
+
+    write_decomposed_export_blend(db, p4k, input, opts, None, None, None, None)
+}
+
+fn empty_socpak_scene_root_mesh() -> crate::types::Mesh {
+    crate::types::Mesh::empty()
 }
 
 /// Write NMC node properties for a geometry path into the JSON output.
@@ -605,23 +770,23 @@ pub fn dump_hierarchy(
             "    {{\n      \"container\": {:?},\n      \"meshes\": [\n",
             container.name
         );
-        for (cgf_idx, transform, _placement_palette) in &container.placements {
-            let entry = &interiors.unique_cgfs[*cgf_idx];
-            let tx = transform[3][0];
-            let ty = transform[3][1];
-            let tz = transform[3][2];
+        for placement in &container.placements {
+            let entry = &interiors.unique_cgfs[placement.mesh_index];
+            let tx = placement.transform[3][0];
+            let ty = placement.transform[3][1];
+            let tz = placement.transform[3][2];
             // Extract scale from rotation columns
-            let sx = (transform[0][0] * transform[0][0]
-                + transform[0][1] * transform[0][1]
-                + transform[0][2] * transform[0][2])
+            let sx = (placement.transform[0][0] * placement.transform[0][0]
+                + placement.transform[0][1] * placement.transform[0][1]
+                + placement.transform[0][2] * placement.transform[0][2])
                 .sqrt();
-            let sy = (transform[1][0] * transform[1][0]
-                + transform[1][1] * transform[1][1]
-                + transform[1][2] * transform[1][2])
+            let sy = (placement.transform[1][0] * placement.transform[1][0]
+                + placement.transform[1][1] * placement.transform[1][1]
+                + placement.transform[1][2] * placement.transform[1][2])
                 .sqrt();
-            let sz = (transform[2][0] * transform[2][0]
-                + transform[2][1] * transform[2][1]
-                + transform[2][2] * transform[2][2])
+            let sz = (placement.transform[2][0] * placement.transform[2][0]
+                + placement.transform[2][1] * placement.transform[2][1]
+                + placement.transform[2][2] * placement.transform[2][2])
                 .sqrt();
             let _ = write!(
                 out,
@@ -731,6 +896,8 @@ mod tests {
             model_max: [0.0; 3],
             scaling_min: [0.0; 3],
             scaling_max: [0.0; 3],
+            skin: None,
+            morph_targets: Vec::new(),
         }
     }
 
@@ -748,6 +915,8 @@ mod tests {
             local_rotation: [1.0, 0.0, 0.0, 0.0],
             world_position,
             world_rotation: [1.0, 0.0, 0.0, 0.0],
+            bind_world_position: world_position,
+            bind_world_rotation: [1.0, 0.0, 0.0, 0.0],
         }
     }
 
@@ -822,6 +991,8 @@ mod tests {
             model_max: [6.0, 5.0, 0.0],
             scaling_min: [2.0, 0.0, 0.0],
             scaling_max: [6.0, 5.0, 0.0],
+            skin: None,
+            morph_targets: Vec::new(),
         };
         let bones = vec![
             sample_bone("root", None, [2.0, 0.0, 0.0], [2.0, 0.0, 0.0]),
@@ -889,18 +1060,22 @@ mod tests {
         let mut specs = Vec::new();
         collect_child_payload_specs(&[proxy, rack], "root_ship", None, &mut specs);
 
-        assert_eq!(specs.len(), 3);
-        assert_eq!(specs[0].child.entity_name, "weapon");
+        assert_eq!(specs.len(), 4);
+        assert_eq!(specs[0].child.entity_name, "proxy");
         assert_eq!(specs[0].parent_entity_name, "root_ship");
         assert_eq!(specs[0].parent_node_name, "hardpoint_proxy");
 
-        assert_eq!(specs[1].child.entity_name, "rack");
+        assert_eq!(specs[1].child.entity_name, "weapon");
         assert_eq!(specs[1].parent_entity_name, "root_ship");
-        assert_eq!(specs[1].parent_node_name, "hardpoint_rack");
+        assert_eq!(specs[1].parent_node_name, "hardpoint_proxy");
 
-        assert_eq!(specs[2].child.entity_name, "missile");
-        assert_eq!(specs[2].parent_entity_name, "rack");
-        assert_eq!(specs[2].parent_node_name, "hardpoint_missile");
+        assert_eq!(specs[2].child.entity_name, "rack");
+        assert_eq!(specs[2].parent_entity_name, "root_ship");
+        assert_eq!(specs[2].parent_node_name, "hardpoint_rack");
+
+        assert_eq!(specs[3].child.entity_name, "missile");
+        assert_eq!(specs[3].parent_entity_name, "rack");
+        assert_eq!(specs[3].parent_node_name, "hardpoint_missile");
     }
 
     #[test]

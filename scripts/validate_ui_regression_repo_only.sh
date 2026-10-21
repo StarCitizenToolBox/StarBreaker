@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+cd "${REPO_ROOT}"
+
+cargo test -p starbreaker-ui --test manifest_snapshot_regression -- --nocapture
+bash ./scripts/validate_ui_snapshot_freeze.sh
+bash ./scripts/validate_ui_regression_artifacts.sh --quick

@@ -1,0 +1,34 @@
+[package]
+name = "starbreaker-ui"
+edition = "2024"
+version.workspace = true
+description = "Static UI atom extractor and canvas composer for Star Citizen ship screens"
+
+[dependencies]
+flate2 = { workspace = true }
+quick-xml = { workspace = true }
+image = { workspace = true, features = ["png", "jpeg", "tiff", "gif", "bmp", "tga"] }
+log = { workspace = true }
+resvg = { version = "0.48", default-features = false, features = ["raster-images"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.11"
+starbreaker-dds = { workspace = true }
+rusttype = "0.9"
+swf = "0.3"
+thiserror = { workspace = true }
+# Phase 6: vector rasterisation backend for the canvas compositor.
+# tiny-skia is pre-approved; must remain unmodified (read-only dep).
+tiny-skia = { version = "0.12", default-features = false, features = ["std"] }
+usvg = { version = "0.48", default-features = false }
+hex = { workspace = true }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+rayon = { workspace = true }
+starbreaker-p4k = { workspace = true }
+swf = "0.3"
+tiny-skia = { version = "0.12", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true

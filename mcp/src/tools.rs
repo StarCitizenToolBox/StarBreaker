@@ -3,17 +3,28 @@ use std::sync::{Arc, RwLock};
 use rmcp::{
     ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{ServerCapabilities, ServerInfo},
+    model::{ServerCapabilities, ServerConfig},
     schemars, tool, tool_router,
 };
+use starbreaker_datacore::database::Database;
+use starbreaker_datacore::types::StructId;
 use starbreaker_p4k::{MappedP4k, P4kArchive};
+use starbreaker_ui::CanvasFetcher;
 
 /// Lazily-loaded game data. Initialized on first tool call.
-struct GameData {
+pub(crate) struct GameData {
     p4k_path: PathBuf,
     p4k: Arc<MappedP4k>,
-    dcb_bytes: Vec<u8>,
+    dcb_bytes: &'static [u8],
+    db: Arc<Database<'static>>,
 }
+
+const MAX_DATACORE_QUERY_RESULTS: usize = 32;
+const MAX_DATACORE_QUERY_JSON_NODES: usize = 50_000;
+const MAX_DATACORE_QUERY_JSON_DEPTH: usize = 16;
+const MAX_DATACORE_QUERY_ARRAY_ITEMS: usize = 256;
+const MAX_DATACORE_QUERY_OBJECT_FIELDS: usize = 256;
+const MAX_DATACORE_QUERY_STRING_CHARS: usize = 2048;
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct P4kSetDataPathRequest {
@@ -68,6 +79,102 @@ pub struct SearchRecordsRequest {
     #[schemars(description = "Optional struct type filter (e.g. 'EntityClassDefinition', 'TintPalette')")]
     pub struct_type: Option<String>,
     #[schemars(description = "Maximum number of results (default 20)")]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UiRegressionRegistryRequest {
+    #[schemars(description = "Optional manifest path. Defaults to crates/starbreaker-ui/tests/fixtures/ui_ir/ui_snapshot_manifest.json")]
+    pub manifest_path: Option<String>,
+    #[schemars(description = "Optional freeze lock path. Defaults to crates/starbreaker-ui/tests/fixtures/ui_regression_freeze.json")]
+    pub freeze_path: Option<String>,
+    #[schemars(description = "Optional case-insensitive substring filter applied to target ids")]
+    pub target_filter: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UiRegressionValidateRequest {
+    #[schemars(description = "Validation mode: quick or full (default quick)")]
+    pub mode: Option<String>,
+    #[schemars(description = "Optional manifest path. Defaults to crates/starbreaker-ui/tests/fixtures/ui_ir/ui_snapshot_manifest.json")]
+    pub manifest_path: Option<String>,
+    #[schemars(description = "Optional freeze lock path. Defaults to crates/starbreaker-ui/tests/fixtures/ui_regression_freeze.json")]
+    pub freeze_path: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UiCanvasStyleInventoryRequest {
+    #[schemars(description = "Canvas identifier to inspect: absolute JSON path, record GUID, full record name, or bare record name.")]
+    pub canvas: String,
+    #[schemars(description = "Optional local root containing decompiled BuildingBlocks JSON records. Defaults to ../ships/dcb_canvas/libs/foundry/records from the workspace root.")]
+    #[allow(dead_code)]
+    pub canvas_root: Option<String>,
+    #[schemars(description = "Optional case-insensitive substring filter applied to style entry names.")]
+    pub entry_filter: Option<String>,
+    #[schemars(description = "If true, include compact condition summaries for each returned style entry. Default true.")]
+    pub include_conditions: Option<bool>,
+    #[schemars(description = "If true, include compact modifier summaries for each returned style entry. Default true.")]
+    pub include_modifiers: Option<bool>,
+    #[schemars(description = "Maximum number of style entries to return. Default 200.")]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UiSceneStyleProbeRequest {
+    #[schemars(description = "Canvas identifier to resolve: absolute JSON path, record GUID, full record name, or bare record name.")]
+    pub canvas: String,
+    #[schemars(description = "Case-insensitive substring matched against resolved node name, type, or text fields.")]
+    pub query: String,
+    #[schemars(description = "Optional local root containing decompiled BuildingBlocks JSON records. Defaults to ../ships/dcb_canvas/libs/foundry/records from the workspace root.")]
+    #[allow(dead_code)]
+    pub canvas_root: Option<String>,
+    #[schemars(description = "Optional manufacturer id used for brand style selection, e.g. drak, rsi, aegis.")]
+    pub manufacturer: Option<String>,
+    #[schemars(description = "Maximum number of matching nodes to return. Default 80.")]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UiIrQueryRequest {
+    #[schemars(description = "Canvas GUID/name for the outer binding canvas.")]
+    pub canvas_guid: String,
+    #[schemars(description = "Optional content canvas GUID/name. Defaults to canvas_guid.")]
+    pub content_guid: Option<String>,
+    #[schemars(description = "Case-insensitive substring matched against IR node name or type.")]
+    pub query: String,
+    #[schemars(description = "Optional local root containing decompiled BuildingBlocks JSON records. Defaults to ../ships/dcb_canvas/libs/foundry/records from the workspace root.")]
+    #[allow(dead_code)]
+    pub canvas_root: Option<String>,
+    #[schemars(description = "Optional local style record root. Defaults to <canvas_root>/ui/buildingblocks/styles.")]
+    #[allow(dead_code)]
+    pub style_root: Option<String>,
+    #[schemars(description = "Manufacturer id used for style selection. Default drak.")]
+    pub manufacturer: Option<String>,
+    #[schemars(description = "Binding helper name included in the UI pipeline input. Default mcp-ui-query.")]
+    pub helper: Option<String>,
+    #[schemars(description = "Target render width. Default 1920.")]
+    pub width: Option<u32>,
+    #[schemars(description = "Target render height. Default 1080.")]
+    pub height: Option<u32>,
+    #[schemars(description = "Maximum number of matching IR nodes to return. Default 80.")]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UiTagLookupRequest {
+    #[schemars(description = "Tag UUID (full or prefix) or case-insensitive tag-name substring to resolve against the live tag database (e.g. 'icon-element' or 'f530a994').")]
+    pub query: String,
+    #[schemars(description = "Maximum number of matches to return. Default 40.")]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UiKitSheetEntriesRequest {
+    #[schemars(description = "BuildingBlocks_Style record to inspect, by name substring (e.g. sk_uilo_a_buttonprimarystyles, s_uilo_a) or GUID — including modular-kit component sheets.")]
+    pub record: String,
+    #[schemars(description = "Optional case-insensitive substring filter on entry names (e.g. Filled).")]
+    pub entry_filter: Option<String>,
+    #[schemars(description = "Maximum entries to return. Default 100.")]
     pub limit: Option<u32>,
 }
 
@@ -146,6 +253,56 @@ pub struct MannequinDumpRequest {
     pub entity: String,
     #[schemars(description = "Optional case-insensitive substring filter against fragment group name, GUID, or animation name.")]
     pub filter: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct AnimationBindingReportRequest {
+    #[schemars(description = "Local filesystem folder of exported animation JSON sidecars (e.g. '<package>/animations'), scanned recursively for *.json.")]
+    pub animation_folder: Option<String>,
+    #[schemars(description = "Individual local animation JSON sidecar files to include, in addition to (or instead of) animation_folder.")]
+    pub animation_json: Option<Vec<String>>,
+    #[schemars(description = "Source .cga rig to resolve track hashes to node names. P4k path (Data\\ prefix optional) or absolute filesystem path. This is the highest-value source for resolving door/component tracks.")]
+    pub cga: Option<String>,
+    #[schemars(description = "Source .cgam rig file. P4k or filesystem path.")]
+    pub cgam: Option<String>,
+    #[schemars(description = "Source .meshsetup file (Joint names). P4k or filesystem path; CryXMLB is auto-decoded.")]
+    pub meshsetup: Option<String>,
+    #[schemars(description = "Source .chrparams file (animation references). P4k or filesystem path; CryXMLB is auto-decoded.")]
+    pub chrparams: Option<String>,
+    #[schemars(description = "Converted .glb file (exported node names). Filesystem path or P4k path.")]
+    pub glb: Option<String>,
+    #[schemars(description = "If true, return the human-readable Markdown summary instead of the full JSON report. Default false.")]
+    pub markdown: Option<bool>,
+}
+
+/// Decode CryXMLB bytes to XML text; fall back to lossy UTF-8 for plain-text
+/// sources (some `.meshsetup`/`.chrparams` are already textual).
+fn decode_text_or_cryxml(data: &[u8]) -> String {
+    if let Ok(xml) = starbreaker_cryxml::from_bytes(data) {
+        return format!("{xml}");
+    }
+    String::from_utf8_lossy(data).into_owned()
+}
+
+/// Recursively collect `*.json` files under `dir` into `files`.
+fn collect_json_files_recursive(
+    dir: &std::path::Path,
+    files: &mut Vec<std::path::PathBuf>,
+) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            collect_json_files_recursive(&path, files)?;
+        } else if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+        {
+            files.push(path);
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -262,6 +419,9 @@ impl StarBreakerMcp {
             .read_file("Data\\Game2.dcb")
             .or_else(|_| p4k.read_file("Data\\Game.dcb"))
             .map_err(|e| anyhow::anyhow!("Failed to read DataCore from {}: {e}", p4k_path.display()))?;
+        let dcb_bytes: &'static [u8] = Box::leak(dcb_bytes.into_boxed_slice());
+        let db = Database::from_bytes(dcb_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to parse DataCore from {}: {e}", p4k_path.display()))?;
         log::info!(
             "DataCore: {} bytes, loaded in {:.1}s",
             dcb_bytes.len(),
@@ -272,6 +432,7 @@ impl StarBreakerMcp {
             p4k_path,
             p4k,
             dcb_bytes,
+            db: Arc::new(db),
         })
     }
 
@@ -447,6 +608,607 @@ impl StarBreakerMcp {
     }
 }
 
+/// P4K-backed asset fetcher for MCP UI tools.
+
+pub(crate) struct P4kAssetFetcher {
+    p4k: Arc<MappedP4k>,
+}
+
+impl P4kAssetFetcher {
+    /// Create a new asset fetcher from the game data.
+    pub(crate) fn new(data: &Arc<GameData>) -> Self {
+        Self {
+            p4k: Arc::clone(&data.p4k),
+        }
+    }
+
+    /// Normalize a path for P4K lookup: ensure `Data\` prefix,
+    /// convert forward slashes to backslashes, auto-convert `.tif` to `.dds`.
+    fn normalize_path(path: &str) -> String {
+        let p = if path.to_lowercase().starts_with("data\\") || path.to_lowercase().starts_with("data/") {
+            path.replace('/', "\\")
+        } else {
+            format!("Data\\{}", path.replace('/', "\\"))
+        };
+        // Auto-convert .tif to .dds for texture lookups
+        if p.to_lowercase().ends_with(".tif") {
+            format!("{}.dds", &p[..p.len() - 4])
+        } else {
+            p
+        }
+    }
+}
+
+impl starbreaker_ui::pipeline::AssetFetcher for P4kAssetFetcher {
+    fn fetch_image_bytes(&self, p4k_path: &str) -> Option<Vec<u8>> {
+        let normalized = Self::normalize_path(p4k_path);
+        self.p4k
+            .read_file(&normalized)
+            .ok()
+            .or_else(|| {
+                // Case-insensitive fallback
+                self.p4k
+                    .entry_case_insensitive(&normalized)
+                    .and_then(|entry| self.p4k.read(entry).ok())
+            })
+    }
+}
+
+/// P4K-backed SWF fetcher for MCP UI tools.
+///
+/// Implements [`starbreaker_ui::SwfFetcher`] by reading SWF files
+/// from the P4K archive loaded from `Data.p4k`.
+/// Replaces `McpNullSwfFetcher` which always returned an error.
+pub(crate) struct P4kSwfFetcher {
+    p4k: Arc<MappedP4k>,
+}
+
+impl P4kSwfFetcher {
+    /// Create a new SWF fetcher from the game data.
+    pub(crate) fn new(data: &Arc<GameData>) -> Self {
+        Self {
+            p4k: Arc::clone(&data.p4k),
+        }
+    }
+
+    /// Normalize a path for P4K lookup: ensure `Data\` prefix,
+    /// convert forward slashes to backslashes, auto-convert `.tif` to `.dds`.
+    fn normalize_path(path: &str) -> String {
+        let p = if path.to_lowercase().starts_with("data\\") || path.to_lowercase().starts_with("data/") {
+            path.replace('/', "\\")
+        } else {
+            format!("Data\\{}", path.replace('/', "\\"))
+        };
+        // Auto-convert .tif to .dds for texture lookups
+        if p.to_lowercase().ends_with(".tif") {
+            format!("{}.dds", &p[..p.len() - 4])
+        } else {
+            p
+        }
+    }
+}
+
+impl starbreaker_ui::SwfFetcher for P4kSwfFetcher {
+    fn fetch_swf_bytes(&self, p4k_path: &str) -> Result<Vec<u8>, starbreaker_ui::UiError> {
+        let normalized = Self::normalize_path(p4k_path);
+        self.p4k
+            .read_file(&normalized)
+            .or_else(|_| {
+                // Case-insensitive fallback
+                self.p4k
+                    .entry_case_insensitive(&normalized)
+                    .ok_or_else(|| format!("SWF file not found in P4K: {normalized}"))
+                    .and_then(|entry| {
+                        self.p4k.read(entry).map_err(|e| format!("Error reading SWF from P4K: {e}"))
+                    })
+            })
+            .map_err(|e| starbreaker_ui::UiError::FetchFailed {
+                guid: p4k_path.to_string(),
+                source: e.into(),
+            })
+    }
+}
+
+/// DataCore-backed canvas fetcher for MCP UI tools.
+///
+/// Implements [`starbreaker_ui::CanvasFetcher`] by querying the
+/// `BuildingBlocks_Canvas` DataCore records loaded from P4K.
+/// Replaces `LocalUiRecordIndex` which scanned local JSON files.
+pub(crate) struct P4kCanvasFetcher {
+    db: Arc<Database<'static>>,
+    /// Record families resolved by GUID/name. `BuildingBlocks_Canvas` plus the
+    /// UI-support families the canvas pipeline fetches by name — currently
+    /// `BuildingBlocks_AspectRatioLibrary` so the MFD aspect-tag content-scaling
+    /// (`AspectRatioToTag_MFD`) resolves and `ui_ir_query` exercises the same
+    /// path as the export (ledger 43; mirrors `datacore_ui_lookup_type_names`).
+    lookup_struct_ids: Vec<StructId>,
+}
+
+impl P4kCanvasFetcher {
+    /// Create a new canvas fetcher from the game data.
+    ///
+    /// Resolves the searched struct IDs at construction time so runtime lookups
+    /// stay fast. `BuildingBlocks_Canvas` is required; the supplementary families
+    /// are best-effort (skipped if absent).
+    pub(crate) fn new(data: &Arc<GameData>) -> Result<Self, String> {
+        let canvas_struct_id = data
+            .db
+            .struct_id("BuildingBlocks_Canvas")
+            .ok_or("DataCore has no BuildingBlocks_Canvas struct")?;
+        let mut lookup_struct_ids = vec![canvas_struct_id];
+        if let Some(aspect) = data.db.struct_id("BuildingBlocks_AspectRatioLibrary") {
+            lookup_struct_ids.push(aspect);
+        }
+        Ok(Self {
+            db: Arc::clone(&data.db),
+            lookup_struct_ids,
+        })
+    }
+
+    /// Search the indexed record families for a matching GUID.
+    fn find_by_guid(&self, guid: &str) -> Option<&starbreaker_datacore::types::Record> {
+        let parsed = guid.parse::<starbreaker_common::CigGuid>().ok();
+        self.lookup_struct_ids.iter().find_map(|sid| {
+            self.db.records_of_type(*sid).find(|r| {
+                parsed.is_some_and(|p| r.id == p) || format!("{}", r.id) == guid
+            })
+        })
+    }
+
+    /// Search the indexed record families for a matching name substring (shortest match).
+    fn find_by_name(&self, name: &str) -> Option<&starbreaker_datacore::types::Record> {
+        let search = name.to_lowercase();
+        let mut candidates: Vec<_> = self
+            .lookup_struct_ids
+            .iter()
+            .flat_map(|sid| self.db.records_of_type(*sid))
+            .filter(|r| {
+                self.db
+                    .resolve_string2(r.name_offset)
+                    .to_lowercase()
+                    .contains(&search)
+            })
+            .collect();
+        candidates.sort_by_key(|r| self.db.resolve_string2(r.name_offset).len());
+        candidates.first().copied()
+    }
+}
+
+/// DataCore-backed style fetcher for MCP UI tools.
+///
+/// Implements [`starbreaker_ui::StyleFetcher`] by querying the
+/// `BuildingBlocks_Style` DataCore records loaded from P4K.
+/// Replaces `LocalUiStyleFetcher` which scanned local JSON files.
+pub(crate) struct P4kStyleFetcher {
+    db: Arc<Database<'static>>,
+    style_struct_id: StructId,
+}
+
+impl P4kStyleFetcher {
+    /// Create a new style fetcher from the game data.
+    ///
+    /// Resolves the struct ID for `BuildingBlocks_Style` at
+    /// construction time so runtime lookups stay fast.
+    pub(crate) fn new(data: &Arc<GameData>) -> Result<Self, String> {
+        let style_struct_id = data
+            .db
+            .struct_id("BuildingBlocks_Style")
+            .ok_or("DataCore has no BuildingBlocks_Style struct")?;
+        Ok(Self {
+            db: Arc::clone(&data.db),
+            style_struct_id,
+        })
+    }
+
+    /// Parse a `ManufacturerStyle` from a DataCore style record.
+    fn parse_style(&self, record: &starbreaker_datacore::types::Record) -> Result<starbreaker_ui::ManufacturerStyle, starbreaker_ui::UiError> {
+        let bytes = starbreaker_datacore::export::to_json(&self.db, record)
+            .map_err(|e| starbreaker_ui::UiError::FetchFailed {
+                guid: "style".to_string(),
+                source: format!("DataCore JSON export failed: {e}").into(),
+            })?;
+
+        let json_str = String::from_utf8(bytes)
+            .map_err(|e| starbreaker_ui::UiError::FetchFailed {
+                guid: "style".to_string(),
+                source: format!("DataCore JSON is not valid UTF-8: {e}").into(),
+            })?;
+
+        let record_json: serde_json::Value = serde_json::from_str(&json_str)
+            .map_err(|e| starbreaker_ui::UiError::FetchFailed {
+                guid: "style".to_string(),
+                source: format!("Failed to parse record JSON: {e}").into(),
+            })?;
+
+        // Extract the manufacturer ID from the record name (e.g. "BuildingBlocks_Style.DRAK" → "DRAK")
+        let record_name = self.db.resolve_string2(record.name_offset);
+        let manufacturer_id = record_name
+            .rsplit('.')
+            .next()
+            .unwrap_or(&record_name)
+            .to_ascii_lowercase();
+
+        starbreaker_ui::StyleLoader::for_manufacturer(&manufacturer_id)
+            .parse_buildingblocks_style_record(&record_json)
+    }
+}
+
+impl starbreaker_ui::StyleFetcher for P4kStyleFetcher {
+    fn fetch_manufacturer_style(&self, manufacturer_id: &str) -> Result<starbreaker_ui::ManufacturerStyle, starbreaker_ui::UiError> {
+        let id = manufacturer_id.to_ascii_lowercase();
+        // Try exact manufacturer name first, then search by substring
+        let candidates: Vec<_> = self
+            .db
+            .records_of_type(self.style_struct_id)
+            .filter(|r| {
+                let name = self.db.resolve_string2(r.name_offset);
+                let bare = name.rsplit('.').next().unwrap_or(&name).to_ascii_lowercase();
+                bare == id || bare.contains(&id)
+            })
+            .collect();
+
+        if candidates.is_empty() {
+            return Err(starbreaker_ui::UiError::RenderError(format!(
+                "missing BuildingBlocks style record for manufacturer '{}'",
+                manufacturer_id
+            )));
+        }
+
+        // Sort by name length (shortest match wins)
+        let mut sorted = candidates;
+        sorted.sort_by_key(|r| self.db.resolve_string2(r.name_offset).len());
+
+        self.parse_style(sorted.first().unwrap())
+    }
+}
+
+impl starbreaker_ui::CanvasFetcher for P4kCanvasFetcher {
+    fn fetch_canvas_json(&self, guid: &str) -> Result<serde_json::Value, starbreaker_ui::UiError> {
+        let record = self
+            .find_by_guid(guid)
+            .ok_or_else(|| starbreaker_ui::UiError::FetchFailed {
+                guid: guid.to_string(),
+                source: format!("No BuildingBlocks_Canvas record with GUID {guid}").into(),
+            })?;
+
+        let bytes = starbreaker_datacore::export::to_json(&self.db, record)
+            .map_err(|e| starbreaker_ui::UiError::FetchFailed {
+                guid: guid.to_string(),
+                source: format!("DataCore JSON export failed: {e}").into(),
+            })?;
+
+        let json_str = String::from_utf8(bytes)
+            .map_err(|e| starbreaker_ui::UiError::FetchFailed {
+                guid: guid.to_string(),
+                source: format!("DataCore JSON is not valid UTF-8: {e}").into(),
+            })?;
+
+        serde_json::from_str(&json_str).map_err(|e| starbreaker_ui::UiError::FetchFailed {
+            guid: guid.to_string(),
+            source: format!("Failed to parse record JSON: {e}").into(),
+        })
+    }
+
+    fn fetch_canvas_by_name(&self, record_name: &str) -> Result<serde_json::Value, starbreaker_ui::UiError> {
+        let record = self
+            .find_by_name(record_name)
+            .ok_or_else(|| starbreaker_ui::UiError::FetchFailed {
+                guid: record_name.to_string(),
+                source: format!("No BuildingBlocks_Canvas record matching name '{record_name}'").into(),
+            })?;
+
+        let bytes = starbreaker_datacore::export::to_json(&self.db, record)
+            .map_err(|e| starbreaker_ui::UiError::FetchFailed {
+                guid: record_name.to_string(),
+                source: format!("DataCore JSON export failed: {e}").into(),
+            })?;
+
+        let json_str = String::from_utf8(bytes)
+            .map_err(|e| starbreaker_ui::UiError::FetchFailed {
+                guid: record_name.to_string(),
+                source: format!("DataCore JSON is not valid UTF-8: {e}").into(),
+            })?;
+
+        serde_json::from_str(&json_str).map_err(|e| starbreaker_ui::UiError::FetchFailed {
+            guid: record_name.to_string(),
+            source: format!("Failed to parse record JSON: {e}").into(),
+        })
+    }
+}
+
+
+pub(crate) fn mcp_error_json(code: &str, message: String) -> String {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "schema_version": 1,
+        "error_code": code,
+        "message": message,
+    }))
+    .unwrap_or_else(|_| format!("{{\"error_code\":\"{code}\"}}"))
+}
+
+fn json_rect(rect: impl Into<(f32, f32, f32, f32)>) -> serde_json::Value {
+    let (x, y, w, h) = rect.into();
+    serde_json::json!({ "x": x, "y": y, "w": w, "h": h })
+}
+
+fn bb_rect_json(rect: starbreaker_ui::bb_layout::Rect) -> serde_json::Value {
+    json_rect((rect.x, rect.y, rect.w, rect.h))
+}
+
+fn ui_rect_json(rect: starbreaker_ui::UiIrRect) -> serde_json::Value {
+    json_rect((rect.x, rect.y, rect.w, rect.h))
+}
+
+pub(crate) fn compact_colour_fields(raw: &serde_json::Value) -> serde_json::Value {
+    let mut fields = serde_json::Map::new();
+    for key in [
+        "FillColor",
+        "FillColorToken",
+        "BackgroundColor",
+        "BackgroundColorToken",
+        "BorderColorLeft",
+        "BorderColorLeftToken",
+        "BorderColorRight",
+        "BorderColorRightToken",
+        "BorderColorTop",
+        "BorderColorTopToken",
+        "BorderColorBottom",
+        "BorderColorBottomToken",
+        "EnableBackground",
+        "IsActive",
+    ] {
+        if let Some(value) = raw.get(key) {
+            fields.insert(key.to_string(), value.clone());
+        }
+    }
+    serde_json::Value::Object(fields)
+}
+
+fn style_entry_name(entry: &serde_json::Value) -> Option<&str> {
+    entry.get("name").and_then(|v| v.as_str())
+}
+
+fn summarize_style_entry(
+    source: &str,
+    index: usize,
+    entry: &serde_json::Value,
+    include_conditions: bool,
+    include_modifiers: bool,
+) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("source".to_string(), serde_json::Value::String(source.to_string()));
+    obj.insert("index".to_string(), serde_json::json!(index));
+    obj.insert(
+        "name".to_string(),
+        style_entry_name(entry)
+            .map(|s| serde_json::Value::String(s.to_string()))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    obj.insert(
+        "condition_list_count".to_string(),
+        serde_json::json!(entry.get("conditionsList").and_then(|v| v.as_array()).map(Vec::len).unwrap_or(0)),
+    );
+    obj.insert(
+        "modifier_count".to_string(),
+        serde_json::json!(entry.get("modifiers").and_then(|v| v.as_array()).map(Vec::len).unwrap_or(0)),
+    );
+    obj.insert(
+        "transition_count".to_string(),
+        serde_json::json!(entry.get("transitions").and_then(|v| v.as_array()).map(Vec::len).unwrap_or(0)),
+    );
+    if include_conditions {
+        obj.insert("conditions".to_string(), summarize_conditions(entry));
+    }
+    if include_modifiers {
+        obj.insert("modifiers".to_string(), summarize_modifiers(entry));
+    }
+    serde_json::Value::Object(obj)
+}
+
+pub(crate) fn summarize_conditions(entry: &serde_json::Value) -> serde_json::Value {
+    let mut out = Vec::new();
+    if let Some(blocks) = entry.get("conditionsList").and_then(|v| v.as_array()) {
+        for block in blocks {
+            if let Some(conditions) = block.get("conditions").and_then(|v| v.as_array()) {
+                for condition in conditions {
+                    collect_condition_summary(condition, &mut out);
+                }
+            }
+        }
+    }
+    serde_json::Value::Array(out)
+}
+
+fn collect_condition_summary(condition: &serde_json::Value, out: &mut Vec<serde_json::Value>) {
+    let condition_type = condition
+        .get("_Type_")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim_start_matches("BuildingBlocks_StyleSelector");
+    let mut obj = serde_json::Map::new();
+    obj.insert("type".to_string(), serde_json::Value::String(condition_type.to_string()));
+    if let Some(widget_type) = condition.get("type").and_then(|v| v.as_str()) {
+        obj.insert("widget_type".to_string(), serde_json::Value::String(widget_type.to_string()));
+    }
+    if let Some(tag) = condition.get("tag") {
+        obj.insert("tag".to_string(), summarize_tag_ref(tag));
+    }
+    if let Some(tags) = condition.get("tags").and_then(|v| v.as_array()) {
+        obj.insert(
+            "tags".to_string(),
+            serde_json::Value::Array(tags.iter().map(summarize_tag_ref).collect()),
+        );
+    }
+    out.push(serde_json::Value::Object(obj));
+
+    if let Some(children) = condition.get("conditions").and_then(|v| v.as_array()) {
+        for child in children {
+            collect_condition_summary(child, out);
+        }
+    }
+}
+
+fn summarize_tag_ref(tag: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "id": tag.get("_RecordId_").and_then(|v| v.as_str()).or_else(|| tag.as_str()),
+        "name": tag.get("_RecordName_").and_then(|v| v.as_str()),
+    })
+}
+
+pub(crate) fn summarize_modifiers(entry: &serde_json::Value) -> serde_json::Value {
+    let Some(modifiers) = entry.get("modifiers").and_then(|v| v.as_array()) else {
+        return serde_json::Value::Array(Vec::new());
+    };
+    serde_json::Value::Array(
+        modifiers
+            .iter()
+            .map(|modifier| {
+                serde_json::json!({
+                    "type": modifier.get("_Type_").and_then(|v| v.as_str()),
+                    "field": modifier_field_name(modifier),
+                    "value": modifier.get("value"),
+                    "color_token": modifier.get("color").and_then(|c| c.get("color")).and_then(|v| v.as_str()),
+                    "alpha": modifier.get("color").and_then(|c| c.get("alpha")),
+                    "record_value": modifier.get("field").and_then(|f| f.get("value")).and_then(|v| v.as_str()),
+                })
+            })
+            .collect(),
+    )
+}
+
+fn modifier_field_name(modifier: &serde_json::Value) -> Option<String> {
+    modifier
+        .get("field")
+        .and_then(|field| field.as_str().map(str::to_string).or_else(|| {
+            field
+                .get("_Type_")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        }))
+}
+
+/// Walk the live tag database record for `"_Type_": "Tag"` nodes, returning
+/// `(uuid, tagName)` pairs. The database is one `TagDatabase` record with the
+/// full tag tree nested inside (the identity layer behind node `styleTags`
+/// and kit-sheet entry conditions).
+fn load_tag_names(db: &Database<'static>) -> Result<Vec<(String, String)>, String> {
+    let struct_id = db
+        .struct_id("TagDatabase")
+        .ok_or_else(|| "DataCore has no TagDatabase struct".to_string())?;
+    let record = db
+        .records_of_type(struct_id)
+        .next()
+        .ok_or_else(|| "no TagDatabase record".to_string())?;
+    let bytes = starbreaker_datacore::export::to_json(db, record)
+        .map_err(|e| format!("TagDatabase JSON export failed: {e}"))?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("TagDatabase JSON parse failed: {e}"))?;
+    let mut tags = Vec::new();
+    collect_tag_nodes(&json, &mut tags);
+    Ok(tags)
+}
+
+fn collect_tag_nodes(value: &serde_json::Value, out: &mut Vec<(String, String)>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.get("_Type_").and_then(|v| v.as_str()) == Some("Tag") {
+                if let (Some(id), Some(name)) = (
+                    map.get("_RecordId_").and_then(|v| v.as_str()),
+                    map.get("tagName").and_then(|v| v.as_str()),
+                ) {
+                    out.push((id.to_string(), name.to_string()));
+                }
+            }
+            for v in map.values() {
+                collect_tag_nodes(v, out);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for v in items {
+                collect_tag_nodes(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Compact one style-entry condition with tag UUIDs resolved to names
+/// (`Tag(text-element-instance)`, `Ancestor breakConditions[...] ...`).
+fn summarize_tagged_condition(
+    cond: &serde_json::Value,
+    tags: &std::collections::HashMap<String, String>,
+) -> String {
+    let ty = cond
+        .get("_Type_")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .replace("BuildingBlocks_StyleSelectorCondition", "");
+    let tag_name = |id: &str| tags.get(id).cloned().unwrap_or_else(|| format!("{}?", &id[..id.len().min(8)]));
+    let mut parts = Vec::new();
+    let tag_id = cond
+        .get("tag")
+        .and_then(|t| t.get("_RecordId_"))
+        .and_then(|v| v.as_str());
+    match tag_id {
+        Some(id) => parts.push(format!("{ty}({})", tag_name(id))),
+        None => parts.push(ty),
+    }
+    for key in ["breakConditions", "conditions"] {
+        if let Some(items) = cond.get(key).and_then(|v| v.as_array()) {
+            if !items.is_empty() {
+                let inner: Vec<String> = items
+                    .iter()
+                    .map(|c| summarize_tagged_condition(c, tags))
+                    .collect();
+                parts.push(format!("{key}[{}]", inner.join(", ")));
+            }
+        }
+    }
+    if let Some(anyof) = cond.get("tags").and_then(|v| v.as_array()) {
+        if !anyof.is_empty() {
+            let names: Vec<String> = anyof
+                .iter()
+                .filter_map(|t| t.get("_RecordId_").and_then(|v| v.as_str()))
+                .map(tag_name)
+                .collect();
+            parts.push(format!("anyOf[{}]", names.join(", ")));
+        }
+    }
+    parts.join(" ")
+}
+
+/// Compact one style-entry modifier: `Field = ColorStyle:<role> a=<alpha>`,
+/// `Field = ColorSolid rgba(...)`, or `Field = <value>`.
+fn summarize_typed_modifier(modifier: &serde_json::Value) -> String {
+    let field = modifier.get("field").and_then(|v| v.as_str()).unwrap_or("?");
+    if let Some(colour) = modifier.get("color") {
+        if colour.get("_Type_").and_then(|v| v.as_str()) == Some("BuildingBlocks_ColorStyle") {
+            return format!(
+                "{field} = ColorStyle:{} a={}",
+                colour.get("color").and_then(|v| v.as_str()).unwrap_or("?"),
+                colour.get("alpha").and_then(|v| v.as_f64()).unwrap_or(1.0)
+            );
+        }
+        if let Some(inner) = colour.get("color") {
+            if inner.get("_Type_").and_then(|v| v.as_str()) == Some("SRGBA8") {
+                return format!(
+                    "{field} = ColorSolid rgba({},{},{},{})",
+                    inner.get("r").and_then(|v| v.as_u64()).unwrap_or(0),
+                    inner.get("g").and_then(|v| v.as_u64()).unwrap_or(0),
+                    inner.get("b").and_then(|v| v.as_u64()).unwrap_or(0),
+                    inner.get("a").and_then(|v| v.as_u64()).unwrap_or(0)
+                );
+            }
+        }
+        return format!("{field} = {}", serde_json::to_string(colour).unwrap_or_default());
+    }
+    format!(
+        "{field} = {}",
+        serde_json::to_string(modifier.get("value").unwrap_or(&serde_json::Value::Null))
+            .unwrap_or_default()
+    )
+}
+
 #[tool_router]
 impl StarBreakerMcp {
     #[tool(description = "Return the currently active Data.p4k path used by StarBreaker MCP tools.")]
@@ -456,6 +1218,744 @@ impl StarBreakerMcp {
             "p4k_path": data.p4k_path,
             "entries": data.p4k.entries().len(),
             "datacore_bytes": data.dcb_bytes.len(),
+        }))
+        .unwrap_or_else(|e| format!("JSON error: {e}"))
+    }
+
+    #[tool(description = "Inspect UI regression targets by reconciling manifest and freeze metadata. Returns deterministic JSON with target ids, tiers, source paths, freeze hash presence, and status (`matched`, `in_manifest_only`, `in_freeze_only`).")]
+    fn ui_regression_registry(&self, Parameters(req): Parameters<UiRegressionRegistryRequest>) -> String {
+        fn error_json(code: &str, message: String) -> String {
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "error_code": code,
+                "message": message,
+            }))
+            .unwrap_or_else(|_| format!("{{\"error_code\":\"{code}\"}}"))
+        }
+
+        fn as_array<'a>(root: &'a serde_json::Value, key: &str) -> Result<&'a Vec<serde_json::Value>, String> {
+            root.get(key)
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| format!("missing or invalid '{key}' array"))
+        }
+
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".."));
+
+        let manifest_rel = req
+            .manifest_path
+            .unwrap_or_else(|| "crates/starbreaker-ui/tests/fixtures/ui_ir/ui_snapshot_manifest.json".to_string());
+        let freeze_rel = req
+            .freeze_path
+            .unwrap_or_else(|| "crates/starbreaker-ui/tests/fixtures/ui_regression_freeze.json".to_string());
+
+        let resolve = |path: &str| -> PathBuf {
+            let p = Path::new(path);
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                repo_root.join(p)
+            }
+        };
+
+        let manifest_path = resolve(&manifest_rel);
+        let freeze_path = resolve(&freeze_rel);
+
+        let manifest_raw = match std::fs::read_to_string(&manifest_path) {
+            Ok(s) => s,
+            Err(e) => {
+                return error_json(
+                    "manifest_read_failed",
+                    format!("failed to read manifest '{}': {e}", manifest_path.display()),
+                )
+            }
+        };
+        let freeze_raw = match std::fs::read_to_string(&freeze_path) {
+            Ok(s) => s,
+            Err(e) => {
+                return error_json(
+                    "freeze_read_failed",
+                    format!("failed to read freeze '{}': {e}", freeze_path.display()),
+                )
+            }
+        };
+
+        let manifest_json: serde_json::Value = match serde_json::from_str(&manifest_raw) {
+            Ok(v) => v,
+            Err(e) => {
+                return error_json(
+                    "manifest_parse_failed",
+                    format!("failed to parse manifest '{}': {e}", manifest_path.display()),
+                )
+            }
+        };
+        let freeze_json: serde_json::Value = match serde_json::from_str(&freeze_raw) {
+            Ok(v) => v,
+            Err(e) => {
+                return error_json(
+                    "freeze_parse_failed",
+                    format!("failed to parse freeze '{}': {e}", freeze_path.display()),
+                )
+            }
+        };
+
+        let manifest_schema = manifest_json.get("schema_version").and_then(|v| v.as_u64());
+        let freeze_schema = freeze_json.get("schema_version").and_then(|v| v.as_u64());
+        if manifest_schema != Some(1) || freeze_schema != Some(1) || manifest_schema != freeze_schema {
+            return error_json(
+                "schema_mismatch",
+                format!(
+                    "manifest/freeze schema mismatch: manifest={manifest_schema:?} freeze={freeze_schema:?}; expected both to be 1"
+                ),
+            );
+        }
+
+        let targets = match as_array(&manifest_json, "targets") {
+            Ok(v) => v,
+            Err(msg) => return error_json("manifest_invalid", msg),
+        };
+        let artifacts = match as_array(&freeze_json, "artifacts") {
+            Ok(v) => v,
+            Err(msg) => return error_json("freeze_invalid", msg),
+        };
+
+        let mut manifest_map: std::collections::BTreeMap<String, serde_json::Value> =
+            std::collections::BTreeMap::new();
+        for target in targets {
+            let Some(id) = target.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            manifest_map.insert(id.to_string(), target.clone());
+        }
+
+        let mut freeze_map: std::collections::BTreeMap<String, serde_json::Value> =
+            std::collections::BTreeMap::new();
+        for artifact in artifacts {
+            let Some(id) = artifact.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            freeze_map.insert(id.to_string(), artifact.clone());
+        }
+
+        let filter = req.target_filter.map(|s| s.to_ascii_lowercase());
+        let mut all_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        all_ids.extend(manifest_map.keys().cloned());
+        all_ids.extend(freeze_map.keys().cloned());
+
+        let mut rows = Vec::new();
+        let mut matched = 0usize;
+        let mut in_manifest_only = 0usize;
+        let mut in_freeze_only = 0usize;
+
+        for id in all_ids {
+            if let Some(ref needle) = filter {
+                if !id.to_ascii_lowercase().contains(needle) {
+                    continue;
+                }
+            }
+
+            let manifest_target = manifest_map.get(&id);
+            let freeze_target = freeze_map.get(&id);
+
+            let status = match (manifest_target, freeze_target) {
+                (Some(_), Some(_)) => {
+                    matched += 1;
+                    "matched"
+                }
+                (Some(_), None) => {
+                    in_manifest_only += 1;
+                    "in_manifest_only"
+                }
+                (None, Some(_)) => {
+                    in_freeze_only += 1;
+                    "in_freeze_only"
+                }
+                (None, None) => continue,
+            };
+
+            let manifest_tier = manifest_target
+                .and_then(|v| v.get("tier"))
+                .and_then(|v| v.as_str());
+            let freeze_tier = freeze_target
+                .and_then(|v| v.get("tier"))
+                .and_then(|v| v.as_str());
+            let source_generated_png = manifest_target
+                .and_then(|v| v.get("source_generated_png"))
+                .and_then(|v| v.as_str())
+                .or_else(|| freeze_target.and_then(|v| v.get("source_generated_png")).and_then(|v| v.as_str()));
+            let freeze_hash = freeze_target
+                .and_then(|v| v.get("sha256"))
+                .and_then(|v| v.as_str());
+
+            rows.push(serde_json::json!({
+                "id": id,
+                "status": status,
+                "manifest_tier": manifest_tier,
+                "freeze_tier": freeze_tier,
+                "tier_mismatch": manifest_tier.is_some() && freeze_tier.is_some() && manifest_tier != freeze_tier,
+                "source_generated_png": source_generated_png,
+                "freeze_hash": freeze_hash,
+                "has_freeze_hash": freeze_hash.is_some(),
+            }));
+        }
+
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "manifest_path": manifest_path,
+            "freeze_path": freeze_path,
+            "summary": {
+                "total_targets": rows.len(),
+                "matched": matched,
+                "in_manifest_only": in_manifest_only,
+                "in_freeze_only": in_freeze_only,
+            },
+            "targets": rows,
+        }))
+        .unwrap_or_else(|e| format!("JSON error: {e}"))
+    }
+
+    #[tool(description = "Run UI regression baseline integrity validation (quick/full) and return structured JSON output including pass/fail status, exit code, and captured stdout/stderr.")]
+    fn ui_regression_validate(&self, Parameters(req): Parameters<UiRegressionValidateRequest>) -> String {
+        fn error_json(code: &str, message: String) -> String {
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": 1,
+                "error_code": code,
+                "message": message,
+            }))
+            .unwrap_or_else(|_| format!("{{\"error_code\":\"{code}\"}}"))
+        }
+
+        let mode = req
+            .mode
+            .unwrap_or_else(|| "quick".to_string())
+            .to_ascii_lowercase();
+        let mode_flag = match mode.as_str() {
+            "quick" => "--quick",
+            "full" => "--full",
+            _ => {
+                return error_json(
+                    "invalid_mode",
+                    format!("invalid mode '{mode}' (expected 'quick' or 'full')"),
+                )
+            }
+        };
+
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".."));
+        let script_path = repo_root.join("scripts/validate_ui_regression_artifacts.sh");
+        if !script_path.is_file() {
+            return error_json(
+                "validator_missing",
+                format!("validator script not found: {}", script_path.display()),
+            );
+        }
+
+        let default_manifest = "crates/starbreaker-ui/tests/fixtures/ui_ir/ui_snapshot_manifest.json".to_string();
+        let default_freeze = "crates/starbreaker-ui/tests/fixtures/ui_regression_freeze.json".to_string();
+
+        let resolve = |path: &str| -> PathBuf {
+            let p = Path::new(path);
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                repo_root.join(p)
+            }
+        };
+
+        let manifest_path = resolve(req.manifest_path.as_deref().unwrap_or(&default_manifest));
+        let freeze_path = resolve(req.freeze_path.as_deref().unwrap_or(&default_freeze));
+
+        let output = std::process::Command::new("bash")
+            .arg(&script_path)
+            .arg(mode_flag)
+            .env("UI_REGRESSION_MANIFEST_PATH", &manifest_path)
+            .env("UI_REGRESSION_FREEZE_PATH", &freeze_path)
+            .current_dir(&repo_root)
+            .output();
+
+        let output = match output {
+            Ok(out) => out,
+            Err(e) => return error_json("validator_exec_failed", format!("failed to execute validator: {e}")),
+        };
+
+        let exit_code = output.status.code().unwrap_or(-1);
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "mode": mode,
+            "manifest_path": manifest_path,
+            "freeze_path": freeze_path,
+            "passed": output.status.success(),
+            "exit_code": exit_code,
+            "stdout": stdout,
+            "stderr": stderr,
+            "error_code": if output.status.success() { serde_json::Value::Null } else { serde_json::Value::String("validation_failed".to_string()) },
+        }))
+        .unwrap_or_else(|e| format!("JSON error: {e}"))
+    }
+
+    #[tool(description = "Inspect authored BuildingBlocks style containers for a local decompiled UI canvas. Returns embedded/default/brand/inline style-entry summaries, including conditions and modifiers, so UI matching can find the actual source style bundle before editing code.")]
+    fn ui_canvas_style_inventory(&self, Parameters(req): Parameters<UiCanvasStyleInventoryRequest>) -> String {
+        let canvas_fetcher = match P4kCanvasFetcher::new(&self.data()) {
+            Ok(f) => f,
+            Err(e) => return mcp_error_json("canvas_fetcher_init_failed", e),
+        };
+        let canvas = match canvas_fetcher.fetch_canvas_json(&req.canvas) {
+            Ok(c) => c,
+            Err(e) => return mcp_error_json("canvas_not_found", format!("{e}")),
+        };
+        let record_value = canvas.get("_RecordValue_").unwrap_or(&canvas);
+        let include_conditions = req.include_conditions.unwrap_or(true);
+        let include_modifiers = req.include_modifiers.unwrap_or(true);
+        let limit = req.limit.unwrap_or(200).max(1) as usize;
+        let filter = req.entry_filter.map(|s| s.to_ascii_lowercase());
+
+        let mut containers = Vec::new();
+        let mut entries = Vec::new();
+        let mut push_entries = |source: String, maybe_entries: Option<&Vec<serde_json::Value>>| {
+            let count = maybe_entries.map(Vec::len).unwrap_or(0);
+            containers.push(serde_json::json!({
+                "source": source,
+                "entry_count": count,
+            }));
+            let Some(style_entries) = maybe_entries else {
+                return;
+            };
+            for (idx, entry) in style_entries.iter().enumerate() {
+                if entries.len() >= limit {
+                    return;
+                }
+                if let Some(ref needle) = filter {
+                    let name = style_entry_name(entry).unwrap_or("").to_ascii_lowercase();
+                    if !name.contains(needle) {
+                        continue;
+                    }
+                }
+                entries.push(summarize_style_entry(
+                    containers.last().and_then(|c| c.get("source")).and_then(|v| v.as_str()).unwrap_or("?"),
+                    idx,
+                    entry,
+                    include_conditions,
+                    include_modifiers,
+                ));
+            }
+        };
+
+        push_entries(
+            "embeddedStyles".to_string(),
+            record_value.get("embeddedStyles").and_then(|v| v.as_array()),
+        );
+        push_entries(
+            "defaultStyles.entries".to_string(),
+            record_value
+                .get("defaultStyles")
+                .and_then(|v| v.get("entries"))
+                .and_then(|v| v.as_array()),
+        );
+        if let Some(brand_styles) = record_value.get("brandStyles").and_then(|v| v.as_array()) {
+            for (idx, brand) in brand_styles.iter().enumerate() {
+                let source = brand_style_label(brand, idx);
+                push_entries(source, brand.get("entries").and_then(|v| v.as_array()));
+            }
+        }
+
+        let mut inline_style_nodes = Vec::new();
+        if let Some(scene_nodes) = record_value.get("scene").and_then(|v| v.as_array()) {
+            for (scene_idx, node) in scene_nodes.iter().enumerate() {
+                let Some(inline_entries) = node.get("inlineStyles").and_then(|v| v.as_array()) else {
+                    continue;
+                };
+                if inline_entries.is_empty() {
+                    continue;
+                }
+                let source = format!(
+                    "scene[{scene_idx}].inlineStyles {}",
+                    node.get("name").and_then(|v| v.as_str()).unwrap_or("<unnamed>")
+                );
+                inline_style_nodes.push(serde_json::json!({
+                    "scene_index": scene_idx,
+                    "name": node.get("name").and_then(|v| v.as_str()),
+                    "pointer": node.get("_Pointer_").and_then(|v| v.as_str()),
+                    "parent": node.get("parent").and_then(|v| v.as_str()),
+                    "entry_count": inline_entries.len(),
+                }));
+                push_entries(source, Some(inline_entries));
+            }
+        }
+
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "canvas": {
+                "record_name": canvas.get("_RecordName_").and_then(|v| v.as_str()),
+                "record_id": canvas.get("_RecordId_").and_then(|v| v.as_str()),
+                "style_field": record_value.get("style"),
+            },
+            "containers": containers,
+            "inline_style_nodes": inline_style_nodes,
+            "returned_entry_count": entries.len(),
+            "entry_limit": limit,
+            "entries": entries,
+        }))
+        .unwrap_or_else(|e| format!("JSON error: {e}"))
+    }
+
+    /// Shared loader: fetch a canvas by GUID/name and resolve its
+    /// BuildingBlocks scene graph (manufacturer-selected brand styles applied).
+    /// Returns the fetched canvas JSON and the owned resolved scene; on failure
+    /// returns the ready-to-emit mcp_error_json string. Shared by
+    /// ui_scene_style_probe and ui_variant_styles.
+    pub(crate) fn resolve_scene_for_canvas(
+        &self,
+        canvas_id: &str,
+        manufacturer: Option<&str>,
+    ) -> Result<(serde_json::Value, starbreaker_ui::bb_scene::BbScene), String> {
+        let canvas_fetcher = P4kCanvasFetcher::new(&self.data())
+            .map_err(|e| mcp_error_json("canvas_fetcher_init_failed", e))?;
+        let canvas = canvas_fetcher
+            .fetch_canvas_json(canvas_id)
+            .map_err(|e| mcp_error_json("canvas_not_found", format!("{e}")))?;
+        let fetch = |path: &str| {
+            canvas_fetcher
+                .fetch_canvas_by_name(path)
+                .map_err(|e| e.to_string())
+        };
+        let scene = starbreaker_ui::bb_resolve::resolve_canvas_graph_with_loc(
+            &canvas,
+            manufacturer,
+            &fetch,
+            None,
+        )
+        .map_err(|e| mcp_error_json("scene_resolve_failed", e))?;
+        Ok((canvas, scene))
+    }
+
+    #[tool(description = "Authored-vs-applied style drill: for a canvas + node-name/text query, list each matched node's AUTHORED style entries per tier (defaultStyles, manufacturer brand, canvas embeddedStyles — including bare Type(Text) selectors) that MATCH the node, each with {tier, name, selector, fields, applied}. `applied` = the entry's modifiers actually ran on the node (membership in the resolved __AppliedStyleEntries), so an authored-but-UNAPPLIED font/colour (e.g. a defaultStyles FontSize a brand supersedes) shows applied:false. Run this FIRST when a font/size/colour looks wrong.")]
+    fn ui_variant_styles(
+        &self,
+        Parameters(req): Parameters<crate::ui_variant_styles::UiVariantStylesRequest>,
+    ) -> String {
+        crate::ui_variant_styles::ui_variant_styles_impl(self, req)
+    }
+
+    #[tool(description = "Resolve a local decompiled BuildingBlocks canvas and list matching scene nodes with style tags, raw color/tint fields, and applied style-entry names. Use this before changing UI style code to prove which authored styles actually matched.")]
+    fn ui_scene_style_probe(&self, Parameters(req): Parameters<UiSceneStyleProbeRequest>) -> String {
+        let manufacturer = req.manufacturer.as_deref();
+        let (canvas, scene) = match self.resolve_scene_for_canvas(&req.canvas, manufacturer) {
+            Ok(v) => v,
+            Err(json) => return json,
+        };
+
+        let query = req.query.to_ascii_lowercase();
+        let limit = req.limit.unwrap_or(80).max(1) as usize;
+        let mut nodes = Vec::new();
+        for node in scene.nodes.values() {
+            let node_type = format!("{:?}", node.ty);
+            let text = node.text.as_ref().map(|text| text.string.clone()).unwrap_or_default();
+            let haystack = format!("{} {} {}", node.name, node_type, text).to_ascii_lowercase();
+            if !haystack.contains(&query) {
+                continue;
+            }
+            if nodes.len() >= limit {
+                break;
+            }
+            let applied_entries: Vec<_> = node
+                .raw
+                .get("__AppliedStyleEntries")
+                .and_then(|v| v.as_array())
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .map(|entry| {
+                            serde_json::json!({
+                                "name": style_entry_name(entry),
+                                "modifier_count": entry.get("modifiers").and_then(|v| v.as_array()).map(Vec::len).unwrap_or(0),
+                                "modifiers": summarize_modifiers(entry),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            nodes.push(serde_json::json!({
+                "id": node.id,
+                "parent": node.parent,
+                "children": node.children,
+                "name": node.name,
+                "type": node_type,
+                "is_active": node.is_active,
+                "alpha": node.alpha,
+                "style_tag_uuids": node.style_tag_uuids,
+                "text": text,
+                "primary_state_tag": node.raw.get("PrimaryStateTag"),
+                "colour_fields": compact_colour_fields(&node.raw),
+                "applied_style_entries": applied_entries,
+            }));
+        }
+
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "canvas": {
+                "record_name": canvas.get("_RecordName_").and_then(|v| v.as_str()),
+                "record_id": canvas.get("_RecordId_").and_then(|v| v.as_str()),
+            },
+            "manufacturer": manufacturer,
+            "query": req.query,
+            "matched_node_count": nodes.len(),
+            "node_limit": limit,
+            "nodes": nodes,
+        }))
+        .unwrap_or_else(|e| format!("JSON error: {e}"))
+    }
+
+    #[tool(description = "Resolve UI style-tag identity against the live tag database: a UUID (or prefix) returns its tag name; a name substring returns matching tags. Tags are the identity layer behind node styleTags and kit-sheet entry conditions.")]
+    fn ui_tag_lookup(&self, Parameters(req): Parameters<UiTagLookupRequest>) -> String {
+        let tags = match load_tag_names(&self.data().db) {
+            Ok(t) => t,
+            Err(e) => return mcp_error_json("tag_database_unavailable", e),
+        };
+        let query = req.query.to_ascii_lowercase();
+        let limit = req.limit.unwrap_or(40).max(1) as usize;
+        let mut matches: Vec<(String, String)> = tags
+            .into_iter()
+            .filter(|(id, name)| {
+                id.to_ascii_lowercase().starts_with(&query)
+                    || name.to_ascii_lowercase().contains(&query)
+            })
+            .collect();
+        matches.sort_by(|a, b| a.1.cmp(&b.1));
+        let total = matches.len();
+        matches.truncate(limit);
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "query": req.query,
+            "matched": total,
+            "returned": matches.len(),
+            "tags": matches
+                .into_iter()
+                .map(|(uuid, tag_name)| serde_json::json!({"uuid": uuid, "tag_name": tag_name}))
+                .collect::<Vec<_>>(),
+        }))
+        .unwrap_or_else(|e| format!("JSON error: {e}"))
+    }
+
+    #[tool(description = "Dump a BuildingBlocks_Style record's entries (modular-kit component sheets like sk_uilo_a_buttonprimarystyles included) with tag-NAME-resolved conditions and compact modifier values (ColorStyle roles / ColorSolid RGBA). MCP-native form of scripts/ui_canvas_query.py entries.")]
+    fn ui_kit_sheet_entries(&self, Parameters(req): Parameters<UiKitSheetEntriesRequest>) -> String {
+        let data = self.data();
+        let db = &data.db;
+        let Some(style_struct_id) = db.struct_id("BuildingBlocks_Style") else {
+            return mcp_error_json(
+                "style_struct_missing",
+                "DataCore has no BuildingBlocks_Style struct".to_string(),
+            );
+        };
+        let search = req.record.to_lowercase();
+        let mut candidates: Vec<_> = db
+            .records_of_type(style_struct_id)
+            .filter(|r| {
+                db.resolve_string2(r.name_offset).to_lowercase().contains(&search)
+                    || format!("{}", r.id) == req.record
+            })
+            .collect();
+        candidates.sort_by_key(|r| db.resolve_string2(r.name_offset).len());
+        let Some(record) = candidates.first() else {
+            return mcp_error_json(
+                "style_record_not_found",
+                format!("no BuildingBlocks_Style record matching '{}'", req.record),
+            );
+        };
+        let record_name = db.resolve_string2(record.name_offset).to_string();
+        let json = match starbreaker_datacore::export::to_json(db, record)
+            .map_err(|e| format!("record JSON export failed: {e}"))
+            .and_then(|bytes| {
+                serde_json::from_slice::<serde_json::Value>(&bytes)
+                    .map_err(|e| format!("record JSON parse failed: {e}"))
+            }) {
+            Ok(v) => v,
+            Err(e) => return mcp_error_json("record_export_failed", e),
+        };
+        let record_value = json.get("_RecordValue_").unwrap_or(&json);
+        let tag_names: std::collections::HashMap<String, String> =
+            load_tag_names(db).unwrap_or_default().into_iter().collect();
+        let filter = req.entry_filter.map(|s| s.to_ascii_lowercase());
+        let limit = req.limit.unwrap_or(100).max(1) as usize;
+        let all_entries = record_value
+            .get("entries")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut entries = Vec::new();
+        for entry in &all_entries {
+            if entries.len() >= limit {
+                break;
+            }
+            let name = entry.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+            if let Some(ref needle) = filter {
+                if !name.to_ascii_lowercase().contains(needle) {
+                    continue;
+                }
+            }
+            let mut conditions = Vec::new();
+            for list in entry
+                .get("conditionsList")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+            {
+                for cond in list.get("conditions").and_then(|v| v.as_array()).into_iter().flatten() {
+                    conditions.push(summarize_tagged_condition(cond, &tag_names));
+                }
+            }
+            let modifiers: Vec<String> = entry
+                .get("modifiers")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+                .map(summarize_typed_modifier)
+                .collect();
+            entries.push(serde_json::json!({
+                "name": name,
+                "when": conditions.join(" AND "),
+                "modifiers": modifiers,
+            }));
+        }
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "record_name": record_name,
+            "record_id": format!("{}", record.id),
+            "entry_count": all_entries.len(),
+            "returned": entries.len(),
+            "entries": entries,
+        }))
+        .unwrap_or_else(|e| format!("JSON error: {e}"))
+    }
+
+    #[tool(description = "Compile a local decompiled UI canvas to canonical IR and return matching nodes with layout rects, draw rects, text bounds, style tags, and resolved color/tint tokens. This is the MCP-native form of query_ui_layout for UI matching.")]
+    fn ui_ir_query(&self, Parameters(req): Parameters<UiIrQueryRequest>) -> String {
+        let canvas_fetcher = match P4kCanvasFetcher::new(&self.data()) {
+            Ok(f) => f,
+            Err(e) => return mcp_error_json("canvas_fetcher_init_failed", e),
+        };
+        // Note: the pipeline re-fetches the canvas via canvas_fetcher internally,
+        // so we don't need to keep the local `canvas` variable here.
+        let _canvas = match canvas_fetcher.fetch_canvas_json(&req.canvas_guid) {
+            Ok(c) => c,
+            Err(e) => return mcp_error_json("canvas_not_found", format!("{e}")),
+        };
+        let style_fetcher = match P4kStyleFetcher::new(&self.data()) {
+            Ok(f) => f,
+            Err(e) => return mcp_error_json("style_fetcher_init_failed", e),
+        };
+        let swf_fetcher = P4kSwfFetcher::new(&self.data());
+        let asset_fetcher = P4kAssetFetcher::new(&self.data());
+        let manufacturer = req.manufacturer.unwrap_or_else(|| "drak".to_string());
+        let helper = req.helper.unwrap_or_else(|| "mcp-ui-query".to_string());
+        let width = req.width.unwrap_or(1920);
+        let height = req.height.unwrap_or(1080);
+        let content_guid = req.content_guid.unwrap_or_else(|| req.canvas_guid.clone());
+        let binding = starbreaker_ui::UiBindingView {
+            canvas_guid: Some(req.canvas_guid.as_str()),
+            content_canvas_guid: Some(content_guid.as_str()),
+            binding_kind: Some("mfd"),
+            manufacturer_id: Some(manufacturer.as_str()),
+            helper_name: Some(helper.as_str()),
+            default_view_index: None,
+            default_screen_slot: None,
+            screen_name_loc_key: None,
+            transit_location_loc_key: None,
+        host_swf_path: None,
+        screen_aspect_w_over_h: None,
+        };
+        let inputs = starbreaker_ui::PipelineInputs {
+            binding: &binding,
+            canvas_fetcher: &canvas_fetcher,
+            swf_fetcher: &swf_fetcher,
+            style_fetcher: &style_fetcher,
+            asset_fetcher: &asset_fetcher,
+            target_size: (width, height),
+            apply_postprocess: false,
+            animation_sample_percent: None,
+            localization_map: None,
+            loc_fetcher: None,
+            derived_values: None,
+            hologram_fetcher: None,
+        };
+        let ir = match starbreaker_ui::compile_ir_for_binding(&inputs) {
+            Ok(ir) => ir,
+            Err(e) => return mcp_error_json("ir_compile_failed", format!("{e}")),
+        };
+
+        let query = req.query.to_ascii_lowercase();
+        let limit = req.limit.unwrap_or(80).max(1) as usize;
+        let mut nodes = Vec::new();
+        for node in &ir.nodes {
+            let haystack = format!("{} {}", node.name, node.node_type).to_ascii_lowercase();
+            if !haystack.contains(&query) {
+                continue;
+            }
+            if nodes.len() >= limit {
+                break;
+            }
+            let draw_rect = starbreaker_ui::ir_compose::debug_node_draw_rect(node, &ir);
+            let text_rects = starbreaker_ui::ir_compose::debug_text_rects(node).map(|rects| {
+                serde_json::json!({
+                    "primary": bb_rect_json(rects.primary),
+                    "primary_text_origin": rects.primary_text_origin,
+                    "secondary": rects.secondary.map(bb_rect_json),
+                    "secondary_text_origin": rects.secondary_text_origin,
+                })
+            });
+            let text_bounds = starbreaker_ui::ir_compose::debug_text_drawn_bounds(node).map(|bounds| {
+                serde_json::json!({
+                    "primary": bb_rect_json(bounds.primary),
+                    "secondary": bounds.secondary.map(bb_rect_json),
+                })
+            });
+            nodes.push(serde_json::json!({
+                "id": node.id,
+                "parent": node.parent_id,
+                "children": node.children,
+                "name": node.name,
+                "type": node.node_type,
+                "is_active": node.is_active,
+                "alpha": node.alpha,
+                "computed_rect": ui_rect_json(node.computed_rect),
+                "draw_rect": bb_rect_json(draw_rect),
+                "background_fill_colour": node.background_fill_colour,
+                "background_fill_colour_token": node.background_fill_colour_token,
+                "stroke_colour": node.stroke_colour,
+                "stroke_colour_token": node.stroke_colour_token,
+                "icon_tint_colour": node.icon_tint_colour,
+                "icon_tint_colour_token": node.icon_tint_colour_token,
+                "text_payload": node.text_payload,
+                "text_colour": node.text_style.as_ref().and_then(|style| style.colour),
+                "text_colour_token": node.text_style.as_ref().and_then(|style| style.colour_token.clone()),
+                "text_style": node.text_style,
+                "text_rects": text_rects,
+                "text_drawn_bounds": text_bounds,
+                "asset_ref": node.asset_ref,
+                "custom_shape": node.custom_shape,
+                "style_tag_uuids": node.style_tag_uuids,
+                "resolved_style_tags": node.resolved_style_tags,
+            }));
+        }
+
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "canvas_guid": req.canvas_guid,
+            "content_guid": content_guid,
+            "manufacturer": manufacturer,
+            "target_size": { "width": width, "height": height },
+            "selected_style_source": ir.selected_style_source,
+            "renderer_hint": ir.renderer_hint,
+            "query": req.query,
+            "matched_node_count": nodes.len(),
+            "node_limit": limit,
+            "nodes": nodes,
         }))
         .unwrap_or_else(|e| format!("JSON error: {e}"))
     }
@@ -480,8 +1980,7 @@ impl StarBreakerMcp {
     #[tool(description = "Search DataCore for entity records by name substring. Returns JSON array of matches sorted by name length (best match first).")]
     fn search_entities(&self, Parameters(req): Parameters<SearchEntitiesRequest>) -> String {
         let data = self.data();
-        let db = starbreaker_datacore::database::Database::from_bytes(&data.dcb_bytes)
-            .expect("DataCore bytes validated at load");
+        let db = &data.db;
         let limit = req.limit.unwrap_or(20) as usize;
         let search = req.query.to_lowercase();
 
@@ -522,8 +2021,7 @@ impl StarBreakerMcp {
     #[tool(description = "Dump the resolved loadout tree for an entity. This is PROCESSED output from StarBreaker's loadout resolver — it resolves entityClassName references and queries geometry paths. For raw DataCore data, use datacore_query with path 'Components[SEntityComponentDefaultLoadoutParams]' instead.")]
     fn entity_loadout(&self, Parameters(req): Parameters<EntityLoadoutRequest>) -> String {
         let data = self.data();
-        let db = starbreaker_datacore::database::Database::from_bytes(&data.dcb_bytes)
-            .expect("DataCore bytes validated at load");
+        let db = &data.db;
         let record = match self.find_entity(&db, &req.name) {
             Some(r) => r,
             None => return format!("No entity found matching '{}'", req.name),
@@ -540,8 +2038,7 @@ impl StarBreakerMcp {
     #[tool(description = "Dump a full DataCore record as pretty-printed JSON. Accepts a GUID or a name substring (uses shortest match).")]
     fn datacore_record(&self, Parameters(req): Parameters<DatacoreRecordRequest>) -> String {
         let data = self.data();
-        let db = starbreaker_datacore::database::Database::from_bytes(&data.dcb_bytes)
-            .expect("DataCore bytes validated at load");
+        let db = &data.db;
 
         let record = match self.find_record(&db, &req.id) {
             Some(r) => r,
@@ -555,11 +2052,10 @@ impl StarBreakerMcp {
         }
     }
 
-    #[tool(description = "Query a specific property path on a DataCore record. Returns the JSON value at that path. Example paths: 'Components[VehicleComponentParams].vehicleDefinition', 'Components[SGeometryResourceParams].Geometry.Geometry.Geometry.path'")]
+    #[tool(description = "Query a specific property path on a DataCore record. Returns JSON at that path using bounded no-reference materialization, so broad object/array queries fail fast instead of expanding the whole graph. Example paths: 'Components[VehicleComponentParams].vehicleDefinition', 'Components[SGeometryResourceParams].Geometry.Geometry.Geometry.path'")]
     fn datacore_query(&self, Parameters(req): Parameters<DatacoreQueryRequest>) -> String {
         let data = self.data();
-        let db = starbreaker_datacore::database::Database::from_bytes(&data.dcb_bytes)
-            .expect("DataCore bytes validated at load");
+        let db = &data.db;
 
         let record = match self.find_record(&db, &req.id) {
             Some(r) => r,
@@ -574,10 +2070,24 @@ impl StarBreakerMcp {
             Err(e) => return format!("Invalid path '{}': {e}", req.path),
         };
 
-        match db.query::<starbreaker_datacore::query::value::Value>(&compiled, record) {
+        match db.query_no_references(&compiled, record) {
             Ok(results) => {
-                let json_values: Vec<serde_json::Value> =
-                    results.iter().map(value_to_json).collect();
+                if results.len() > MAX_DATACORE_QUERY_RESULTS {
+                    return format!(
+                        "Query result too large: {} top-level values matched (limit {}). Narrow the path before retrying.",
+                        results.len(),
+                        MAX_DATACORE_QUERY_RESULTS
+                    );
+                }
+                let mut budget = JsonBudget::new();
+                let json_values: Result<Vec<serde_json::Value>, String> = results
+                    .iter()
+                    .map(|value| value_to_json_limited(value, 0, &mut budget))
+                    .collect();
+                let json_values = match json_values {
+                    Ok(values) => values,
+                    Err(err) => return err,
+                };
                 if json_values.len() == 1 {
                     serde_json::to_string_pretty(&json_values[0])
                         .unwrap_or_else(|e| format!("JSON error: {e}"))
@@ -650,8 +2160,7 @@ impl StarBreakerMcp {
     #[tool(description = "Search all DataCore records by name substring. Unlike search_entities which only searches EntityClassDefinition records, this searches ALL record types. Optionally filter by struct type.")]
     fn search_records(&self, Parameters(req): Parameters<SearchRecordsRequest>) -> String {
         let data = self.data();
-        let db = starbreaker_datacore::database::Database::from_bytes(&data.dcb_bytes)
-            .expect("DataCore bytes validated at load");
+        let db = &data.db;
         let limit = req.limit.unwrap_or(20) as usize;
         let search = req.query.to_lowercase();
 
@@ -694,7 +2203,7 @@ impl StarBreakerMcp {
     }
 
     #[tool(description = "Preview an image from the P4k archive. Supports DDS (with mip selection), PNG, JPG, and other formats. Returns the image for visual inspection. For DDS files, .tif extension is auto-converted to .dds.")]
-    fn image_preview(&self, Parameters(req): Parameters<ImagePreviewRequest>) -> rmcp::model::Content {
+    fn image_preview(&self, Parameters(req): Parameters<ImagePreviewRequest>) -> rmcp::model::ContentBlock {
         let data = match self.read_p4k_file(&req.path) {
             Ok(d) => d,
             Err(e) => return content_text(e),
@@ -1213,11 +2722,111 @@ impl StarBreakerMcp {
         }
     }
 
+    #[tool(description = "Report-only animation binding diagnostic for debugging why exported animation clips fail to bind in Blender. Scans a local folder of exported animation JSON sidecars (animation_folder, e.g. '<package>/animations') and cross-references every CAF/DBA track hash against node names recovered from source rigs: .cga/.cgam NMC nodes, .meshsetup joints, .chrparams references, and an optional .glb. Source files accept P4k paths (Data\\ prefix optional) OR absolute filesystem paths; CryXMLB .meshsetup/.chrparams are auto-decoded. Returns JSON: per-clip source_node_name coverage, the list of unresolved track hashes, and per-hash candidate name matches so you can see which rig owns each hash. Never mutates sidecars or guesses bindings. Set markdown=true for a readable summary. Typical use: set cga to a component .cga (e.g. a door) to discover which rig owns an unresolved track, or to the exterior hull .cga to confirm which tracks the hull does NOT own.")]
+    fn animation_binding_report(
+        &self,
+        Parameters(req): Parameters<AnimationBindingReportRequest>,
+    ) -> String {
+        use starbreaker_3d::animation::binding_report as report;
+
+        let mut names = report::NameSources::default();
+        let mut source_reports = Vec::<serde_json::Value>::new();
+
+        // .cga / .cgam: raw bytes parsed directly for NMC/rig node names.
+        for (path, label) in [(req.cga.as_deref(), "cga"), (req.cgam.as_deref(), "cgam")] {
+            if let Some(path) = path {
+                match self.read_p4k_or_disk(path) {
+                    Ok(data) => {
+                        source_reports.push(report::rig_source_report(&data, label, path, &mut names))
+                    }
+                    Err(e) => return format!("Failed to read {label} '{path}': {e}"),
+                }
+            }
+        }
+        // .meshsetup / .chrparams: CryXMLB-decoded to text where needed.
+        if let Some(path) = req.meshsetup.as_deref() {
+            match self.read_p4k_or_disk(path) {
+                Ok(data) => source_reports.push(report::meshsetup_source_report(
+                    &decode_text_or_cryxml(&data),
+                    path,
+                    &mut names,
+                )),
+                Err(e) => return format!("Failed to read meshsetup '{path}': {e}"),
+            }
+        }
+        if let Some(path) = req.chrparams.as_deref() {
+            match self.read_p4k_or_disk(path) {
+                Ok(data) => source_reports.push(report::chrparams_source_report(
+                    &decode_text_or_cryxml(&data),
+                    path,
+                    &mut names,
+                )),
+                Err(e) => return format!("Failed to read chrparams '{path}': {e}"),
+            }
+        }
+        if let Some(path) = req.glb.as_deref() {
+            match self.read_p4k_or_disk(path) {
+                Ok(data) => match report::glb_source_report(&data, path, &mut names) {
+                    Some(r) => source_reports.push(r),
+                    None => return format!("Failed to parse GLB JSON chunk: {path}"),
+                },
+                Err(e) => return format!("Failed to read glb '{path}': {e}"),
+            }
+        }
+
+        // Animation sidecars live on disk (exported package).
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        if let Some(explicit) = &req.animation_json {
+            for p in explicit {
+                let path = std::path::PathBuf::from(p);
+                if !path.is_file() {
+                    return format!("animation JSON file not found: {p}");
+                }
+                files.push(path);
+            }
+        }
+        if let Some(folder) = req.animation_folder.as_deref() {
+            let dir = std::path::Path::new(folder);
+            if !dir.is_dir() {
+                return format!("animation folder not found: {folder}");
+            }
+            if let Err(e) = collect_json_files_recursive(dir, &mut files) {
+                return format!("Failed to scan '{folder}': {e}");
+            }
+        }
+        files.sort();
+        files.dedup();
+        if files.is_empty() {
+            return "no animation JSON files were supplied/found (set animation_folder and/or animation_json)".to_string();
+        }
+
+        let mut clip_stats = Vec::new();
+        for file in &files {
+            let data = match std::fs::read(file) {
+                Ok(d) => d,
+                Err(e) => return format!("Failed to read {}: {e}", file.display()),
+            };
+            let value: serde_json::Value = match serde_json::from_slice(&data) {
+                Ok(v) => v,
+                Err(e) => return format!("Failed to parse JSON {}: {e}", file.display()),
+            };
+            clip_stats.extend(report::clips_from_value(&file.display().to_string(), &value));
+        }
+
+        let report_value = report::build_report(&names, source_reports, files.len(), &clip_stats);
+        if req.markdown.unwrap_or(false) {
+            return report::build_markdown_report(&report_value);
+        }
+        match serde_json::to_string_pretty(&report_value) {
+            Ok(s) => s,
+            Err(e) => format!("serialize failed: {e}"),
+        }
+    }
+
     #[tool(description = "Dump the Mannequin Animation Database (ADB) plus its companion ControllerDef for an entity. Returns structured JSON listing every Mannequin Fragment with group name, GUID, tags, FragTags, BlendOutDuration, OptionWeight, animations, scopes (resolved from the ControllerDef), and procedurals. Use to inspect fragment-scope metadata for animation troubleshooting (Phase 37). Note: the ADB has no per-bone blend-mode flag; use dba_dump's `rot_format_flags`/`pos_format_flags` for per-bone CAF metadata.")]
     fn mannequin_dump(&self, Parameters(req): Parameters<MannequinDumpRequest>) -> String {
         let data = self.data();
-        let db = starbreaker_datacore::database::Database::from_bytes(&data.dcb_bytes)
-            .expect("DataCore bytes validated at load");
+        let db = &data.db;
         let record = match self.find_entity(&db, &req.entity) {
             Some(r) => r,
             None => return format!("No entity matching '{}'", req.entity),
@@ -1237,6 +2846,46 @@ impl StarBreakerMcp {
         match serde_json::to_string_pretty(&value) {
             Ok(s) => s,
             Err(e) => format!("serialize failed: {e}"),
+        }
+    }
+
+    #[tool(description = "Inspect a .RigLogic file or extract the RigLogic chunk from a .skin \
+        IVO container and dump it as structured JSON. Provide either standalone_path (a virtual \
+        P4k path to a raw .RigLogic file) or skin_path (a virtual P4k path to a .skin IVO \
+        container). The optional section parameter restricts output to a named subset: \
+        'header' (counts, name, rig_type, section_starts), 'joints' (control names and CRCs), \
+        'regions' (blend region bones and weights), 'appearance' (blendshape appearance data), \
+        'corrective' (corrective blendshape data), or 'protos-info' (ProtosInfo chunk — \
+        skin_path only).")]
+    fn riglogic_dump(
+        &self,
+        Parameters(req): Parameters<crate::riglogic::RigLogicDumpRequest>,
+    ) -> String {
+        match (&req.standalone_path, &req.skin_path) {
+            (Some(_), Some(_)) => {
+                return "Provide either standalone_path or skin_path, not both.".to_string();
+            }
+            (None, None) => {
+                return "Provide either standalone_path or skin_path.".to_string();
+            }
+            _ => {}
+        }
+
+        let section = req.section.as_deref();
+
+        if let Some(standalone) = &req.standalone_path {
+            let bytes = match self.read_p4k_file(standalone) {
+                Ok(b) => b,
+                Err(e) => return format!("Failed to read '{standalone}' from P4k: {e}"),
+            };
+            crate::riglogic::dump_standalone(&bytes, section)
+        } else {
+            let skin = req.skin_path.as_ref().unwrap();
+            let bytes = match self.read_p4k_file(skin) {
+                Ok(b) => b,
+                Err(e) => return format!("Failed to read '{skin}' from P4k: {e}"),
+            };
+            crate::riglogic::dump_from_ivo(&bytes, section, skin)
         }
     }
 
@@ -1941,10 +3590,826 @@ impl StarBreakerMcp {
 }
 #[rmcp::tool_handler]
 impl ServerHandler for StarBreakerMcp {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "Star Citizen game data server. Query DataCore records, entity loadouts, and P4k archive files.",
         )
+    }
+}
+
+/// Label for a `brandStyles[idx]` container in the style inventory. Appends the
+/// brand identifier's basename (`brandStyles[1] s_drak_hud`) so the inventory
+/// shows WHICH brand each index is — `brandIdentifier` is a record path
+/// (`file://.../styles/s_drak_hud.json`); a null/missing one falls back to the
+/// bare index.
+fn brand_style_label(brand: &serde_json::Value, idx: usize) -> String {
+    match brand
+        .get("brandIdentifier")
+        .and_then(|value| value.as_str())
+        .map(|path| {
+            path.rsplit('/')
+                .next()
+                .unwrap_or(path)
+                .trim_end_matches(".json")
+        }) {
+        Some(name) if !name.is_empty() => format!("brandStyles[{idx}] {name}"),
+        _ => format!("brandStyles[{idx}]"),
+    }
+}
+
+#[cfg(test)]
+mod ui_regression_registry_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn brand_style_label_uses_brand_identifier_basename() {
+        let brand = serde_json::json!({
+            "brandIdentifier":
+                "file://./../../libs/foundry/records/ui/buildingblocks/styles/s_drak_hud.json"
+        });
+        assert_eq!(brand_style_label(&brand, 1), "brandStyles[1] s_drak_hud");
+        // null / missing brandIdentifier falls back to the bare index.
+        assert_eq!(brand_style_label(&serde_json::json!({}), 3), "brandStyles[3]");
+    }
+
+    #[test]
+    fn ui_regression_registry_defaults_report_expected_targets() {
+        let server = StarBreakerMcp::new(None);
+        let response = server.ui_regression_registry(Parameters(UiRegressionRegistryRequest {
+            manifest_path: None,
+            freeze_path: None,
+            target_filter: None,
+        }));
+
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("registry response should be valid JSON");
+
+        assert_eq!(json.get("schema_version").and_then(|v| v.as_u64()), Some(1));
+        // The default manifest + freeze fixtures carry the full set of onboarded
+        // UI parity targets (15 as of the compass/countermeasures/self/g-force/
+        // velocity/master-mode/annunciator/... arcs), and every one is matched
+        // (present in both manifest and freeze). Bump this guard when a target is
+        // onboarded or retired.
+        assert_eq!(
+            json.get("summary")
+                .and_then(|v| v.get("total_targets"))
+                .and_then(|v| v.as_u64()),
+            Some(15)
+        );
+        assert_eq!(
+            json.get("summary")
+                .and_then(|v| v.get("matched"))
+                .and_then(|v| v.as_u64()),
+            Some(15)
+        );
+    }
+
+    #[test]
+    fn ui_regression_registry_filter_limits_results() {
+        let server = StarBreakerMcp::new(None);
+        let response = server.ui_regression_registry(Parameters(UiRegressionRegistryRequest {
+            manifest_path: None,
+            freeze_path: None,
+            target_filter: Some("ui_target_a".to_string()),
+        }));
+
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("registry response should be valid JSON");
+        let targets = json
+            .get("targets")
+            .and_then(|v| v.as_array())
+            .expect("targets array should exist");
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(
+            targets[0].get("id").and_then(|v| v.as_str()),
+            Some("ui_target_a")
+        );
+    }
+
+    #[test]
+    fn ui_regression_registry_surfaces_manifest_read_errors() {
+        let server = StarBreakerMcp::new(None);
+        let response = server.ui_regression_registry(Parameters(UiRegressionRegistryRequest {
+            manifest_path: Some("does/not/exist.json".to_string()),
+            freeze_path: None,
+            target_filter: None,
+        }));
+
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("error response should be valid JSON");
+        assert_eq!(
+            json.get("error_code").and_then(|v| v.as_str()),
+            Some("manifest_read_failed")
+        );
+    }
+
+    #[test]
+    fn ui_regression_registry_surfaces_schema_mismatch() {
+        let server = StarBreakerMcp::new(None);
+
+        let tmp_root = std::env::temp_dir().join(format!(
+            "starbreaker_mcp_registry_schema_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp_root).expect("temp dir should be created");
+
+        let manifest_path = tmp_root.join("manifest.json");
+        let freeze_path = tmp_root.join("freeze.json");
+
+        let mut mf = std::fs::File::create(&manifest_path).expect("manifest file create");
+        writeln!(mf, "{{\"schema_version\":1,\"targets\":[]}}")
+            .expect("manifest write");
+
+        let mut ff = std::fs::File::create(&freeze_path).expect("freeze file create");
+        writeln!(ff, "{{\"schema_version\":2,\"artifacts\":[]}}")
+            .expect("freeze write");
+
+        let response = server.ui_regression_registry(Parameters(UiRegressionRegistryRequest {
+            manifest_path: Some(manifest_path.to_string_lossy().to_string()),
+            freeze_path: Some(freeze_path.to_string_lossy().to_string()),
+            target_filter: None,
+        }));
+
+        let _ = std::fs::remove_dir_all(&tmp_root);
+
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("error response should be valid JSON");
+        assert_eq!(
+            json.get("error_code").and_then(|v| v.as_str()),
+            Some("schema_mismatch")
+        );
+    }
+
+    #[test]
+    fn ui_regression_validate_rejects_invalid_mode() {
+        let server = StarBreakerMcp::new(None);
+        let response = server.ui_regression_validate(Parameters(UiRegressionValidateRequest {
+            mode: Some("fast".to_string()),
+            manifest_path: None,
+            freeze_path: None,
+        }));
+
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("validator response should be valid JSON");
+        assert_eq!(
+            json.get("error_code").and_then(|v| v.as_str()),
+            Some("invalid_mode")
+        );
+    }
+
+    // The validator is a POSIX shell script (bash + jq); on Windows the
+    // bash bridge mangles the Windows paths passed via env vars, so these
+    // two tests only run where the script actually executes.
+    #[cfg(unix)]
+    #[test]
+    fn ui_regression_validate_quick_mode_passes_with_default_fixtures() {
+        let server = StarBreakerMcp::new(None);
+        let response = server.ui_regression_validate(Parameters(UiRegressionValidateRequest {
+            mode: Some("quick".to_string()),
+            manifest_path: None,
+            freeze_path: None,
+        }));
+
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("validator response should be valid JSON");
+        assert_eq!(json.get("mode").and_then(|v| v.as_str()), Some("quick"));
+        assert_eq!(json.get("passed").and_then(|v| v.as_bool()), Some(true));
+    }
+
+    // POSIX-script-backed — see the note on the quick-mode test above.
+    #[cfg(unix)]
+    #[test]
+    fn ui_regression_validate_reports_missing_freeze_file() {
+        let server = StarBreakerMcp::new(None);
+        let response = server.ui_regression_validate(Parameters(UiRegressionValidateRequest {
+            mode: Some("full".to_string()),
+            manifest_path: None,
+            freeze_path: Some("does/not/exist-freeze.json".to_string()),
+        }));
+
+        let json: serde_json::Value =
+            serde_json::from_str(&response).expect("validator response should be valid JSON");
+        assert_eq!(json.get("passed").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(
+            json.get("error_code").and_then(|v| v.as_str()),
+            Some("validation_failed")
+        );
+        assert!(
+            json.get("stderr")
+                .and_then(|v| v.as_str())
+                .map(|s| s.contains("freeze file not found"))
+                .unwrap_or(false),
+            "expected stderr to mention missing freeze file"
+        );
+    }
+
+    /// Helper: run a test with a live P4K/DataCore connection. Passes the server
+    /// to the closure so the test can query real DataCore records.
+    /// Uses auto-discovery (same path as production code).
+    ///
+    /// SKIPS (early-returns) when no Data.p4k can be discovered — CI runners
+    /// have no Star Citizen install, and `server.data()` would otherwise
+    /// panic. Locally, set `SC_DATA_P4K` to point at non-default data.
+    fn with_p4k_test<F>(test: F)
+    where
+        F: FnOnce(StarBreakerMcp),
+    {
+        if let Err(e) = starbreaker_p4k::find_p4k() {
+            eprintln!("SKIP: no Data.p4k available ({e}); set SC_DATA_P4K to run P4K-backed MCP tests");
+            return;
+        }
+        let server = StarBreakerMcp::new(None);
+        // Verify P4K loaded successfully via auto-discovery
+        if server.data().p4k.entries().is_empty() {
+            panic!(
+                "P4K auto-discovery found a path but loaded no entries. \
+                Set SC_DATA_P4K env var to override."
+            );
+        }
+        test(server);
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 1.5: Unit tests for P4kCanvasFetcher (mock-based, no P4K required)
+    // -----------------------------------------------------------------------
+
+    /// A mock canvas fetcher for unit testing.
+    struct MockCanvasFetcher {
+        canvases: std::collections::HashMap<String, serde_json::Value>,
+    }
+
+    impl MockCanvasFetcher {
+        fn new() -> Self {
+            Self {
+                canvases: std::collections::HashMap::new(),
+            }
+        }
+
+        fn insert(&mut self, guid: impl Into<String>, canvas: serde_json::Value) {
+            self.canvases.insert(guid.into(), canvas);
+        }
+
+        fn insert_with_name(&mut self, guid: impl Into<String>, name: impl Into<String>, canvas: serde_json::Value) {
+            let guid_str: String = guid.into();
+            let name_str: String = name.into();
+            let mut c = canvas;
+            c["_RecordName_"] = serde_json::Value::String(name_str);
+            c["_RecordId_"] = serde_json::Value::String(guid_str.clone());
+            self.canvases.insert(guid_str, c);
+        }
+    }
+
+    impl starbreaker_ui::CanvasFetcher for MockCanvasFetcher {
+        fn fetch_canvas_json(&self, guid: &str) -> Result<serde_json::Value, starbreaker_ui::UiError> {
+            self.canvases
+                .get(guid)
+                .cloned()
+                .ok_or_else(|| starbreaker_ui::UiError::FetchFailed {
+                    guid: guid.to_string(),
+                    source: format!("No canvas with GUID {guid}").into(),
+                })
+        }
+
+        fn fetch_canvas_by_name(&self, record_name: &str) -> Result<serde_json::Value, starbreaker_ui::UiError> {
+            let search = record_name.to_lowercase();
+            let mut candidates: Vec<(String, serde_json::Value)> = self
+                .canvases
+                .iter()
+                .filter(|(_, c)| {
+                    c.get("_RecordName_")
+                        .and_then(|v| v.as_str())
+                        .map(|n| n.to_lowercase().contains(&search))
+                        .unwrap_or(false)
+                })
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            candidates.sort_by_key(|(_, c)| {
+                c.get("_RecordName_")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.len())
+                    .unwrap_or(usize::MAX)
+            });
+            match candidates.into_iter().next() {
+                Some((_, c)) => Ok(c),
+                None => Err(starbreaker_ui::UiError::FetchFailed {
+                    guid: record_name.to_string(),
+                    source: format!("No canvas matching name '{record_name}'").into(),
+                }),
+            }
+        }
+    }
+
+    #[test]
+    fn fetch_canvas_json_with_known_guid() {
+        let mut mock = MockCanvasFetcher::new();
+        let canvas = serde_json::json!({
+            "_RecordId_": "test-guid-123",
+            "_RecordName_": "TestCanvas",
+            "scene": []
+        });
+        mock.insert("test-guid-123", canvas.clone());
+
+        let result = mock.fetch_canvas_json("test-guid-123").expect("should find canvas");
+        assert_eq!(
+            result.get("_RecordId_").and_then(|v| v.as_str()),
+            Some("test-guid-123")
+        );
+    }
+
+    #[test]
+    fn fetch_canvas_by_name_with_known_substring() {
+        let mut mock = MockCanvasFetcher::new();
+        mock.insert_with_name("guid-1", "BuildingBlocks_Canvas.GEN_MC_S_Target", serde_json::json!({"scene": []}));
+        mock.insert_with_name("guid-2", "BuildingBlocks_Canvas.GEN_MC_S_TargetDiagram", serde_json::json!({"scene": []}));
+
+        // Shortest match should win
+        let result = mock.fetch_canvas_by_name("Target").expect("should find canvas");
+        assert_eq!(
+            result.get("_RecordId_").and_then(|v| v.as_str()),
+            Some("guid-1")
+        );
+    }
+
+    #[test]
+    fn fetch_canvas_json_with_non_existent_guid() {
+        let mock = MockCanvasFetcher::new();
+        let result = mock.fetch_canvas_json("non-existent-guid");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("non-existent-guid"));
+    }
+
+    #[test]
+    fn fetch_canvas_by_name_with_empty_string() {
+        let mut mock = MockCanvasFetcher::new();
+        mock.insert_with_name("guid-1", "SomeCanvas", serde_json::json!({"scene": []}));
+
+        // Empty string matches everything — should return shortest match
+        let result = mock.fetch_canvas_by_name("");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn fetch_canvas_by_name_with_empty_string_no_canvases() {
+        let mock = MockCanvasFetcher::new();
+        let result = mock.fetch_canvas_by_name("");
+        // No canvases → no match → error
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn extract_record_name_strips_file_scheme() {
+        assert_eq!(
+            starbreaker_ui::pipeline::extract_record_name("file://./path/to/canvas.json"),
+            "canvas"
+        );
+    }
+
+    #[test]
+    fn extract_record_name_strips_file_scheme_no_extension() {
+        assert_eq!(
+            starbreaker_ui::pipeline::extract_record_name("file://./path/to/canvas"),
+            "canvas"
+        );
+    }
+
+    #[test]
+    fn extract_record_name_handles_malformed_url() {
+        // No scheme, no path — just a bare name
+        assert_eq!(
+            starbreaker_ui::pipeline::extract_record_name("bare_name"),
+            "bare_name"
+        );
+    }
+
+    #[test]
+    fn extract_record_name_handles_deeply_nested_relative_path() {
+        assert_eq!(
+            starbreaker_ui::pipeline::extract_record_name("file://../../../../../../libs/foundry/records/gen_mc_s_target.json"),
+            "gen_mc_s_target"
+        );
+    }
+
+    #[test]
+    fn extract_record_name_handles_case_insensitive_extension() {
+        assert_eq!(
+            starbreaker_ui::pipeline::extract_record_name("file://./path/to/Canvas.JSON"),
+            "Canvas"
+        );
+    }
+
+    #[test]
+    fn fetch_canvas_by_name_case_insensitive() {
+        let mut mock = MockCanvasFetcher::new();
+        mock.insert_with_name("guid-1", "BuildingBlocks_Canvas.GEN_MC_S_Target", serde_json::json!({"scene": []}));
+
+        let result = mock.fetch_canvas_by_name("target").expect("should find case-insensitively");
+        assert_eq!(
+            result.get("_RecordId_").and_then(|v| v.as_str()),
+            Some("guid-1")
+        );
+    }
+
+    #[test]
+    fn fetch_canvas_by_name_no_match() {
+        let mut mock = MockCanvasFetcher::new();
+        mock.insert_with_name("guid-1", "BuildingBlocks_Canvas.GEN_MC_S_Target", serde_json::json!({"scene": []}));
+
+        let result = mock.fetch_canvas_by_name("nonexistent_xyz");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn ui_canvas_style_inventory_reports_style_sources() {
+        with_p4k_test(|server| {
+            let response = server.ui_canvas_style_inventory(Parameters(UiCanvasStyleInventoryRequest {
+                canvas: "dd9ed6dc-7fe4-4884-9d11-c143290c9498".to_string(),
+                canvas_root: None,
+                entry_filter: None,
+                include_conditions: Some(true),
+                include_modifiers: Some(true),
+                limit: None,
+            }));
+
+            let json: serde_json::Value = serde_json::from_str(&response).expect("valid JSON");
+            assert_eq!(json.get("schema_version").and_then(|v| v.as_u64()), Some(1));
+            assert!(
+                json.get("entries")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|arr| !arr.is_empty())
+            );
+        });
+    }
+
+    #[test]
+    fn ui_scene_style_probe_reports_applied_entries() {
+        with_p4k_test(|server| {
+            let response = server.ui_scene_style_probe(Parameters(UiSceneStyleProbeRequest {
+                canvas: "dd9ed6dc-7fe4-4884-9d11-c143290c9498".to_string(),
+                query: "Target".to_string(),
+                canvas_root: None,
+                manufacturer: None,
+                limit: None,
+            }));
+
+            let json: serde_json::Value = serde_json::from_str(&response).expect("valid JSON");
+            let nodes = json.get("nodes").and_then(|v| v.as_array()).expect("nodes array");
+            assert!(nodes.len() >= 1);
+        });
+    }
+
+    #[test]
+    fn ui_variant_styles_reports_authored_entries_with_applied() {
+        with_p4k_test(|server| {
+            let response = server.ui_variant_styles(Parameters(
+                crate::ui_variant_styles::UiVariantStylesRequest {
+                    canvas: "dd9ed6dc-7fe4-4884-9d11-c143290c9498".to_string(),
+                    query: "text_".to_string(),
+                    manufacturer: Some("drak".to_string()),
+                    limit: None,
+                },
+            ));
+            let json: serde_json::Value = serde_json::from_str(&response).expect("valid JSON");
+            assert_eq!(json.get("error_code"), None, "{json:#}");
+            let nodes = json.get("nodes").and_then(|v| v.as_array()).expect("nodes array");
+            assert!(!nodes.is_empty(), "expected matched nodes: {json:#}");
+
+            // At least one node carries an authored entry with a tier + applied bool.
+            let has_authored = nodes.iter().any(|n| {
+                n.get("authored_entries").and_then(|v| v.as_array()).is_some_and(|es| {
+                    es.iter().any(|e| {
+                        e.get("tier").is_some()
+                            && e.get("applied").and_then(|v| v.as_bool()).is_some()
+                    })
+                })
+            });
+            assert!(has_authored, "expected an authored entry with tier+applied: {json:#}");
+
+            // A known-applied embedded entry (Base/Bright Elements) reports applied:true.
+            let has_applied_true = nodes.iter().any(|n| {
+                n.get("authored_entries").and_then(|v| v.as_array()).is_some_and(|es| {
+                    es.iter().any(|e| {
+                        let name = e.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                        (name == "Base Elements" || name == "Bright Elements")
+                            && e.get("applied").and_then(|v| v.as_bool()) == Some(true)
+                    })
+                })
+            });
+            assert!(has_applied_true, "expected Base/Bright Elements applied:true: {json:#}");
+        });
+    }
+
+    #[test]
+    fn ui_ir_query_reports_matching_ir_nodes() {
+        with_p4k_test(|server| {
+            let response = server.ui_ir_query(Parameters(UiIrQueryRequest {
+                canvas_guid: "dd9ed6dc-7fe4-4884-9d11-c143290c9498".to_string(),
+                content_guid: None,
+                query: "Target".to_string(),
+                canvas_root: None,
+                style_root: None,
+                manufacturer: Some("drak".to_string()),
+                helper: None,
+                width: Some(1920),
+                height: Some(1080),
+                limit: None,
+            }));
+
+            let json: serde_json::Value = serde_json::from_str(&response).expect("valid JSON");
+            assert_eq!(json.get("error_code"), None, "{json:#}");
+            let nodes = json.get("nodes").and_then(|v| v.as_array()).expect("nodes array");
+            assert!(nodes.len() >= 1);
+        });
+    }
+
+    #[test]
+    fn ui_tag_lookup_resolves_element_instance_tags() {
+        with_p4k_test(|server| {
+            let response = server.ui_tag_lookup(Parameters(UiTagLookupRequest {
+                query: "icon-element".to_string(),
+                limit: None,
+            }));
+            let json: serde_json::Value = serde_json::from_str(&response).expect("valid JSON");
+            assert_eq!(json.get("error_code"), None, "{json:#}");
+            let tags = json.get("tags").and_then(|v| v.as_array()).expect("tags array");
+            assert!(
+                tags.iter().any(|t| t.get("tag_name").and_then(|v| v.as_str())
+                    == Some("icon-element-instance")),
+                "{json:#}"
+            );
+        });
+    }
+
+    #[test]
+    fn ui_kit_sheet_entries_resolves_condition_tag_names() {
+        with_p4k_test(|server| {
+            let response = server.ui_kit_sheet_entries(Parameters(UiKitSheetEntriesRequest {
+                record: "sk_uilo_a_buttonprimarystyles".to_string(),
+                entry_filter: Some("FilledText".to_string()),
+                limit: None,
+            }));
+            let json: serde_json::Value = serde_json::from_str(&response).expect("valid JSON");
+            assert_eq!(json.get("error_code"), None, "{json:#}");
+            let entries = json.get("entries").and_then(|v| v.as_array()).expect("entries");
+            assert!(!entries.is_empty(), "{json:#}");
+            let when = entries[0].get("when").and_then(|v| v.as_str()).unwrap_or("");
+            assert!(
+                when.contains("text-element-instance"),
+                "conditions should carry resolved tag names, got: {when}"
+            );
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 2.5: Unit tests for P4kStyleFetcher (mock-based, no P4K required)
+    // -----------------------------------------------------------------------
+
+    use starbreaker_ui::StyleFetcher;
+
+    /// A mock style fetcher for unit testing.
+    struct MockStyleFetcher {
+        styles: std::collections::HashMap<String, starbreaker_ui::ManufacturerStyle>,
+    }
+
+    impl MockStyleFetcher {
+        fn new() -> Self {
+            Self {
+                styles: std::collections::HashMap::new(),
+            }
+        }
+
+        fn insert(&mut self, manufacturer_id: &str, style: starbreaker_ui::ManufacturerStyle) {
+            self.styles.insert(manufacturer_id.to_string(), style);
+        }
+    }
+
+    impl starbreaker_ui::StyleFetcher for MockStyleFetcher {
+        fn fetch_manufacturer_style(&self, manufacturer_id: &str) -> Result<starbreaker_ui::ManufacturerStyle, starbreaker_ui::UiError> {
+            self.styles
+                .get(manufacturer_id)
+                .cloned()
+                .ok_or_else(|| starbreaker_ui::UiError::RenderError(format!(
+                    "missing BuildingBlocks style record for manufacturer '{}'",
+                    manufacturer_id
+                )))
+        }
+    }
+
+    #[test]
+    fn style_fetcher_returns_drak_style() {
+        let mut mock = MockStyleFetcher::new();
+        let style = starbreaker_ui::ManufacturerStyle {
+            name: "drak".to_string(),
+            primary_tint: starbreaker_ui::canvas::RgbaColor { r: 240, g: 168, b: 104, a: 255 },
+            secondary_tint: None,
+            colour_slots: vec![starbreaker_ui::canvas::RgbaColor { r: 240, g: 168, b: 104, a: 255 }],
+            background: starbreaker_ui::canvas::RgbaColor { r: 48, g: 32, b: 16, a: 255 },
+            backlight: starbreaker_ui::canvas::RgbaColor { r: 102, g: 214, b: 255, a: 255 },
+            font_family_hints: vec!["Rajdhani".into(), "Orbitron".into()],
+            crt: starbreaker_ui::style::CrtParams::default(),
+        };
+        mock.insert("drak", style.clone());
+
+        let result = mock.fetch_manufacturer_style("drak").expect("should find drak style");
+        assert_eq!(result.name, "drak");
+        assert_eq!(result.primary_tint.r, 240);
+        assert_eq!(result.primary_tint.g, 168);
+    }
+
+    #[test]
+    fn style_fetcher_returns_banu_style() {
+        let mut mock = MockStyleFetcher::new();
+        let style = starbreaker_ui::ManufacturerStyle {
+            name: "banu".to_string(),
+            primary_tint: starbreaker_ui::canvas::RgbaColor { r: 200, g: 100, b: 50, a: 255 },
+            secondary_tint: None,
+            colour_slots: vec![],
+            background: starbreaker_ui::canvas::RgbaColor { r: 30, g: 20, b: 10, a: 255 },
+            backlight: starbreaker_ui::canvas::RgbaColor { r: 255, g: 200, b: 100, a: 255 },
+            font_family_hints: vec![],
+            crt: starbreaker_ui::style::CrtParams::default(),
+        };
+        mock.insert("banu", style.clone());
+
+        let result = mock.fetch_manufacturer_style("banu").expect("should find banu style");
+        assert_eq!(result.name, "banu");
+        assert_eq!(result.primary_tint.r, 200);
+    }
+
+    #[test]
+    fn style_fetcher_unknown_manufacturer_returns_error() {
+        let mock = MockStyleFetcher::new();
+        let result = mock.fetch_manufacturer_style("unknown_xyz");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("unknown_xyz"));
+    }
+
+    #[test]
+    fn style_fetcher_empty_string_returns_error() {
+        let mock = MockStyleFetcher::new();
+        let result = mock.fetch_manufacturer_style("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn ui_scene_style_probe_with_drak_manufacturer() {
+        with_p4k_test(|server| {
+            let response = server.ui_scene_style_probe(Parameters(UiSceneStyleProbeRequest {
+                canvas: "dd9ed6dc-7fe4-4884-9d11-c143290c9498".to_string(),
+                query: "Target".to_string(),
+                canvas_root: None,
+                manufacturer: Some("drak".to_string()),
+                limit: None,
+            }));
+
+            let json: serde_json::Value = serde_json::from_str(&response).expect("valid JSON");
+            assert_eq!(json.get("schema_version").and_then(|v| v.as_u64()), Some(1));
+            let nodes = json.get("nodes").and_then(|v| v.as_array()).expect("nodes array");
+            assert!(nodes.len() >= 1);
+        });
+    }
+
+    #[test]
+    fn ui_scene_style_probe_with_banu_manufacturer() {
+        with_p4k_test(|server| {
+            let response = server.ui_scene_style_probe(Parameters(UiSceneStyleProbeRequest {
+                canvas: "dd9ed6dc-7fe4-4884-9d11-c143290c9498".to_string(),
+                query: "Target".to_string(),
+                canvas_root: None,
+                manufacturer: Some("banu".to_string()),
+                limit: None,
+            }));
+
+            let json: serde_json::Value = serde_json::from_str(&response).expect("valid JSON");
+            assert_eq!(json.get("schema_version").and_then(|v| v.as_u64()), Some(1));
+            let nodes = json.get("nodes").and_then(|v| v.as_array()).expect("nodes array");
+            assert!(nodes.len() >= 1);
+        });
+    }
+
+    #[test]
+    fn ui_canvas_style_inventory_with_drak_manufacturer() {
+        with_p4k_test(|server| {
+            let response = server.ui_canvas_style_inventory(Parameters(UiCanvasStyleInventoryRequest {
+                canvas: "dd9ed6dc-7fe4-4884-9d11-c143290c9498".to_string(),
+                canvas_root: None,
+                entry_filter: None,
+                include_conditions: Some(true),
+                include_modifiers: Some(true),
+                limit: None,
+            }));
+
+            let json: serde_json::Value = serde_json::from_str(&response).expect("valid JSON");
+            assert_eq!(json.get("schema_version").and_then(|v| v.as_u64()), Some(1));
+            assert!(
+                json.get("entries")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|arr| !arr.is_empty())
+            );
+        });
+    }
+
+    #[test]
+    fn style_fetcher_no_records_for_manufacturer_returns_error() {
+        let mock = MockStyleFetcher::new();
+        // No records inserted
+        let result = mock.fetch_manufacturer_style("nonexistent");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("nonexistent"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3.5: Unit tests for P4kSwfFetcher path normalization
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn p4k_swf_fetcher_normalize_path_adds_data_prefix() {
+        let path = P4kSwfFetcher::normalize_path("UI/ShipInterface/assets/SWF/DRAK/test.swf");
+        assert_eq!(path, "Data\\UI\\ShipInterface\\assets\\SWF\\DRAK\\test.swf");
+    }
+
+    #[test]
+    fn p4k_swf_fetcher_normalize_path_converts_slashes() {
+        let path = P4kSwfFetcher::normalize_path("Data/UI/ShipInterface/test.swf");
+        assert_eq!(path, "Data\\UI\\ShipInterface\\test.swf");
+    }
+
+    #[test]
+    fn p4k_swf_fetcher_normalize_path_preserves_backslashes() {
+        let path = P4kSwfFetcher::normalize_path(r"Data\UI\ShipInterface\test.swf");
+        assert_eq!(path, r"Data\UI\ShipInterface\test.swf");
+    }
+
+    #[test]
+    fn p4k_swf_fetcher_normalize_path_auto_convert_tif_to_dds() {
+        let path = P4kSwfFetcher::normalize_path("UI/Textures/test.tif");
+        assert_eq!(path, "Data\\UI\\Textures\\test.dds");
+    }
+
+    #[test]
+    fn p4k_swf_fetcher_normalize_path_case_insensitive_data_prefix() {
+        // normalize_path preserves original case of prefix, only converts slashes
+        let path = P4kSwfFetcher::normalize_path("data/UI/test.swf");
+        assert_eq!(path, "data\\UI\\test.swf");
+    }
+
+    #[test]
+    fn p4k_swf_fetcher_normalize_path_preserves_existing_data_prefix() {
+        let path = P4kSwfFetcher::normalize_path(r"Data\UI\ShipInterface\SWF\DRAK\test.swf");
+        assert_eq!(path, r"Data\UI\ShipInterface\SWF\DRAK\test.swf");
+    }
+
+    #[test]
+    fn p4k_swf_fetcher_normalize_path_no_extension_unchanged() {
+        let path = P4kSwfFetcher::normalize_path("UI/ShipInterface/test.swf");
+        assert_eq!(path, "Data\\UI\\ShipInterface\\test.swf");
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 4.5: Unit tests for P4kAssetFetcher path normalization
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn p4k_asset_fetcher_normalize_path_adds_data_prefix() {
+        let path = P4kAssetFetcher::normalize_path("UI/Textures/test.dds");
+        assert_eq!(path, "Data\\UI\\Textures\\test.dds");
+    }
+
+    #[test]
+    fn p4k_asset_fetcher_normalize_path_converts_slashes() {
+        let path = P4kAssetFetcher::normalize_path("Data/UI/Textures/test.svg");
+        assert_eq!(path, "Data\\UI\\Textures\\test.svg");
+    }
+
+    #[test]
+    fn p4k_asset_fetcher_normalize_path_preserves_backslashes() {
+        let path = P4kAssetFetcher::normalize_path(r"Data\UI\Textures\test.png");
+        assert_eq!(path, r"Data\UI\Textures\test.png");
+    }
+
+    #[test]
+    fn p4k_asset_fetcher_normalize_path_auto_convert_tif_to_dds() {
+        let path = P4kAssetFetcher::normalize_path("UI/Textures/test.tif");
+        assert_eq!(path, "Data\\UI\\Textures\\test.dds");
+    }
+
+    #[test]
+    fn p4k_asset_fetcher_normalize_path_preserves_existing_data_prefix() {
+        let path = P4kAssetFetcher::normalize_path(r"Data\UI\Textures\Vector\test.svg");
+        assert_eq!(path, r"Data\UI\Textures\Vector\test.svg");
+    }
+
+    #[test]
+    fn p4k_asset_fetcher_normalize_path_no_extension_unchanged() {
+        let path = P4kAssetFetcher::normalize_path("UI/Textures/test.dds");
+        assert_eq!(path, "Data\\UI\\Textures\\test.dds");
     }
 }
 
@@ -1966,53 +4431,121 @@ fn format_loadout_node(
     }
 }
 
-/// Convert a DataCore `Value` to a `serde_json::Value`.
-fn value_to_json(v: &starbreaker_datacore::query::value::Value) -> serde_json::Value {
+struct JsonBudget {
+    remaining_nodes: usize,
+}
+
+impl JsonBudget {
+    fn new() -> Self {
+        Self {
+            remaining_nodes: MAX_DATACORE_QUERY_JSON_NODES,
+        }
+    }
+
+    fn consume(&mut self, detail: impl Into<String>) -> Result<(), String> {
+        if self.remaining_nodes == 0 {
+            return Err(format!(
+                "Query result too large: exceeded JSON node limit {} while serializing {}. Narrow the path before retrying.",
+                MAX_DATACORE_QUERY_JSON_NODES,
+                detail.into()
+            ));
+        }
+        self.remaining_nodes -= 1;
+        Ok(())
+    }
+}
+
+/// Convert a DataCore `Value` to a bounded `serde_json::Value`.
+fn value_to_json_limited(
+    v: &starbreaker_datacore::query::value::Value,
+    depth: usize,
+    budget: &mut JsonBudget,
+) -> Result<serde_json::Value, String> {
     use starbreaker_datacore::query::value::Value;
+    if depth > MAX_DATACORE_QUERY_JSON_DEPTH {
+        return Err(format!(
+            "Query result too deep: exceeded nesting limit {}. Narrow the path before retrying.",
+            MAX_DATACORE_QUERY_JSON_DEPTH
+        ));
+    }
+    budget.consume(format!("depth {}", depth))?;
     match v {
-        Value::Null => serde_json::Value::Null,
-        Value::Bool(b) => serde_json::Value::Bool(*b),
-        Value::Int8(n) => serde_json::json!(*n),
-        Value::Int16(n) => serde_json::json!(*n),
-        Value::Int32(n) => serde_json::json!(*n),
-        Value::Int64(n) => serde_json::json!(*n),
-        Value::UInt8(n) => serde_json::json!(*n),
-        Value::UInt16(n) => serde_json::json!(*n),
-        Value::UInt32(n) => serde_json::json!(*n),
-        Value::UInt64(n) => serde_json::json!(*n),
-        Value::Float(n) => serde_json::json!(*n),
-        Value::Double(n) => serde_json::json!(*n),
-        Value::String(s) => serde_json::Value::String(s.to_string()),
-        Value::Guid(g) => serde_json::Value::String(format!("{g}")),
-        Value::Enum(s) => serde_json::Value::String(s.to_string()),
-        Value::Locale(s) => serde_json::Value::String(s.to_string()),
+        Value::Null => Ok(serde_json::Value::Null),
+        Value::Bool(b) => Ok(serde_json::Value::Bool(*b)),
+        Value::Int8(n) => Ok(serde_json::json!(*n)),
+        Value::Int16(n) => Ok(serde_json::json!(*n)),
+        Value::Int32(n) => Ok(serde_json::json!(*n)),
+        Value::Int64(n) => Ok(serde_json::json!(*n)),
+        Value::UInt8(n) => Ok(serde_json::json!(*n)),
+        Value::UInt16(n) => Ok(serde_json::json!(*n)),
+        Value::UInt32(n) => Ok(serde_json::json!(*n)),
+        Value::UInt64(n) => Ok(serde_json::json!(*n)),
+        Value::Float(n) => Ok(serde_json::json!(*n)),
+        Value::Double(n) => Ok(serde_json::json!(*n)),
+        Value::String(s) => Ok(serde_json::Value::String(truncate_string(s))),
+        Value::Guid(g) => Ok(serde_json::Value::String(format!("{g}"))),
+        Value::Enum(s) => Ok(serde_json::Value::String(truncate_string(s))),
+        Value::Locale(s) => Ok(serde_json::Value::String(truncate_string(s))),
         Value::Array(items) => {
-            serde_json::Value::Array(items.iter().map(value_to_json).collect())
+            if items.len() > MAX_DATACORE_QUERY_ARRAY_ITEMS {
+                return Err(format!(
+                    "Query result too large: array has {} items (limit {}). Narrow the path before retrying.",
+                    items.len(),
+                    MAX_DATACORE_QUERY_ARRAY_ITEMS
+                ));
+            }
+            let values = items
+                .iter()
+                .map(|item| value_to_json_limited(item, depth + 1, budget))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(serde_json::Value::Array(values))
         }
         Value::Object {
             type_name, fields, record_id,
         } => {
+            if fields.len() > MAX_DATACORE_QUERY_OBJECT_FIELDS {
+                return Err(format!(
+                    "Query result too large: object '{}' has {} fields (limit {}). Narrow the path before retrying.",
+                    type_name,
+                    fields.len(),
+                    MAX_DATACORE_QUERY_OBJECT_FIELDS
+                ));
+            }
             let mut map = serde_json::Map::new();
             map.insert("__type".to_string(), serde_json::Value::String(type_name.to_string()));
             if let Some(rid) = record_id {
                 map.insert("__id".to_string(), serde_json::Value::String(format!("{rid}")));
             }
             for (key, val) in fields {
-                map.insert(key.to_string(), value_to_json(val));
+                map.insert(
+                    key.to_string(),
+                    value_to_json_limited(val, depth + 1, budget)?,
+                );
             }
-            serde_json::Value::Object(map)
+            Ok(serde_json::Value::Object(map))
         }
     }
 }
 
-/// Create a Content::Text item.
-fn content_text(text: impl Into<String>) -> rmcp::model::Content {
-    rmcp::model::Content::new(rmcp::model::RawContent::text(text), None)
+fn truncate_string(value: &str) -> String {
+    if value.chars().count() <= MAX_DATACORE_QUERY_STRING_CHARS {
+        return value.to_string();
+    }
+    value
+        .chars()
+        .take(MAX_DATACORE_QUERY_STRING_CHARS)
+        .collect::<String>()
+        + "…"
 }
 
-/// Create a Content::Image item.
-fn content_image(data: impl Into<String>, mime_type: impl Into<String>) -> rmcp::model::Content {
-    rmcp::model::Content::new(rmcp::model::RawContent::image(data, mime_type), None)
+/// Create a ContentBlock::Text item.
+fn content_text(text: impl Into<String>) -> rmcp::model::ContentBlock {
+    rmcp::model::ContentBlock::text(text)
+}
+
+/// Create a ContentBlock::Image item.
+fn content_image(data: impl Into<String>, mime_type: impl Into<String>) -> rmcp::model::ContentBlock {
+    rmcp::model::ContentBlock::image(data, mime_type)
 }
 
 /// P4k-backed sibling reader for split DDS mip files.
@@ -2221,8 +4754,10 @@ fn read_u64_at_le(data: &[u8], idx: usize) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        inspect_included_objects_chunk, raw_included_object_type_counts, StarBreakerMcp,
+        inspect_included_objects_chunk, raw_included_object_type_counts, value_to_json_limited,
+        JsonBudget, StarBreakerMcp,
     };
+    use starbreaker_datacore::query::value::Value;
 
     fn build_included_objects_chunk(object_payloads: &[Vec<u8>]) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -2337,5 +4872,35 @@ mod tests {
         assert!(StarBreakerMcp::split_socpak_entry_path("foo.socpak::").is_none());
         assert!(StarBreakerMcp::split_socpak_entry_path("::inner.entxml").is_none());
         assert!(StarBreakerMcp::split_socpak_entry_path("plain/path.xml").is_none());
+    }
+
+    #[test]
+    fn value_to_json_limited_rejects_large_arrays() {
+        let value = Value::Array(
+            (0..(super::MAX_DATACORE_QUERY_ARRAY_ITEMS + 1))
+                .map(|_| Value::Int32(1))
+                .collect(),
+        );
+
+        let err = value_to_json_limited(&value, 0, &mut JsonBudget::new())
+            .expect_err("large array should be rejected");
+
+        assert!(err.contains("array has"));
+    }
+
+    #[test]
+    fn value_to_json_limited_truncates_long_strings() {
+        let input = "a".repeat(super::MAX_DATACORE_QUERY_STRING_CHARS + 10);
+        let leaked: &'static str = Box::leak(input.into_boxed_str());
+
+        let json = value_to_json_limited(&Value::String(leaked), 0, &mut JsonBudget::new())
+            .expect("string should serialize");
+
+        let output = json.as_str().expect("serialized string");
+        assert_eq!(
+            output.chars().count(),
+            super::MAX_DATACORE_QUERY_STRING_CHARS + 1
+        );
+        assert!(output.ends_with('…'));
     }
 }

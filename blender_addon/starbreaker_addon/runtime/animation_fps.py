@@ -1,11 +1,27 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterable
 
 FPS_POLICY_ADAPT_SCENE = "adapt_scene"
 FPS_POLICY_MATCH_SCENE_TO_CLIP = "match_scene_to_clip"
 FPS_POLICIES = {FPS_POLICY_ADAPT_SCENE, FPS_POLICY_MATCH_SCENE_TO_CLIP}
+
+
+def extend_frame_end(current_end: float, strip_ends: Iterable[float]) -> int:
+    """Scene ``frame_end`` that covers the longest applied NLA strip.
+
+    Socpak door/elevator clips run hundreds of frames (e.g. 648, 1200) past the
+    default 250-frame range, so an applied animation looks frozen until the
+    range is extended. Never shrinks the existing range; rounds up to a whole
+    frame so the final keyframe is included.
+    """
+    longest = float(current_end)
+    for end in strip_ends:
+        if end > longest:
+            longest = float(end)
+    return int(math.ceil(longest))
 
 
 @dataclass(frozen=True)

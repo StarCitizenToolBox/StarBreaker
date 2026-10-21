@@ -6,7 +6,7 @@ use rayon::prelude::*;
 use starbreaker_datacore::database::Database;
 use starbreaker_datacore::query::value::Value;
 
-use crate::common::{load_dcb_bytes, matches_filter};
+use crate::common::{load_dcb, load_dcb_bytes, matches_filter};
 use crate::error::{CliError, Result};
 
 #[derive(Clone, ValueEnum)]
@@ -35,6 +35,16 @@ pub enum DcbCommand {
         /// Filter record names by glob
         #[arg(long)]
         filter: Option<String>,
+        /// Also export non-main records (types like ResourceType only exist as
+        /// non-main records); written as <stem>.<record-name>.<guid>.<ext>
+        #[arg(long)]
+        all: bool,
+        /// With --format unp4k: also write classic unforge's combined
+        /// document, <output>/Game2.xml (named after the .dcb): every record,
+        /// main and non-main, under one <DataForge> root. Large (the whole
+        /// DataCore, ~3 GB).
+        #[arg(long)]
+        combined: bool,
     },
     /// Query DataCore records by property path
     Query {
@@ -75,7 +85,9 @@ impl DcbCommand {
                 output,
                 format,
                 filter,
-            } => extract(p4k, dcb, output, format, filter),
+                all,
+                combined,
+            } => extract(p4k, dcb, output, format, filter, all, combined),
             Self::Query {
                 p4k,
                 dcb,
@@ -92,8 +104,13 @@ fn extract(
     output: PathBuf,
     format: DcbFormat,
     filter: Option<String>,
+    all: bool,
+    combined: bool,
 ) -> Result<()> {
-    let (_p4k, dcb_bytes) = load_dcb_bytes(p4k_path.as_deref(), dcb_path.as_deref())?;
+    if combined && !matches!(format, DcbFormat::Unp4k) {
+        return Err(CliError::InvalidInput("--combined writes unforge's combined document: it needs --format unp4k".into()));
+    }
+    let (_p4k, dcb_bytes, dcb_stem) = load_dcb(p4k_path.as_deref(), dcb_path.as_deref())?;
     let db = Database::from_bytes(&dcb_bytes)?;
 
     eprintln!("DataCore loaded.");
@@ -103,13 +120,15 @@ fn extract(
         DcbFormat::Xml | DcbFormat::Unp4k => "xml",
     };
 
-    // Only export main records (matching C#'s behavior), using the file path
-    // from the DataCore as the output directory structure.
+    // By default only export main records (matching C#'s behavior), using the
+    // file path from the DataCore as the output directory structure. With
+    // --all, non-main records (earlier records sharing a file name) are
+    // exported too under de-duplicated names.
     let records: Vec<_> = db
         .records()
         .iter()
         .filter(|r| {
-            if !db.is_main_record(r) {
+            if !all && !db.is_main_record(r) {
                 return false;
             }
             let file_name = db.resolve_string(r.file_name_offset);
@@ -130,9 +149,21 @@ fn extract(
     records.par_iter().for_each(|record| {
         let file_name = db.resolve_string(record.file_name_offset);
         // Change extension to match output format (C# uses Path.ChangeExtension)
-        let out_name = match file_name.rfind('.') {
-            Some(dot) => format!("{}.{ext}", &file_name[..dot]),
-            None => format!("{file_name}.{ext}"),
+        let stem = match file_name.rfind('.') {
+            Some(dot) => &file_name[..dot],
+            None => file_name,
+        };
+        // Non-main records share their file name with the main record, so
+        // suffix record name + guid to keep every output file unique.
+        let out_name = if db.is_main_record(record) {
+            format!("{stem}.{ext}")
+        } else {
+            let rec_name: String = db
+                .resolve_string2(record.name_offset)
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
+                .collect();
+            format!("{stem}.{rec_name}.{}.{ext}", record.id)
         };
         let out_path = output.join(&out_name);
 
@@ -160,6 +191,23 @@ fn extract(
     });
 
     pb.finish_and_clear();
+
+    if combined {
+        // Every record (non-main too), in record-table order, as classic unforge wrote it.
+        let all_records: Vec<_> = db
+            .records()
+            .iter()
+            .filter(|r| matches_filter(db.resolve_string(r.file_name_offset), filter.as_deref(), None))
+            .collect();
+        let path = output.join(format!("{dcb_stem}.xml"));
+        eprintln!("Writing {} records to {}...", all_records.len(), path.display());
+        let file = std::fs::File::create(&path)
+            .map_err(|e| CliError::IoPath { source: e, path: path.display().to_string() })?;
+        let mut writer = std::io::BufWriter::new(file);
+        starbreaker_datacore::export::write_unp4k_combined(&db, &all_records, &mut writer)?;
+        std::io::Write::flush(&mut writer)?;
+    }
+
     eprintln!("Done.");
     Ok(())
 }

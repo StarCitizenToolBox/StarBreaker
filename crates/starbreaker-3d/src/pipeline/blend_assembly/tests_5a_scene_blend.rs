@@ -6,14 +6,14 @@ use crate::pipeline::LoadedInteriors;
 use crate::types::{Mesh, SubMesh};
 
 #[derive(Debug)]
-struct BlendBlock<'a> {
-    code: &'a [u8],
-    sdna: u32,
-    old_ptr: u64,
-    data: &'a [u8],
+pub(super) struct BlendBlock<'a> {
+    pub(super) code: &'a [u8],
+    pub(super) sdna: u32,
+    pub(super) old_ptr: u64,
+    pub(super) data: &'a [u8],
 }
 
-fn parse_blend_blocks(bytes: &[u8]) -> Vec<BlendBlock<'_>> {
+pub(super) fn parse_blend_blocks(bytes: &[u8]) -> Vec<BlendBlock<'_>> {
     let mut blocks = Vec::new();
     let mut offset = BLEND_MAGIC.len();
     while offset + 32 <= bytes.len() {
@@ -37,7 +37,7 @@ fn parse_blend_blocks(bytes: &[u8]) -> Vec<BlendBlock<'_>> {
     blocks
 }
 
-fn object_block_by_name<'a>(blocks: &'a [BlendBlock<'a>], name: &str) -> &'a BlendBlock<'a> {
+pub(super) fn object_block_by_name<'a>(blocks: &'a [BlendBlock<'a>], name: &str) -> &'a BlendBlock<'a> {
     blocks
         .iter()
         .find(|block| {
@@ -51,7 +51,7 @@ fn object_block_by_name<'a>(blocks: &'a [BlendBlock<'a>], name: &str) -> &'a Ble
         .unwrap_or_else(|| panic!("missing Object block named {name}"))
 }
 
-fn mesh_block_by_name<'a>(blocks: &'a [BlendBlock<'a>], name: &str) -> &'a BlendBlock<'a> {
+pub(super) fn mesh_block_by_name<'a>(blocks: &'a [BlendBlock<'a>], name: &str) -> &'a BlendBlock<'a> {
     blocks
         .iter()
         .find(|block| {
@@ -77,7 +77,7 @@ fn id_block_name(block: &BlendBlock<'_>) -> String {
     cstr_at(block.data, 42, 258).to_string()
 }
 
-fn cstr_at(data: &[u8], offset: usize, len: usize) -> &str {
+pub(super) fn cstr_at(data: &[u8], offset: usize, len: usize) -> &str {
     let raw = &data[offset..offset + len];
     let end = raw.iter().position(|&byte| byte == 0).unwrap_or(raw.len());
     std::str::from_utf8(&raw[..end]).unwrap()
@@ -126,6 +126,8 @@ fn test_mesh_with_submeshes(submeshes: Vec<SubMesh>) -> Mesh {
         model_max: [1.0, 1.0, 1.0],
         scaling_min: [0.0, 0.0, 0.0],
         scaling_max: [1.0, 1.0, 1.0],
+        skin: None,
+        morph_targets: Vec::new(),
     }
 }
 
@@ -168,9 +170,11 @@ fn mesh_to_blend_exports_secondary_uv_map() {
         model_max: [1.0, 1.0, 0.0],
         scaling_min: [0.0, 0.0, 0.0],
         scaling_max: [1.0, 1.0, 0.0],
+        skin: None,
+        morph_targets: Vec::new(),
     };
 
-    let bytes = mesh_to_blend("uv_test", &mesh, &None, None, None);
+    let bytes = mesh_to_blend("uv_test", &mesh, &None, None, None, &[], &[]).unwrap();
 
     assert!(
         bytes
@@ -255,7 +259,7 @@ fn mesh_to_blend_exports_decal_offset_displace_modifier_for_decal_vertex_group()
         vertex_indices: vec![0, 1, 2],
     }];
 
-    let bytes = mesh_to_blend("decal_mesh", &mesh, &None, None, Some(&vertex_groups));
+    let bytes = mesh_to_blend("decal_mesh", &mesh, &None, None, Some(&vertex_groups), &[], &[]).unwrap();
     let blocks = parse_blend_blocks(&bytes);
     let object = object_block_by_name(&blocks, "decal_mesh");
     let last_modifier_ptr = u64::from_le_bytes(object.data[664..672].try_into().unwrap());
@@ -287,9 +291,11 @@ fn flat_mesh_assets_bake_root_rotation_without_wrappers() {
         model_max: [1.0, 1.0, 0.0],
         scaling_min: [0.0, 0.0, 0.0],
         scaling_max: [1.0, 1.0, 0.0],
+        skin: None,
+        morph_targets: Vec::new(),
     };
 
-    let blend_bytes = mesh_to_blend("flat_asset", &mesh, &None, None, None);
+    let blend_bytes = mesh_to_blend("flat_asset", &mesh, &None, None, None, &[], &[]).unwrap();
     let blocks = parse_blend_blocks(&blend_bytes);
     let object = object_block_by_name(&blocks, "flat_asset");
 
@@ -464,6 +470,8 @@ fn interior_placement_mesh_geometry_converts_to_scene_axes() {
         model_max: [1.0, 2.0, 3.0],
         scaling_min: [1.0, 2.0, 3.0],
         scaling_max: [1.0, 2.0, 3.0],
+        skin: None,
+        morph_targets: Vec::new(),
     };
 
     convert_mesh_geometry_to_scene_axes(&mut mesh);
@@ -490,6 +498,8 @@ fn interior_placement_assets_flatten_source_hierarchy() {
         model_max: [1.0, 1.0, 0.0],
         scaling_min: [0.0, 0.0, 0.0],
         scaling_max: [1.0, 1.0, 0.0],
+        skin: None,
+        morph_targets: Vec::new(),
     };
     let nmc = NodeMeshCombo {
         nodes: vec![crate::nmc::NmcNode {
@@ -527,7 +537,7 @@ fn interior_placement_assets_flatten_source_hierarchy() {
         blend_key: "data/interior_asset.blend".to_string(),
     };
 
-    let built = build_native_blend_asset(&job, &mesh_data_map, &HashMap::new(), None).unwrap();
+    let built = build_native_blend_asset(&job, &mesh_data_map, &HashMap::new(), &[], None).unwrap();
 
     assert!(
         built
@@ -561,14 +571,12 @@ fn existing_native_blend_asset_is_reused_when_present() {
         model_max: [1.0, 1.0, 0.0],
         scaling_min: [0.0, 0.0, 0.0],
         scaling_max: [1.0, 1.0, 0.0],
+        skin: None,
+        morph_targets: Vec::new(),
     };
-    let existing_bytes = starbreaker_blend::compress_blend_bytes(&mesh_to_blend(
-        "existing_asset",
-        &mesh,
-        &None,
-        None,
-        None,
-    ));
+    let existing_bytes = starbreaker_blend::compress_blend_bytes(
+        &mesh_to_blend("existing_asset", &mesh, &None, None, None, &[], &[]).unwrap(),
+    );
     let job = BlendAssetJob {
         blend_path: "Data/Objects/existing_asset_LOD0.blend".to_string(),
         mesh_name: "existing_asset_LOD0".to_string(),
@@ -589,7 +597,7 @@ fn existing_native_blend_asset_is_reused_when_present() {
     );
 
     let built =
-        build_native_blend_asset(&job, &mesh_data_map, &HashMap::new(), Some(&loader)).unwrap();
+        build_native_blend_asset(&job, &mesh_data_map, &HashMap::new(), &[], Some(&loader)).unwrap();
 
     assert!(
         built.file.is_none(),
@@ -619,14 +627,15 @@ fn missing_mesh_payload_reuses_existing_native_blend_asset() {
         model_max: [1.0, 1.0, 0.0],
         scaling_min: [0.0, 0.0, 0.0],
         scaling_max: [1.0, 1.0, 0.0],
+        skin: None,
+        morph_targets: Vec::new(),
     };
     let existing_bytes = starbreaker_blend::compress_blend_bytes(&mesh_to_blend(
         "existing_asset",
         &mesh,
         &None,
         None,
-        None,
-    ));
+        None, &[], &[]).unwrap());
     let job = BlendAssetJob {
         blend_path: "Data/Objects/existing_asset_LOD0.blend".to_string(),
         mesh_name: "existing_asset_LOD0".to_string(),
@@ -636,8 +645,7 @@ fn missing_mesh_payload_reuses_existing_native_blend_asset() {
         (relative_path == "Data/Objects/existing_asset_LOD0.blend").then(|| existing_bytes.clone())
     };
 
-    let built =
-        build_native_blend_asset(&job, &HashMap::new(), &HashMap::new(), Some(&loader)).unwrap();
+    let built = build_native_blend_asset(&job, &HashMap::new(), &HashMap::new(), &[], Some(&loader)).unwrap();
 
     assert!(
         built.file.is_none(),
@@ -715,6 +723,8 @@ fn test_mesh_blend_with_nmc_writes_hierarchy_objects() {
         model_max: [3.0, 1.0, 0.0],
         scaling_min: [0.0, 0.0, 0.0],
         scaling_max: [3.0, 1.0, 0.0],
+        skin: None,
+        morph_targets: Vec::new(),
     };
     let identity = [
         [1.0, 0.0, 0.0, 0.0],
@@ -754,7 +764,7 @@ fn test_mesh_blend_with_nmc_writes_hierarchy_objects() {
         material_indices: vec![],
     };
 
-    let blend_bytes = mesh_to_blend("asset_LOD0", &mesh, &None, Some(&nmc), None);
+    let blend_bytes = mesh_to_blend("asset_LOD0", &mesh, &None, Some(&nmc), None, &[], &[]).unwrap();
     let blocks = parse_blend_blocks(&blend_bytes);
     let object_names = blocks
         .iter()
@@ -842,13 +852,7 @@ fn empty_only_nmc_asset_writes_linkable_anchor_mesh() {
         material_indices: Vec::new(),
     };
 
-    let blend_bytes = mesh_to_blend(
-        "EmptyHelper_LOD0",
-        &empty_anchor_mesh(),
-        &None,
-        Some(&nmc),
-        None,
-    );
+    let blend_bytes = mesh_to_blend("EmptyHelper_LOD0", &empty_anchor_mesh(), &None, Some(&nmc), None, &[], &[]).unwrap();
     let blocks = parse_blend_blocks(&blend_bytes);
 
     assert_eq!(
@@ -892,6 +896,8 @@ fn collapsed_wrapper_node_preserves_non_identity_root_transform() {
         model_max: [1.0, 1.0, 0.0],
         scaling_min: [0.0, 0.0, 0.0],
         scaling_max: [1.0, 1.0, 0.0],
+        skin: None,
+        morph_targets: Vec::new(),
     };
     let identity = [
         [1.0, 0.0, 0.0, 0.0],
@@ -927,7 +933,7 @@ fn collapsed_wrapper_node_preserves_non_identity_root_transform() {
         material_indices: Vec::new(),
     };
 
-    let blend_bytes = mesh_to_blend("asset_LOD0", &mesh, &None, Some(&nmc), None);
+    let blend_bytes = mesh_to_blend("asset_LOD0", &mesh, &None, Some(&nmc), None, &[], &[]).unwrap();
     let blocks = parse_blend_blocks(&blend_bytes);
     let wrapper = object_block_by_name(&blocks, "asset");
     let quat = [
@@ -991,6 +997,8 @@ fn linked_scene_object_names_use_geometry_nodes_for_nmc_assets() {
         model_max: [1.0; 3],
         scaling_min: [0.0; 3],
         scaling_max: [1.0; 3],
+        skin: None,
+        morph_targets: Vec::new(),
     };
     let identity = [
         [1.0, 0.0, 0.0, 0.0],
@@ -1059,6 +1067,7 @@ fn test_create_scene_blend_links_object_ids_instead_of_empty_mesh_stubs() {
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: Vec::new(),
         source_ancestors: Vec::new(),
         source_loc: [0.0, 0.0, 0.0],
@@ -1120,6 +1129,7 @@ fn test_create_scene_blend_disambiguates_duplicate_library_basenames() {
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: Vec::new(),
         source_ancestors: Vec::new(),
         source_loc: [0.0, 0.0, 0.0],
@@ -1151,6 +1161,7 @@ fn test_create_scene_blend_disambiguates_duplicate_library_basenames() {
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: Vec::new(),
         source_ancestors: Vec::new(),
         source_loc: [0.0, 0.0, 0.0],
@@ -1214,6 +1225,7 @@ fn test_create_scene_blend_writes_addon_style_scene_anchors() {
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: Vec::new(),
         source_ancestors: vec![
             LinkedSourceAncestor {
@@ -1375,6 +1387,7 @@ fn test_interior_meshes_do_not_parent_to_global_coordinate_nodes() {
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: vec![LinkedSourceNode {
             name: "StarBreaker_Y_up".to_string(),
             parent_name: None,
@@ -1412,6 +1425,7 @@ fn test_interior_meshes_do_not_parent_to_global_coordinate_nodes() {
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: vec![LinkedSourceNode {
             name: "interior_helper".to_string(),
             parent_name: None,
@@ -1478,6 +1492,7 @@ fn test_create_scene_blend_uses_full_source_empty_tree_for_parent_nodes() {
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: vec![
             LinkedSourceNode {
                 name: "hardpoint_child".to_string(),
@@ -1524,6 +1539,7 @@ fn test_create_scene_blend_uses_full_source_empty_tree_for_parent_nodes() {
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: Vec::new(),
         source_ancestors: Vec::new(),
         source_loc: [0.0, 0.0, 0.0],
@@ -1589,6 +1605,7 @@ fn test_create_scene_blend_parents_source_empty_to_local_mesh_object() {
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: vec![LinkedSourceNode {
             name: "child_empty".to_string(),
             parent_name: Some("parent_mesh".to_string()),
@@ -1641,6 +1658,7 @@ fn test_create_scene_blend_uses_instance_local_source_parent_before_global_name(
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: vec![LinkedSourceNode {
             name: "shared_source_parent".to_string(),
             parent_name: None,
@@ -1678,6 +1696,7 @@ fn test_create_scene_blend_uses_instance_local_source_parent_before_global_name(
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: vec![LinkedSourceNode {
             name: "shared_source_parent".to_string(),
             parent_name: None,
@@ -1744,6 +1763,7 @@ fn test_create_scene_blend_reuses_source_tree_for_same_scene_instance_mesh_refs(
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: vec![LinkedSourceNode {
             name: "mav_main".to_string(),
             parent_name: None,
@@ -1781,6 +1801,7 @@ fn test_create_scene_blend_reuses_source_tree_for_same_scene_instance_mesh_refs(
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: vec![LinkedSourceNode {
             name: "mav_main".to_string(),
             parent_name: None,
@@ -1818,6 +1839,7 @@ fn test_create_scene_blend_reuses_source_tree_for_same_scene_instance_mesh_refs(
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: Vec::new(),
         source_ancestors: Vec::new(),
         source_loc: [0.0, 0.0, 0.0],
@@ -1875,6 +1897,7 @@ fn test_create_scene_blend_resolves_parent_node_against_matching_parent_entity_i
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: vec![LinkedSourceNode {
             name: "hardpoint_class_2".to_string(),
             parent_name: None,
@@ -1912,6 +1935,7 @@ fn test_create_scene_blend_resolves_parent_node_against_matching_parent_entity_i
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: Vec::new(),
         source_ancestors: Vec::new(),
         source_loc: [0.0, 0.0, 0.0],
@@ -1943,6 +1967,7 @@ fn test_create_scene_blend_resolves_parent_node_against_matching_parent_entity_i
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: vec![LinkedSourceNode {
             name: "hardpoint_class_2".to_string(),
             parent_name: None,
@@ -1980,6 +2005,7 @@ fn test_create_scene_blend_resolves_parent_node_against_matching_parent_entity_i
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: Vec::new(),
         source_ancestors: Vec::new(),
         source_loc: [0.0, 0.0, 0.0],
@@ -2036,6 +2062,7 @@ fn test_create_scene_blend_resolves_parent_node_case_insensitively() {
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: vec![LinkedSourceNode {
             name: "hardpoint_Right_Main_Retro".to_string(),
             parent_name: None,
@@ -2073,6 +2100,7 @@ fn test_create_scene_blend_resolves_parent_node_case_insensitively() {
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_nodes: Vec::new(),
         source_ancestors: Vec::new(),
         source_loc: [0.0, 0.0, 0.0],
@@ -2171,6 +2199,8 @@ fn create_test_input(entity_name: &str, num_children: usize) -> DecomposedInput 
         model_max: [1.0, 1.0, 0.0],
         scaling_min: [0.0, 0.0, 0.0],
         scaling_max: [1.0, 1.0, 0.0],
+        skin: None,
+        morph_targets: Vec::new(),
     };
 
     let mut children = Vec::new();
@@ -2195,6 +2225,7 @@ fn create_test_input(entity_name: &str, num_children: usize) -> DecomposedInput 
             offset_rotation: [0.0, 0.0, 0.0],
             detach_direction: [0.0, 0.0, 0.0],
             port_flags: String::new(),
+            ui_bindings: Vec::new(),
         });
     }
 
@@ -2219,6 +2250,7 @@ fn create_test_input(entity_name: &str, num_children: usize) -> DecomposedInput 
             containers: vec![],
         },
         paint_variants: vec![],
+        animations: Vec::new(),
     }
 }
 
@@ -2292,6 +2324,7 @@ fn test_create_scene_blend_hides_invisible_linked_instance_objects() {
         material_names: Vec::new(),
         material_sidecar: None,
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_ancestors: Vec::new(),
         source_nodes: Vec::new(),
         source_loc: [0.0, 0.0, 0.0],
@@ -2351,6 +2384,7 @@ fn test_create_scene_blend_writes_decal_offset_modifier_for_decal_mesh_asset() {
                 .to_string(),
         ),
         palette_id: None,
+        ui_bindings: Vec::new(),
         source_ancestors: Vec::new(),
         source_nodes: Vec::new(),
         source_loc: [0.0, 0.0, 0.0],
@@ -2377,6 +2411,8 @@ fn test_create_scene_blend_writes_decal_offset_modifier_for_decal_mesh_asset() {
         &[],
         &HashMap::new(),
         &decal_mesh_refs,
+        &HashSet::new(),
+        None,
     )
     .unwrap();
     let blocks = parse_blend_blocks(&blend_bytes);

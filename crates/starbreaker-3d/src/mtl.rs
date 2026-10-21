@@ -85,6 +85,9 @@ pub struct AuthoredTexture {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MaterialSetAuthoredData {
+    /// The root has a `<SubMaterials>` node: a multi-material, which the
+    /// engine flags `MTL_FLAG_MULTI_SUBMTL` (`crate::material_slots`).
+    pub sub_materials: bool,
     pub attributes: Vec<AuthoredAttribute>,
     pub public_params: Vec<PublicParam>,
     pub child_blocks: Vec<AuthoredBlock>,
@@ -472,7 +475,7 @@ impl SubMaterial {
         };
 
         DecodedStringGenMask {
-            has_decal: has_token("DECAL"),
+            has_decal: has_token("DECAL") || has_token("DECALS"),
             has_parallax_occlusion_mapping: has_token("PARALLAX_OCCLUSION_MAPPING"),
             has_stencil_map: has_token("STENCIL_MAP"),
             has_iridescence: has_token("IRIDESCENCE"),
@@ -518,12 +521,11 @@ impl SubMaterial {
         if self.is_nodraw {
             return AlphaConfig::Blend;
         }
-        let mask = &self.string_gen_mask;
         // Decals use alpha blending for layering on top of hull geometry.
         // MeshDecal shader is always a decal overlay, even without %DECAL flag.
         // Note: STENCIL_MAP on non-MeshDecal shaders (e.g. HardSurface camo paints)
         // is for the stencil pattern system, NOT alpha blending — don't treat as decal.
-        if mask.contains("%DECAL") || self.shader == "MeshDecal" {
+        if self.is_decal() {
             return AlphaConfig::Blend;
         }
         if self.alpha_test > 0.0 {
@@ -539,10 +541,13 @@ impl SubMaterial {
         self.is_nodraw || self.opacity <= f32::EPSILON
     }
 
-    /// Whether this material is a decal overlay (needs alpha texture to look correct).
+    /// Whether this material is a decal overlay (needs alpha texture to look
+    /// correct): the `%DECAL` gen-mask token (whole token — LayerBlend_V2's
+    /// `%DECALS` decal-sheet feature is not it) or the MeshDecal shader.
     pub fn is_decal(&self) -> bool {
-        let mask = &self.string_gen_mask;
-        mask.contains("%DECAL") || self.shader == "MeshDecal"
+        // The whole `%DECAL` token: LayerBlend_V2's `%DECALS` (a decal sheet,
+        // see `DecodedStringGenMask::has_decal`) is not a decal surface.
+        self.string_gen_mask.split('%').any(|t| t.eq_ignore_ascii_case("DECAL")) || self.shader == "MeshDecal"
     }
 
     /// Whether this material uses a glass shader family.
@@ -577,7 +582,10 @@ impl SubMaterial {
     /// the scalar Shininess value.
     fn uses_per_pixel_smoothness(&self) -> bool {
         let s = self.shader.to_lowercase();
-        s.contains("hardsurface") || s.contains("layerblend") || s == "illum" || s == "glasspbr"
+        s.contains("hardsurface")
+            || s.contains("layerblend")
+            || s == "illum"
+            || self.shader_family() == ShaderFamily::GlassPbr
     }
 
     /// glTF metallic factor derived from authored response data.
@@ -621,8 +629,7 @@ impl SubMaterial {
     }
 
     pub fn is_double_sided(&self) -> bool {
-        let mask = &self.string_gen_mask;
-        mask.contains("%DECAL") || self.shader == "MeshDecal"
+        self.is_decal()
     }
 }
 
@@ -723,6 +730,7 @@ pub fn parse_mtl(data: &[u8]) -> Result<MtlFile, Error> {
             .map(|child| parse_authored_block(&xml, child))
             .collect::<Vec<_>>();
         MaterialSetAuthoredData {
+            sub_materials: true,
             attributes: collect_authored_attributes(&xml, root),
             public_params,
             child_blocks,
@@ -1504,6 +1512,22 @@ mod tests {
         assert_eq!(material.metallic(), 0.0);
     }
 
+    /// A decal surface is the `%DECAL` token; `%DECALS` (LayerBlend_V2's
+    /// decal-sheet feature, on whole garments such as undersuits) only gives
+    /// the material a decal sheet (texture role), never makes it a decal.
+    #[test]
+    fn decal_surface_is_the_whole_decal_token() {
+        let decal_sheet = dummy_submaterial("LayerBlend_V2", "%NORMAL_MAP%BLEND_MAP%DECALS");
+        assert!(decal_sheet.decoded_string_gen_mask().has_decal, "it has a decal sheet");
+        assert!(!decal_sheet.is_decal());
+        assert!(!decal_sheet.is_double_sided());
+        assert!(matches!(decal_sheet.alpha_config(), AlphaConfig::Opaque));
+        let decal = dummy_submaterial("Illum", "%DECAL%NORMAL_MAP");
+        assert!(decal.is_decal());
+        assert!(decal.is_double_sided());
+        assert!(matches!(decal.alpha_config(), AlphaConfig::Blend));
+    }
+
     #[test]
     fn decoded_string_gen_mask_splits_tokens() {
         let decoded = dummy_submaterial(
@@ -1603,6 +1627,16 @@ mod tests {
     }
 
     #[test]
+    fn scope_pbr_uses_per_pixel_smoothness_for_roughness() {
+        // ScopePBR is glass-family; with the per-pixel smoothness placeholder
+        // (Shininess = 255 -> roughness 0) it must fall back to the glass default
+        // rather than rendering an unrealistic mirror finish.
+        let mut material = dummy_submaterial("ScopePBR", "");
+        material.shininess = 255.0;
+        assert_eq!(material.roughness(), 0.5);
+    }
+
+    #[test]
     fn normal_named_texslot1_is_not_classified_as_base_color() {
         let mut material = dummy_submaterial("HardSurface", "");
         material.texture_slots = vec![TextureSlotBinding {
@@ -1636,6 +1670,18 @@ mod tests {
             .collect();
 
         assert_eq!(roles, vec![TextureSemanticRole::BaseColor]);
+    }
+
+    #[test]
+    fn layer_blend_plural_decals_classifies_slot_nine_without_filename_hints() {
+        let mut material = dummy_submaterial("LayerBlend_V2", "%NORMAL_MAP%BLEND_MAP%DECALS");
+        material.texture_slots = vec![TextureSlotBinding {
+            slot: "TexSlot9".into(),
+            path: "textures/helmet_diff.tif".into(),
+            is_virtual: false,
+        }];
+        assert!(material.decoded_string_gen_mask().has_decal);
+        assert_eq!(material.semantic_texture_slots()[0].role, TextureSemanticRole::DecalSheet);
     }
 
     #[test]

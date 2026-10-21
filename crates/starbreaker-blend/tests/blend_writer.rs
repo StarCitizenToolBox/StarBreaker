@@ -259,7 +259,7 @@ fn scene_initializes_cycles_safe_motion_blur_curve() {
 
 #[test]
 fn cycles_render_settings_idprops_match_requested_defaults() {
-    let child_ptrs = [0x3000, 0x3010, 0x3020, 0x3030, 0x3040, 0x3050];
+    let child_ptrs = [0x3000, 0x3010, 0x3020, 0x3030, 0x3040, 0x3050, 0x3060, 0x3070];
     let (root, cycles_group, children) =
         build_cycles_render_settings_system_properties(0x1000, 0x2000, &child_ptrs);
     let scene = build_scene_with_motion_blur_curve_and_properties(
@@ -279,7 +279,7 @@ fn cycles_render_settings_idprops_match_requested_defaults() {
     assert_eq!(root[16], IDP_GROUP);
     assert_eq!(u64::from_le_bytes(root[96..104].try_into().unwrap()), 0x2000);
     assert_eq!(&cycles_group[20..26], b"cycles");
-    assert_eq!(i32::from_le_bytes(cycles_group[128..132].try_into().unwrap()), 6);
+    assert_eq!(i32::from_le_bytes(cycles_group[128..132].try_into().unwrap()), 8);
 
     let values = children
         .iter()
@@ -301,6 +301,8 @@ fn cycles_render_settings_idprops_match_requested_defaults() {
             ("use_preview_denoising".to_string(), 1),
             ("samples".to_string(), 512),
             ("use_denoising".to_string(), 1),
+            ("denoiser".to_string(), 2),         // OPTIX
+            ("preview_denoiser".to_string(), 2), // OPTIX
         ]
     );
 }
@@ -532,7 +534,8 @@ fn object_transform_defaults_are_visible_identity() {
     assert_eq!(f32::from_le_bytes(ob[768..772].try_into().unwrap()), 1.0);
     assert_eq!(f32::from_le_bytes(ob[820..824].try_into().unwrap()), 1.0);
     assert_eq!(i16::from_le_bytes(ob[1040..1042].try_into().unwrap()), 1);
-    assert_eq!(i16::from_le_bytes(ob[1042..1044].try_into().unwrap()), -1);
+    assert_eq!(i16::from_le_bytes(ob[1022..1024].try_into().unwrap()), 1 << 10); // protectflag = OB_LOCK_ROT4D
+    assert_eq!(i16::from_le_bytes(ob[1042..1044].try_into().unwrap()), 0); // boundtype = OB_BOUND_BOX
     assert_eq!(ob[1046], 5);
     assert_eq!(f32::from_le_bytes(ob[1048..1052].try_into().unwrap()), 1.0);
     assert_eq!(f32::from_le_bytes(ob[1064..1068].try_into().unwrap()), 1.0);

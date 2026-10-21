@@ -17,6 +17,14 @@ use super::{P4kSiblingReader, datacore_path_to_p4k, try_load_mtl};
 
 pub(crate) type PngCache = std::collections::HashMap<String, Option<Vec<u8>>>;
 
+/// Prewarm cache for DDNA→roughness decodes, keyed by RAW source path (matching
+/// the writer's `source_path` key semantics). Holds ONLY the pure decode result
+/// so the serial writer keeps every `files`/`texture_cache`/`ddna_status_cache`
+/// bookkeeping insert; a hit clones cheaply (`RoughnessTextureLoad: Clone`,
+/// `RoughnessTextureLoadError: Copy`).
+pub(crate) type RoughnessCache =
+    std::collections::HashMap<String, Result<RoughnessTextureLoad, RoughnessTextureLoadError>>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RoughnessTextureLoadError {
     MissingSourceDds,
@@ -874,13 +882,13 @@ pub(super) fn load_material_textures(
                         );
                         None
                     } else {
-                        cached_load(p4k, path, mip, png_cache, load_normal_texture)
+                        cached_load_keyed(p4k, path, mip, "@n", png_cache, load_normal_texture)
                     }
                 } else {
-                    cached_load(p4k, path, mip, png_cache, load_normal_texture)
+                    cached_load_keyed(p4k, path, mip, "@n", png_cache, load_normal_texture)
                 }
             } else {
-                cached_load(p4k, path, mip, png_cache, load_normal_texture)
+                cached_load_keyed(p4k, path, mip, "@n", png_cache, load_normal_texture)
             }
         } else {
             None
@@ -897,7 +905,7 @@ pub(super) fn load_material_textures(
             {
                 None
             } else {
-                cached_load(p4k, path, mip, png_cache, load_roughness_texture)
+                cached_load_keyed(p4k, path, mip, "@r", png_cache, load_roughness_texture)
             }
         } else {
             None
@@ -1052,21 +1060,39 @@ pub(crate) fn cached_load(
     cache: &mut PngCache,
     loader: fn(&MappedP4k, &str, u32) -> Option<Vec<u8>>,
 ) -> Option<Vec<u8>> {
-    let key = cached_load_key(path, mip, loader);
+    cached_load_keyed(p4k, path, mip, "", cache, loader)
+}
+
+/// Like [`cached_load`] but appends `key_discriminator` to the cache key so the
+/// same texture path decoded with different loaders (e.g. a Generic albedo vs a
+/// Normal-gloss map vs a derived DDNA roughness map) occupies distinct cache
+/// slots instead of aliasing to one "first decode wins" entry. The discriminator
+/// is `""` for the legacy/Generic key and a short tag (e.g. `"@n"` for Normal,
+/// `"@r"` for derived Roughness) for other flavors.
+/// Build the canonical `PngCache` key for a texture decode. The SAME format
+/// must be used by every writer (the prewarm pass) and reader
+/// (`cached_load_keyed`) — a hand-formatted duplicate drifting from this is
+/// exactly the silent cache-miss class behind the `@n` flavor-aliasing hunt
+/// (review F6).
+pub(crate) fn png_cache_key(path: &str, mip: u32, key_discriminator: &str) -> String {
+    format!("{path}@mip{mip}{key_discriminator}")
+}
+
+pub(crate) fn cached_load_keyed(
+    p4k: &MappedP4k,
+    path: &str,
+    mip: u32,
+    key_discriminator: &str,
+    cache: &mut PngCache,
+    loader: fn(&MappedP4k, &str, u32) -> Option<Vec<u8>>,
+) -> Option<Vec<u8>> {
+    let key = png_cache_key(path, mip, key_discriminator);
     if let Some(cached) = cache.get(&key) {
         return cached.clone();
     }
     let result = loader(p4k, path, mip);
     cache.insert(key, result.clone());
     result
-}
-
-fn cached_load_key(
-    path: &str,
-    mip: u32,
-    loader: fn(&MappedP4k, &str, u32) -> Option<Vec<u8>>,
-) -> String {
-    format!("{path}@loader{:x}_mip{mip}", loader as usize)
 }
 
 pub(super) fn encode_png_rgba(width: u32, height: u32, rgba: Vec<u8>) -> Option<Vec<u8>> {
@@ -1482,18 +1508,6 @@ mod tests {
     fn normal_texture_mip_uses_color_mips_when_smoothness_is_missing() {
         assert_eq!(select_normal_texture_mip(8, 10, 0), 8);
         assert_eq!(select_normal_texture_mip(12, 10, 0), 9);
-    }
-
-    #[test]
-    fn cached_load_key_distinguishes_normal_and_roughness_loaders() {
-        assert_ne!(
-            cached_load_key("Data/Objects/Test/panel_ddna.tif", 0, load_normal_texture),
-            cached_load_key(
-                "Data/Objects/Test/panel_ddna.tif",
-                0,
-                load_roughness_texture
-            ),
-        );
     }
 
     #[test]

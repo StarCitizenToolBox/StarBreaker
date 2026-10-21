@@ -172,8 +172,7 @@ pub(crate) fn synthesize_nmc_from_bones(
 /// lives in the .cgfm sidecar.
 pub(crate) fn load_nmc_for_cgf(p4k: &MappedP4k, cgf_path: &str) -> Option<crate::nmc::NodeMeshCombo> {
     let try_path = |path: &str| -> Option<crate::nmc::NodeMeshCombo> {
-        let p4k_path = datacore_path_to_p4k(path);
-        let bytes = p4k.entry_case_insensitive(&p4k_path).and_then(|e| p4k.read(e).ok())?;
+        let bytes = crate::socpak::read_geometry_file(p4k, &datacore_path_to_p4k(path))?;
         let (nodes, material_indices) = crate::nmc::parse_nmc_full(&bytes)?;
         Some(crate::nmc::NodeMeshCombo { nodes, material_indices })
     };
@@ -188,8 +187,7 @@ pub(crate) fn load_nmc_for_cgf(p4k: &MappedP4k, cgf_path: &str) -> Option<crate:
         }
     }
     let try_skeleton = |path: &str| -> Option<crate::nmc::NodeMeshCombo> {
-        let p4k_path = datacore_path_to_p4k(path);
-        let bytes = p4k.entry_case_insensitive(&p4k_path).and_then(|e| p4k.read(e).ok())?;
+        let bytes = crate::socpak::read_geometry_file(p4k, &datacore_path_to_p4k(path))?;
         let bones = crate::skeleton::parse_skeleton(&bytes)?;
         node_mesh_combo_from_bones(&bones)
     };

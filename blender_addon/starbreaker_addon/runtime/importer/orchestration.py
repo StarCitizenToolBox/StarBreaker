@@ -19,10 +19,11 @@ from typing import Any, Callable
 
 import bpy
 import mathutils
+from .layer_blend_decals import prepare_decal_coordinates
 
 from ..constants import (
-    DECAL_OFFSET_EXTERNAL_DEFAULT,
     DECAL_OFFSET_MODIFIER_NAME,
+    DECAL_OFFSET_TEMPLATE_CAP,
     PACKAGE_ROOT_PREFIX,
     PROP_ASSEMBLY_KIND,
     PROP_DECAL_HOST_CHANNEL,
@@ -47,6 +48,7 @@ from ..constants import (
     PROP_SOURCE_NODE_NAME,
     PROP_SUBMATERIAL_JSON,
     PROP_TEMPLATE_PATH,
+    PROP_UI_DEFAULT_STATE_IS_OFF,
     TEMPLATE_COLLECTION_NAME,
 )
 from ..package_ops import (
@@ -65,7 +67,9 @@ from .groups import GroupsMixin
 from .layers import LayersMixin
 from .materials import MaterialsMixin
 from .palette import PaletteMixin
-from .types import ImportedTemplate, _bake_bitangent_sign_attribute
+from .hair import HairMixin
+from .skin import SkinMixin
+from .types import BITANGENT_SIGN_ATTRIBUTE, ImportedTemplate, _bake_bitangent_sign_attribute
 from .utils import (
     _canonical_material_sidecar_path,
     _canonical_source_name,
@@ -106,7 +110,7 @@ class OrchestrationMixin:
         self.import_palette_override: str | None = None
         self.import_paint_variant_sidecar: str | None = None
         self.runtime_shared_groups_ready = False
-        self.material_identity_cache: dict[tuple[str, int, str], str] = {}
+        self.material_identity_cache: dict[tuple[str, int, str, str], str] = {}
         self.material_identity_index: dict[str, bpy.types.Material] = {}
         self.material_identity_index_ready = False
         self.sidecar_submaterials_by_index: dict[str, dict[int, SubmaterialRecord]] = {}
@@ -195,19 +199,12 @@ class OrchestrationMixin:
     def _ensure_material_identity_index(self) -> None:
         if self.material_identity_index_ready:
             return
+        # Index every material (including decal-host variants) by the identity that
+        # builders stamped at creation. Re-deriving the identity here is unsafe:
+        # builders computes it from call-site-specific parts, so a fixed-arity
+        # reconstruction would not match the stamped value, defeating reuse and
+        # accumulating duplicate host-variant materials across re-imports.
         for material in bpy.data.materials:
-            if self._material_is_decal_host_variant(material):
-                self._set_decal_host_variant_identity(
-                    material,
-                    material.name,
-                    material.get("starbreaker_decal_host_base_key"),
-                    material.get("starbreaker_decal_host_material_key"),
-                    material.get("starbreaker_decal_host_channel"),
-                    material.get("starbreaker_decal_host_rgb_key"),
-                    material.get("starbreaker_mesh_decal_variant_mode"),
-                    material.get("starbreaker_decal_host_composite_mode"),
-                )
-                continue
             material_identity = material.get(PROP_MATERIAL_IDENTITY)
             if isinstance(material_identity, str) and material_identity:
                 self.material_identity_index[material_identity] = material
@@ -373,6 +370,135 @@ class OrchestrationMixin:
             return self._sidecar_default_palette_id(record.material_sidecar)
         return None
 
+    def _instance_payload_dict(self, obj: bpy.types.Object) -> dict[str, Any] | None:
+        payload = obj.get(PROP_INSTANCE_JSON)
+        if not isinstance(payload, str) or not payload:
+            return None
+        try:
+            decoded = json.loads(payload)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return None
+        return decoded if isinstance(decoded, dict) else None
+
+    @staticmethod
+    def _source_names_from_payload(payload: dict[str, Any] | None) -> set[str]:
+        if payload is None:
+            return set()
+        source_names: set[str] = set()
+        for value in (
+            payload.get("source_object_name"),
+            payload.get("source_parent_name"),
+        ):
+            if isinstance(value, str) and value:
+                source_names.add(value)
+        source_ancestors = payload.get("source_ancestors")
+        if isinstance(source_ancestors, list):
+            for value in source_ancestors:
+                if isinstance(value, str) and value:
+                    source_names.add(value)
+        return source_names
+
+    def _manifest_ui_binding_records(
+        self,
+    ) -> dict[tuple[str, str], list[SceneInstanceRecord]]:
+        cached = getattr(self, "_ui_binding_records_by_asset", None)
+        if cached is not None:
+            return cached
+        indexed: dict[tuple[str, str], list[SceneInstanceRecord]] = {}
+        for record in getattr(self.package.scene, "children", []):
+            if not isinstance(record, SceneInstanceRecord):
+                continue
+            if not record.mesh_asset or not record.ui_bindings:
+                continue
+            key = (record.mesh_asset, record.material_sidecar or "")
+            indexed.setdefault(key, []).append(record)
+        self._ui_binding_records_by_asset = indexed
+        return indexed
+
+    def _manifest_ui_bindings_for_object(
+        self,
+        obj: bpy.types.Object,
+        payload: dict[str, Any] | None,
+    ) -> list[dict[str, Any]] | None:
+        mesh_asset = _string_prop(obj, PROP_MESH_ASSET)
+        if mesh_asset is None:
+            return None
+        sidecar_path = _string_prop(obj, PROP_MATERIAL_SIDECAR) or ""
+        candidates = self._manifest_ui_binding_records().get((mesh_asset, sidecar_path))
+        if not candidates and sidecar_path:
+            candidates = self._manifest_ui_binding_records().get((mesh_asset, ""))
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0].ui_bindings
+
+        ancestor_names: set[str] = set()
+        current = obj.parent
+        while current is not None:
+            name = getattr(current, "name", None)
+            if isinstance(name, str) and name:
+                ancestor_names.add(name.lower())
+            current = current.parent
+        ancestry_matches = [
+            record
+            for record in candidates
+            if record.parent_node_name
+            and any(record.parent_node_name.lower() in ancestor_name for ancestor_name in ancestor_names)
+        ]
+        narrowed = ancestry_matches or candidates
+        if len(narrowed) == 1:
+            return narrowed[0].ui_bindings
+
+        source_names = self._source_names_from_payload(payload)
+        helper_matches = [
+            record
+            for record in narrowed
+            if any(
+                isinstance(binding.get("helper_name"), str)
+                and binding.get("helper_name") in source_names
+                and isinstance(binding.get("generated_image_path"), str)
+                and binding.get("generated_image_path")
+                for binding in record.ui_bindings
+            )
+        ]
+        narrowed = helper_matches or narrowed
+        if len(narrowed) == 1:
+            return narrowed[0].ui_bindings
+
+        unique_bindings = {
+            json.dumps(bindings, sort_keys=True): bindings
+            for bindings in (record.ui_bindings for record in narrowed)
+        }
+        if len(unique_bindings) == 1:
+            return next(iter(unique_bindings.values()))
+        return None
+
+    def _ui_binding_for_object(self, obj: bpy.types.Object) -> dict[str, Any] | None:
+        payload = self._instance_payload_dict(obj)
+        bindings = payload.get("ui_bindings") if payload is not None else None
+        if (not isinstance(bindings, list) or not bindings) and payload is not None:
+            bindings = self._manifest_ui_bindings_for_object(obj, payload)
+        if not isinstance(bindings, list) or not bindings:
+            return None
+        source_names = self._source_names_from_payload(payload)
+        fallback = None
+        for binding in bindings:
+            if not isinstance(binding, dict):
+                continue
+            image_path = binding.get("generated_image_path")
+            if not isinstance(image_path, str) or not image_path:
+                continue
+            helper_name = binding.get("helper_name")
+            if isinstance(helper_name, str) and helper_name:
+                if helper_name in source_names:
+                    return binding
+                if fallback is None:
+                    fallback = binding
+                continue
+            if fallback is None:
+                fallback = binding
+        return fallback
+
     def _sidecar_default_palette_id(self, sidecar_path: str) -> str | None:
         load_sidecar = getattr(self.package, "load_material_sidecar", None)
         if not callable(load_sidecar):
@@ -446,6 +572,15 @@ class OrchestrationMixin:
             self._advance_progress(f"Preparing {interior.name}")
             self.import_interior_container(interior, scene_root_parent)
 
+        # POM tangent_space reads a per-corner bitangent sign to correct
+        # UV-mirrored faces (where parallax otherwise marches the wrong way
+        # vertically). The per-template bake covers shared templates, but
+        # instantiated meshes that bypass the template loader still need it.
+        self._bake_pom_mesh_bitangent_signs(package_root)
+        # Re-resolve POM Bias from the height-map background now that image
+        # buffers load reliably (the build-time read races buffer eviction).
+        self._apply_deferred_pom_background_bias()
+
         # Final flush in case anything else deferred a depsgraph update.
         self._flush_pending_view_layer_update()
         # Drain the per-template orphan-material queue with a single
@@ -465,6 +600,47 @@ class OrchestrationMixin:
             return self.import_paint_variant_sidecar
         return sidecar_path
 
+    def _bake_pom_mesh_bitangent_signs(self, package_root: bpy.types.Object) -> None:
+        """Bake ``starbreaker_bitangent_sign`` on every POM-bearing mesh under
+        ``package_root`` that lacks it.
+
+        The POM ``tangent_space`` group multiplies its bitangent by this
+        per-corner sign so UV-mirrored faces parallax-march in the correct
+        vertical direction. Only meshes whose materials use a runtime POM group
+        are baked, and meshes that already carry the attribute (e.g. inherited
+        from a baked template) are skipped.
+        """
+        seen: set[int] = set()
+        stack: list[bpy.types.Object] = [package_root]
+        while stack:
+            obj = stack.pop()
+            stack.extend(obj.children)
+            if getattr(obj, "type", None) != "MESH":
+                continue
+            mesh = getattr(obj, "data", None)
+            if mesh is None or mesh.as_pointer() in seen:
+                continue
+            seen.add(mesh.as_pointer())
+            if mesh.attributes.get(BITANGENT_SIGN_ATTRIBUTE) is not None:
+                continue
+            if self._object_uses_runtime_pom(obj):
+                _bake_bitangent_sign_attribute(mesh)
+
+    @staticmethod
+    def _object_uses_runtime_pom(obj: bpy.types.Object) -> bool:
+        for slot in obj.material_slots:
+            mat = slot.material
+            if mat is None or mat.node_tree is None:
+                continue
+            for node in mat.node_tree.nodes:
+                if (
+                    node.bl_idname == "ShaderNodeGroup"
+                    and node.node_tree is not None
+                    and node.node_tree.name.startswith("StarBreaker POM [")
+                ):
+                    return True
+        return False
+
     def rebuild_object_materials(self, obj: bpy.types.Object, palette_id: str | None) -> int:
         self._ensure_runtime_shared_groups()
         if obj.type != "MESH":
@@ -475,6 +651,7 @@ class OrchestrationMixin:
         sidecar = self.package.load_material_sidecar(sidecar_path)
         if sidecar is None:
             return 0
+        prepare_decal_coordinates(obj, sidecar)
         effective_palette_id = self._effective_palette_id(palette_id)
         palette = palette_for_id(self.package, effective_palette_id)
         applied = 0
@@ -555,6 +732,16 @@ class OrchestrationMixin:
             sidecar,
             slot_mapping,
         )
+        ui_binding = self._ui_binding_for_object(obj)
+        ui_image_path = (
+            ui_binding.get("generated_image_path")
+            if isinstance(ui_binding, dict) and isinstance(ui_binding.get("generated_image_path"), str)
+            else None
+        )
+        if isinstance(ui_binding, dict) and bool(ui_binding.get("default_state_is_off")):
+            obj[PROP_UI_DEFAULT_STATE_IS_OFF] = True
+        elif callable(getattr(obj, "get", None)) and obj.get(PROP_UI_DEFAULT_STATE_IS_OFF) is not None:
+            del obj[PROP_UI_DEFAULT_STATE_IS_OFF]
         if slot_mapping is not None:
             if mesh_materials is not None:
                 while len(mesh_materials) < len(slot_mapping):
@@ -565,6 +752,7 @@ class OrchestrationMixin:
                 sidecar_path,
                 source_sidecar_path,
                 effective_palette_id,
+                ui_image_path,
                 tuple(slot_mapping),
                 ("channel", precomputed_host_channel)
                 if precomputed_host_channel is not None
@@ -626,7 +814,13 @@ class OrchestrationMixin:
                         f"StarBreaker: slot index {slot_index} exceeds material slot count for {obj.name}"
                     )
                     continue
-                material = self.material_for_submaterial(sidecar_path, sidecar, submaterial, palette)
+                material = self.material_for_submaterial(
+                    sidecar_path,
+                    sidecar,
+                    submaterial,
+                    palette,
+                    ui_image_path=ui_image_path,
+                )
                 slot = obj.material_slots[slot_index]
                 replaced_material = slot.material
                 slot.link = "OBJECT"
@@ -667,7 +861,13 @@ class OrchestrationMixin:
                     f"StarBreaker: submaterial index {submaterial.index} exceeds material slot count for {obj.name}"
                 )
                 continue
-            material = self.material_for_submaterial(sidecar_path, sidecar, submaterial, palette)
+            material = self.material_for_submaterial(
+                sidecar_path,
+                sidecar,
+                submaterial,
+                palette,
+                ui_image_path=ui_image_path,
+            )
             slot = obj.material_slots[submaterial.index]
             replaced_material = slot.material
             slot.link = "OBJECT"
@@ -857,6 +1057,7 @@ class OrchestrationMixin:
                 material_sidecar=placement.material_sidecar,
                 mesh_asset=placement.mesh_asset,
                 palette_id=effective_placement_palette,
+                ui_bindings=list(placement.ui_bindings),
                 decal_host_channel=placement_decal_host_channel,
                 decal_host_rgb=placement_decal_host_rgb,
                 raw=placement.raw,
@@ -1216,8 +1417,8 @@ class OrchestrationMixin:
         if modifiers is None:
             return
         dimensions = tuple(float(value) for value in getattr(obj, "dimensions", ()) if float(value) > 0.0)
-        relative_strength = min(dimensions) * 0.005 if dimensions else DECAL_OFFSET_EXTERNAL_DEFAULT
-        normalized_strength = min(DECAL_OFFSET_EXTERNAL_DEFAULT, max(0.00001, relative_strength))
+        relative_strength = min(dimensions) * 0.005 if dimensions else DECAL_OFFSET_TEMPLATE_CAP
+        normalized_strength = min(DECAL_OFFSET_TEMPLATE_CAP, max(0.00001, relative_strength))
         for modifier in modifiers:
             if (
                 getattr(modifier, "name", "") == DECAL_OFFSET_MODIFIER_NAME
@@ -1364,6 +1565,8 @@ class PackageImporter(
     LayersMixin,
     MaterialsMixin,
     BuildersMixin,
+    SkinMixin,
+    HairMixin,
     GroupsMixin,
     OrchestrationMixin,
 ):

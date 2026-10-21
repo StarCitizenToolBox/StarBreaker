@@ -1,11 +1,15 @@
 //! Socpak reader: opens ship interior containers from P4k, extracts geometry and lights.
 //!
 //! Flow: P4k → socpak (ZIP) → main .soc (CrCh) → IncludedObjects + CryXMLB → InteriorPayload
+//!
+//! Also resolves CryEngine pak-mounted geometry (`read_geometry_file` /
+//! `read_socpak_internal_geometry`): designer "brush" meshes baked inside a
+//! `.socpak` are absent from the main P4k tree and must be read from the archive.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::included_objects::IncludedObjects;
-use quick_xml::Reader;
+use quick_xml::{Reader, XmlVersion};
 use quick_xml::events::Event;
 use starbreaker_chunks::ChunkFile;
 use starbreaker_chunks::known_types::crch;
@@ -197,6 +201,23 @@ pub fn load_interior_from_socpak(
         return Err(Error::MissingSocpak(format!("No .soc in {p4k_path}")));
     }
 
+    // Transit destinations authored in the socpak's metadata sidecar
+    // (`<name>/metadata/sctransitdestination.xml`): floor positions + loc
+    // keys, socpak-pivot-relative — the SAME raw space as the `.soc` entity
+    // transforms, so the spatial association below runs before any container
+    // or item-port delta transform is applied.
+    let mut transit_destinations = Vec::new();
+    for entry in inner.entries() {
+        let lowered = entry.name.to_ascii_lowercase().replace('\\', "/");
+        if !lowered.ends_with("metadata/sctransitdestination.xml") {
+            continue;
+        }
+        match inner.read(entry) {
+            Ok(data) => transit_destinations.extend(parse_transit_destinations(&data)),
+            Err(e) => log::warn!("failed to read {}: {e}", entry.name),
+        }
+    }
+
     let mut meshes = Vec::new();
     let mut lights = Vec::new();
     let mut tint_palette_names = Vec::new();
@@ -211,7 +232,8 @@ pub fn load_interior_from_socpak(
         };
 
         match parse_soc(&soc_data, &soc_entry.name, container_transform) {
-            Ok((payload, palette_names)) => {
+            Ok((mut payload, palette_names)) => {
+                associate_transit_locations(&mut payload.meshes, &transit_destinations);
                 log::debug!(
                     "  .soc '{}' → {} meshes, {} lights",
                     soc_entry.name,
@@ -258,13 +280,408 @@ pub fn load_interior_from_socpak(
     })
 }
 
-fn normalize_socpak_path(path: &str) -> String {
+/// Load a socpak plus every manifest-declared child socpak instance.
+///
+/// Child manifests carry local quaternion transforms. Those transforms are
+/// composed into world/container space here so downstream interior export can
+/// flatten the recursive tree without losing repeated instances.
+pub(crate) fn load_interior_tree_from_socpak_filtered_with_progress<F>(
+    p4k: &MappedP4k,
+    socpak_path: &str,
+    container_transform: [[f32; 4]; 4],
+    non_item_port_transform_delta: [[f32; 4]; 4],
+    root_item_port_reference_candidates: &[[[f32; 4]; 4]],
+    path_filter: Option<&HashSet<String>>,
+    progress: &mut F,
+) -> Result<Vec<InteriorPayload>, Error>
+where
+    F: FnMut(SocpakTreeProgress),
+{
+    let mut payloads = Vec::new();
+    let mut ancestors = HashSet::new();
+    let mut containers_loaded = 0usize;
+    collect_interior_tree_from_socpak(
+        p4k,
+        socpak_path,
+        container_transform,
+        non_item_port_transform_delta,
+        root_item_port_reference_candidates,
+        0,
+        &mut ancestors,
+        &mut payloads,
+        &mut containers_loaded,
+        path_filter,
+        progress,
+    )?;
+    Ok(payloads)
+}
+
+#[derive(Debug, Clone)]
+pub struct SocpakHierarchyNode {
+    pub path: String,
+    pub name: String,
+    pub entity_name: Option<String>,
+    pub class_name: Option<String>,
+    pub depth: usize,
+    pub mesh_count: usize,
+    pub light_count: usize,
+    pub children: Vec<SocpakHierarchyNode>,
+}
+
+pub(crate) fn inspect_interior_tree_from_socpak(
+    p4k: &MappedP4k,
+    socpak_path: &str,
+) -> Result<SocpakHierarchyNode, Error> {
+    let mut ancestors = HashSet::new();
+    inspect_interior_tree_from_socpak_inner(p4k, socpak_path, None, None, 0, &mut ancestors)
+}
+
+fn inspect_interior_tree_from_socpak_inner(
+    p4k: &MappedP4k,
+    socpak_path: &str,
+    entity_name: Option<String>,
+    class_name: Option<String>,
+    depth: usize,
+    ancestors: &mut HashSet<String>,
+) -> Result<SocpakHierarchyNode, Error> {
+    let normalized_path = normalize_socpak_filter_key(socpak_path);
+    if !ancestors.insert(normalized_path) {
+        log::warn!("skipping cyclic socpak child reference: {socpak_path}");
+        return Ok(SocpakHierarchyNode {
+            path: normalize_socpak_path(socpak_path),
+            name: socpak_display_name(socpak_path),
+            entity_name,
+            class_name,
+            depth,
+            mesh_count: 0,
+            light_count: 0,
+            children: Vec::new(),
+        });
+    }
+
+    let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+    let payload = load_interior_from_socpak(
+        p4k,
+        socpak_path,
+        identity,
+        identity,
+        std::slice::from_ref(&identity),
+    )?;
+    let child_refs = read_child_socpak_refs(p4k, socpak_path)?;
+    let mut children = Vec::with_capacity(child_refs.len());
+    for child in child_refs {
+        children.push(inspect_interior_tree_from_socpak_inner(
+            p4k,
+            &child.socpak_path,
+            Some(child.entity_name),
+            Some(child.class_name),
+            depth + 1,
+            ancestors,
+        )?);
+    }
+    ancestors.remove(&normalize_socpak_filter_key(socpak_path));
+
+    Ok(SocpakHierarchyNode {
+        path: normalize_socpak_path(socpak_path),
+        name: socpak_display_name(socpak_path),
+        entity_name,
+        class_name,
+        depth,
+        mesh_count: payload.meshes.len(),
+        light_count: payload.lights.len(),
+        children,
+    })
+}
+
+fn socpak_display_name(path: &str) -> String {
+    path.rsplit(&['/', '\\'])
+        .next()
+        .unwrap_or(path)
+        .strip_suffix(".socpak")
+        .unwrap_or(path)
+        .to_string()
+}
+
+fn collect_interior_tree_from_socpak<F>(
+    p4k: &MappedP4k,
+    socpak_path: &str,
+    container_transform: [[f32; 4]; 4],
+    non_item_port_transform_delta: [[f32; 4]; 4],
+    root_item_port_reference_candidates: &[[[f32; 4]; 4]],
+    depth: usize,
+    ancestors: &mut HashSet<String>,
+    payloads: &mut Vec<InteriorPayload>,
+    containers_loaded: &mut usize,
+    path_filter: Option<&HashSet<String>>,
+    progress: &mut F,
+) -> Result<(), Error>
+where
+    F: FnMut(SocpakTreeProgress),
+{
+    let normalized_path = normalize_socpak_path(socpak_path).to_ascii_lowercase();
+    if !ancestors.insert(normalized_path.clone()) {
+        log::warn!("skipping cyclic socpak child reference: {socpak_path}");
+        return Ok(());
+    }
+
+    progress(SocpakTreeProgress {
+        socpak_path: socpak_path.to_string(),
+        depth,
+        containers_loaded: *containers_loaded,
+        child_count: 0,
+        mesh_count: 0,
+        light_count: 0,
+        stage: "Opening socpak archive".to_string(),
+    });
+
+    let payload = load_interior_from_socpak(
+        p4k,
+        socpak_path,
+        container_transform,
+        non_item_port_transform_delta,
+        root_item_port_reference_candidates,
+    )?;
+    *containers_loaded += 1;
+    let mesh_count = payload.meshes.len();
+    let light_count = payload.lights.len();
+    payloads.push(payload);
+
+    let child_refs = read_child_socpak_refs(p4k, socpak_path)?;
+    progress(SocpakTreeProgress {
+        socpak_path: socpak_path.to_string(),
+        depth,
+        containers_loaded: *containers_loaded,
+        child_count: child_refs.len(),
+        mesh_count,
+        light_count,
+        stage: if child_refs.is_empty() {
+            "Loaded container payload".to_string()
+        } else {
+            format!("Discovered {} child container(s)", child_refs.len())
+        },
+    });
+
+    for child in child_refs {
+        if path_filter
+            .is_some_and(|filter| !filter.contains(&normalize_socpak_filter_key(&child.socpak_path)))
+        {
+            continue;
+        }
+        log::debug!(
+            "descending socpak child '{}' ({}) -> {}",
+            child.entity_name,
+            child.class_name,
+            child.socpak_path
+        );
+        let parent = glam::Mat4::from_cols_array_2d(&container_transform);
+        let local = glam::Mat4::from_cols_array_2d(&child.local_transform);
+        let child_transform = (parent * local).to_cols_array_2d();
+        collect_interior_tree_from_socpak(
+            p4k,
+            &child.socpak_path,
+            child_transform,
+            non_item_port_transform_delta,
+            std::slice::from_ref(&child_transform),
+            depth + 1,
+            ancestors,
+            payloads,
+            containers_loaded,
+            path_filter,
+            progress,
+        )?;
+    }
+
+    ancestors.remove(&normalized_path);
+    Ok(())
+}
+
+pub(crate) fn normalize_socpak_path(path: &str) -> String {
     let normalized = path.replace('/', "\\");
     if normalized.to_lowercase().starts_with("data\\") {
         normalized
     } else {
         format!("Data\\{normalized}")
     }
+}
+
+pub(crate) fn normalize_socpak_filter_key(path: &str) -> String {
+    normalize_socpak_path(path).to_ascii_lowercase()
+}
+
+/// Split a CryEngine pak-mounted geometry path into its owning `.socpak` and the
+/// entry inside that archive.
+///
+/// CIG authors pak-internal geometry with a doubled path separator at the mount
+/// point, e.g. `…\hangar_xltop_001\\Brush\designer_40.cgf`: the part before the
+/// `\\` is the container (a `.socpak` mounted at its own directory) and the part
+/// after is the file inside it, stored under the socpak's `<name>\` root. Returns
+/// `None` when the path carries no pak-mount marker.
+fn split_socpak_internal_path(p4k_path: &str) -> Option<(String, String)> {
+    let idx = p4k_path.find("\\\\")?;
+    let container = &p4k_path[..idx];
+    let inner_rel = &p4k_path[idx + 2..];
+    let socpak_name = container.rsplit('\\').next().unwrap_or(container);
+    Some((
+        format!("{container}.socpak"),
+        format!("{socpak_name}\\{inner_rel}"),
+    ))
+}
+
+/// Read a geometry file that lives inside a `.socpak` archive (CryEngine
+/// pak-mounted geometry — e.g. designer "brush" meshes baked into a container).
+/// These entries are absent from the main P4k tree, so they are read from the
+/// owning archive identified by [`split_socpak_internal_path`].
+/// A transit destination (elevator floor) authored in the socpak's
+/// `metadata/sctransitdestination.xml` sidecar.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransitDestination {
+    /// Floor-name localization key (`nameIdentifier`, e.g.
+    /// `@ui_interactor_carrack_garage` → "Sub Deck").
+    pub name_identifier: String,
+    /// Socpak-pivot-relative position (`PivotRelativePos`).
+    pub position: [f32; 3],
+    /// Association radius (`Radius`): a transit peripheral within this
+    /// distance is served by the destination.
+    pub radius: f32,
+}
+
+/// Parse `metadata/sctransitdestination.xml` (binary CryXMLB or plain text)
+/// into the authored transit destinations.
+pub(crate) fn parse_transit_destinations(data: &[u8]) -> Vec<TransitDestination> {
+    if let Ok(xml) = starbreaker_cryxml::from_bytes(data) {
+        let mut destinations = Vec::new();
+        fn walk(
+            xml: &CryXml,
+            node: &starbreaker_cryxml::CryXmlNode,
+            destinations: &mut Vec<TransitDestination>,
+        ) {
+            if xml.node_tag(node) == "Entity" {
+                let attrs: HashMap<&str, &str> = xml.node_attributes(node).collect();
+                push_transit_destination(&attrs, destinations);
+            }
+            for child in xml.node_children(node) {
+                walk(xml, child, destinations);
+            }
+        }
+        walk(&xml, xml.root(), &mut destinations);
+        return destinations;
+    }
+
+    let Ok(text) = std::str::from_utf8(data) else {
+        return Vec::new();
+    };
+    let mut reader = Reader::from_str(text);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let mut destinations = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == "Entity" => {
+                let mut attrs: HashMap<String, String> = HashMap::new();
+                for attr in e.attributes().flatten() {
+                    let key = attr.key.as_ref().to_owned();
+                    if let Ok(value) = attr.normalized_value(XmlVersion::Implicit1_0) {
+                        attrs.insert(key, value.into_owned());
+                    }
+                }
+                let borrowed: HashMap<&str, &str> = attrs
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str()))
+                    .collect();
+                push_transit_destination(&borrowed, &mut destinations);
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(e) => {
+                log::warn!("failed to parse transit destination xml: {e}");
+                break;
+            }
+        }
+        buf.clear();
+    }
+    destinations
+}
+
+fn push_transit_destination(attrs: &HashMap<&str, &str>, destinations: &mut Vec<TransitDestination>) {
+    let Some(name_identifier) = attrs.get("nameIdentifier").filter(|s| !s.trim().is_empty()) else {
+        return;
+    };
+    if attrs.get("enabled").copied() == Some("false") {
+        return;
+    }
+    let Some(position) = attrs.get("PivotRelativePos").and_then(|s| parse_vec3_csv(s)) else {
+        return;
+    };
+    let radius = attrs
+        .get("Radius")
+        .and_then(|s| s.trim().parse::<f32>().ok())
+        .unwrap_or(0.0);
+    destinations.push(TransitDestination {
+        name_identifier: name_identifier.trim().to_string(),
+        position,
+        radius,
+    });
+}
+
+/// Associate each canvas-bearing transit screen with the NEAREST authored
+/// `TransitDestination` within that destination's radius. The console entity
+/// carries no destination reference — the engine's transit system associates
+/// peripherals spatially, so the exporter mirrors that: both positions are
+/// socpak-pivot-relative (destination `PivotRelativePos` vs the entity's raw
+/// `.soc` transform), and real data separates cleanly (Carrack: every
+/// lift-call screen is ≤2.2 m from exactly one destination; radii are 16–20 m
+/// with floors many metres apart).
+fn associate_transit_locations(meshes: &mut [InteriorMesh], destinations: &[TransitDestination]) {
+    if destinations.is_empty() {
+        return;
+    }
+    for mesh in meshes.iter_mut() {
+        if mesh.ui_canvas_guid.is_none() {
+            continue;
+        }
+        let pos = [mesh.transform[3][0], mesh.transform[3][1], mesh.transform[3][2]];
+        let mut best: Option<(&TransitDestination, f32)> = None;
+        for destination in destinations {
+            let d = [
+                destination.position[0] - pos[0],
+                destination.position[1] - pos[1],
+                destination.position[2] - pos[2],
+            ];
+            let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            if dist <= destination.radius
+                && best.is_none_or(|(_, best_dist)| dist < best_dist)
+            {
+                best = Some((destination, dist));
+            }
+        }
+        if let Some((destination, _)) = best {
+            mesh.ui_location_loc_key = Some(destination.name_identifier.clone());
+        }
+    }
+}
+
+pub(crate) fn read_socpak_internal_geometry(p4k: &MappedP4k, p4k_path: &str) -> Option<Vec<u8>> {
+    let (socpak_path, inner_entry) = split_socpak_internal_path(p4k_path)?;
+    let entry = p4k.entry_case_insensitive(&socpak_path)?;
+    let socpak_data = p4k.read(entry).ok()?;
+    let inner = P4kArchive::from_bytes(&socpak_data).ok()?;
+    let want = inner_entry.replace('/', "\\").to_ascii_lowercase();
+    let inner_ref = inner
+        .entries()
+        .iter()
+        .find(|e| e.name.replace('/', "\\").to_ascii_lowercase() == want)?;
+    inner.read(inner_ref).ok()
+}
+
+/// Read a geometry file by P4k path, falling back to the owning `.socpak` archive
+/// when the path points at pak-mounted geometry that is absent from the main P4k.
+pub(crate) fn read_geometry_file(p4k: &MappedP4k, p4k_path: &str) -> Option<Vec<u8>> {
+    if let Some(entry) = p4k.entry_case_insensitive(p4k_path) {
+        if let Ok(bytes) = p4k.read(entry) {
+            return Some(bytes);
+        }
+    }
+    read_socpak_internal_geometry(p4k, p4k_path)
 }
 
 /// Parse a .soc file's CrCh chunks. Returns meshes/lights + tint palette names.
@@ -482,6 +899,7 @@ fn extract_item_port_meshes_from_cryxml(
         root_item_port_reference_transform,
         &mut meshes,
     );
+    inherit_colocated_item_port_rotations(&mut meshes);
     meshes
 }
 
@@ -497,11 +915,11 @@ fn extract_item_port_meshes_from_text_xml(
 
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == b"ItemPort" => {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == "ItemPort" => {
                 let mut attrs: HashMap<String, String> = HashMap::new();
                 for attr in e.attributes().flatten() {
-                    let key = String::from_utf8_lossy(attr.key.as_ref()).into_owned();
-                    if let Ok(value) = attr.decode_and_unescape_value(reader.decoder()) {
+                    let key = attr.key.as_ref().to_owned();
+                    if let Ok(value) = attr.normalized_value(XmlVersion::Implicit1_0) {
                         attrs.insert(key, value.into_owned());
                     }
                 }
@@ -526,7 +944,87 @@ fn extract_item_port_meshes_from_text_xml(
         buf.clear();
     }
 
+    inherit_colocated_item_port_rotations(&mut meshes);
     meshes
+}
+
+fn inherit_colocated_item_port_rotations(meshes: &mut [InteriorMesh]) {
+    for i in 0..meshes.len() {
+        if !is_identity_basis(meshes[i].transform) {
+            continue;
+        }
+
+        let position = item_port_translation(meshes[i].transform);
+        let mut candidate_rotation: Option<[[f32; 4]; 4]> = None;
+        let mut ambiguous = false;
+
+        for (j, candidate) in meshes.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            if !same_position(position, item_port_translation(candidate.transform))
+                || is_identity_basis(candidate.transform)
+            {
+                continue;
+            }
+
+            if let Some(existing) = candidate_rotation {
+                if !same_rotation(existing, candidate.transform) {
+                    ambiguous = true;
+                    break;
+                }
+            } else {
+                candidate_rotation = Some(candidate.transform);
+            }
+        }
+
+        if ambiguous {
+            continue;
+        }
+        if let Some(candidate) = candidate_rotation {
+            meshes[i].transform[0][0] = candidate[0][0];
+            meshes[i].transform[0][1] = candidate[0][1];
+            meshes[i].transform[0][2] = candidate[0][2];
+            meshes[i].transform[1][0] = candidate[1][0];
+            meshes[i].transform[1][1] = candidate[1][1];
+            meshes[i].transform[1][2] = candidate[1][2];
+            meshes[i].transform[2][0] = candidate[2][0];
+            meshes[i].transform[2][1] = candidate[2][1];
+            meshes[i].transform[2][2] = candidate[2][2];
+        }
+    }
+}
+
+fn item_port_translation(transform: [[f32; 4]; 4]) -> [f32; 3] {
+    [transform[3][0], transform[3][1], transform[3][2]]
+}
+
+fn is_identity_basis(transform: [[f32; 4]; 4]) -> bool {
+    same_rotation(
+        transform,
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+    )
+}
+
+fn same_position(a: [f32; 3], b: [f32; 3]) -> bool {
+    (a[0] - b[0]).abs() <= 1e-3 && (a[1] - b[1]).abs() <= 1e-3 && (a[2] - b[2]).abs() <= 1e-3
+}
+
+fn same_rotation(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> bool {
+    (a[0][0] - b[0][0]).abs() <= 1e-4
+        && (a[0][1] - b[0][1]).abs() <= 1e-4
+        && (a[0][2] - b[0][2]).abs() <= 1e-4
+        && (a[1][0] - b[1][0]).abs() <= 1e-4
+        && (a[1][1] - b[1][1]).abs() <= 1e-4
+        && (a[1][2] - b[1][2]).abs() <= 1e-4
+        && (a[2][0] - b[2][0]).abs() <= 1e-4
+        && (a[2][1] - b[2][1]).abs() <= 1e-4
+        && (a[2][2] - b[2][2]).abs() <= 1e-4
 }
 
 fn push_item_port_mesh(
@@ -564,6 +1062,9 @@ fn push_item_port_mesh(
         transform,
         entity_class_guid: None,
         entity_class_name: Some(entity_class_name),
+        tint_palette_name: None,
+        ui_canvas_guid: None,
+        ui_location_loc_key: None,
     });
 }
 
@@ -657,17 +1158,17 @@ fn parse_editor_bounds(data: &[u8]) -> Option<([f32; 3], [f32; 3])> {
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == b"ObjectContainer" => {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == "ObjectContainer" => {
                 let mut min_bounds = None;
                 let mut max_bounds = None;
                 for attr in e.attributes().flatten() {
                     let key = attr.key.as_ref();
-                    let Ok(value) = attr.decode_and_unescape_value(reader.decoder()) else {
+                    let Ok(value) = attr.normalized_value(XmlVersion::Implicit1_0) else {
                         continue;
                     };
-                    if key == b"minBounds" {
+                    if key == "minBounds" {
                         min_bounds = Some(parse_vec3_csv(value.as_ref()));
-                    } else if key == b"maxBounds" {
+                    } else if key == "maxBounds" {
                         max_bounds = Some(parse_vec3_csv(value.as_ref()));
                     }
                 }
@@ -787,6 +1288,11 @@ fn included_objects_to_meshes(io: &IncludedObjects) -> Vec<InteriorMesh> {
                 transform,
                 entity_class_guid: None,
                 entity_class_name: None,
+                tint_palette_name: obj
+                    .tint_palette_index
+                    .and_then(|i| io.tint_palette_paths.get(i as usize).cloned()),
+                ui_canvas_guid: None,
+                ui_location_loc_key: None,
             })
         })
         .collect()
@@ -922,6 +1428,12 @@ fn process_entity_children(
         let transform = pos_rot_scale_to_4x4(&pos, &rot, &scale);
         let material_path = attrs.get("Material").map(|s| s.to_string());
 
+        // A transit-peripheral / interactive-screen entity authors its display
+        // canvas inline on its `EntityComponentUIBuildingBlocks` component, which
+        // OVERRIDES the entity class default (e.g. an elevator call console picks
+        // `OLD_TransitUIPanelExterior_ANVL` over the generic class canvas). Capture
+        // it here so the UI binding renders the correct per-instance canvas.
+        let ui_canvas_guid = extract_entity_ui_canvas(xml, entity);
         if let Some(geom_path) = extract_entity_geometry(xml, entity) {
             meshes.push(InteriorMesh {
                 cgf_path: geom_path,
@@ -929,6 +1441,9 @@ fn process_entity_children(
                 transform,
                 entity_class_guid: None,
                 entity_class_name: None,
+                tint_palette_name: None,
+                ui_canvas_guid,
+                ui_location_loc_key: None,
             });
         } else if let Some(guid) = attrs.get("EntityClassGUID") {
             // No inline geometry — resolve via DataCore using EntityClassGUID
@@ -938,6 +1453,9 @@ fn process_entity_children(
                 transform,
                 entity_class_guid: Some(guid.to_string()),
                 entity_class_name: None,
+                tint_palette_name: None,
+                ui_canvas_guid,
+                ui_location_loc_key: None,
             });
         }
     }
@@ -980,6 +1498,58 @@ fn extract_entity_geometry(
         }
     }
     None
+}
+
+/// Extract the per-instance UI canvas GUID authored inline on an entity's
+/// `EntityComponentUIBuildingBlocks` component, if any.
+///
+/// Structure (from the `.soc` CryXMLB, sibling of `EntityGeometryResource`):
+/// `PropertiesDataCore → EntityComponentUIBuildingBlocks →
+///  layers → BuildingBlocksLayer → views → BuildingBlocksView →
+///  component[@canvas]`. The `canvas` attribute carries the GUID and OVERRIDES
+/// the entity class record's default canvas. The same component subtree also
+/// appears (without a real canvas) under `specialWeakPointers` as a
+/// `weakPointer`, so we search the subtree for the first node whose `canvas`
+/// attribute is a non-zero GUID rather than assuming a fixed depth.
+fn extract_entity_ui_canvas(xml: &CryXml, entity: &starbreaker_cryxml::CryXmlNode) -> Option<String> {
+    for child in xml.node_children(entity) {
+        if xml.node_tag(child) != "PropertiesDataCore" {
+            continue;
+        }
+        for prop in xml.node_children(child) {
+            if xml.node_tag(prop) != "EntityComponentUIBuildingBlocks" {
+                continue;
+            }
+            if let Some(canvas) = find_canvas_attribute(xml, prop) {
+                return Some(canvas);
+            }
+        }
+    }
+    None
+}
+
+/// Recursively search `node`'s subtree for a `canvas` attribute holding a
+/// non-zero GUID. Returns the first such value found (depth-first).
+fn find_canvas_attribute(xml: &CryXml, node: &starbreaker_cryxml::CryXmlNode) -> Option<String> {
+    let attrs: HashMap<&str, &str> = xml.node_attributes(node).collect();
+    if let Some(canvas) = attrs.get("canvas")
+        && is_nonzero_guid(canvas)
+    {
+        return Some(canvas.to_string());
+    }
+    for child in xml.node_children(node) {
+        if let Some(canvas) = find_canvas_attribute(xml, child) {
+            return Some(canvas);
+        }
+    }
+    None
+}
+
+/// `true` when `value` looks like a non-empty, non-null, non-zero GUID.
+fn is_nonzero_guid(value: &str) -> bool {
+    !value.is_empty()
+        && !value.eq_ignore_ascii_case("null")
+        && value != "00000000-0000-0000-0000-000000000000"
 }
 
 /// Parse light properties from CryXML entity.
@@ -1570,10 +2140,182 @@ mod tests {
 
     use super::{
         build_container_transform, collect_object_container_refs,
-        extract_item_port_meshes_from_text_xml, normalize_item_port_entity_name, parse_container_ref,
-        filter_item_port_meshes_to_editor_bounds, quat_mul, quat_rotate_vec,
-        semantic_light_kind_for_light,
+        extract_item_port_meshes_from_text_xml, filter_item_port_meshes_to_editor_bounds,
+        is_nonzero_guid, load_interior_from_socpak, normalize_item_port_entity_name,
+        parse_child_socpak_refs_from_text_xml, parse_container_ref, quat_mul, quat_rotate_vec,
+        semantic_light_kind_for_light, split_socpak_internal_path,
     };
+
+    #[test]
+    fn is_nonzero_guid_rejects_empty_null_and_zero() {
+        assert!(is_nonzero_guid("a2c5fae4-f018-4d05-8ab7-e4f17a4d8ae4"));
+        assert!(!is_nonzero_guid(""));
+        assert!(!is_nonzero_guid("null"));
+        assert!(!is_nonzero_guid("NULL"));
+        assert!(!is_nonzero_guid("00000000-0000-0000-0000-000000000000"));
+    }
+
+    /// Real-P4K regression: the Carrack elevator transit panels author their
+    /// display canvas inline on `EntityComponentUIBuildingBlocks`, which
+    /// OVERRIDES the entity class default. The in-lift interior screen
+    /// (`anvl_crk_lift_screen.cgf`) must capture `OLD_TransitUIPanelInterior_ANVL`
+    /// (`4a8bbd52-…`) as its per-instance `ui_canvas_guid`. Skips when
+    /// `SC_DATA_P4K` is not available (hosted CI).
+    #[test]
+    fn transit_panel_entity_captures_inline_ui_canvas_guid() {
+        let Ok(p4k_path) = std::env::var("SC_DATA_P4K") else {
+            eprintln!("SC_DATA_P4K not set; skipping transit-panel canvas test");
+            return;
+        };
+        let Ok(p4k) = starbreaker_p4k::MappedP4k::open(std::path::Path::new(&p4k_path)) else {
+            eprintln!("SC_DATA_P4K set but Data.p4k could not be opened; skipping");
+            return;
+        };
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+        let payload = load_interior_from_socpak(
+            &p4k,
+            "Data\\ObjectContainers\\Ships\\ANVL\\Carrack\\elevators.socpak",
+            identity,
+            identity,
+            &[],
+        )
+        .expect("elevators.socpak should load");
+        let screen = payload
+            .meshes
+            .iter()
+            .find(|m| m.cgf_path.to_lowercase().contains("anvl_crk_lift_screen"))
+            .expect("lift screen entity mesh should be present in elevators.socpak");
+        assert_eq!(
+            screen.ui_canvas_guid.as_deref(),
+            Some("4a8bbd52-234f-4888-87fe-e157ec147ee5"),
+            "lift screen should capture the inline OLD_TransitUIPanelInterior_ANVL canvas override"
+        );
+    }
+
+    #[test]
+    fn parse_transit_destinations_reads_text_xml_entities() {
+        // Synthetic fixture mirroring the metadata sidecar shape (values arbitrary).
+        let xml = r#"
+            <SCTransitDestination>
+              <Entity nameIdentifier="@ui_interactor_test_floor_a" enabled="true"
+                      PivotRelativePos="1.5,-2.25,3.0" Radius="16" CryGUID="0">
+                <Tags />
+              </Entity>
+              <Entity nameIdentifier="@ui_interactor_test_floor_b" enabled="true"
+                      PivotRelativePos="-4.0,5.5,-6.75" Radius="20" CryGUID="1" />
+              <Entity nameIdentifier="@ui_interactor_test_disabled" enabled="false"
+                      PivotRelativePos="0,0,0" Radius="16" CryGUID="2" />
+            </SCTransitDestination>
+        "#;
+        let destinations = super::parse_transit_destinations(xml.as_bytes());
+        assert_eq!(destinations.len(), 2, "disabled destination must be skipped");
+        assert_eq!(destinations[0].name_identifier, "@ui_interactor_test_floor_a");
+        assert_eq!(destinations[0].position, [1.5, -2.25, 3.0]);
+        assert_eq!(destinations[0].radius, 16.0);
+        assert_eq!(destinations[1].name_identifier, "@ui_interactor_test_floor_b");
+        assert_eq!(destinations[1].radius, 20.0);
+    }
+
+    #[test]
+    fn associate_transit_locations_picks_nearest_destination_within_radius() {
+        let mesh = |canvas: Option<&str>, x: f32, y: f32, z: f32| InteriorMesh {
+            cgf_path: "test.cgf".into(),
+            material_path: None,
+            transform: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [x, y, z, 1.0],
+            ],
+            entity_class_guid: None,
+            entity_class_name: None,
+            tint_palette_name: None,
+            ui_canvas_guid: canvas.map(str::to_string),
+            ui_location_loc_key: None,
+        };
+        let destinations = vec![
+            super::TransitDestination {
+                name_identifier: "@floor_a".into(),
+                position: [0.0, 0.0, 0.0],
+                radius: 10.0,
+            },
+            super::TransitDestination {
+                name_identifier: "@floor_b".into(),
+                position: [0.0, 8.0, 0.0],
+                radius: 10.0,
+            },
+        ];
+        let mut meshes = vec![
+            mesh(Some("canvas-a"), 0.0, 1.0, 0.0),  // nearest floor_a
+            mesh(Some("canvas-b"), 0.0, 7.0, 0.0),  // nearest floor_b
+            mesh(Some("canvas-c"), 0.0, 50.0, 0.0), // outside every radius
+            mesh(None, 0.0, 1.0, 0.0),              // no canvas → never associated
+        ];
+        super::associate_transit_locations(&mut meshes, &destinations);
+        assert_eq!(meshes[0].ui_location_loc_key.as_deref(), Some("@floor_a"));
+        assert_eq!(meshes[1].ui_location_loc_key.as_deref(), Some("@floor_b"));
+        assert_eq!(meshes[2].ui_location_loc_key, None, "beyond radius stays unassociated");
+        assert_eq!(meshes[3].ui_location_loc_key, None, "non-canvas mesh stays unassociated");
+    }
+
+    /// Real-P4K regression: the Carrack middle section authors its floors in
+    /// `middle/metadata/sctransitdestination.xml`; every canvas-bearing
+    /// lift-call screen must resolve its floor loc key spatially — including
+    /// one on the sub deck (`@ui_interactor_carrack_garage`, the localized
+    /// "Sub Deck" heading the in-game console shows). Skips without SC_DATA_P4K.
+    #[test]
+    fn carrack_middle_lift_screens_resolve_transit_floor_loc_keys() {
+        let Ok(p4k_path) = std::env::var("SC_DATA_P4K") else {
+            eprintln!("SC_DATA_P4K not set; skipping transit-floor association test");
+            return;
+        };
+        let Ok(p4k) = starbreaker_p4k::MappedP4k::open(std::path::Path::new(&p4k_path)) else {
+            eprintln!("SC_DATA_P4K set but Data.p4k could not be opened; skipping");
+            return;
+        };
+        let identity = glam::Mat4::IDENTITY.to_cols_array_2d();
+        let payload = load_interior_from_socpak(
+            &p4k,
+            "Data\\ObjectContainers\\Ships\\ANVL\\Carrack\\middle.socpak",
+            identity,
+            identity,
+            &[],
+        )
+        .expect("middle.socpak should load");
+        let keys: std::collections::BTreeSet<String> = payload
+            .meshes
+            .iter()
+            .filter(|m| m.cgf_path.to_lowercase().contains("screen_liftcall"))
+            .filter_map(|m| m.ui_location_loc_key.clone())
+            .collect();
+        assert!(
+            keys.contains("@ui_interactor_carrack_garage"),
+            "a middle-section lift screen serves the sub deck (garage); got {keys:?}"
+        );
+        assert!(
+            keys.contains("@ui_interactor_carrack_crew_deck")
+                && keys.contains("@ui_interactor_carrack_technical"),
+            "middle-section lift screens cover crew deck + technical; got {keys:?}"
+        );
+    }
+
+    #[test]
+    fn split_socpak_internal_path_isolates_archive_and_inner_entry() {
+        // CIG authors pak-internal brush geometry with a doubled separator at the
+        // `.socpak` mount point.
+        let p4k_path = crate::pipeline::datacore_path_to_p4k(
+            "ObjectContainers/PU/loc/mod/common/hangar/hightech_a/hangar_xltop_001//Brush/designer_40.cgfm",
+        );
+        let (socpak, inner) = split_socpak_internal_path(&p4k_path).expect("should detect pak mount");
+        assert_eq!(
+            socpak,
+            "Data\\ObjectContainers\\PU\\loc\\mod\\common\\hangar\\hightech_a\\hangar_xltop_001.socpak"
+        );
+        assert_eq!(inner, "hangar_xltop_001\\Brush\\designer_40.cgfm");
+
+        // A normal (non-pak-mounted) path has no doubled separator.
+        assert!(split_socpak_internal_path("Data\\objects\\buildingsets\\foo.cgf").is_none());
+    }
 
     fn approx_eq3(left: [f64; 3], right: [f64; 3]) {
         for index in 0..3 {
@@ -1677,6 +2419,7 @@ mod tests {
                 transform: [[0.0; 3]; 4],
                 vector1: [0.0; 3],
                 vector2: [0.0; 3],
+                tint_palette_index: None,
             }],
         };
 
@@ -1796,6 +2539,56 @@ mod tests {
     }
 
     #[test]
+    fn extract_item_port_meshes_inherits_colocated_non_identity_rotation() {
+        let xml = r#"
+            <ObjectContainer>
+              <TileXmlEntry>
+                <TileItemPortEntries>
+                  <ItemPort
+                    name="Port1_ControlPanel_Screen_DoorControl_Physical_Clipper_OpenNoneLight[int_setup]"
+                    interactionOffset="1.0,2.0,3.0"
+                    rotation="0.9238795,0,0,0.3826834" />
+                  <ItemPort
+                    name="Port2_ControlPanel_Screen_DoorControl_9x16_Small-001[int_setup]"
+                    interactionOffset="1.0,2.0,3.0"
+                    rotation="1,0,0,0" />
+                </TileItemPortEntries>
+              </TileXmlEntry>
+            </ObjectContainer>
+        "#;
+
+        let meshes = extract_item_port_meshes_from_text_xml(
+            xml,
+            glam::Mat4::IDENTITY.to_cols_array_2d(),
+            None,
+        );
+        assert_eq!(meshes.len(), 2);
+
+        let physical = meshes
+            .iter()
+            .find(|m| {
+                m.entity_class_name
+                    .as_deref()
+                    .is_some_and(|name| name.contains("Physical"))
+            })
+            .expect("physical control panel mesh");
+        let screen = meshes
+            .iter()
+            .find(|m| {
+                m.entity_class_name
+                    .as_deref()
+                    .is_some_and(|name| name.contains("9x16_Small"))
+            })
+            .expect("screen mesh");
+
+        assert!(super::same_rotation(physical.transform, screen.transform));
+        assert!(super::same_position(
+            super::item_port_translation(physical.transform),
+            super::item_port_translation(screen.transform),
+        ));
+    }
+
+    #[test]
     fn filter_item_port_meshes_to_editor_bounds_drops_out_of_bounds_ports() {
         let inside = InteriorMesh {
             cgf_path: String::new(),
@@ -1804,6 +2597,9 @@ mod tests {
                 .to_cols_array_2d(),
             entity_class_guid: None,
             entity_class_name: Some("InsideControl".to_string()),
+            tint_palette_name: None,
+            ui_canvas_guid: None,
+            ui_location_loc_key: None,
         };
         let outside = InteriorMesh {
             cgf_path: String::new(),
@@ -1812,6 +2608,9 @@ mod tests {
                 .to_cols_array_2d(),
             entity_class_guid: None,
             entity_class_name: Some("OutsideControl".to_string()),
+            tint_palette_name: None,
+            ui_canvas_guid: None,
+            ui_location_loc_key: None,
         };
 
         let filtered = filter_item_port_meshes_to_editor_bounds(
@@ -1823,4 +2622,148 @@ mod tests {
         assert_eq!(filtered[0].entity_class_name.as_deref(), Some("InsideControl"));
     }
 
+    #[test]
+    fn parse_child_socpak_refs_from_text_xml_reads_manifest_refs_and_quaternion_transforms() {
+        let xml = r#"
+            <ObjectContainer>
+              <ChildObjectContainers>
+                <Child
+                  external="1"
+                  name="Data/objectcontainers/pu/loc/mod/common/hangar/hightech_a/hangar_component_module_cargo_elevator_xl.socpak"
+                  entityName="ObjectContainer_FreightElevator_XLTop-000"
+                  class="ObjectContainer"
+                  pos="-120,152,-112"
+                  rot="-0.70710678,0,0,0.70710678" />
+              </ChildObjectContainers>
+            </ObjectContainer>
+        "#;
+
+        let refs = parse_child_socpak_refs_from_text_xml(xml);
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(
+            refs[0].socpak_path,
+            "Data/objectcontainers/pu/loc/mod/common/hangar/hightech_a/hangar_component_module_cargo_elevator_xl.socpak"
+        );
+        assert_eq!(refs[0].entity_name, "ObjectContainer_FreightElevator_XLTop-000");
+        assert_eq!(refs[0].class_name, "ObjectContainer");
+        assert_eq!(refs[0].local_transform[3], [-120.0, 152.0, -112.0, 1.0]);
+        assert!((refs[0].local_transform[0][0]).abs() < 1e-5);
+        assert!((refs[0].local_transform[1][1]).abs() < 1e-5);
+        assert!((refs[0].local_transform[0][1] + 1.0).abs() < 1e-5);
+        assert!((refs[0].local_transform[1][0] - 1.0).abs() < 1e-5);
+    }
+}
+
+fn read_child_socpak_refs(
+    p4k: &MappedP4k,
+    socpak_path: &str,
+) -> Result<Vec<ChildSocpakRef>, Error> {
+    let p4k_path = normalize_socpak_path(socpak_path);
+    let entry = p4k
+        .entry_case_insensitive(&p4k_path)
+        .ok_or_else(|| Error::MissingSocpak(p4k_path.clone()))?;
+    let socpak_data = p4k
+        .read(entry)
+        .map_err(|e| Error::P4kRead(format!("{p4k_path}: {e}")))?;
+    let inner = P4kArchive::from_bytes(&socpak_data)
+        .map_err(|e| Error::P4kRead(format!("ZIP parse {p4k_path}: {e}")))?;
+
+    let root_name = socpak_path
+        .rsplit(&['/', '\\'])
+        .next()
+        .unwrap_or(socpak_path)
+        .strip_suffix(".socpak")
+        .unwrap_or(socpak_path)
+        .to_ascii_lowercase();
+    let root_xml_name = format!("{root_name}.xml");
+    let Some(entry) = inner.entries().iter().find(|entry| {
+        entry.name.replace('/', "\\").to_ascii_lowercase() == root_xml_name
+    }) else {
+        return Ok(Vec::new());
+    };
+
+    let data = inner
+        .read(entry)
+        .map_err(|e| Error::P4kRead(format!("{}: {e}", entry.name)))?;
+    let Ok(text) = std::str::from_utf8(&data) else {
+        return Ok(Vec::new());
+    };
+    Ok(parse_child_socpak_refs_from_text_xml(text))
+}
+
+fn parse_child_socpak_refs_from_text_xml(text: &str) -> Vec<ChildSocpakRef> {
+    let mut reader = Reader::from_str(text);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let mut refs = Vec::new();
+    let mut inside_children = false;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) if e.name().as_ref() == "ChildObjectContainers" => {
+                inside_children = true;
+            }
+            Ok(Event::End(e)) if e.name().as_ref() == "ChildObjectContainers" => {
+                inside_children = false;
+            }
+            Ok(Event::Start(e)) | Ok(Event::Empty(e))
+                if inside_children && e.name().as_ref() == "Child" =>
+            {
+                let mut attrs = HashMap::new();
+                for attr in e.attributes().flatten() {
+                    let key = attr.key.as_ref().to_owned();
+                    if let Ok(value) = attr.normalized_value(XmlVersion::Implicit1_0) {
+                        attrs.insert(key, value.into_owned());
+                    }
+                }
+                if attrs.get("external").map(String::as_str) != Some("1") {
+                    buf.clear();
+                    continue;
+                }
+                let Some(socpak_path) = attrs.get("name").cloned() else {
+                    buf.clear();
+                    continue;
+                };
+                let entity_name = attrs.get("entityName").cloned().unwrap_or_default();
+                let class_name = attrs.get("class").cloned().unwrap_or_default();
+                let pos = parse_csv_f64(attrs.get("pos").map(String::as_str).unwrap_or("0,0,0"));
+                let rot = parse_csv_f64(attrs.get("rot").map(String::as_str).unwrap_or("1,0,0,0"));
+                refs.push(ChildSocpakRef {
+                    socpak_path,
+                    entity_name,
+                    class_name,
+                    local_transform: pos_rot_scale_to_4x4(&pos, &rot, &[1.0, 1.0, 1.0]),
+                });
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(e) => {
+                log::warn!("failed to parse socpak child manifest XML: {e}");
+                break;
+            }
+        }
+        buf.clear();
+    }
+
+    refs
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ChildSocpakRef {
+    pub socpak_path: String,
+    pub entity_name: String,
+    pub class_name: String,
+    pub local_transform: [[f32; 4]; 4],
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SocpakTreeProgress {
+    pub socpak_path: String,
+    pub depth: usize,
+    pub containers_loaded: usize,
+    pub child_count: usize,
+    pub mesh_count: usize,
+    pub light_count: usize,
+    pub stage: String,
 }

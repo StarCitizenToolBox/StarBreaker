@@ -6,7 +6,9 @@ import { UpdateBanner } from "./components/update-banner";
 import { P4kBrowser } from "./views/p4k-browser";
 import { DataCoreBrowser } from "./views/datacore-browser";
 import { ExportView } from "./views/export-view";
+import { SocpakExportView } from "./views/socpak-export-view";
 import { AudioView } from "./views/audio-view";
+import { CharacterBuilder } from "./views/character-builder";
 import { getSystemTheme, onSystemThemeChanged } from "./lib/commands";
 import { applySystemTheme } from "./lib/theme";
 
@@ -33,8 +35,10 @@ function App() {
         <main className="flex-1 flex flex-col overflow-hidden">
           {mode === "p4k" && <P4kBrowser />}
           {mode === "datacore" && <DataCoreBrowser />}
-          {mode === "export" && <ExportView />}
+          {(mode === "export" || mode === "armor") && <ExportView armorOnly={mode === "armor"} />}
+          {mode === "socpak-export" && <SocpakExportView />}
           {mode === "audio" && <AudioView />}
+          {mode === "character" && <CharacterBuilder />}
         </main>
       </div>
     </div>

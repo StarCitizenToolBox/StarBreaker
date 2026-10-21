@@ -1,0 +1,39 @@
+FONTDUMP	H_Eng_Annunciator_Master_Left	Text Item 0	Blender Pro Heavy	133.60	80.17	20480.0	233.73	PWR
+FONTDUMP	H_Eng_Annunciator_Master_Left	Text Item 1	Blender Pro Heavy	133.60	80.17	20480.0	234.65	WPN
+FONTDUMP	H_Eng_Annunciator_Master_Left	Text Item 2	Blender Pro Heavy	133.60	80.17	20480.0	211.16	THR
+FONTDUMP	H_Eng_Annunciator_Master_Left	Text Item 3	Blender Pro Heavy	123.36	75.11	20480.0	254.55	SHLD
+FONTDUMP	H_Eng_Annunciator_Master_Left	Text Item 4	Blender Pro Heavy	122.26	74.44	20480.0	257.47	COOL
+FONTDUMP	I_Door_Small_DRAK	text_Status	Audimat Mono	329.11	197.38	21560.0	938.04	CLOSED
+FONTDUMP	I_Door_Small_DRAK	text_Status	Audimat Mono	329.11	197.38	21560.0	938.04	CLOSED
+FONTDUMP	I_Door_Small_DRAK	text_Status	Audimat Mono	329.11	197.38	21560.0	938.04	CLOSED
+FONTDUMP	I_Door_Small_DRAK	text_Status	Audimat Mono	329.11	197.38	21560.0	938.04	CLOSED
+FONTDUMP	I_Door_Small_DRAK	text_Status	Audimat Mono	329.11	197.38	21560.0	938.04	CLOSED
+FONTDUMP	I_Door_Small_DRAK	text_Status	Audimat Mono	329.11	197.38	21560.0	938.04	CLOSED
+FONTDUMP	I_Door_Small_DRAK	text_Status	Audimat Mono	329.11	197.38	21560.0	938.04	CLOSED
+FONTDUMP	I_Door_Small_DRAK	text_Status	Audimat Mono	329.11	197.38	21560.0	938.04	CLOSED
+FONTDUMP	I_Door_Small_DRAK	text_Status	Audimat Mono	329.11	197.38	21560.0	938.04	CLOSED
+FONTDUMP	I_Door_Small_DRAK	text_Status	Audimat Mono	329.11	197.38	21560.0	938.04	CLOSED
+FONTDUMP	I_Door_Small_DRAK	text_Status	Audimat Mono	329.11	197.38	21560.0	938.04	CLOSED
+FONTDUMP	I_Door_Small_DRAK	text_Status	Audimat Mono	329.11	197.38	21560.0	938.04	CLOSED
+FONTDUMP	I_Door_Small_DRAK	text_Status	Audimat Mono	329.11	197.38	21560.0	938.04	CLOSED
+FONTDUMP	I_Med_MedicalBed_A	LocationName	Blender Pro Thin	30.00	23.19	20480.0	151.11	Drake Clipper
+FONTDUMP	I_Med_MedicalBed_A	MachineTypeNameText	Blender Pro Thin	57.00	34.54	20480.0	440.30	MEDICAL ASSISTANT
+FONTDUMP	I_Med_MedicalBed_A	MedGel	Blender Pro Thin	25.00	15.12	20480.0	80.85	200/200
+FONTDUMP	I_Med_MedicalBed_A	MedGel	Blender Pro Thin	30.00	18.18	20480.0	106.83	MEDGELS
+FONTDUMP	I_Med_MedicalBed_A	OptionDescriptionText	Blender Pro Book	25.00	15.25	20480.0	311.73	MANAGE IMPRINT RECORDS AND R
+FONTDUMP	I_Med_MedicalBed_A	OptionDescriptionText	Blender Pro Book	25.00	17.27	20480.0	338.46	MANAGE THE TREATMENT, IMPRIN
+FONTDUMP	I_Med_MedicalBed_A	OptionDescriptionText	Blender Pro Book	25.00	17.30	20480.0	352.09	VIEW CURRENT STATUS, CUSTOMI
+FONTDUMP	I_Med_MedicalBed_A	OptionNameText	Blender Pro Bold	30.00	17.94	20480.0	75.40	ADMIN
+FONTDUMP	I_Med_MedicalBed_A	OptionNameText	Blender Pro Bold	30.00	18.21	20480.0	175.90	MEDICAL CARE
+FONTDUMP	I_Med_MedicalBed_A	OptionNameText	Blender Pro Bold	30.00	18.24	20480.0	185.51	REGENERATION
+FONTDUMP	I_Med_MedicalBed_A	PatientName	Blender Pro Thin	25.00	19.32	20480.0	157.08	No patient in bed
+FONTDUMP	I_Med_MedicalBed_A	PatientName	Blender Pro Thin	30.00	17.83	20480.0	162.07	PATIENT NAME
+FONTDUMP	I_Med_MedicalBed_A	TierLevel	Blender Pro Thin	57.00	34.54	20480.0	48.46	T3
+FONTDUMP	I_Med_MedicalBed_A	TierLevel	Blender Pro Thin	90.00	54.54	20480.0	76.51	T3
+FONTDUMP	I_Med_MedicalBed_A	WelcomeText	Blender Pro Thin	40.01	24.24	20480.0	915.45	PLEASE SELECT AN OPTION FROM
+FONTDUMP	I_Med_MedicalEndOfBed_A	MedGel	Blender Pro Thin	25.00	15.12	20480.0	80.85	200/200
+FONTDUMP	I_Med_MedicalEndOfBed_A	MedGel	Blender Pro Thin	30.00	18.18	20480.0	106.83	MEDGELS
+FONTDUMP	I_Med_MedicalEndOfBed_A	TierLevel	Blender Pro Thin	150.00	90.89	20480.0	127.51	T3
+FONTDUMP	I_Med_MedicalEndOfBed_A	TitleText	Blender Pro Thin	150.00	90.89	20480.0	950.98	DIGITAL MEDICAL ASSISTANT
+FONTDUMP	I_Med_MedicalEndOfBed_A	TouchPromptText	Blender Pro Bold	30.00	18.24	20480.0	463.33	PLEASE TOUCH THE SCREEN TO B
+FONTDUMP	I_Med_MedicalEndOfBed_A	TouchToStart	Blender Pro Thin	57.00	34.54	20480.0	370.05	TOUCH TO START

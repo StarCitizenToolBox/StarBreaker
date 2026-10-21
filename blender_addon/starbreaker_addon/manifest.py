@@ -325,6 +325,7 @@ class SubmaterialRecord:
     variant_membership: JsonDict
     virtual_inputs: list[str]
     raw: JsonDict
+    screen_effects: JsonDict = field(default_factory=dict)
 
     @classmethod
     def from_value(cls, value: Any) -> SubmaterialRecord:
@@ -345,6 +346,7 @@ class SubmaterialRecord:
             layer_manifest=[LayerManifestEntry.from_value(item) for item in data.get("layer_manifest", [])],
             palette_routing=PaletteRouting.from_value(data.get("palette_routing")),
             public_params=_as_dict(data.get("public_params")),
+            screen_effects=_as_dict(data.get("screen_effects")),
             variant_membership=_as_dict(data.get("variant_membership")),
             virtual_inputs=[str(item) for item in data.get("virtual_inputs", [])],
             raw=data,
@@ -445,7 +447,7 @@ class LiveryRecord:
 class LightState:
     """A single CryEngine `<defaultState|auxiliaryState|...>` snapshot.
 
-    See ``docs/StarBreaker/lights-research.md``. Values are copied verbatim
+    See ``docs/star-citizen-lighting-research.md``. Values are copied verbatim
     from the exporter's ``states`` map and are used both to populate the
     light datablock at import time and to switch between states at runtime.
     """
@@ -539,6 +541,7 @@ class InteriorPlacementRecord:
     entity_class_guid: str | None
     transform: Matrix4
     raw: JsonDict
+    ui_bindings: list[JsonDict] = field(default_factory=list)
 
     @classmethod
     def from_value(cls, value: Any) -> InteriorPlacementRecord:
@@ -549,6 +552,7 @@ class InteriorPlacementRecord:
             mesh_asset=_normalize_relative_path(_as_str(data.get("mesh_asset"))),
             material_sidecar=_normalize_relative_path(_as_str(data.get("material_sidecar"))),
             entity_class_guid=_as_str(data.get("entity_class_guid")),
+            ui_bindings=[_as_dict(item) for item in data.get("ui_bindings", []) if _as_dict(item)],
             transform=_matrix4(data.get("transform")),
             raw=data,
         )
@@ -588,6 +592,7 @@ class SceneInstanceRecord:
     material_sidecar: str | None
     mesh_asset: str | None
     palette_id: str | None
+    ui_bindings: list[JsonDict] = field(default_factory=list)
     decal_host_channel: str | None = None
     decal_host_rgb: Color3 | None = None
     parent_entity_name: str | None = None
@@ -612,6 +617,7 @@ class SceneInstanceRecord:
             material_sidecar=_normalize_relative_path(_as_str(data.get("material_sidecar"))),
             mesh_asset=_normalize_relative_path(_as_str(data.get("mesh_asset"))),
             palette_id=_as_str(data.get("palette_id")),
+            ui_bindings=[_as_dict(item) for item in data.get("ui_bindings", []) if _as_dict(item)],
             decal_host_channel=_as_str(data.get("decal_host_channel")),
             decal_host_rgb=_float_tuple(data.get("decal_host_rgb"), 3)
             if data.get("decal_host_rgb") is not None
@@ -846,11 +852,13 @@ class PackageBundle:
         return self.scene_path.parent.name
 
     def resolve_path(self, relative_path: str | None) -> Path | None:
-        path_index = self._build_path_index()
+        path_index = None
         for candidate in _candidate_relative_paths(relative_path):
             direct = self.export_root / Path(candidate)
             if direct.exists():
                 return direct
+            if path_index is None:
+                path_index = self._build_path_index()
             resolved = path_index.get(candidate.lower())
             if resolved is not None:
                 return resolved

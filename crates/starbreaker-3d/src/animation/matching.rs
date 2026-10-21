@@ -569,6 +569,43 @@ pub fn extract_animations_for_skeleton_json(
         })
         .unwrap_or_default();
 
+    // Build the hash→node-name map once and use it for both DBA-backed clips
+    // and direct per-CAF chrparams clips.
+    //
+    // Important: Star Citizen uses the same 32-bit CRC32 name-hash space for
+    // CHR bones and rigid CGA/CGAM NMC nodes.  The older code only called
+    // parse_skeleton(), which works for CHR CompiledBones but returns None for
+    // many CGA object-animation rigs (doors, panels, ladders, etc.).  That made
+    // their exported sidecar JSON hash-only, so the Blender add-on had real
+    // key data but no source_node_name/binding hints.  parse_rig_node_names()
+    // intentionally handles both cases: CHR CompiledBones first, then CGA/CGAM
+    // NMC node names.
+    let skeleton_p4k_path = crate::pipeline::datacore_path_to_p4k(skeleton_path);
+    let (skeleton_bone_hashes, skeleton_bone_name_by_hash): (
+        HashSet<u32>,
+        HashMap<u32, String>,
+    ) = p4k
+        .entry_case_insensitive(&skeleton_p4k_path)
+        .and_then(|e| p4k.read(e).ok())
+        .and_then(|data| crate::skeleton::parse_rig_node_names(&data))
+        .map(|names| {
+            let hashes = names
+                .iter()
+                .map(|name| bone_name_hash(name))
+                .collect::<HashSet<_>>();
+            let name_map = names
+                .iter()
+                .map(|name| (bone_name_hash(name), name.to_string()))
+                .collect::<HashMap<_, _>>();
+            (hashes, name_map)
+        })
+        .unwrap_or_default();
+    log::debug!(
+        "[anim] rig '{}' has {} resolved CHR/NMC node hashes",
+        skeleton_path,
+        skeleton_bone_hashes.len()
+    );
+
     // Prefer tracks database (.dba) when present.
     if let Some(tracks_db_path) = chrparams.tracks_database.clone() {
         let resolved_path = chrparams.resolved_caf_path(&tracks_db_path);
@@ -579,33 +616,6 @@ pub fn extract_animations_for_skeleton_json(
             .ok_or_else(|| Error::Other(format!("Cannot load tracks database: {resolved_path}")))?
             .to_vec();
         let db = parse_dba(&dba_data)?;
-        // Load the skeleton file and compute its bone hash set.  This is used
-        // to identify which DBA blocks belong to this CHR (bone-subset scan).
-        let skeleton_p4k_path = crate::pipeline::datacore_path_to_p4k(skeleton_path);
-        let (skeleton_bone_hashes, skeleton_bone_name_by_hash): (
-            HashSet<u32>,
-            HashMap<u32, String>,
-        ) = p4k
-            .entry_case_insensitive(&skeleton_p4k_path)
-            .and_then(|e| p4k.read(e).ok())
-            .and_then(|data| crate::skeleton::parse_skeleton(&data))
-            .map(|bones| {
-                let hashes = bones
-                    .iter()
-                    .map(|b| bone_name_hash(&b.name))
-                    .collect::<HashSet<_>>();
-                let name_map = bones
-                    .iter()
-                    .map(|b| (bone_name_hash(&b.name), b.name.to_ascii_lowercase()))
-                    .collect::<HashMap<_, _>>();
-                (hashes, name_map)
-            })
-            .unwrap_or_default();
-        log::debug!(
-            "[anim] skeleton '{}' has {} bone hashes",
-            skeleton_path,
-            skeleton_bone_hashes.len()
-        );
         let clips = caf_anchored_remap(
             &db,
             &chrparams,
@@ -654,7 +664,7 @@ pub fn extract_animations_for_skeleton_json(
         return Ok(None);
     }
     let mut value = database_to_animations_json(&AnimationDatabase { clips });
-    annotate_animation_json_source(&mut value, skeleton_path, &HashMap::new());
+    annotate_animation_json_source(&mut value, skeleton_path, &skeleton_bone_name_by_hash);
     Ok(Some(value))
 }
 

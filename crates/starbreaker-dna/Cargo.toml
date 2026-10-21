@@ -1,0 +1,19 @@
+[package]
+name = "starbreaker-dna"
+version.workspace = true
+edition = "2024"
+
+[dependencies]
+starbreaker-common = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+starbreaker-p4k = { workspace = true }
+
+[features]
+default = []
+serde = ["dep:serde"]
+
+[lints]
+workspace = true

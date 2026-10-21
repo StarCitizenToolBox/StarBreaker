@@ -4,7 +4,9 @@ pub mod bnk;
 pub mod datacore_audio;
 pub mod didx;
 pub mod error;
+pub mod external_sources;
 pub mod fnv;
+pub mod game_audio;
 pub mod hirc;
 pub mod section;
 pub mod stid;
@@ -14,6 +16,8 @@ pub use bnk::BnkFile;
 pub use datacore_audio::{AudioTriggerRef, EntityAudioInfo};
 pub use didx::DataIndexEntry;
 pub use error::BnkError;
+pub use external_sources::{ExternalSourceEntry, ExternalSourceIndex};
+pub use game_audio::{GameAudioDoc, load as load_game_audio};
 pub use fnv::fnv1_hash;
 pub use hirc::{
     HircEntry, HircObject, HircObjectType, HircSection, Hierarchy,

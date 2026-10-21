@@ -94,6 +94,16 @@ pub enum QueryError {
 
     #[error("missing target struct index for {segment} segment")]
     MissingTargetStructIndex { segment: String },
+
+    #[error("invalid array count while materializing value tree: {count}")]
+    InvalidArrayCount { count: i32 },
+
+    #[error("value materialization limit exceeded for {kind}: limit {limit}, detail: {detail}")]
+    MaterializationLimitExceeded {
+        kind: &'static str,
+        limit: usize,
+        detail: String,
+    },
 }
 
 /// Extension trait for `Result<T, QueryError>` to handle optional components.

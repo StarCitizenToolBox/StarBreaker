@@ -19,6 +19,11 @@ pub struct IncludedObject {
     /// Two f64×3 vectors before the transform (purpose unknown — bone ref? bbox?).
     pub vector1: [f64; 3],
     pub vector2: [f64; 3],
+    /// Per-object tint-palette index into [`IncludedObjects::tint_palette_paths`],
+    /// decoded from the u16 at object offset +172 (within the `unknown3 == 0`
+    /// trailing block). `None` when the object has no trailing block or the index
+    /// is `0xFFFF` ("no palette override" — the object keeps its CGF materials).
+    pub tint_palette_index: Option<u16>,
 }
 
 /// Parsed IncludedObjects chunk data.
@@ -148,12 +153,25 @@ impl IncludedObjects {
                         "IncludedObjects: Type1 at offset {off}, cgf_index={id}, unknown1={unknown1:#x}, unknown2={unknown2:#x}, unknown3={unknown3:#x}{extra}"
                     );
 
+                    // The per-object tint-palette index lives in the trailing
+                    // block that is only present when unknown3 == 0: a u16 at
+                    // object offset +172. (The u16 at +170 is a separate flags
+                    // field whose values exceed the palette count, so it is not
+                    // the index.) 0xFFFF means "no palette override".
+                    let tint_palette_index = if unknown3 == 0 && off + 184 <= data.len() {
+                        let raw = read_u16_at(data, off + 172)?;
+                        (raw != 0xFFFF).then_some(raw)
+                    } else {
+                        None
+                    };
+
                     objects.push(IncludedObject {
                         cgf_index: id,
                         unknown2,
                         transform,
                         vector1,
                         vector2,
+                        tint_palette_index,
                     });
                     off = end;
                 }
@@ -255,7 +273,7 @@ mod tests {
     use super::*;
 
     /// Build a minimal IncludedObjects chunk with 1 CGF, 0 materials, 0 palettes, 1 Type1 object.
-    fn make_test_chunk(unknown3: u64) -> Vec<u8> {
+    fn make_test_chunk(unknown3: u64, pal_index: u16) -> Vec<u8> {
         let mut buf = Vec::new();
 
         // 4 bytes padding
@@ -296,7 +314,11 @@ mod tests {
 
         obj.extend_from_slice(&unknown3.to_le_bytes());
         if unknown3 == 0 {
-            obj.extend_from_slice(&[0u8; 16]); // extra 16 bytes
+            // extra 16 bytes; the per-object tint-palette index is the u16 at +4
+            // (object offset +172).
+            let mut extra = [0u8; 16];
+            extra[4..6].copy_from_slice(&pal_index.to_le_bytes());
+            obj.extend_from_slice(&extra);
         }
 
         // Objects section: byte count
@@ -308,7 +330,7 @@ mod tests {
 
     #[test]
     fn parse_single_object_184_byte_variant() {
-        let data = make_test_chunk(0); // unknown3 == 0 → 184 bytes
+        let data = make_test_chunk(0, 0xFFFF); // unknown3 == 0 → 184 bytes
         let io = IncludedObjects::from_bytes(&data).unwrap();
 
         assert_eq!(io.cgf_paths.len(), 1);
@@ -350,11 +372,13 @@ mod tests {
 
     #[test]
     fn parse_single_object_168_byte_variant() {
-        let data = make_test_chunk(42); // unknown3 != 0 → 168 bytes
+        let data = make_test_chunk(42, 0xFFFF); // unknown3 != 0 → 168 bytes
         let io = IncludedObjects::from_bytes(&data).unwrap();
 
         assert_eq!(io.objects.len(), 1);
         assert_eq!(io.objects[0].cgf_index, 0);
+        // 168-byte variant has no trailing block → no palette index.
+        assert_eq!(io.objects[0].tint_palette_index, None);
 
         let t = &io.objects[0].transform;
         assert!((t[3][0] - 5.0).abs() < 1e-10);
@@ -363,6 +387,21 @@ mod tests {
             (t[0][1] - 1.0).abs() < 1e-10,
             "col0 row1 should be 1.0 for 90° Z rotation"
         );
+    }
+
+    #[test]
+    fn parse_per_object_tint_palette_index() {
+        // The per-object palette index is the u16 at object offset +172.
+        let data = make_test_chunk(0, 4);
+        let io = IncludedObjects::from_bytes(&data).unwrap();
+        assert_eq!(io.objects[0].tint_palette_index, Some(4));
+    }
+
+    #[test]
+    fn tint_palette_index_ffff_means_no_override() {
+        let data = make_test_chunk(0, 0xFFFF);
+        let io = IncludedObjects::from_bytes(&data).unwrap();
+        assert_eq!(io.objects[0].tint_palette_index, None);
     }
 
     #[test]

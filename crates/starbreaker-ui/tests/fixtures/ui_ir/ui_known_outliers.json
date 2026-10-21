@@ -1,0 +1,25 @@
+{
+ "schema_version": 1,
+ "outliers": [
+  {
+   "target": "ui_target_a",
+   "identity": "2147483660:widget_text_field",
+   "field": "primary_text_top",
+   "frozen_value": 73.0,
+   "reference_target": 78.0,
+   "confidence": 2.0,
+   "reason": "Header T3 renders ~5px high vs the in-game reference. True fix = the caption/heading line-box baseline model (A5 residual class); deferred. measured_render_delta = -5 (render band centre 83 vs reference 88.5). REBASED 2026-06-13 (plan P3.2): the freeze pipeline's TTF measure now follows the em model (1.5 retired), shifting snapshot space 77->73 while the RENDER is unchanged (T3/MEDICAL ink positions byte-identical); the render-space delta (-5, band centre 83 vs reference 88.5) is preserved: target = 73 + 5 = 78.",
+   "source": "reference/in-game/Clipper/screen_16x9_a-[medical1].png, band-profiled at threshold 60 on the 1920x1080 replay render, 2026-06-11"
+  },
+  {
+   "target": "ui_target_a",
+   "identity": "2147483654:widget_text_field",
+   "field": "primary_text_top",
+   "frozen_value": 73.0,
+   "reference_target": 78.0,
+   "confidence": 2.0,
+   "reason": "Header MEDICAL ASSISTANT renders ~5px high vs the in-game reference (same heading band as T3). True fix = the caption/heading line-box baseline model (A5 residual class); deferred. REBASED 2026-06-13 (plan P3.2): the freeze pipeline's TTF measure now follows the em model (1.5 retired), shifting snapshot space 77->73 while the RENDER is unchanged (T3/MEDICAL ink positions byte-identical); the render-space delta (-5, band centre 83 vs reference 88.5) is preserved: target = 73 + 5 = 78.",
+   "source": "reference/in-game/Clipper/screen_16x9_a-[medical1].png, band-profiled at threshold 60 on the 1920x1080 replay render, 2026-06-11"
+  }
+ ]
+}

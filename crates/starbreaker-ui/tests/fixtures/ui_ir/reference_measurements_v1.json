@@ -1,0 +1,118 @@
+{
+  "schema": "reference_measurements_v1",
+  "description": "Settled in-game reference measurements (plan P1.4). Adjudications consult this bank FIRST before re-measuring (docs/ui-workflow.md §4). Method: scripts/ui_measure.py on the named capture with the delta in notes. Provenance + traps: reference_measurements_v1.notes.md.",
+  "entries": [
+    {
+      "capture": "reference/in-game/Clipper/Screen_Left_Lower_RTT.png",
+      "element": "power.footer.P-glyph",
+      "metric": "cap_height_px",
+      "value": 52,
+      "box": [430, 1085, 470, 1190],
+      "notes": "delta 45; footer bar line y1097-1103 crosses the box and is flagged suspect (the ledger-19 trap); glyph run 1126-1178 nudges the right box edge (reported, not suspect)"
+    },
+    {
+      "capture": "reference/in-game/Clipper/Screen_Left_Lower_RTT.png",
+      "element": "power.footer.text-colour-anchor",
+      "metric": "colour_ratio",
+      "value": [1.0, 0.6055, 0.3104],
+      "box": [430, 1085, 470, 1190],
+      "notes": "delta 45; capture-space (haze-UNCORRECTED) bright-pixel ratios of the footer text = the brand Base anchor for this capture; mean RGB 204.7/124.0/63.5; use as --anchor when haze-correcting other elements on this capture"
+    },
+    {
+      "capture": "reference/in-game/Clipper/Screen_Left_Lower_RTT.png",
+      "element": "power.emissions.IR-label",
+      "metric": "cap_height_px",
+      "value": 53,
+      "box": [85, 40, 175, 125],
+      "notes": "delta 45"
+    },
+    {
+      "capture": "reference/in-game/Clipper/Screen_Left_Lower_RTT.png",
+      "element": "power.emissions.3.5K",
+      "metric": "cap_height_px",
+      "value": 54,
+      "box": [250, 0, 465, 85],
+      "notes": "delta 45; a second truncated run at the box bottom is 294.1 leaking in — ignore it"
+    },
+    {
+      "capture": "reference/in-game/Clipper/Screen_Left_Lower_RTT.png",
+      "element": "power.emissions.294.1",
+      "metric": "cap_height_px",
+      "value": 55,
+      "box": [245, 65, 490, 160],
+      "notes": "delta 50 (delta 45 admits one AA row -> 56)"
+    },
+    {
+      "capture": "reference/in-game/Clipper/Screen_Left_Lower_RTT.png",
+      "element": "power.output.title-OUTPUT",
+      "metric": "cap_height_px",
+      "value": 41,
+      "box": [250, 275, 470, 330],
+      "notes": "delta 45"
+    },
+    {
+      "capture": "reference/in-game/Clipper/Screen_Left_Lower_RTT.png",
+      "element": "power.output.2-glyph",
+      "metric": "cap_height_px",
+      "value": 93,
+      "box": [163, 430, 222, 550],
+      "notes": "delta 30; keep the box ABOVE the card underline — a wider box once caught it and mis-measured the cap as 218 (ledger 19)"
+    },
+    {
+      "capture": "reference/in-game/Clipper/Screen_Left_Lower_RTT.png",
+      "element": "power.output.slash16",
+      "metric": "cap_height_px",
+      "value": 58,
+      "box": [245, 415, 430, 535],
+      "notes": "delta 45; the slash drives the union run height — the 1/6 digits alone are shorter"
+    },
+    {
+      "capture": "reference/in-game/Clipper/Screen_Left_Lower_RTT.png",
+      "element": "power.battery.zeros",
+      "metric": "cap_height_px",
+      "value": 51,
+      "box": [265, 660, 310, 770],
+      "notes": "delta 25 (card is dim); SOFT ±2 — the 2026-06-12 arc recorded 53; second zero at box [425,660,475,770] measures the same 51"
+    },
+    {
+      "capture": "reference/in-game/Clipper/Screen_Left_Lower_RTT.png",
+      "element": "power.battery.slash",
+      "metric": "cap_height_px",
+      "value": 55,
+      "box": [330, 660, 380, 770],
+      "notes": "delta 25; SOFT — the 2026-06-12 arc recorded 58; dim card + capture blur"
+    },
+    {
+      "capture": "reference/in-game/Clipper/Screen_Left_Lower_RTT.png",
+      "element": "power.battery.OFFLINE",
+      "metric": "cap_height_px",
+      "value": 49,
+      "box": [195, 770, 230, 845],
+      "notes": "delta 30, per-glyph F box (full-line box [145,750,470,840] gives 50); DOES NOT reproduce the arc's 43 — that number was already flagged 'unexplained (band-fit?)' in the handoff; treat as soft until the P3 text arc settles it"
+    },
+    {
+      "capture": "reference/in-game/Clipper/Screen_Left_Lower_RTT.png",
+      "element": "power.pips.degC",
+      "metric": "cap_height_px",
+      "value": 37,
+      "box": [1150, 795, 1210, 885],
+      "notes": "delta 25; C glyph only (the º mark sits at x1137-1153, excluded); keep x0 >= 1150 — the bright pip slab ends ~x1125 and contaminates wider boxes"
+    },
+    {
+      "capture": "reference/in-game/Clipper/Screen_Right_Upper_RTT.png",
+      "element": "target.body.NO-TARGET",
+      "metric": "cap_height_px",
+      "value": 77,
+      "box": [700, 640, 1290, 760],
+      "notes": "delta 45; CAPTURE IS 1959x1513 — scale by 1600/1959 before comparing against the render; glyphs span x715-1274"
+    },
+    {
+      "capture": "reference/in-game/Clipper/Screen_Right_Upper_RTT.png",
+      "element": "target.footer.TARGET-STATUS",
+      "metric": "cap_height_px",
+      "value": 64,
+      "box": [500, 1395, 1500, 1500],
+      "notes": "delta 50; CAPTURE IS 1959x1513; the footer bar at y1374-1389 sits just above this box — a taller box catches it (flagged suspect when crossing)"
+    }
+  ]
+}

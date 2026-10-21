@@ -3,8 +3,11 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use parking_lot::Mutex;
 
+use starbreaker_3d::character::HeadIdentityContext;
 use starbreaker_p4k::MappedP4k;
-use starbreaker_wwise::{AtlIndex, Hierarchy};
+use starbreaker_wwise::{AtlIndex, ExternalSourceIndex};
+
+use crate::audio_commands::LoadedBank;
 
 use crate::datacore_commands::RecordEntry;
 
@@ -19,10 +22,15 @@ pub struct AppState {
     pub record_index: Mutex<Option<Vec<RecordEntry>>>,
     /// ATL trigger index, built once by audio_init.
     pub atl_index: Mutex<Option<AtlIndex>>,
-    /// Lazily-loaded bank hierarchies, keyed by bank filename.
-    pub bank_cache: Mutex<HashMap<String, Option<Arc<Hierarchy>>>>,
+    /// ATL external-source index, built once by audio_init.
+    pub external_source_index: Mutex<Option<ExternalSourceIndex>>,
+    /// Lazily-loaded banks (hierarchy + embedded media), keyed by bank filename.
+    pub bank_cache: Mutex<HashMap<String, Option<Arc<LoadedBank>>>>,
     /// Maps wwise filename (bnk/wem) to full P4k path (e.g. "Data\\Sounds\\wwise\\English(US)\\Foo.bnk").
     pub wwise_paths: Mutex<HashMap<String, String>>,
+    /// Per-gender cached head rig context for the Character Builder.
+    /// Keyed by gender_hash value. Built lazily on first preview.
+    pub head_contexts: Mutex<HashMap<u32, Arc<HeadIdentityContext>>>,
 }
 
 impl AppState {
@@ -34,8 +42,10 @@ impl AppState {
             localization: Mutex::new(HashMap::new()),
             record_index: Mutex::new(None),
             atl_index: Mutex::new(None),
+            external_source_index: Mutex::new(None),
             bank_cache: Mutex::new(HashMap::new()),
             wwise_paths: Mutex::new(HashMap::new()),
+            head_contexts: Mutex::new(HashMap::new()),
         }
     }
 }

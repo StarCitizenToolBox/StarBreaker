@@ -93,6 +93,7 @@ pub fn export_geometry_glb(
             skeleton_bones: bones,
             children: Vec::new(),
             interiors: pipeline::LoadedInteriors::default(),
+            animations: Vec::new(),
         },
         &mut crate::gltf::GlbLoaders {
             load_textures: &mut no_textures,

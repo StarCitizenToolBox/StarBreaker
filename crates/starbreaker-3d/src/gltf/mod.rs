@@ -1,3 +1,4 @@
+mod animation;
 mod glb_builder;
 
 use gltf_json as json;
@@ -8,7 +9,7 @@ use crate::error::Error;
 use crate::nmc::NodeMeshCombo;
 use crate::types::{MaterialTextures, Mesh};
 
-pub(crate) use glb_builder::{GlbBuilder, PackedMeshInfo, offset_to_gltf_matrix};
+pub(crate) use glb_builder::{GlbBuilder, PackedMeshInfo, VertexAccessors, offset_to_gltf_matrix};
 
 fn hierarchy_covers_bones(nmc: Option<&NodeMeshCombo>, bones: &[crate::skeleton::Bone]) -> bool {
     let Some(nmc) = nmc.filter(|nmc| !nmc.nodes.is_empty()) else {
@@ -41,6 +42,8 @@ pub struct GlbInput {
     pub skeleton_bones: Vec<crate::skeleton::Bone>,
     pub children: Vec<crate::types::EntityPayload>,
     pub interiors: crate::pipeline::LoadedInteriors,
+    /// Animation clips (bones by name, morph targets by name).
+    pub animations: Vec<crate::clip::Clip>,
 }
 
 pub struct GlbLoaders<'a> {
@@ -172,17 +175,26 @@ pub fn write_glb_with_progress(
     progress: Option<&Progress>,
 ) -> Result<Vec<u8>, Error> {
     let mut builder = GlbBuilder::new();
+    // The root's instance name; decomposed GLBs are shared assets and carry
+    // no instance metadata.
+    let root_name = opts.metadata.entity_name.clone().filter(|_| opts.metadata.export_options.kind != "Decomposed");
 
     log::info!("[mem-phase] start write_glb");
     report_progress(progress, 0.05, "Packing root mesh");
     // ---- Pack root entity (drop textures after packing) ----
-    let mut scene_nodes = if let Some(root_mesh) = input.root_mesh {
+    let root_without_geometry = input.root_mesh.as_ref().is_some_and(|m| m.positions.is_empty())
+        && input.root_nmc.as_ref().is_none_or(|n| n.nodes.is_empty());
+    let mut scene_nodes = if root_without_geometry {
+        // No geometry (as for a child): a node without a mesh.
+        builder.nodes_json.push(json::Node { name: root_name.clone(), ..Default::default() });
+        vec![json::Index::new(0)]
+    } else if let Some(root_mesh) = input.root_mesh {
         let root_packed = builder.pack_mesh(
             &root_mesh,
             input.root_materials.as_ref(),
             input.root_textures.as_ref(),
             input.root_palette.as_ref(),
-            None,
+            root_name.as_deref(),
             opts.material_mode,
             opts.preserve_textureless_decal_primitives,
         );
@@ -197,8 +209,9 @@ pub fn write_glb_with_progress(
                 .map(|&i| json::Index::new(i))
                 .collect::<Vec<_>>()
         } else {
-            // Flat path — single node with root mesh
+            // Flat path — single node with root mesh, named after the entity
             builder.nodes_json.push(json::Node {
+                name: root_name.clone(),
                 mesh: Some(json::Index::new(root_packed.mesh_idx)),
                 ..Default::default()
             });
@@ -216,6 +229,11 @@ pub fn write_glb_with_progress(
     // ---- Skeleton bone nodes ----
     if !hierarchy_covers_bones(input.root_nmc.as_ref(), &input.skeleton_bones) {
         builder.attach_skeleton_bones(&input.skeleton_bones, &scene_nodes);
+    }
+    // Children name the root by its entity (`parent_entity_name`). After the
+    // skeleton, so a bone of the same name keeps its node.
+    if let (Some(name), Some(root)) = (root_name.as_ref(), scene_nodes.first()) {
+        builder.node_name_to_idx.entry(name.to_lowercase()).or_insert(root.value() as u32);
     }
 
     // ---- Attach child entities ----
@@ -247,6 +265,7 @@ pub fn write_glb_with_progress(
         "[mem-phase] children done, bin={}MB",
         builder.bin.len() / 1_048_576
     );
+    builder.add_animations(&input.animations)?;
     if num_children == 0 {
         report_progress(progress, 0.60, "Packing interiors");
     }
@@ -311,6 +330,11 @@ pub fn write_glb_with_progress(
 }
 
 #[cfg(test)]
+mod tests_anim;
+#[cfg(test)]
+mod tests_rig;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -352,6 +376,8 @@ mod tests {
             model_max: [1.0; 3],
             scaling_min: [0.0; 3],
             scaling_max: [1.0; 3],
+            skin: None,
+            morph_targets: Vec::new(),
         }
     }
 
@@ -571,6 +597,7 @@ mod tests {
                 material_path: Some("Data/Objects/layered_variant.mtl".into()),
             }),
             material_set: crate::mtl::MaterialSetAuthoredData {
+                sub_materials: true,
                 attributes: vec![crate::mtl::AuthoredAttribute {
                     name: "DefaultPalette".into(),
                     value: "vehicle.palette.rsi_zeus_cl".into(),
@@ -973,6 +1000,7 @@ mod tests {
             offset_rotation: [0.0; 3],
             detach_direction: [0.0; 3],
             port_flags: String::new(),
+            ui_bindings: Vec::new(),
         }
     }
 
@@ -1019,6 +1047,7 @@ mod tests {
                 skeleton_bones: Vec::new(),
                 children: Vec::new(),
                 interiors: crate::pipeline::LoadedInteriors::default(),
+                animations: Vec::new(),
             },
             &mut GlbLoaders {
                 load_textures: &mut |_, _| None,
@@ -1042,6 +1071,7 @@ mod tests {
                 skeleton_bones: Vec::new(),
                 children: Vec::new(),
                 interiors: crate::pipeline::LoadedInteriors::default(),
+                animations: Vec::new(),
             },
             &mut GlbLoaders {
                 load_textures: &mut |_, _| None,
@@ -1096,6 +1126,27 @@ mod tests {
         );
     }
 
+    /// Without a `.mtl`, each material id keeps its own (default) glTF
+    /// material, as the `.blend` writer keeps one slot per material id: the
+    /// submeshes stay distinguishable instead of collapsing into one.
+    #[test]
+    fn write_glb_keeps_one_default_material_per_material_id() {
+        let mut mesh = triangle_mesh();
+        let first = mesh.submeshes[0].clone();
+        mesh.submeshes = (0..3)
+            .map(|id| SubMesh { material_name: None, material_id: id, ..first.clone() })
+            .chain(std::iter::once(SubMesh { material_name: None, material_id: 1, ..first.clone() }))
+            .collect();
+        let root = glb_json(&call_write_glb(mesh).expect("write_glb failed"));
+        let materials: std::collections::BTreeSet<u64> = root["meshes"][0]["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["material"].as_u64().expect("material index"))
+            .collect();
+        assert_eq!(materials.len(), 3, "one material per id: {root:#}");
+    }
+
     #[test]
     fn write_glb_exports_texcoord_1_when_second_uvs_exist() {
         let glb = call_write_glb(multi_uv_triangle_mesh()).expect("write_glb failed");
@@ -1105,6 +1156,35 @@ mod tests {
             attributes.get("TEXCOORD_1").is_some(),
             "second UVs should export as TEXCOORD_1"
         );
+    }
+
+    /// A root without geometry (a character whose head a helmet hides) is
+    /// a node without a mesh, as a child without geometry is; its children
+    /// still hang under it.
+    #[test]
+    fn write_glb_root_without_geometry_has_no_mesh() {
+        let glb = write_glb(
+            GlbInput {
+                root_mesh: Some(Mesh::empty()),
+                root_materials: None,
+                root_textures: None,
+                root_nmc: None,
+                root_palette: None,
+                skeleton_bones: Vec::new(),
+                children: vec![child_entity("child_a", shared_material_file())],
+                interiors: crate::pipeline::LoadedInteriors::default(),
+                animations: Vec::new(),
+            },
+            &mut GlbLoaders { load_textures: &mut |_, _| None, load_interior_mesh: &mut |_| None },
+            &default_opts(),
+        )
+        .expect("write_glb failed");
+
+        let json = glb_json(&glb);
+        let root = &json["nodes"][json["scenes"][0]["nodes"][0].as_u64().unwrap() as usize];
+        assert!(root.get("mesh").is_none(), "{root}");
+        assert_eq!(json["meshes"].as_array().map_or(0, |a| a.len()), 1, "only the child's mesh");
+        assert!(root["children"].as_array().is_some_and(|c| !c.is_empty()), "the child hangs under the root");
     }
 
     #[test]
@@ -1125,6 +1205,7 @@ mod tests {
                 skeleton_bones: Vec::new(),
                 children,
                 interiors: crate::pipeline::LoadedInteriors::default(),
+                animations: Vec::new(),
             },
             &mut GlbLoaders {
                 load_textures: &mut |_, _| Some(shared_textures()),
@@ -1161,6 +1242,7 @@ mod tests {
                 skeleton_bones: Vec::new(),
                 children: Vec::new(),
                 interiors: crate::pipeline::LoadedInteriors::default(),
+                animations: Vec::new(),
             },
             &mut GlbLoaders {
                 load_textures: &mut |_, _| None,
@@ -1239,6 +1321,7 @@ mod tests {
                 skeleton_bones: Vec::new(),
                 children: Vec::new(),
                 interiors: crate::pipeline::LoadedInteriors::default(),
+                animations: Vec::new(),
             },
             &mut GlbLoaders {
                 load_textures: &mut |_, _| None,
@@ -1272,6 +1355,7 @@ mod tests {
                 skeleton_bones: Vec::new(),
                 children: Vec::new(),
                 interiors: crate::pipeline::LoadedInteriors::default(),
+                animations: Vec::new(),
             },
             &mut GlbLoaders {
                 load_textures: &mut |_, _| None,
@@ -1427,6 +1511,7 @@ mod tests {
                 skeleton_bones: Vec::new(),
                 children: Vec::new(),
                 interiors: crate::pipeline::LoadedInteriors::default(),
+                animations: Vec::new(),
             },
             &mut GlbLoaders {
                 load_textures: &mut |_, _| None,
@@ -1559,6 +1644,7 @@ mod tests {
                 skeleton_bones: Vec::new(),
                 children: Vec::new(),
                 interiors: crate::pipeline::LoadedInteriors::default(),
+                animations: Vec::new(),
             },
             &mut GlbLoaders {
                 load_textures: &mut |_, _| None,
@@ -1597,6 +1683,7 @@ mod tests {
                 skeleton_bones: Vec::new(),
                 children: Vec::new(),
                 interiors: crate::pipeline::LoadedInteriors::default(),
+                animations: Vec::new(),
             },
             &mut GlbLoaders {
                 load_textures: &mut |_, _| None,
@@ -1630,6 +1717,7 @@ mod tests {
                 skeleton_bones: Vec::new(),
                 children: Vec::new(),
                 interiors: crate::pipeline::LoadedInteriors::default(),
+                animations: Vec::new(),
             },
             &mut GlbLoaders {
                 load_textures: &mut |_, _| None,
@@ -1671,6 +1759,7 @@ mod tests {
                 skeleton_bones: Vec::new(),
                 children: Vec::new(),
                 interiors: crate::pipeline::LoadedInteriors::default(),
+                animations: Vec::new(),
             },
             &mut GlbLoaders {
                 load_textures: &mut |_, _| None,
@@ -1708,6 +1797,7 @@ mod tests {
                 skeleton_bones: Vec::new(),
                 children: Vec::new(),
                 interiors: crate::pipeline::LoadedInteriors::default(),
+                animations: Vec::new(),
             },
             &mut GlbLoaders {
                 load_textures: &mut |_, _| None,
@@ -1755,6 +1845,7 @@ mod tests {
                 skeleton_bones: Vec::new(),
                 children,
                 interiors: crate::pipeline::LoadedInteriors::default(),
+                animations: Vec::new(),
             },
             &mut GlbLoaders {
                 load_textures: &mut |_, _| Some(shared_textures()),
@@ -1809,6 +1900,7 @@ mod tests {
                 skeleton_bones: Vec::new(),
                 children: vec![child_a, child_b],
                 interiors: crate::pipeline::LoadedInteriors::default(),
+                animations: Vec::new(),
             },
             &mut GlbLoaders {
                 load_textures: &mut |_, _| None,
@@ -1863,6 +1955,7 @@ mod tests {
                 skeleton_bones: Vec::new(),
                 children: Vec::new(),
                 interiors: crate::pipeline::LoadedInteriors::default(),
+                animations: Vec::new(),
             },
             &mut GlbLoaders {
                 load_textures: &mut |_, _| None,
@@ -1882,6 +1975,7 @@ mod tests {
                 skeleton_bones: Vec::new(),
                 children: Vec::new(),
                 interiors: crate::pipeline::LoadedInteriors::default(),
+                animations: Vec::new(),
             },
             &mut GlbLoaders {
                 load_textures: &mut |_, _| None,
@@ -1928,6 +2022,7 @@ mod tests {
                 skeleton_bones: Vec::new(),
                 children: Vec::new(),
                 interiors: crate::pipeline::LoadedInteriors::default(),
+                animations: Vec::new(),
             },
             &mut GlbLoaders {
                 load_textures: &mut |_, _| None,
@@ -1951,6 +2046,7 @@ mod tests {
                 skeleton_bones: Vec::new(),
                 children: Vec::new(),
                 interiors: crate::pipeline::LoadedInteriors::default(),
+                animations: Vec::new(),
             },
             &mut GlbLoaders {
                 load_textures: &mut |_, _| None,
@@ -1970,6 +2066,7 @@ mod tests {
                 skeleton_bones: Vec::new(),
                 children: Vec::new(),
                 interiors: crate::pipeline::LoadedInteriors::default(),
+                animations: Vec::new(),
             },
             &mut GlbLoaders {
                 load_textures: &mut |_, _| None,
@@ -1989,6 +2086,7 @@ mod tests {
                 skeleton_bones: Vec::new(),
                 children: Vec::new(),
                 interiors: crate::pipeline::LoadedInteriors::default(),
+                animations: Vec::new(),
             },
             &mut GlbLoaders {
                 load_textures: &mut |_, _| None,
@@ -2094,6 +2192,7 @@ mod tests {
                         skeleton_bones: Vec::new(),
                         children: Vec::new(),
                         interiors: crate::pipeline::LoadedInteriors::default(),
+                        animations: Vec::new(),
                     },
                     &mut GlbLoaders {
                         load_textures: &mut |_, _| None,
@@ -2120,6 +2219,7 @@ mod tests {
                         skeleton_bones: Vec::new(),
                         children: Vec::new(),
                         interiors: crate::pipeline::LoadedInteriors::default(),
+                        animations: Vec::new(),
                     },
                     &mut GlbLoaders {
                         load_textures: &mut |_, _| None,
@@ -2146,6 +2246,7 @@ mod tests {
                         skeleton_bones: Vec::new(),
                         children: Vec::new(),
                         interiors: crate::pipeline::LoadedInteriors::default(),
+                        animations: Vec::new(),
                     },
                     &mut GlbLoaders {
                         load_textures: &mut |_, _| None,
@@ -2167,6 +2268,7 @@ mod tests {
                         skeleton_bones: Vec::new(),
                         children: Vec::new(),
                         interiors: crate::pipeline::LoadedInteriors::default(),
+                        animations: Vec::new(),
                     },
                     &mut GlbLoaders {
                         load_textures: &mut |_, _| None,
@@ -2259,6 +2361,7 @@ mod tests {
                 skeleton_bones: Vec::new(),
                 children: vec![child],
                 interiors: crate::pipeline::LoadedInteriors::default(),
+                animations: Vec::new(),
             },
             &mut GlbLoaders {
                 load_textures: &mut |_, _| {
@@ -2352,6 +2455,8 @@ mod tests {
             model_max: [3.0, 1.0, 0.0],
             scaling_min: [0.0; 3],
             scaling_max: [3.0, 1.0, 0.0],
+            skin: None,
+            morph_targets: Vec::new(),
             submeshes: vec![
                 SubMesh {
                     material_name: Some("mat_a".into()),
@@ -2479,6 +2584,8 @@ mod tests {
             model_max: [1.0; 3],
             scaling_min: [0.0; 3],
             scaling_max: [1.0; 3],
+            skin: None,
+            morph_targets: Vec::new(),
             submeshes: vec![SubMesh {
                 material_name: None,
                 material_id: 0,

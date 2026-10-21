@@ -2,9 +2,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio_commands;
+mod character_commands;
 mod commands;
 mod datacore_commands;
 mod error;
+mod socpak_category;
 mod state;
 mod ui_sink;
 
@@ -220,7 +222,10 @@ fn main() {
             commands::p4k_search,
             commands::list_subdirs,
             commands::scan_categories,
+            commands::scan_socpaks,
+            commands::inspect_socpak_hierarchy,
             commands::start_export,
+            commands::export_socpaks,
             commands::cancel_export,
             datacore_commands::dc_search,
             datacore_commands::dc_list_tree,
@@ -233,11 +238,13 @@ fn main() {
             audio_commands::audio_init,
             audio_commands::audio_search_entities,
             audio_commands::audio_search_triggers,
+            audio_commands::audio_search_external_sources,
             audio_commands::audio_list_banks,
             audio_commands::audio_bank_triggers,
             audio_commands::audio_bank_media,
             audio_commands::audio_entity_triggers,
             audio_commands::audio_resolve_trigger,
+            audio_commands::audio_resolve_external_source,
             audio_commands::audio_decode_wem,
             audio_commands::audio_export_info,
             audio_commands::audio_export_media,
@@ -253,6 +260,12 @@ fn main() {
             commands::install_blender_addon,
             commands::uninstall_blender_addon,
             commands::reload_blender_addon,
+            character_commands::dna_preview_glb,
+            character_commands::dna_export_chf_to,
+            character_commands::dna_export_glb_to,
+            character_commands::dna_import_chf,
+            character_commands::dna_list_expressions,
+            character_commands::dna_expression_anim_glb,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|e| {

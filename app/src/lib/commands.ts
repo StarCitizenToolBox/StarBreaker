@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { DnaInput, Gender } from "./dna";
 
 export interface DiscoverResult {
   path: string;
@@ -139,6 +140,7 @@ export interface EntityDto {
   id: string;
   display_name: string | null;
   is_npc_or_internal: boolean;
+  armor_type: string | null;
 }
 
 export interface CategoryDto {
@@ -147,6 +149,7 @@ export interface CategoryDto {
 }
 
 export interface ExportRequest {
+  geometry_tag?: string;
   record_ids: string[];
   names: string[];
   output_dir: string;
@@ -180,6 +183,56 @@ export interface ExportDone {
   succeeded_ids: string[];
 }
 
+export interface SocpakDto {
+  path: string;
+  category: string;
+  subcategory: string;
+}
+
+export interface SocpakHierarchyRequest {
+  socpak_paths: string[];
+}
+
+export interface SocpakHierarchyNode {
+  path: string;
+  name: string;
+  entity_name: string | null;
+  class_name: string | null;
+  depth: number;
+  mesh_count: number;
+  light_count: number;
+  children: SocpakHierarchyNode[];
+}
+
+export interface SocpakExportRequest {
+  socpak_paths: string[];
+  output_dir: string;
+  lod: number;
+  mip: number;
+  material_mode: string;
+  include_lights: boolean;
+  overwrite_existing_assets: boolean;
+  include_nodraw: boolean;
+  socpak_path_filter?: string[] | null;
+}
+
+export interface SocpakExportDone {
+  file_count: number;
+  package_names: string[];
+}
+
+export interface SocpakExportProgress {
+  current: number;
+  total: number;
+  fraction: number;
+  socpak_path: string;
+  package_name: string;
+  stage: string;
+  files_written: number;
+  files_total: number;
+  error: string | null;
+}
+
 // ── Export commands ──
 
 /** Scan DataCore for entity categories. Requires P4k to be loaded. */
@@ -195,6 +248,34 @@ export async function startExport(request: ExportRequest): Promise<void> {
 /** Cancel an in-progress export. */
 export async function cancelExport(): Promise<void> {
   return invoke<void>("cancel_export");
+}
+
+/** List socpak archive paths, optionally filtered by substring. */
+export async function scanSocpaks(query = ""): Promise<SocpakDto[]> {
+  return invoke<SocpakDto[]>("scan_socpaks", { query: query || null });
+}
+
+/** Crawl selected socpaks and their inherited child containers. */
+export async function inspectSocpakHierarchy(
+  request: SocpakHierarchyRequest,
+): Promise<SocpakHierarchyNode[]> {
+  return invoke<SocpakHierarchyNode[]>("inspect_socpak_hierarchy", { request });
+}
+
+/** Export selected socpaks as a decomposed Blender package. */
+export async function exportSocpaks(
+  request: SocpakExportRequest,
+): Promise<SocpakExportDone> {
+  return invoke<SocpakExportDone>("export_socpaks", { request });
+}
+
+/** Listen for socpak export progress. */
+export function onSocpakExportProgress(
+  callback: (progress: SocpakExportProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<SocpakExportProgress>("socpak-export-progress", (event) => {
+    callback(event.payload);
+  });
 }
 
 /** Listen for export progress events. */
@@ -352,6 +433,7 @@ export async function dcGetBacklinks(recordId: string): Promise<BacklinkDto[]> {
 export interface AudioInitResult {
   trigger_count: number;
   bank_count: number;
+  external_source_count: number;
 }
 
 export interface AudioBankResult {
@@ -381,9 +463,12 @@ export interface AudioTriggerDetail {
 
 export interface AudioSoundResult {
   media_id: number;
+  label: string;
   source_type: string;
   bank_name: string;
   path_description: string;
+  media_path: string | null;
+  playable: boolean;
 }
 
 export interface AudioExportInfo {
@@ -405,6 +490,11 @@ export async function audioSearchEntities(query: string): Promise<AudioEntityRes
 /** Search ATL index by trigger name substring. */
 export async function audioSearchTriggers(query: string): Promise<AudioTriggerResult[]> {
   return invoke<AudioTriggerResult[]>("audio_search_triggers", { query });
+}
+
+/** Search ATL external sources by source name or WEM path. */
+export async function audioSearchExternalSources(query: string): Promise<AudioTriggerDetail[]> {
+  return invoke<AudioTriggerDetail[]>("audio_search_external_sources", { query });
 }
 
 /** List all soundbanks with trigger counts. */
@@ -432,13 +522,19 @@ export async function audioResolveTrigger(triggerName: string): Promise<AudioSou
   return invoke<AudioSoundResult[]>("audio_resolve_trigger", { triggerName });
 }
 
+/** Resolve an ATL external source to its WEM path. */
+export async function audioResolveExternalSource(sourceName: string, language: string): Promise<AudioSoundResult[]> {
+  return invoke<AudioSoundResult[]>("audio_resolve_external_source", { sourceName, language });
+}
+
 /** Decode a WEM to Ogg bytes for browser playback. */
 export async function audioDecodeWem(
   mediaId: number,
   sourceType: string,
   bankName: string,
+  mediaPath?: string | null,
 ): Promise<number[]> {
-  return invoke<number[]>("audio_decode_wem", { mediaId, sourceType, bankName });
+  return invoke<number[]>("audio_decode_wem", { mediaId, sourceType, bankName, mediaPath });
 }
 
 /** Get recommended export extension for a media file (ogg for Vorbis, else wem). */
@@ -446,8 +542,9 @@ export async function audioExportInfo(
   mediaId: number,
   sourceType: string,
   bankName: string,
+  mediaPath?: string | null,
 ): Promise<AudioExportInfo> {
-  return invoke<AudioExportInfo>("audio_export_info", { mediaId, sourceType, bankName });
+  return invoke<AudioExportInfo>("audio_export_info", { mediaId, sourceType, bankName, mediaPath });
 }
 
 /** Export a media file to disk, decoding Vorbis to OGG when applicable. */
@@ -455,9 +552,16 @@ export async function audioExportMedia(
   mediaId: number,
   sourceType: string,
   bankName: string,
+  mediaPath: string | null | undefined,
   outputPath: string,
 ): Promise<void> {
-  return invoke<void>("audio_export_media", { mediaId, sourceType, bankName, outputPath });
+  return invoke<void>("audio_export_media", {
+    mediaId,
+    sourceType,
+    bankName,
+    mediaPath,
+    outputPath,
+  });
 }
 
 export interface FolderExtractProgress {
@@ -547,4 +651,53 @@ export async function extractP4kFile(
   outputPath: string,
 ): Promise<void> {
   return invoke<void>("extract_p4k_file", { path, outputPath });
+}
+
+// ── Character builder ──
+
+/** Build a head GLB preview from DNA. `full` includes eyes/teeth.
+ *  The Rust command returns raw bytes via `ipc::Response`, so `invoke`
+ *  resolves directly to an ArrayBuffer (no JSON `number[]` round-trip). */
+export async function dnaPreviewGlb(dna: DnaInput, full: boolean): Promise<ArrayBuffer> {
+  return invoke<ArrayBuffer>("dna_preview_glb", { dna, full });
+}
+
+/** Build the DNA's .chf and write it to `path` (chosen via the save dialog). */
+export async function dnaExportChfTo(dna: DnaInput, path: string): Promise<void> {
+  return invoke<void>("dna_export_chf_to", { dna, path });
+}
+
+/** Build the head GLB and write it to `path` (chosen via the save dialog). */
+export async function dnaExportGlbTo(
+  dna: DnaInput,
+  full: boolean,
+  path: string,
+): Promise<void> {
+  return invoke<void>("dna_export_glb_to", { dna, full, path });
+}
+
+/** Read a .chf from `path` (chosen via the open dialog) and parse it into DNA. */
+export async function dnaImportChf(path: string): Promise<DnaInput> {
+  return invoke<DnaInput>("dna_import_chf", { path });
+}
+
+export interface ExpressionSet {
+  emotion: string;
+  variations: number[];
+}
+
+/** List idle face-anim emotions + variations for a gender. */
+export async function dnaListExpressions(gender: Gender): Promise<ExpressionSet[]> {
+  return invoke<ExpressionSet[]>("dna_list_expressions", { gender });
+}
+
+/** Build a looping expression-animation GLB. Returns a raw ArrayBuffer (the
+ *  Rust command returns ipc::Response, so invoke resolves to an ArrayBuffer). */
+export async function dnaExpressionAnimGlb(
+  dna: DnaInput,
+  emotion: string,
+  variation: number,
+  intensity: number,
+): Promise<ArrayBuffer> {
+  return invoke<ArrayBuffer>("dna_expression_anim_glb", { dna, emotion, variation, intensity });
 }

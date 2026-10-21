@@ -7,9 +7,11 @@ exports/
 mcp/starbreaker-mcp.exe
 mcp/starbreaker-mcp
 research/
-scripts/
+test-artifacts/
+
 docs-local/
-.claude/
+.claude/*
+!.claude/skills/
 ships/
 .vscode/
 .dev-logs/
@@ -18,3 +20,6 @@ __pycache__/
 .DS_Store
 Thumbs.db
 blender_addon/starbreaker_addon/resources/material_templates.blend1
+docs/audit_tmp/
+.github/copilot-steering.md
+/graphify-out/

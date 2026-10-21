@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "family": "MC",
+      "id": "mc_target_master",
+      "canvas_fixture": "MC_S_Target_Master_b8d2d65c.json",
+      "target_width": 1920,
+      "target_height": 1080
+    },
+    {
+      "family": "MC",
+      "id": "mc_self_master",
+      "canvas_fixture": "MC_S_Self_Master_680a71df.json",
+      "target_width": 1920,
+      "target_height": 1080
+    },
+    {
+      "family": "M",
+      "id": "gen_mc_target",
+      "canvas_fixture": "GEN_MC_S_Target_dd9ed6dc.json",
+      "target_width": 1920,
+      "target_height": 1080
+    },
+    {
+      "family": "IC",
+      "id": "ec_power_management",
+      "canvas_fixture": "EC_PowerManagement_3228e5cc.json",
+      "target_width": 1920,
+      "target_height": 1080
+    },
+    {
+      "family": "Fluff",
+      "id": "fluff_representative_gen_mc",
+      "canvas_fixture": "GEN_MC_S_Target_dd9ed6dc.json",
+      "target_width": 1920,
+      "target_height": 1080
+    },
+    {
+      "family": "radar_physical",
+      "id": "bb_starmap",
+      "canvas_fixture": "BB_ScreenRadar_C_App_Starmap_68ff6d17.json",
+      "target_width": 1920,
+      "target_height": 1080
+    }
+  ]
+}

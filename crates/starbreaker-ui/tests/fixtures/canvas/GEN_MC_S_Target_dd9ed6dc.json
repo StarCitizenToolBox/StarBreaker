@@ -1,0 +1,4426 @@
+{
+  "_RecordName_": "BuildingBlocks_Canvas.GEN_MC_S_Target",
+  "_RecordId_": "dd9ed6dc-7fe4-4884-9d11-c143290c9498",
+  "_RecordValue_": {
+    "_Type_": "BuildingBlocks_Canvas",
+    "size": {
+      "_Type_": "Vec3",
+      "x": 1920.0,
+      "y": 1080.0,
+      "z": 0.0
+    },
+    "defaultStyles": {
+      "_Type_": "BuildingBlocks_DefaultStyles",
+      "sharedStyles": "file://./../../../../../../../../../../../../libs/foundry/records/ui/buildingblocks/ships/displays/mfdscreens/mc_mfdgenericstyles/mfd_g_targetstatus.json",
+      "entries": []
+    },
+    "brandStyles": [],
+    "scene": [
+      {
+        "_Pointer_": "ptr:1",
+        "_Type_": "BuildingBlocks_DisplayWidget",
+        "name": "base_Root",
+        "parent": null,
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Pointer_": "ptr:4",
+        "_Type_": "BuildingBlocks_DisplayWidget",
+        "name": "base_Info",
+        "parent": "_PointsTo_:ptr:1",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.95,
+            "behavior": "Percent"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.92,
+            "behavior": "Percent"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.5,
+          "y": 0.5,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.5,
+          "y": 0.5,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 15.0,
+          "right": 25.0,
+          "bottom": 15.0,
+          "left": 25.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Pointer_": "ptr:28",
+        "_Type_": "BuildingBlocks_WidgetCanvas",
+        "name": "canvas_TargetDiagram",
+        "parent": "_PointsTo_:ptr:1",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.2,
+            "behavior": "Percent"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.75,
+            "behavior": "PercentOfX"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.5,
+          "y": 0.5,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.5,
+          "y": 0.5,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "canvas": "file://./../../../../../../../../../../../../libs/foundry/records/ui/buildingblocks/ships/displays/mfdscreens/mc_mfdcomponents/screens/target/types/gen_mc_s_targetdiagram.json",
+        "urlPostfix": "",
+        "styleTags": [
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.9fb92f44-f769-497f-b2d9-72da7ba77be9",
+            "_RecordId_": "9fb92f44-f769-497f-b2d9-72da7ba77be9"
+          },
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.79f1bb24-172f-41c7-ba8e-c7b15fec91fd",
+            "_RecordId_": "79f1bb24-172f-41c7-ba8e-c7b15fec91fd"
+          }
+        ],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Pointer_": "ptr:3",
+        "_Type_": "BuildingBlocks_WidgetCard",
+        "name": "card_NoTargetText",
+        "parent": "_PointsTo_:ptr:1",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 64.0,
+            "behavior": "Auto"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 64.0,
+            "behavior": "Auto"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.5,
+          "y": 0.48,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.5,
+          "y": 0.5,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Type_": "BuildingBlocks_WidgetTextField",
+        "name": "text_NoTarget",
+        "parent": "_PointsTo_:ptr:3",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 64.0,
+            "behavior": "Auto"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 64.0,
+            "behavior": "Auto"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "canvas": null,
+        "urlPostfix": "",
+        "styleTags": [
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.3af47f21-9907-4354-b285-add110f8e35d",
+            "_RecordId_": "3af47f21-9907-4354-b285-add110f8e35d"
+          },
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.15bee45a-c33e-40d1-bb78-b7721b8582b4",
+            "_RecordId_": "15bee45a-c33e-40d1-bb78-b7721b8582b4"
+          },
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.b164a1c2-0562-49e8-aa7b-33a0c18418c9",
+            "_RecordId_": "b164a1c2-0562-49e8-aa7b-33a0c18418c9"
+          }
+        ],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Pointer_": "ptr:5",
+        "_Type_": "BuildingBlocks_DisplayWidget",
+        "name": "base_hackScanDetailsList",
+        "parent": "_PointsTo_:ptr:4",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Auto"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.6,
+            "behavior": "Auto"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.4de16c43-275b-4986-8bbe-7b142059bda0",
+            "_RecordId_": "4de16c43-275b-4986-8bbe-7b142059bda0"
+          }
+        ],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Pointer_": "ptr:26",
+        "_Type_": "BuildingBlocks_WidgetCanvas",
+        "name": "canvas_Emissions",
+        "parent": "_PointsTo_:ptr:1",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.131,
+            "behavior": "Percent"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "canvas": "file://./../../../../../../../../../../../../libs/foundry/records/ui/buildingblocks/ships/displays/mfdscreens/mc_mfdcomponents/screens/general/emissions_types/gen_mc_s_emissions.json",
+        "urlPostfix": "/UIController/TargetSignatureSystem",
+        "styleTags": [
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.4d2023c1-43e1-48d4-bf2b-1860ff0cadfb",
+            "_RecordId_": "4d2023c1-43e1-48d4-bf2b-1860ff0cadfb"
+          }
+        ],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Pointer_": "ptr:6",
+        "_Type_": "BuildingBlocks_DisplayWidget",
+        "name": "base_TargetModel",
+        "parent": "_PointsTo_:ptr:5",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Auto"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.25,
+            "behavior": "Auto"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.85,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.fb4379e9-d04e-4938-8851-8d8fabe29f4c",
+            "_RecordId_": "fb4379e9-d04e-4938-8851-8d8fabe29f4c"
+          }
+        ],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Pointer_": "ptr:7",
+        "_Type_": "BuildingBlocks_DisplayWidget",
+        "name": "base_title",
+        "parent": "_PointsTo_:ptr:6",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Auto"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.3,
+            "behavior": "Auto"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Pointer_": "ptr:8",
+        "_Type_": "BuildingBlocks_DisplayWidget",
+        "name": "base_value",
+        "parent": "_PointsTo_:ptr:6",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Auto"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.6,
+            "behavior": "Auto"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": -5.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Type_": "BuildingBlocks_WidgetTextField",
+        "name": "text_title",
+        "parent": "_PointsTo_:ptr:7",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Auto"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Auto"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "canvas": null,
+        "urlPostfix": "",
+        "styleTags": [
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.69cf5aaf-ecee-4814-bc1d-1cb89311ac8c",
+            "_RecordId_": "69cf5aaf-ecee-4814-bc1d-1cb89311ac8c"
+          },
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.46446fa5-914f-40a7-a6c8-0d18072282fe",
+            "_RecordId_": "46446fa5-914f-40a7-a6c8-0d18072282fe"
+          }
+        ],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Pointer_": "ptr:29",
+        "_Type_": "BuildingBlocks_WidgetTextField",
+        "name": "text_value",
+        "parent": "_PointsTo_:ptr:8",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Auto"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Auto"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "canvas": null,
+        "urlPostfix": "",
+        "styleTags": [
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.1d43519b-1af9-472d-b3d4-1f1c379ecdc1",
+            "_RecordId_": "1d43519b-1af9-472d-b3d4-1f1c379ecdc1"
+          }
+        ],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Pointer_": "ptr:16",
+        "_Type_": "BuildingBlocks_WidgetCard",
+        "name": "card_PageGreeblesWithTarget",
+        "parent": "_PointsTo_:ptr:1",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.85,
+            "behavior": "Percent"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.5,
+          "y": 1.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.5,
+          "y": 1.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Type_": "BuildingBlocks_WidgetImage",
+        "name": "image_PageGreeblesNoTargetLeft",
+        "parent": "_PointsTo_:ptr:9",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.5,
+            "behavior": "Percent"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.df3a61e4-6d4c-49fa-a8f4-ef8a020d9266",
+            "_RecordId_": "df3a61e4-6d4c-49fa-a8f4-ef8a020d9266"
+          },
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.6238aa56-e862-4efd-8c58-417fd457bd7c",
+            "_RecordId_": "6238aa56-e862-4efd-8c58-417fd457bd7c"
+          }
+        ],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Pointer_": "ptr:9",
+        "_Type_": "BuildingBlocks_WidgetCard",
+        "name": "card_PageGreeblesNo Target",
+        "parent": null,
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.5,
+          "y": 0.5,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.5,
+          "y": 0.5,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 15.0,
+          "bottom": 0.0,
+          "left": 15.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Type_": "BuildingBlocks_WidgetImage",
+        "name": "image_PageGreeblesNoTarget",
+        "parent": "_PointsTo_:ptr:10",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.55,
+            "behavior": "Percent"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.26,
+            "behavior": "Percent"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.5,
+          "y": 0.48,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.5,
+          "y": 0.5,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.7c7bbbe7-7456-4089-9109-00b2056d81d5",
+            "_RecordId_": "7c7bbbe7-7456-4089-9109-00b2056d81d5"
+          }
+        ],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Pointer_": "ptr:11",
+        "_Type_": "BuildingBlocks_WidgetCard",
+        "name": "card_PageGreebles",
+        "parent": null,
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.43,
+            "behavior": "PercentOfY"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.05,
+            "behavior": "Percent"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.5,
+          "y": 0.55,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.5,
+          "y": 0.5,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [],
+        "isActive": true,
+        "layer": 0
+      },
+      {
+        "_Type_": "BuildingBlocks_WidgetImage",
+        "name": "image_PageGreebles",
+        "parent": "_PointsTo_:ptr:11",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [],
+        "isActive": true,
+        "layer": 2
+      },
+      {
+        "_Type_": "BuildingBlocks_DisplayWidget",
+        "name": "base_value",
+        "parent": "_PointsTo_:ptr:6",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Auto"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.6,
+            "behavior": "Auto"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": -5.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Type_": "BuildingBlocks_WidgetTextField",
+        "name": "text_HeaderValue",
+        "parent": "_PointsTo_:ptr:12",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Auto"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Auto"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "canvas": null,
+        "urlPostfix": "",
+        "styleTags": [
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.15bee45a-c33e-40d1-bb78-b7721b8582b4",
+            "_RecordId_": "15bee45a-c33e-40d1-bb78-b7721b8582b4"
+          },
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.d170ee34-103c-4e75-80af-5006f8e4f403",
+            "_RecordId_": "d170ee34-103c-4e75-80af-5006f8e4f403"
+          },
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.febe9a7d-a96a-4e25-b4dc-ffcb376469b8",
+            "_RecordId_": "febe9a7d-a96a-4e25-b4dc-ffcb376469b8"
+          }
+        ],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Pointer_": "ptr:33",
+        "_Type_": "BuildingBlocks_WidgetTextField",
+        "name": "text_BodyValueFaction",
+        "parent": "_PointsTo_:ptr:13",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.75,
+            "behavior": "Auto"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Auto"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "canvas": null,
+        "urlPostfix": "",
+        "styleTags": [
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.d170ee34-103c-4e75-80af-5006f8e4f403",
+            "_RecordId_": "d170ee34-103c-4e75-80af-5006f8e4f403"
+          },
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.bec2f784-7fb9-4464-9e08-8a27f622cb8a",
+            "_RecordId_": "bec2f784-7fb9-4464-9e08-8a27f622cb8a"
+          },
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.febe9a7d-a96a-4e25-b4dc-ffcb376469b8",
+            "_RecordId_": "febe9a7d-a96a-4e25-b4dc-ffcb376469b8"
+          }
+        ],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Pointer_": "ptr:12",
+        "_Type_": "BuildingBlocks_WidgetCard",
+        "name": "card_Text",
+        "parent": "_PointsTo_:ptr:14",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 64.0,
+            "behavior": "Auto"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 64.0,
+            "behavior": "Auto"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Pointer_": "ptr:13",
+        "_Type_": "BuildingBlocks_WidgetCard",
+        "name": "card_Text",
+        "parent": "_PointsTo_:ptr:14",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 64.0,
+            "behavior": "Auto"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 64.0,
+            "behavior": "Auto"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Pointer_": "ptr:15",
+        "_Type_": "BuildingBlocks_WidgetCard",
+        "name": "card_Chevron",
+        "parent": "_PointsTo_:ptr:14",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "PercentOfY"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.4,
+            "behavior": "Percent"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Type_": "BuildingBlocks_WidgetCustomShape",
+        "name": "shape_Chevron",
+        "parent": "_PointsTo_:ptr:15",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.f630fa8d-d40f-46b1-b434-57f793df73b1",
+            "_RecordId_": "f630fa8d-d40f-46b1-b434-57f793df73b1"
+          },
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.bec2f784-7fb9-4464-9e08-8a27f622cb8a",
+            "_RecordId_": "bec2f784-7fb9-4464-9e08-8a27f622cb8a"
+          }
+        ],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Pointer_": "ptr:14",
+        "_Type_": "BuildingBlocks_DisplayWidget",
+        "name": "base_Text",
+        "parent": "_PointsTo_:ptr:4",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Auto"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 1.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 1.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Pointer_": "ptr:10",
+        "_Type_": "BuildingBlocks_DisplayWidget",
+        "name": "base_PositionHelper",
+        "parent": "_PointsTo_:ptr:9",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.df3a61e4-6d4c-49fa-a8f4-ef8a020d9266",
+            "_RecordId_": "df3a61e4-6d4c-49fa-a8f4-ef8a020d9266"
+          }
+        ],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Type_": "BuildingBlocks_WidgetImage",
+        "name": "image_PageGreeblesNoTargetRight",
+        "parent": "_PointsTo_:ptr:9",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.5,
+            "behavior": "Percent"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 1.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 1.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.df3a61e4-6d4c-49fa-a8f4-ef8a020d9266",
+            "_RecordId_": "df3a61e4-6d4c-49fa-a8f4-ef8a020d9266"
+          },
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.4ff705a2-1417-4d2a-987c-0ef6f2d74400",
+            "_RecordId_": "4ff705a2-1417-4d2a-987c-0ef6f2d74400"
+          }
+        ],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Type_": "BuildingBlocks_WidgetCustomShape",
+        "name": "shape_NoTargetBox",
+        "parent": "_PointsTo_:ptr:9",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.5,
+          "y": 0.5,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.5,
+          "y": 0.5,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.df3a61e4-6d4c-49fa-a8f4-ef8a020d9266",
+            "_RecordId_": "df3a61e4-6d4c-49fa-a8f4-ef8a020d9266"
+          }
+        ],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Type_": "BuildingBlocks_WidgetImage",
+        "name": "image_PageGreeblesRight",
+        "parent": "_PointsTo_:ptr:16",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.5,
+            "behavior": "Percent"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 1.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 1.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.48f58afe-c9f6-4cd9-8306-373c7ea110cb",
+            "_RecordId_": "48f58afe-c9f6-4cd9-8306-373c7ea110cb"
+          },
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.4ff705a2-1417-4d2a-987c-0ef6f2d74400",
+            "_RecordId_": "4ff705a2-1417-4d2a-987c-0ef6f2d74400"
+          }
+        ],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Type_": "BuildingBlocks_WidgetCustomShape",
+        "name": "shape_PageGreebles",
+        "parent": "_PointsTo_:ptr:16",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.48f58afe-c9f6-4cd9-8306-373c7ea110cb",
+            "_RecordId_": "48f58afe-c9f6-4cd9-8306-373c7ea110cb"
+          },
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.7b4b7423-6b4b-4d76-8e16-028c32feabc5",
+            "_RecordId_": "7b4b7423-6b4b-4d76-8e16-028c32feabc5"
+          }
+        ],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Type_": "BuildingBlocks_WidgetImage",
+        "name": "image_PageGreeblesLeft",
+        "parent": "_PointsTo_:ptr:16",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.5,
+            "behavior": "Percent"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.48f58afe-c9f6-4cd9-8306-373c7ea110cb",
+            "_RecordId_": "48f58afe-c9f6-4cd9-8306-373c7ea110cb"
+          },
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.6238aa56-e862-4efd-8c58-417fd457bd7c",
+            "_RecordId_": "6238aa56-e862-4efd-8c58-417fd457bd7c"
+          }
+        ],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Pointer_": "ptr:17",
+        "_Type_": "BuildingBlocks_DisplayWidget",
+        "name": "base_Text",
+        "parent": "_PointsTo_:ptr:4",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Auto"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.89,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 1.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Pointer_": "ptr:18",
+        "_Type_": "BuildingBlocks_WidgetCard",
+        "name": "card_Text",
+        "parent": "_PointsTo_:ptr:17",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 64.0,
+            "behavior": "Auto"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 64.0,
+            "behavior": "Auto"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Type_": "BuildingBlocks_WidgetTextField",
+        "name": "text_HeaderValue",
+        "parent": "_PointsTo_:ptr:18",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Auto"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Auto"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "canvas": null,
+        "urlPostfix": "",
+        "styleTags": [
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.15bee45a-c33e-40d1-bb78-b7721b8582b4",
+            "_RecordId_": "15bee45a-c33e-40d1-bb78-b7721b8582b4"
+          },
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.d170ee34-103c-4e75-80af-5006f8e4f403",
+            "_RecordId_": "d170ee34-103c-4e75-80af-5006f8e4f403"
+          },
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.febe9a7d-a96a-4e25-b4dc-ffcb376469b8",
+            "_RecordId_": "febe9a7d-a96a-4e25-b4dc-ffcb376469b8"
+          }
+        ],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Pointer_": "ptr:19",
+        "_Type_": "BuildingBlocks_WidgetCard",
+        "name": "card_Chevron",
+        "parent": "_PointsTo_:ptr:17",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "PercentOfY"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.4,
+            "behavior": "Percent"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Type_": "BuildingBlocks_WidgetCustomShape",
+        "name": "shape_Chevron",
+        "parent": "_PointsTo_:ptr:19",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.f630fa8d-d40f-46b1-b434-57f793df73b1",
+            "_RecordId_": "f630fa8d-d40f-46b1-b434-57f793df73b1"
+          },
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.bec2f784-7fb9-4464-9e08-8a27f622cb8a",
+            "_RecordId_": "bec2f784-7fb9-4464-9e08-8a27f622cb8a"
+          }
+        ],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Pointer_": "ptr:20",
+        "_Type_": "BuildingBlocks_WidgetCard",
+        "name": "card_Text",
+        "parent": "_PointsTo_:ptr:17",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 64.0,
+            "behavior": "Auto"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 64.0,
+            "behavior": "Auto"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Pointer_": "ptr:36",
+        "_Type_": "BuildingBlocks_WidgetTextField",
+        "name": "text_BodyValueVelocity",
+        "parent": "_PointsTo_:ptr:20",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.75,
+            "behavior": "Auto"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Auto"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "canvas": null,
+        "urlPostfix": "",
+        "styleTags": [
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.d170ee34-103c-4e75-80af-5006f8e4f403",
+            "_RecordId_": "d170ee34-103c-4e75-80af-5006f8e4f403"
+          },
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.bec2f784-7fb9-4464-9e08-8a27f622cb8a",
+            "_RecordId_": "bec2f784-7fb9-4464-9e08-8a27f622cb8a"
+          },
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.febe9a7d-a96a-4e25-b4dc-ffcb376469b8",
+            "_RecordId_": "febe9a7d-a96a-4e25-b4dc-ffcb376469b8"
+          }
+        ],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Type_": "BuildingBlocks_WidgetTextField",
+        "name": "text_ContactCall",
+        "parent": "_PointsTo_:ptr:21",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Auto"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Auto"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.5,
+          "y": 0.5,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.5,
+          "y": 0.5,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "canvas": null,
+        "urlPostfix": "",
+        "styleTags": [
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.bec2f784-7fb9-4464-9e08-8a27f622cb8a",
+            "_RecordId_": "bec2f784-7fb9-4464-9e08-8a27f622cb8a"
+          },
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.46446fa5-914f-40a7-a6c8-0d18072282fe",
+            "_RecordId_": "46446fa5-914f-40a7-a6c8-0d18072282fe"
+          },
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.44676fef-03c5-49ff-aa46-15f124a34602",
+            "_RecordId_": "44676fef-03c5-49ff-aa46-15f124a34602"
+          }
+        ],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Pointer_": "ptr:21",
+        "_Type_": "BuildingBlocks_ComponentGeneralButtonSecondary",
+        "name": "CallButton",
+        "parent": "_PointsTo_:ptr:22",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "canvas": null,
+        "urlPostfix": "",
+        "styleTags": [
+          {
+            "_RecordPath_": "file://./../../../../../../../../../../../../libs/foundry/records/tagdatabase/tagdatabase.tagdatabase.json",
+            "_RecordName_": "Tag.9a513627-8dbe-4218-b58a-7d7ad8cea499",
+            "_RecordId_": "9a513627-8dbe-4218-b58a-7d7ad8cea499"
+          }
+        ],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Pointer_": "ptr:22",
+        "_Type_": "BuildingBlocks_DisplayWidget",
+        "name": "base_Clip",
+        "parent": "_PointsTo_:ptr:23",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 1.0,
+            "behavior": "Percent"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": true,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 0.5,
+          "y": 0.5,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 0.5,
+          "y": 0.5,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [],
+        "isActive": true,
+        "layer": 5
+      },
+      {
+        "_Pointer_": "ptr:23",
+        "_Type_": "BuildingBlocks_WidgetCard",
+        "name": "Card_Call",
+        "parent": "_PointsTo_:ptr:4",
+        "position": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "positionOffset": {
+          "_Type_": "Vec3",
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "sizing": {
+          "_Type_": "BuildingBlocks_Size",
+          "width": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.2,
+            "behavior": "Percent"
+          },
+          "height": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.4,
+            "behavior": "PercentOfX"
+          },
+          "depth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "minHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxWidth": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "maxHeight": {
+            "_Type_": "BuildingBlocks_FixedOrRelativeValue",
+            "value": 0.0,
+            "behavior": "Fixed"
+          },
+          "enableMinWidth": false,
+          "enableMinHeight": false,
+          "enableMaxWidth": false,
+          "enableMaxHeight": false
+        },
+        "anchor": {
+          "_Type_": "Vec3",
+          "x": 1.0,
+          "y": 1.0,
+          "z": 0.0
+        },
+        "pivot": {
+          "_Type_": "Vec3",
+          "x": 1.0,
+          "y": 1.0,
+          "z": 0.0
+        },
+        "padding": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "margin": {
+          "_Type_": "BuildingBlocks_TRBL",
+          "top": 0.0,
+          "right": 0.0,
+          "bottom": 0.0,
+          "left": 0.0,
+          "front": 0.0,
+          "back": 0.0
+        },
+        "styleTags": [],
+        "isActive": true,
+        "layer": 5
+      }
+    ],
+    "operations": [
+      {
+        "_Type_": "BuildingBlocks_BindingsIntegerField",
+        "widget": "_PointsTo_:ptr:4",
+        "field": "LayoutDisplayOrder",
+        "input": "_PointsTo_:ptr:24"
+      },
+      {
+        "_Type_": "BuildingBlocks_BindingsBooleanField",
+        "widget": "_PointsTo_:ptr:4",
+        "field": "IsActive",
+        "input": "_PointsTo_:ptr:25"
+      },
+      {
+        "_Type_": "BuildingBlocks_BindingsBooleanField",
+        "widget": "_PointsTo_:ptr:26",
+        "field": "Instantiated",
+        "input": "_PointsTo_:ptr:25"
+      },
+      {
+        "_Pointer_": "ptr:27",
+        "_Type_": "BuildingBlocks_BindingsBooleanInvert",
+        "input": "_PointsTo_:ptr:25"
+      },
+      {
+        "_Type_": "BuildingBlocks_BindingsBooleanField",
+        "widget": "_PointsTo_:ptr:3",
+        "field": "IsActive",
+        "input": "_PointsTo_:ptr:27"
+      },
+      {
+        "_Type_": "BuildingBlocks_BindingsBooleanField",
+        "widget": "_PointsTo_:ptr:28",
+        "field": "Instantiated",
+        "input": "_PointsTo_:ptr:25"
+      },
+      {
+        "_Type_": "BuildingBlocks_BindingsLocalizedField",
+        "widget": "_PointsTo_:ptr:29",
+        "field": "ParamInput0",
+        "input": "_PointsTo_:ptr:30"
+      },
+      {
+        "_Pointer_": "ptr:31",
+        "_Type_": "BuildingBlocks_BindingsBooleanComponentParameter",
+        "name": "iscast",
+        "parameter": "ParamInput0",
+        "defaultValue": false
+      },
+      {
+        "_Type_": "BuildingBlocks_BindingsBooleanField",
+        "widget": "_PointsTo_:ptr:28",
+        "field": "ParamInput0",
+        "input": "_PointsTo_:ptr:31"
+      },
+      {
+        "_Type_": "BuildingBlocks_BindingsBooleanField",
+        "widget": "_PointsTo_:ptr:16",
+        "field": "IsActive",
+        "input": "_PointsTo_:ptr:25"
+      },
+      {
+        "_Type_": "BuildingBlocks_BindingsBooleanField",
+        "widget": "_PointsTo_:ptr:9",
+        "field": "IsActive",
+        "input": "_PointsTo_:ptr:27"
+      },
+      {
+        "_Type_": "BuildingBlocks_BindingsColorField",
+        "widget": "_PointsTo_:ptr:6",
+        "field": "BackgroundColor",
+        "input": "_PointsTo_:ptr:32"
+      },
+      {
+        "_Type_": "BuildingBlocks_BindingsLocalizedField",
+        "widget": "_PointsTo_:ptr:33",
+        "field": "ParamInput0",
+        "input": "_PointsTo_:ptr:34"
+      },
+      {
+        "_Type_": "BuildingBlocks_BindingsBooleanField",
+        "widget": "_PointsTo_:ptr:23",
+        "field": "IsActive",
+        "input": "_PointsTo_:ptr:35"
+      },
+      {
+        "_Type_": "BuildingBlocks_BindingsBooleanField",
+        "widget": "_PointsTo_:ptr:26",
+        "field": "ParamInput0",
+        "input": "_PointsTo_:ptr:31"
+      },
+      {
+        "_Type_": "BuildingBlocks_BindingsLocalizedField",
+        "widget": "_PointsTo_:ptr:36",
+        "field": "ParamInput0",
+        "input": "_PointsTo_:ptr:37"
+      },
+      {
+        "_Pointer_": "ptr:37",
+        "_Type_": "BuildingBlocks_BindingsLocalizedComponentParameter",
+        "name": "velocity",
+        "parameter": "ParamInput0",
+        "defaultValue": "@LOC_PLACEHOLDER"
+      },
+      {
+        "_Pointer_": "ptr:30",
+        "_Type_": "BuildingBlocks_BindingsLocalizedComponentParameter",
+        "name": "model",
+        "parameter": "ParamInput1",
+        "defaultValue": "@LOC_PLACEHOLDER"
+      },
+      {
+        "_Pointer_": "ptr:34",
+        "_Type_": "BuildingBlocks_BindingsLocalizedComponentParameter",
+        "name": "organization",
+        "parameter": "ParamInput2",
+        "defaultValue": "@LOC_PLACEHOLDER"
+      },
+      {
+        "_Pointer_": "ptr:32",
+        "_Type_": "BuildingBlocks_BindingsColorComponentParameter",
+        "name": "hostility",
+        "parameter": "ParamInput0",
+        "defaultValue": {
+          "_Type_": "SRGBA8",
+          "r": 255,
+          "g": 255,
+          "b": 255,
+          "a": 255
+        }
+      },
+      {
+        "_Pointer_": "ptr:24",
+        "_Type_": "BuildingBlocks_BindingsIntegerComponentParameter",
+        "name": "displayOrder",
+        "parameter": "ParamInput0",
+        "defaultValue": 0
+      },
+      {
+        "_Pointer_": "ptr:25",
+        "_Type_": "BuildingBlocks_BindingsBooleanComponentParameter",
+        "name": "isValidTarget",
+        "parameter": "ParamInput1",
+        "defaultValue": false
+      },
+      {
+        "_Pointer_": "ptr:35",
+        "_Type_": "BuildingBlocks_BindingsBooleanComponentParameter",
+        "name": "isValidTarget",
+        "parameter": "ParamInput2",
+        "defaultValue": false
+      }
+    ],
+    "previewScenes": [],
+    "staticVariables": [],
+    "library": [],
+    "embeddedStyles": []
+  }
+}
