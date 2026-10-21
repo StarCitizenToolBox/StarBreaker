@@ -12,9 +12,9 @@ starbreaker-datacore = { workspace = true }
 starbreaker-p4k = { workspace = true }
 starbreaker-cryxml = { workspace = true }
 starbreaker-dds = { workspace = true }
-starbreaker-gfx = { workspace = true }
+starbreaker-gfx = { workspace = true, optional = true }
 starbreaker-blend = { workspace = true }
-starbreaker-ui = { workspace = true }
+starbreaker-ui = { workspace = true, optional = true }
 # glTF reader for `parity` (GLB → summary).
 gltf = "1"
 gltf-json = { version = "1", features = ["names", "extras", "KHR_lights_punctual", "KHR_materials_transmission", "KHR_materials_ior", "KHR_materials_emissive_strength", "KHR_materials_volume", "KHR_texture_transform"] }
@@ -31,6 +31,16 @@ glam = "0.34"
 crc32fast = "1.5"
 quick-xml = { workspace = true }
 
+[features]
+default = ["ui"]
+# Ship-screen rendering for decomposed exports (starbreaker-ui + starbreaker-gfx).
+# Without it UI bindings export with no generated image.
+ui = ["dep:starbreaker-ui", "dep:starbreaker-gfx"]
+
 [dev-dependencies]
 env_logger = { workspace = true }
 memmap2 = "0.9"
+
+[[example]]
+name = "holo_preview"
+required-features = ["ui"]

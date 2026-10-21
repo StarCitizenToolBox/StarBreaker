@@ -14,6 +14,8 @@ use starbreaker_ui::pipeline::{CanvasFetcher, PipelineInputs, UiBindingView};
 
 use crate::types::UiBinding;
 
+pub use starbreaker_ui::DefaultValueRegistry;
+
 mod canvas_fetcher;
 mod hologram_fetcher;
 mod p4k_fetchers;

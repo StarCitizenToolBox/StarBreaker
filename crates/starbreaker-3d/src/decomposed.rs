@@ -3200,7 +3200,7 @@ fn generated_ui_binding_record(
     scene_manifest_path: &str,
     root_manufacturer_id: Option<&str>,
     loc_data: &crate::ui_pipeline::UiLocData,
-    defaults_registry: &starbreaker_ui::DefaultValueRegistry,
+    defaults_registry: &crate::ui_pipeline::DefaultValueRegistry,
     ship_data: &crate::ui_pipeline::UiShipData,
     render_cache: &HashMap<UiRenderKey, Result<Vec<u8>, String>>,
 ) -> (UiBinding, Option<(String, Vec<u8>)>) {
@@ -3333,7 +3333,7 @@ fn generate_ui_binding_records_detached(
     scene_manifest_path: &str,
     root_manufacturer_id: Option<&str>,
     loc_data: Option<&crate::ui_pipeline::UiLocData>,
-    defaults_registry: Option<&starbreaker_ui::DefaultValueRegistry>,
+    defaults_registry: Option<&crate::ui_pipeline::DefaultValueRegistry>,
     ship_data: &crate::ui_pipeline::UiShipData,
     render_cache: &HashMap<UiRenderKey, Result<Vec<u8>, String>>,
 ) -> (Vec<UiBinding>, Vec<(String, Vec<u8>)>) {
@@ -4827,7 +4827,7 @@ fn prerender_ui_bindings(
     root_entity_name: &str,
     root_manufacturer_id: Option<&str>,
     loc_data: &crate::ui_pipeline::UiLocData,
-    defaults_registry: &starbreaker_ui::DefaultValueRegistry,
+    defaults_registry: &crate::ui_pipeline::DefaultValueRegistry,
     ship_data: &crate::ui_pipeline::UiShipData,
 ) -> HashMap<UiRenderKey, Result<Vec<u8>, String>> {
     // One representative binding per unique key (first wins; any is equivalent).

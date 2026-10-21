@@ -20,6 +20,10 @@ pub mod character;
 pub mod chrparams;
 pub mod riglogic;
 pub mod validation;
+#[cfg(feature = "ui")]
+pub mod ui_pipeline;
+#[cfg(not(feature = "ui"))]
+#[path = "ui_pipeline_disabled.rs"]
 pub mod ui_pipeline;
 #[cfg(test)]
 pub(crate) mod test_p4k;
